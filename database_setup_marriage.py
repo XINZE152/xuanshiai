@@ -1,0 +1,1552 @@
+# database_setup_marriage.py - 婚恋交友小程序数据库表结构初始化
+# 注意：此文件主要用于数据库表结构定义和初始化
+# 日常数据库操作请使用 core.database.get_conn()
+# 已移除 SQLAlchemy ORM，完全使用 pymysql
+import pymysql
+from core.config import get_db_config
+from core.logging import get_logger
+import json
+
+# 使用统一的日志配置
+logger = get_logger(__name__)
+
+
+class DatabaseManager:
+    def __init__(self):
+        self._ensure_database_exists()
+
+    def _ensure_database_exists(self):
+        """确保数据库存在，如果不存在则创建"""
+        try:
+            temp_config = get_db_config().copy()
+            database = temp_config.pop('database')
+            import pymysql
+            conn = pymysql.connect(**temp_config)
+            cursor = conn.cursor()
+            cursor.execute(
+                f"CREATE DATABASE IF NOT EXISTS `{database}` "
+                f"DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            )
+            conn.commit()
+            conn.close()
+            logger.debug(f"数据库 `{database}` 已就绪")
+        except Exception as e:
+            logger.error(f"❌ 数据库初始化失败: {e}")
+            raise
+
+    def _ensure_table_columns(self, cursor, table_name: str, required_columns: dict):
+        """
+        确保表的必需字段存在，如果不存在则添加
+
+        Args:
+            cursor: 数据库游标
+            table_name: 表名
+            required_columns: 必需字段字典，格式为 {字段名: 字段定义}
+        """
+        try:
+            cursor.execute(f"SHOW COLUMNS FROM {table_name}")
+            existing_columns = {row['Field'] for row in cursor.fetchall()}
+
+            for column_name, column_def in required_columns.items():
+                if column_name not in existing_columns:
+                    try:
+                        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_def}")
+                        logger.info(f"✅ 已添加字段 {table_name}.{column_name}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ 添加字段 {table_name}.{column_name} 失败: {e}")
+        except Exception as e:
+            logger.debug(f"表 {table_name} 可能不存在，将在创建表时处理: {e}")
+
+    def _add_foreign_key(self, cursor, table_name: str, column: str, ref_table: str = 'users', ref_column: str = 'id'):
+        """添加外键约束（幂等）"""
+        try:
+            fk_name = f"fk_{table_name}_{column}"
+            cursor.execute(f"""
+                SELECT CONSTRAINT_NAME
+                FROM information_schema.TABLE_CONSTRAINTS
+                WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = '{table_name}'
+                AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+                AND CONSTRAINT_NAME = '{fk_name}'
+            """)
+            if cursor.fetchone():
+                return
+
+            cursor.execute(f"""
+                ALTER TABLE `{table_name}`
+                ADD CONSTRAINT `{fk_name}`
+                FOREIGN KEY (`{column}`) REFERENCES `{ref_table}`(`{ref_column}`) ON DELETE CASCADE
+            """)
+            logger.debug(f"✅ 外键 {fk_name} 已添加")
+        except pymysql.MySQLError as e:
+            # 1061: 重复键名, 1062: 重复键, 1215: 无法添加外键约束（通常因为数据类型不匹配或引用表不存在）
+            if e.args[0] in (1061, 1062, 1215):
+                logger.debug(f"ℹ️ 外键 {fk_name} 跳过（{e.args[1]}）")
+            else:
+                logger.warning(f"⚠️ 外键 {fk_name} 添加失败: {e}")
+
+    def _add_all_foreign_keys(self, cursor):
+        """添加所有外键约束"""
+        # 所有引用 users.id 的 user_id 字段
+        user_id_tables = [
+            ('user_auth', 'user_id'),
+            ('user_profile', 'user_id'),
+            ('user_privacy', 'user_id'),
+            ('user_login_log', 'user_id'),
+            ('user_block', 'user_id'),
+            ('user_block', 'target_user_id'),
+            ('user_report', 'user_id'),
+            ('user_report', 'target_user_id'),
+            ('user_favorite', 'user_id'),
+            ('user_favorite', 'target_user_id'),
+            ('user_browse_history', 'user_id'),
+            ('user_browse_history', 'target_user_id'),
+            ('user_boost', 'user_id'),
+            ('user_boost', 'target_user_id'),
+            ('user_match', 'user_id'),
+            ('user_match', 'target_user_id'),
+            ('user_points', 'user_id'),
+            ('user_membership', 'user_id'),
+            ('user_task', 'user_id'),
+            ('user_checkin', 'user_id'),
+            ('user_matchmaker_apply', 'user_id'),
+            ('user_match_recommend', 'user_id'),
+            ('user_match_recommend', 'recommend_user_id'),
+            ('user_swipe_record', 'user_id'),
+            ('user_swipe_record', 'target_user_id'),
+            ('match_apply', 'from_user_id'),
+            ('match_apply', 'to_user_id'),
+            ('chat_session', 'user1_id'),
+            ('chat_session', 'user2_id'),
+            ('chat_message', 'from_user_id'),
+            ('chat_message', 'to_user_id'),
+            ('community_post', 'user_id'),
+            ('community_comment', 'user_id'),
+            ('community_like', 'user_id'),
+            ('paper_plane', 'user_id'),
+            ('paper_plane_reply', 'user_id'),
+            ('matchmaker_service', 'user_id'),
+            ('matchmaker_service', 'matchmaker_id'),
+            ('matchmaker_rating', 'user_id'),
+            ('matchmaker_rating', 'matchmaker_id'),
+            ('offline_activity', 'created_by'),
+            ('activity_signup', 'user_id'),
+            ('payment_order', 'user_id'),
+            ('user_read_notification', 'user_id'),
+            ('feedback', 'user_id'),
+            ('user_device', 'user_id'),
+            ('invite_record', 'inviter_id'),
+            ('invite_record', 'invitee_id'),
+            ('user_feature_vector', 'user_id'),
+            ('user_behavior_event', 'user_id'),
+            ('user_behavior_event', 'target_user_id'),
+            ('user_mbti_result', 'user_id'),
+            ('user_love_style_result', 'user_id'),
+            ('user_match_score_history', 'user_id'),
+            ('user_match_score_history', 'target_user_id'),
+            ('user_exposure', 'user_id'),
+        ]
+
+        for table, column in user_id_tables:
+            self._add_foreign_key(cursor, table, column)
+
+        # 社区相关外键
+        try:
+            # community_comment.post_id → community_post.id
+            cursor.execute("""
+                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'community_comment'
+                AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME = 'fk_community_comment_post_id'
+            """)
+            if not cursor.fetchone():
+                cursor.execute("""
+                    ALTER TABLE `community_comment`
+                    ADD CONSTRAINT `fk_community_comment_post_id`
+                    FOREIGN KEY (`post_id`) REFERENCES `community_post`(`id`) ON DELETE CASCADE
+                """)
+                logger.debug("✅ 外键 fk_community_comment_post_id 已添加")
+
+            # community_like.target_id → community_post.id 或 community_comment.id（软外键，不强制）
+            # 社区点赞的 target_id 可能是动态ID或评论ID，不添加物理外键
+        except Exception as e:
+            logger.debug(f"ℹ️ 社区外键处理: {e}")
+
+        # 纸飞机回复外键
+        try:
+            cursor.execute("""
+                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'paper_plane_reply'
+                AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME = 'fk_paper_plane_reply_plane_id'
+            """)
+            if not cursor.fetchone():
+                cursor.execute("""
+                    ALTER TABLE `paper_plane_reply`
+                    ADD CONSTRAINT `fk_paper_plane_reply_plane_id`
+                    FOREIGN KEY (`plane_id`) REFERENCES `paper_plane`(`id`) ON DELETE CASCADE
+                """)
+                logger.debug("✅ 外键 fk_paper_plane_reply_plane_id 已添加")
+        except Exception as e:
+            logger.debug(f"ℹ️ 纸飞机外键处理: {e}")
+
+        # 红娘评价外键
+        try:
+            cursor.execute("""
+                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'matchmaker_rating'
+                AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME = 'fk_matchmaker_rating_service_id'
+            """)
+            if not cursor.fetchone():
+                cursor.execute("""
+                    ALTER TABLE `matchmaker_rating`
+                    ADD CONSTRAINT `fk_matchmaker_rating_service_id`
+                    FOREIGN KEY (`service_id`) REFERENCES `matchmaker_service`(`id`) ON DELETE CASCADE
+                """)
+                logger.debug("✅ 外键 fk_matchmaker_rating_service_id 已添加")
+        except Exception as e:
+            logger.debug(f"ℹ️ 红娘评价外键处理: {e}")
+
+        # 活动报名外键
+        try:
+            cursor.execute("""
+                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'activity_signup'
+                AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME = 'fk_activity_signup_activity_id'
+            """)
+            if not cursor.fetchone():
+                cursor.execute("""
+                    ALTER TABLE `activity_signup`
+                    ADD CONSTRAINT `fk_activity_signup_activity_id`
+                    FOREIGN KEY (`activity_id`) REFERENCES `offline_activity`(`id`) ON DELETE CASCADE
+                """)
+                logger.debug("✅ 外键 fk_activity_signup_activity_id 已添加")
+        except Exception as e:
+            logger.debug(f"ℹ️ 活动报名外键处理: {e}")
+
+        # chat_message.session_id → chat_session.id
+        try:
+            cursor.execute("""
+                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_message'
+                AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME = 'fk_chat_message_session_id'
+            """)
+            if not cursor.fetchone():
+                cursor.execute("""
+                    ALTER TABLE `chat_message`
+                    ADD CONSTRAINT `fk_chat_message_session_id`
+                    FOREIGN KEY (`session_id`) REFERENCES `chat_session`(`id`) ON DELETE CASCADE
+                """)
+                logger.debug("✅ 外键 fk_chat_message_session_id 已添加")
+        except Exception as e:
+            logger.debug(f"ℹ️ 聊天消息外键处理: {e}")
+
+    def init_all_tables(self, cursor):
+        """初始化数据库表结构"""
+        logger.info("初始化数据库表结构")
+
+        tables = {
+            # ============================================
+            # 1. 用户主表
+            # ============================================
+            'users': """
+                CREATE TABLE IF NOT EXISTS `users` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `openid` varchar(64) DEFAULT NULL COMMENT '微信openid',
+                    `unionid` varchar(64) DEFAULT NULL COMMENT '微信unionid',
+                    `phone` varchar(20) DEFAULT NULL COMMENT '手机号',
+                    `password` varchar(255) DEFAULT NULL COMMENT '密码（预留）',
+                    `nickname` varchar(64) DEFAULT NULL COMMENT '昵称',
+                    `avatar` varchar(255) DEFAULT NULL COMMENT '头像URL',
+                    `gender` tinyint DEFAULT NULL COMMENT '性别 1男 2女',
+                    `birthday` date DEFAULT NULL COMMENT '出生日期',
+                    `status` tinyint DEFAULT '1' COMMENT '状态 1正常 2冻结 3注销',
+                    `is_real_name` tinyint DEFAULT '0' COMMENT '是否实名认证 0否 1是',
+                    `is_married` tinyint DEFAULT '0' COMMENT '婚姻状态 0未知 1未婚 2离异 3丧偶',
+                    `is_single_pledge` tinyint DEFAULT '0' COMMENT '是否签署单身承诺 0否 1是',
+                    `data_complete_rate` tinyint DEFAULT '0' COMMENT '资料完整度 0-100',
+                    `register_ip` varchar(64) DEFAULT NULL,
+                    `last_login_at` datetime DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_phone` (`phone`),
+                    UNIQUE KEY `uk_openid` (`openid`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户主表'
+            """,
+
+            # ============================================
+            # 2. 认证信息表
+            # ============================================
+            'user_auth': """
+                CREATE TABLE IF NOT EXISTS `user_auth` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `real_name` varchar(64) DEFAULT NULL COMMENT '真实姓名',
+                    `id_card` varchar(18) DEFAULT NULL COMMENT '身份证号（加密）',
+                    `id_card_front` varchar(255) DEFAULT NULL COMMENT '身份证正面',
+                    `id_card_back` varchar(255) DEFAULT NULL COMMENT '身份证反面',
+                    `face_photo` varchar(255) DEFAULT NULL COMMENT '人脸照片',
+                    `face_verified` tinyint DEFAULT '0' COMMENT '人脸认证 0未 1通过 2失败',
+                    `education` varchar(64) DEFAULT NULL COMMENT '学历',
+                    `school` varchar(128) DEFAULT NULL COMMENT '学校',
+                    `education_cert` varchar(255) DEFAULT NULL COMMENT '学历证书图片',
+                    `education_verified` tinyint DEFAULT '0' COMMENT '学历认证状态 0未 1通过 2失败',
+                    `job` varchar(128) DEFAULT NULL COMMENT '职业',
+                    `company` varchar(128) DEFAULT NULL COMMENT '公司',
+                    `job_cert` varchar(255) DEFAULT NULL COMMENT '工作证明图片',
+                    `job_verified` tinyint DEFAULT '0' COMMENT '工作认证状态 0未 1通过 2失败',
+                    `house_cert` varchar(255) DEFAULT NULL COMMENT '房产证明',
+                    `house_verified` tinyint DEFAULT '0' COMMENT '房产认证状态',
+                    `auth_status` tinyint DEFAULT '0' COMMENT '整体认证状态 0未提交 1审核中 2通过 3失败',
+                    `auth_step` tinyint DEFAULT '0' COMMENT '认证步骤 0未提交 1资料已提交 2人脸待认证 3审核中 4已通过 5已失败',
+                    `fail_reason` varchar(255) DEFAULT NULL COMMENT '失败原因',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_id` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户认证信息表'
+            """,
+
+            # ============================================
+            # 3. 用户资料扩展
+            # ============================================
+            'user_profile': """
+                CREATE TABLE IF NOT EXISTS `user_profile` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `height` int DEFAULT NULL COMMENT '身高cm',
+                    `income` decimal(10,2) DEFAULT NULL COMMENT '月收入',
+                    `hometown` varchar(64) DEFAULT NULL COMMENT '家乡',
+                    `residence` varchar(64) DEFAULT NULL COMMENT '现居地',
+                    `latitude` decimal(10,8) DEFAULT NULL COMMENT '纬度（GCJ-02）',
+                    `longitude` decimal(11,8) DEFAULT NULL COMMENT '经度（GCJ-02）',
+                    `mbti` varchar(8) DEFAULT NULL COMMENT 'MBTI类型',
+                    `constellation` varchar(16) DEFAULT NULL COMMENT '星座',
+                    `tags` json DEFAULT NULL COMMENT '个性标签 ["颜控","宠物"]',
+                    `self_intro` text COMMENT '自我介绍',
+                    `love_view` text COMMENT '爱情观',
+                    `ideal_partner` text COMMENT '理想另一半',
+                    `single_reason` varchar(255) DEFAULT NULL COMMENT '单身原因',
+                    `family_background` text COMMENT '家庭背景',
+                    `hobbies` text COMMENT '兴趣爱好',
+                    `photos` json DEFAULT NULL COMMENT '相册图片URL列表',
+                    `video` varchar(255) DEFAULT NULL COMMENT '视频自我介绍',
+                    `online_status` tinyint DEFAULT '0' COMMENT '在线状态 0离线 1在线 2隐身',
+                    `last_active_at` datetime DEFAULT NULL COMMENT '最近活跃时间',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_id` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户扩展资料表'
+            """,
+
+            # ============================================
+            # 4. 隐私设置
+            # ============================================
+            'user_privacy': """
+                CREATE TABLE IF NOT EXISTS `user_privacy` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `hide_phone` tinyint DEFAULT '0' COMMENT '隐藏手机号',
+                    `hide_school` tinyint DEFAULT '0' COMMENT '隐藏学校',
+                    `hide_company` tinyint DEFAULT '0' COMMENT '隐藏公司',
+                    `hide_distance` tinyint DEFAULT '0' COMMENT '隐藏距离',
+                    `hide_online_status` tinyint DEFAULT '0' COMMENT '隐藏在线状态',
+                    `block_colleagues` json DEFAULT NULL COMMENT '屏蔽同事/熟人 手机号列表',
+                    `only_auth_can_contact` tinyint DEFAULT '0' COMMENT '仅认证用户可联系我',
+                    `only_vip_can_see_detail` tinyint DEFAULT '0' COMMENT '仅会员可见详细资料',
+                    `who_can_see_me` tinyint DEFAULT '1' COMMENT '1所有人 2仅认证 3仅VIP 4完全私密',
+                    `match_status` tinyint DEFAULT '1' COMMENT '交友状态 1公开展示 2委托红娘 3完全私密 4暂停服务 5已脱单',
+                    `notify_like` tinyint DEFAULT '1' COMMENT '点赞通知 0关闭 1开启',
+                    `notify_comment` tinyint DEFAULT '1' COMMENT '评论通知',
+                    `notify_match` tinyint DEFAULT '1' COMMENT '匹配成功通知',
+                    `notify_apply` tinyint DEFAULT '1' COMMENT '牵线申请通知',
+                    `notify_system` tinyint DEFAULT '1' COMMENT '系统消息通知',
+                    `notify_activity` tinyint DEFAULT '1' COMMENT '活动通知',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_id` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户隐私设置表'
+            """,
+
+            # ============================================
+            # 5. 登录日志
+            # ============================================
+            'user_login_log': """
+                CREATE TABLE IF NOT EXISTS `user_login_log` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `login_type` tinyint DEFAULT '1' COMMENT '1微信 2手机号',
+                    `ip` varchar(64) DEFAULT NULL,
+                    `device` varchar(255) DEFAULT NULL COMMENT '设备信息',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user_id` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户登录日志'
+            """,
+
+            # ============================================
+            # 6. 拉黑记录
+            # ============================================
+            'user_block': """
+                CREATE TABLE IF NOT EXISTS `user_block` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL COMMENT '拉黑者',
+                    `target_user_id` bigint unsigned NOT NULL COMMENT '被拉黑者',
+                    `reason` varchar(255) DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_pair` (`user_id`,`target_user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='拉黑记录'
+            """,
+
+            # ============================================
+            # 7. 举报记录
+            # ============================================
+            'user_report': """
+                CREATE TABLE IF NOT EXISTS `user_report` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL COMMENT '举报人',
+                    `target_user_id` bigint unsigned NOT NULL COMMENT '被举报人',
+                    `type` varchar(64) DEFAULT NULL COMMENT '举报类型 骚扰/虚假/诈骗等',
+                    `desc` text COMMENT '描述',
+                    `images` json DEFAULT NULL COMMENT '截图证据',
+                    `status` tinyint DEFAULT '0' COMMENT '0待处理 1已处理 2驳回',
+                    `result` varchar(255) DEFAULT NULL COMMENT '处理结果',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_target` (`target_user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='举报记录'
+            """,
+
+            # ============================================
+            # 8. 收藏/关注/喜欢记录
+            # ============================================
+            'user_favorite': """
+                CREATE TABLE IF NOT EXISTS `user_favorite` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `target_user_id` bigint unsigned NOT NULL,
+                    `type` tinyint DEFAULT '1' COMMENT '1喜欢 2收藏 3关注',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_pair_type` (`user_id`,`target_user_id`,`type`),
+                    KEY `idx_target` (`target_user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户收藏/关注/喜欢记录'
+            """,
+
+            # ============================================
+            # 9. 浏览足迹
+            # ============================================
+            'user_browse_history': """
+                CREATE TABLE IF NOT EXISTS `user_browse_history` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `target_user_id` bigint unsigned NOT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user` (`user_id`),
+                    KEY `idx_target` (`target_user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户浏览足迹'
+            """,
+
+            # ============================================
+            # 10. 爆灯记录
+            # ============================================
+            'user_boost': """
+                CREATE TABLE IF NOT EXISTS `user_boost` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `target_user_id` bigint unsigned NOT NULL,
+                    `amount` decimal(10,2) DEFAULT '5.00' COMMENT '支付金额',
+                    `order_no` varchar(64) DEFAULT NULL COMMENT '订单号',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user` (`user_id`),
+                    KEY `idx_target` (`target_user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='爆灯记录'
+            """,
+
+            # ============================================
+            # 11. 匹配记录
+            # ============================================
+            'user_match': """
+                CREATE TABLE IF NOT EXISTS `user_match` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `target_user_id` bigint unsigned NOT NULL,
+                    `status` tinyint DEFAULT '1' COMMENT '1已匹配 2已聊天 3已取消',
+                    `matched_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_pair` (`user_id`,`target_user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='匹配记录'
+            """,
+
+            # ============================================
+            # 12. 积分流水
+            # ============================================
+            'user_points': """
+                CREATE TABLE IF NOT EXISTS `user_points` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `type` tinyint DEFAULT '1' COMMENT '1签到 2任务 3邀请好友 4兑换消费',
+                    `amount` int DEFAULT '0' COMMENT '变动数量（正负）',
+                    `balance` int DEFAULT '0' COMMENT '变动后余额',
+                    `desc` varchar(255) DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='积分流水'
+            """,
+
+            # ============================================
+            # 13. 会员购买记录
+            # ============================================
+            'user_membership': """
+                CREATE TABLE IF NOT EXISTS `user_membership` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `package_type` varchar(64) DEFAULT NULL COMMENT '套餐类型 月/季/年',
+                    `amount` decimal(10,2) DEFAULT NULL,
+                    `order_no` varchar(64) DEFAULT NULL,
+                    `start_at` datetime DEFAULT NULL,
+                    `end_at` datetime DEFAULT NULL,
+                    `status` tinyint DEFAULT '1' COMMENT '1生效中 2已过期 3已退款',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员购买记录'
+            """,
+
+            # ============================================
+            # 14. 用户任务完成记录
+            # ============================================
+            'user_task': """
+                CREATE TABLE IF NOT EXISTS `user_task` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `task_code` varchar(64) NOT NULL COMMENT '任务编码 如: certify, upload_photo, invite_friend',
+                    `status` tinyint DEFAULT '1' COMMENT '1已完成 2已领奖',
+                    `reward` varchar(255) DEFAULT NULL COMMENT '奖励内容',
+                    `completed_at` datetime DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_task` (`user_id`,`task_code`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户任务记录'
+            """,
+
+            # ============================================
+            # 15. 签到记录
+            # ============================================
+            'user_checkin': """
+                CREATE TABLE IF NOT EXISTS `user_checkin` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `checkin_date` date NOT NULL,
+                    `continuous_days` int DEFAULT '1' COMMENT '连续签到天数',
+                    `points` int DEFAULT '0' COMMENT '本次签到获得积分',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_date` (`user_id`,`checkin_date`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='签到记录'
+            """,
+
+            # ============================================
+            # 16. 红娘申请表
+            # ============================================
+            'user_matchmaker_apply': """
+                CREATE TABLE IF NOT EXISTS `user_matchmaker_apply` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `real_name` varchar(64) DEFAULT NULL,
+                    `phone` varchar(20) DEFAULT NULL,
+                    `intro` text COMMENT '自我介绍/优势',
+                    `cert_images` json DEFAULT NULL COMMENT '资质证书图片',
+                    `status` tinyint DEFAULT '0' COMMENT '0待审核 1通过 2驳回',
+                    `fail_reason` varchar(255) DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_id` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘申请表'
+            """,
+
+            # ============================================
+            # 17. 推荐记录
+            # ============================================
+            'user_match_recommend': """
+                CREATE TABLE IF NOT EXISTS `user_match_recommend` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL COMMENT '被推荐给谁',
+                    `recommend_user_id` bigint unsigned NOT NULL COMMENT '推荐了谁',
+                    `recommend_date` date NOT NULL COMMENT '推荐日期',
+                    `match_score` decimal(5,2) DEFAULT '0.00' COMMENT 'AI匹配度分数',
+                    `match_reason` varchar(255) DEFAULT NULL COMMENT '匹配理由（同乡/同校/兴趣重合等）',
+                    `recommend_source` varchar(16) DEFAULT 'system' COMMENT '推荐来源 system/ai/manual',
+                    `is_viewed` tinyint DEFAULT '0' COMMENT '是否已查看 0否 1是',
+                    `is_liked` tinyint DEFAULT '0' COMMENT '是否已点喜欢 0否 1是',
+                    `is_passed` tinyint DEFAULT '0' COMMENT '是否已划过 0否 1是',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user_date` (`user_id`,`recommend_date`),
+                    KEY `idx_recommend_user` (`recommend_user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='每日推荐记录'
+            """,
+
+            # ============================================
+            # 18. 滑动行为记录
+            # ============================================
+            'user_swipe_record': """
+                CREATE TABLE IF NOT EXISTS `user_swipe_record` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `target_user_id` bigint unsigned NOT NULL,
+                    `action` tinyint NOT NULL COMMENT '1喜欢(❤️) 2无感(划过) 3申请认识(牵线)',
+                    `scene` varchar(32) DEFAULT 'recommend' COMMENT '场景: recommend推荐页 / plaza广场 / community社区',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user` (`user_id`),
+                    KEY `idx_target` (`target_user_id`),
+                    UNIQUE KEY `uk_user_target_action` (`user_id`,`target_user_id`,`action`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='滑动行为记录'
+            """,
+
+            # ============================================
+            # 19. 牵线申请记录
+            # ============================================
+            'match_apply': """
+                CREATE TABLE IF NOT EXISTS `match_apply` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `from_user_id` bigint unsigned NOT NULL COMMENT '发起方',
+                    `to_user_id` bigint unsigned NOT NULL COMMENT '接收方',
+                    `message` varchar(255) DEFAULT NULL COMMENT '申请留言',
+                    `status` tinyint DEFAULT '0' COMMENT '0待处理 1同意 2拒绝 3已过期',
+                    `responded_at` datetime DEFAULT NULL COMMENT '处理时间',
+                    `expire_at` datetime DEFAULT NULL COMMENT '过期时间（默认72小时）',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_from` (`from_user_id`),
+                    KEY `idx_to` (`to_user_id`),
+                    KEY `idx_status` (`status`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵线申请记录'
+            """,
+
+            # ============================================
+            # 20. 聊天会话
+            # ============================================
+            'chat_session': """
+                CREATE TABLE IF NOT EXISTS `chat_session` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user1_id` bigint unsigned NOT NULL,
+                    `user2_id` bigint unsigned NOT NULL,
+                    `last_message` text COMMENT '最后一条消息',
+                    `last_message_time` datetime DEFAULT NULL COMMENT '最后消息时间',
+                    `unread_count_user1` int DEFAULT '0' COMMENT 'user1未读数',
+                    `unread_count_user2` int DEFAULT '0' COMMENT 'user2未读数',
+                    `is_user1_hidden` tinyint DEFAULT '0' COMMENT 'user1是否删除会话',
+                    `is_user2_hidden` tinyint DEFAULT '0' COMMENT 'user2是否删除会话',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_pair` (`user1_id`,`user2_id`),
+                    KEY `idx_user1` (`user1_id`),
+                    KEY `idx_user2` (`user2_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='聊天会话'
+            """,
+
+            # ============================================
+            # 21. 聊天消息
+            # ============================================
+            'chat_message': """
+                CREATE TABLE IF NOT EXISTS `chat_message` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `session_id` bigint unsigned NOT NULL,
+                    `from_user_id` bigint unsigned NOT NULL,
+                    `to_user_id` bigint unsigned NOT NULL,
+                    `type` tinyint DEFAULT '1' COMMENT '1文本 2图片 3语音 4视频 5小程序卡片 6系统消息',
+                    `content` text COMMENT '消息内容',
+                    `media_url` varchar(500) DEFAULT NULL COMMENT '媒体文件URL',
+                    `is_read` tinyint DEFAULT '0' COMMENT '是否已读 0否 1是',
+                    `read_at` datetime DEFAULT NULL,
+                    `revoked_at` datetime DEFAULT NULL COMMENT '撤回时间（NULL表示未撤回）',
+                    `quote_message_id` bigint unsigned DEFAULT NULL COMMENT '引用的消息ID（回复引用）',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_session` (`session_id`),
+                    KEY `idx_from_to` (`from_user_id`,`to_user_id`),
+                    KEY `idx_created_at` (`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='聊天消息'
+            """,
+
+            # ============================================
+            # 22. 社区动态
+            # ============================================
+            'community_post': """
+                CREATE TABLE IF NOT EXISTS `community_post` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `topic_id` bigint unsigned DEFAULT NULL COMMENT '话题ID',
+                    `content` text COMMENT '文字内容',
+                    `images` json DEFAULT NULL COMMENT '图片URL列表',
+                    `video` varchar(255) DEFAULT NULL COMMENT '视频URL',
+                    `location` varchar(128) DEFAULT NULL COMMENT '位置信息',
+                    `view_count` int DEFAULT '0' COMMENT '浏览次数',
+                    `like_count` int DEFAULT '0' COMMENT '点赞数',
+                    `comment_count` int DEFAULT '0' COMMENT '评论数',
+                    `status` tinyint DEFAULT '1' COMMENT '1正常 2审核中 3违规下架',
+                    `is_top` tinyint DEFAULT '0' COMMENT '是否置顶 0否 1是',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user` (`user_id`),
+                    KEY `idx_topic` (`topic_id`),
+                    KEY `idx_created` (`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='社区动态'
+            """,
+
+            # ============================================
+            # 23. 动态评论
+            # ============================================
+            'community_comment': """
+                CREATE TABLE IF NOT EXISTS `community_comment` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `post_id` bigint unsigned NOT NULL,
+                    `user_id` bigint unsigned NOT NULL,
+                    `parent_id` bigint unsigned DEFAULT NULL COMMENT '父评论ID（支持二级回复）',
+                    `content` varchar(500) NOT NULL,
+                    `like_count` int DEFAULT '0',
+                    `status` tinyint DEFAULT '1' COMMENT '1正常 2违规',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_post` (`post_id`),
+                    KEY `idx_user` (`user_id`),
+                    KEY `idx_parent` (`parent_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='动态评论'
+            """,
+
+            # ============================================
+            # 24. 动态点赞
+            # ============================================
+            'community_like': """
+                CREATE TABLE IF NOT EXISTS `community_like` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `target_id` bigint unsigned NOT NULL,
+                    `type` tinyint DEFAULT '1' COMMENT '1动态 2评论',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_target` (`user_id`,`target_id`,`type`),
+                    KEY `idx_target` (`target_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='动态点赞'
+            """,
+
+            # ============================================
+            # 25. 话题分类
+            # ============================================
+            'community_topic': """
+                CREATE TABLE IF NOT EXISTS `community_topic` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `name` varchar(64) NOT NULL COMMENT '话题名 如 诚意帖/同乡/树洞',
+                    `icon` varchar(255) DEFAULT NULL,
+                    `sort` int DEFAULT '0',
+                    `is_active` tinyint DEFAULT '1',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_name` (`name`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='话题分类'
+            """,
+
+            # ============================================
+            # 26. 纸飞机（漂流瓶）
+            # ============================================
+            'paper_plane': """
+                CREATE TABLE IF NOT EXISTS `paper_plane` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL COMMENT '发送者',
+                    `content` text NOT NULL COMMENT '内容（文字/图片）',
+                    `images` json DEFAULT NULL COMMENT '图片列表',
+                    `city` varchar(64) DEFAULT NULL COMMENT '同城城市',
+                    `tags` json DEFAULT NULL COMMENT '标签 如 三观/情感/吐槽',
+                    `is_anonymous` tinyint DEFAULT '1' COMMENT '是否匿名 0否 1是',
+                    `reply_count` int DEFAULT '0',
+                    `like_count` int DEFAULT '0',
+                    `status` tinyint DEFAULT '1' COMMENT '1待回应 2已回应 3已过期',
+                    `expire_at` datetime DEFAULT NULL COMMENT '过期时间（默认24小时）',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_city` (`city`),
+                    KEY `idx_status` (`status`),
+                    KEY `idx_created` (`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='纸飞机（漂流瓶）'
+            """,
+
+            # ============================================
+            # 27. 纸飞机回复
+            # ============================================
+            'paper_plane_reply': """
+                CREATE TABLE IF NOT EXISTS `paper_plane_reply` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `plane_id` bigint unsigned NOT NULL,
+                    `user_id` bigint unsigned NOT NULL COMMENT '回复者',
+                    `content` text NOT NULL,
+                    `is_anonymous` tinyint DEFAULT '1',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_plane` (`plane_id`),
+                    KEY `idx_user` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='纸飞机回复'
+            """,
+
+            # ============================================
+            # 28. 红娘服务订单
+            # ============================================
+            'matchmaker_service': """
+                CREATE TABLE IF NOT EXISTS `matchmaker_service` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL COMMENT '用户',
+                    `matchmaker_id` bigint unsigned DEFAULT NULL COMMENT '红娘ID（users表）',
+                    `service_type` tinyint DEFAULT '1' COMMENT '1付费服务红娘 2免费热心红娘 3私人定制（含形象指导/安排见面）',
+                    `status` tinyint DEFAULT '0' COMMENT '0待接单 1服务中 2已完成 3已取消',
+                    `requirement` text COMMENT '用户需求描述',
+                    `feedback` text COMMENT '红娘反馈',
+                    `start_at` datetime DEFAULT NULL,
+                    `end_at` datetime DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user` (`user_id`),
+                    KEY `idx_matchmaker` (`matchmaker_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘服务订单'
+            """,
+
+            # ============================================
+            # 29. 红娘评价
+            # ============================================
+            'matchmaker_rating': """
+                CREATE TABLE IF NOT EXISTS `matchmaker_rating` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `service_id` bigint unsigned NOT NULL,
+                    `user_id` bigint unsigned NOT NULL,
+                    `matchmaker_id` bigint unsigned NOT NULL,
+                    `score` tinyint DEFAULT '5' COMMENT '评分 1-5',
+                    `content` varchar(500) DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_matchmaker` (`matchmaker_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘评价'
+            """,
+
+            # ============================================
+            # 30. 线下活动
+            # ============================================
+            'offline_activity': """
+                CREATE TABLE IF NOT EXISTS `offline_activity` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `title` varchar(128) NOT NULL,
+                    `cover` varchar(255) DEFAULT NULL COMMENT '封面图',
+                    `type` varchar(64) DEFAULT NULL COMMENT '活动类型 1v1情感咨询/线下脱单局/竞争力评分等',
+                    `city` varchar(64) DEFAULT NULL COMMENT '城市',
+                    `address` varchar(255) DEFAULT NULL COMMENT '详细地址（报名后可见）',
+                    `start_time` datetime NOT NULL,
+                    `end_time` datetime NOT NULL,
+                    `signup_deadline` datetime DEFAULT NULL COMMENT '报名截止时间',
+                    `max_people` int DEFAULT '0' COMMENT '人数上限',
+                    `current_people` int DEFAULT '0' COMMENT '已报名人数',
+                    `price` decimal(10,2) DEFAULT '0.00' COMMENT '报名费',
+                    `status` tinyint DEFAULT '1' COMMENT '1招募中 2已满 3进行中 4已结束 5已取消',
+                    `description` text COMMENT '活动详情',
+                    `created_by` bigint unsigned DEFAULT NULL COMMENT '创建人（运营）',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_city` (`city`),
+                    KEY `idx_time` (`start_time`),
+                    KEY `idx_status` (`status`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='线下活动'
+            """,
+
+            # ============================================
+            # 31. 活动报名
+            # ============================================
+            'activity_signup': """
+                CREATE TABLE IF NOT EXISTS `activity_signup` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `activity_id` bigint unsigned NOT NULL,
+                    `user_id` bigint unsigned NOT NULL,
+                    `real_name` varchar(64) DEFAULT NULL COMMENT '真实姓名（报名时填）',
+                    `phone` varchar(20) DEFAULT NULL COMMENT '联系电话',
+                    `remark` varchar(255) DEFAULT NULL COMMENT '备注',
+                    `status` tinyint DEFAULT '0' COMMENT '0待审核 1报名成功 2已取消 3已拒绝',
+                    `cancel_reason` varchar(255) DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_activity_user` (`activity_id`,`user_id`),
+                    KEY `idx_user` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='活动报名'
+            """,
+
+            # ============================================
+            # 32. 支付订单
+            # ============================================
+            'payment_order': """
+                CREATE TABLE IF NOT EXISTS `payment_order` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `order_no` varchar(64) NOT NULL COMMENT '订单号',
+                    `type` tinyint DEFAULT '1' COMMENT '1会员 2爆灯 3牵线套餐 4置顶曝光 5活动报名 6虚拟商品',
+                    `product_id` bigint DEFAULT NULL COMMENT '商品ID',
+                    `product_type` tinyint DEFAULT NULL COMMENT '商品类型 1会员 2爆灯 3置顶曝光 4牵线套餐 5活动报名 6虚拟商品',
+                    `product_name` varchar(128) DEFAULT NULL,
+                    `amount` decimal(10,2) NOT NULL COMMENT '金额',
+                    `pay_type` tinyint DEFAULT '1' COMMENT '1微信支付 2余额 3积分',
+                    `status` tinyint DEFAULT '0' COMMENT '0待支付 1支付成功 2支付失败 3已退款',
+                    `transaction_id` varchar(64) DEFAULT NULL COMMENT '微信支付交易号',
+                    `pay_time` datetime DEFAULT NULL,
+                    `refund_time` datetime DEFAULT NULL,
+                    `expire_at` datetime DEFAULT NULL COMMENT '支付过期时间',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_order_no` (`order_no`),
+                    KEY `idx_user` (`user_id`),
+                    KEY `idx_status` (`status`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='支付订单'
+            """,
+
+            # ============================================
+            # 33. 系统通知
+            # ============================================
+            'system_notification': """
+                CREATE TABLE IF NOT EXISTS `system_notification` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `type` varchar(32) NOT NULL COMMENT 'like/comment/follow/match/apply/system/activity',
+                    `title` varchar(128) DEFAULT NULL,
+                    `content` varchar(500) NOT NULL,
+                    `target_url` varchar(255) DEFAULT NULL COMMENT '跳转链接',
+                    `target_id` bigint DEFAULT NULL COMMENT '关联ID（动态ID/用户ID等）',
+                    `is_global` tinyint DEFAULT '0' COMMENT '是否全局通知 0否 1是',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_type` (`type`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='系统通知'
+            """,
+
+            # ============================================
+            # 34. 用户通知已读记录
+            # ============================================
+            'user_read_notification': """
+                CREATE TABLE IF NOT EXISTS `user_read_notification` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `notification_id` bigint unsigned NOT NULL,
+                    `is_read` tinyint DEFAULT '1',
+                    `read_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_noti` (`user_id`,`notification_id`),
+                    KEY `idx_user` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户通知已读记录'
+            """,
+
+            # ============================================
+            # 35. 意见反馈
+            # ============================================
+            'feedback': """
+                CREATE TABLE IF NOT EXISTS `feedback` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `type` tinyint DEFAULT '1' COMMENT '1Bug反馈 2功能建议 3体验问题 4其他',
+                    `content` text NOT NULL,
+                    `images` json DEFAULT NULL,
+                    `contact` varchar(64) DEFAULT NULL COMMENT '联系方式',
+                    `status` tinyint DEFAULT '0' COMMENT '0待处理 1已处理 2已采纳 3不处理',
+                    `reply` text COMMENT '处理回复',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='意见反馈'
+            """,
+
+            # ============================================
+            # 36. 用户设备信息
+            # ============================================
+            'user_device': """
+                CREATE TABLE IF NOT EXISTS `user_device` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `device_id` varchar(128) DEFAULT NULL COMMENT '设备唯一标识',
+                    `platform` varchar(32) DEFAULT NULL COMMENT 'ios/android',
+                    `os_version` varchar(32) DEFAULT NULL,
+                    `app_version` varchar(32) DEFAULT NULL,
+                    `push_token` varchar(255) DEFAULT NULL COMMENT '推送token',
+                    `last_active_at` datetime DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user` (`user_id`),
+                    KEY `idx_device` (`device_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户设备信息'
+            """,
+
+            # ============================================
+            # 37. 邀请好友记录
+            # ============================================
+            'invite_record': """
+                CREATE TABLE IF NOT EXISTS `invite_record` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `inviter_id` bigint unsigned NOT NULL COMMENT '邀请人',
+                    `invitee_id` bigint unsigned NOT NULL COMMENT '被邀请人',
+                    `invite_code` varchar(32) DEFAULT NULL COMMENT '邀请码',
+                    `status` tinyint DEFAULT '0' COMMENT '0已邀请 1已注册 2已实名 3已奖励',
+                    `reward_points` int DEFAULT '0' COMMENT '奖励积分',
+                    `reward_membership_days` int DEFAULT '0' COMMENT '奖励会员天数',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_invitee` (`invitee_id`),
+                    KEY `idx_inviter` (`inviter_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='邀请好友记录'
+            """,
+
+            # ============================================
+            # 38. 会员套餐配置
+            # ============================================
+            'config_membership_package': """
+                CREATE TABLE IF NOT EXISTS `config_membership_package` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `name` varchar(64) NOT NULL COMMENT '套餐名称 如 月度会员/季度会员/年度会员',
+                    `code` varchar(32) NOT NULL COMMENT '套餐编码 monthly/quarterly/yearly',
+                    `duration_days` int NOT NULL COMMENT '有效天数',
+                    `price` decimal(10,2) NOT NULL COMMENT '价格（元）',
+                    `original_price` decimal(10,2) DEFAULT NULL COMMENT '原价（划线价）',
+                    `daily_price` decimal(10,2) DEFAULT NULL COMMENT '日均价（展示用）',
+                    `sort` int DEFAULT '0' COMMENT '排序 越小越靠前',
+                    `is_active` tinyint DEFAULT '1' COMMENT '是否上架 0否 1是',
+                    `is_recommend` tinyint DEFAULT '0' COMMENT '是否推荐套餐 0否 1是',
+                    `badge` varchar(32) DEFAULT NULL COMMENT '角标 如 热销/超值',
+                    `rights` json NOT NULL COMMENT '权益列表 ["不限申请次数","无痕浏览","优先曝光","查看最近来访","高级筛选","专属标识"]',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_code` (`code`),
+                    KEY `idx_active_sort` (`is_active`,`sort`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员套餐配置'
+            """,
+
+            # ============================================
+            # 39. 爆灯/置顶曝光套餐配置
+            # ============================================
+            'config_boost_package': """
+                CREATE TABLE IF NOT EXISTS `config_boost_package` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `type` tinyint NOT NULL COMMENT '1爆灯 2置顶曝光',
+                    `name` varchar(64) NOT NULL COMMENT '套餐名称',
+                    `duration_days` int DEFAULT '0' COMMENT '有效天数（置顶曝光用）',
+                    `price` decimal(10,2) NOT NULL COMMENT '价格',
+                    `sort` int DEFAULT '0',
+                    `is_active` tinyint DEFAULT '1',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_type_active` (`type`,`is_active`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='爆灯/置顶曝光套餐配置'
+            """,
+
+            # ============================================
+            # 40. 首页Banner配置
+            # ============================================
+            'config_banner': """
+                CREATE TABLE IF NOT EXISTS `config_banner` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `title` varchar(128) DEFAULT NULL COMMENT '标题',
+                    `image_url` varchar(255) NOT NULL COMMENT '图片URL',
+                    `link_type` varchar(32) DEFAULT NULL COMMENT '跳转类型 activity/url/miniprogram/none',
+                    `link_value` varchar(500) DEFAULT NULL COMMENT '跳转值（活动ID/URL/小程序路径）',
+                    `sort` int DEFAULT '0' COMMENT '排序',
+                    `position` varchar(32) DEFAULT 'home' COMMENT '位置 home首页 / community社区',
+                    `is_active` tinyint DEFAULT '1',
+                    `start_at` datetime DEFAULT NULL COMMENT '生效开始时间',
+                    `end_at` datetime DEFAULT NULL COMMENT '生效结束时间',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_position_active_time` (`position`,`is_active`,`start_at`,`end_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Banner配置'
+            """,
+
+            # ============================================
+            # 41. 活动模板配置
+            # ============================================
+            'config_activity_template': """
+                CREATE TABLE IF NOT EXISTS `config_activity_template` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `type` varchar(64) NOT NULL COMMENT '活动类型 1v1情感咨询/线下脱单局/竞争力评分/黑心媒婆大赛',
+                    `name` varchar(64) NOT NULL,
+                    `icon` varchar(255) DEFAULT NULL,
+                    `default_cover` varchar(255) DEFAULT NULL COMMENT '默认封面图',
+                    `default_price` decimal(10,2) DEFAULT '0.00',
+                    `description_template` text COMMENT '活动描述模板（支持占位符）',
+                    `is_active` tinyint DEFAULT '1',
+                    `sort` int DEFAULT '0',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_type` (`type`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='活动模板配置'
+            """,
+
+            # ============================================
+            # 42. 任务奖励规则配置
+            # ============================================
+            'config_reward_rule': """
+                CREATE TABLE IF NOT EXISTS `config_reward_rule` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `task_code` varchar(64) NOT NULL COMMENT '任务编码',
+                    `task_name` varchar(64) NOT NULL COMMENT '任务名称',
+                    `task_type` tinyint DEFAULT '1' COMMENT '1新手任务 2日常任务 3成长任务',
+                    `reward_type` tinyint DEFAULT '1' COMMENT '1积分 2纸飞机次数 3会员天数 4曝光卡 5牵线次数',
+                    `reward_value` int DEFAULT '0' COMMENT '奖励值（数量）',
+                    `daily_limit` int DEFAULT '0' COMMENT '每日可完成次数（0不限）',
+                    `is_active` tinyint DEFAULT '1',
+                    `sort` int DEFAULT '0',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_task_code` (`task_code`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='任务奖励规则配置'
+            """,
+
+            # ============================================
+            # 43. 敏感词库
+            # ============================================
+            'config_sensitive_word': """
+                CREATE TABLE IF NOT EXISTS `config_sensitive_word` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `word` varchar(64) NOT NULL COMMENT '敏感词',
+                    `category` varchar(32) DEFAULT NULL COMMENT '分类 政治/色情/暴力/诈骗等',
+                    `level` tinyint DEFAULT '1' COMMENT '严重等级 1-3',
+                    `is_active` tinyint DEFAULT '1',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_word` (`word`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='敏感词库'
+            """,
+
+            # ============================================
+            # 44. 用户特征向量（用于AI推荐）
+            # ============================================
+            'user_feature_vector': """
+                CREATE TABLE IF NOT EXISTS `user_feature_vector` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `age` int DEFAULT NULL,
+                    `gender` tinyint DEFAULT NULL,
+                    `height` int DEFAULT NULL,
+                    `income_level` tinyint DEFAULT NULL COMMENT '收入等级 1-5',
+                    `education_level` tinyint DEFAULT NULL COMMENT '学历等级 1博士 2硕士 3本科 4大专 5高中',
+                    `city_code` varchar(32) DEFAULT NULL COMMENT '城市编码',
+                    `hometown_city` varchar(32) DEFAULT NULL COMMENT '家乡城市',
+                    `mbti_ei` tinyint DEFAULT NULL COMMENT 'E/I 0-100',
+                    `mbti_sn` tinyint DEFAULT NULL COMMENT 'S/N 0-100',
+                    `mbti_tf` tinyint DEFAULT NULL COMMENT 'T/F 0-100',
+                    `mbti_jp` tinyint DEFAULT NULL COMMENT 'J/P 0-100',
+                    `interest_vector` json DEFAULT NULL COMMENT '兴趣标签权重 {"音乐":0.8,"旅行":0.6,"读书":0.9}',
+                    `active_score` decimal(5,2) DEFAULT '0.00' COMMENT '活跃度评分',
+                    `response_rate` decimal(5,2) DEFAULT '0.00' COMMENT '回复率',
+                    `avg_response_time` int DEFAULT NULL COMMENT '平均回复时间（秒）',
+                    `version` int DEFAULT '1' COMMENT '版本号（用于增量更新）',
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_id` (`user_id`),
+                    KEY `idx_mbti` (`mbti_ei`,`mbti_sn`,`mbti_tf`,`mbti_jp`),
+                    KEY `idx_city_education` (`city_code`,`education_level`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户特征向量（AI推荐）'
+            """,
+
+            # ============================================
+            # 45. 用户行为事件（实时推荐用）
+            # ============================================
+            'user_behavior_event': """
+                CREATE TABLE IF NOT EXISTS `user_behavior_event` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `target_user_id` bigint unsigned DEFAULT NULL COMMENT '关联目标用户',
+                    `target_post_id` bigint unsigned DEFAULT NULL COMMENT '关联动态ID',
+                    `event_type` varchar(32) NOT NULL COMMENT '事件类型: view_profile / like / pass / chat / reply / post / share / checkin',
+                    `event_value` varchar(255) DEFAULT NULL COMMENT '事件附加值（如停留时长、点赞等）',
+                    `session_id` varchar(64) DEFAULT NULL COMMENT '会话ID（用于归因）',
+                    `ip` varchar(64) DEFAULT NULL,
+                    `device` varchar(128) DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user_time` (`user_id`,`created_at`),
+                    KEY `idx_target_user` (`target_user_id`),
+                    KEY `idx_type_time` (`event_type`,`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户行为事件（实时推荐）'
+            """,
+
+            # ============================================
+            # 46. MBTI测试结果
+            # ============================================
+            'user_mbti_result': """
+                CREATE TABLE IF NOT EXISTS `user_mbti_result` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `mbti_type` varchar(8) NOT NULL COMMENT 'ENFJ/INTJ等',
+                    `ei_score` int DEFAULT '0' COMMENT 'E/I 分数 0-100',
+                    `sn_score` int DEFAULT '0' COMMENT 'S/N 分数',
+                    `tf_score` int DEFAULT '0' COMMENT 'T/F 分数',
+                    `jp_score` int DEFAULT '0' COMMENT 'J/P 分数',
+                    `dimensions` json DEFAULT NULL COMMENT '各维度详细描述',
+                    `description` text COMMENT '性格描述',
+                    `test_version` varchar(16) DEFAULT NULL COMMENT '测试版本',
+                    `test_date` date NOT NULL COMMENT '测试日期',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_date` (`user_id`,`test_date`),
+                    KEY `idx_mbti_type` (`mbti_type`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MBTI测试结果'
+            """,
+
+            # ============================================
+            # 47. 恋爱风格测试结果
+            # ============================================
+            'user_love_style_result': """
+                CREATE TABLE IF NOT EXISTS `user_love_style_result` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `attachment_style` varchar(32) DEFAULT NULL COMMENT '依恋类型: 安全型/焦虑型/回避型/恐惧型',
+                    `love_language` json DEFAULT NULL COMMENT '爱的语言: ["肯定话语","服务行动","接受礼物","精心时刻","身体接触"]',
+                    `relationship_expectation` text COMMENT '关系期望',
+                    `test_date` date NOT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_date` (`user_id`,`test_date`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='恋爱风格测试结果'
+            """,
+
+            # ============================================
+            # 48. 用户间匹配分历史
+            # ============================================
+            'user_match_score_history': """
+                CREATE TABLE IF NOT EXISTS `user_match_score_history` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `target_user_id` bigint unsigned NOT NULL,
+                    `match_score` decimal(5,2) NOT NULL COMMENT '匹配分 0-100',
+                    `dimension_scores` json DEFAULT NULL COMMENT '各维度分数 {"age_similarity":85,"interest_overlap":72,"mbti_compatibility":90}',
+                    `match_reason` varchar(255) DEFAULT NULL COMMENT '匹配理由',
+                    `is_clicked` tinyint DEFAULT '0' COMMENT '用户是否点击查看',
+                    `is_liked` tinyint DEFAULT '0',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user_target` (`user_id`,`target_user_id`),
+                    KEY `idx_score` (`match_score`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户间匹配分历史'
+            """,
+
+            # ============================================
+            # 49. 每日用户统计
+            # ============================================
+            'stat_daily_user': """
+                CREATE TABLE IF NOT EXISTS `stat_daily_user` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `stat_date` date NOT NULL COMMENT '统计日期',
+                    `total_users` int DEFAULT '0' COMMENT '累计注册用户数',
+                    `new_users` int DEFAULT '0' COMMENT '新增注册用户',
+                    `auth_users` int DEFAULT '0' COMMENT '累计认证用户数',
+                    `new_auth_users` int DEFAULT '0' COMMENT '新增认证用户',
+                    `total_vip_users` int DEFAULT '0' COMMENT '累计VIP用户数',
+                    `active_vip_users` int DEFAULT '0' COMMENT '当前活跃VIP用户数',
+                    `new_vip_users` int DEFAULT '0' COMMENT '新增VIP用户',
+                    `male_users` int DEFAULT '0',
+                    `female_users` int DEFAULT '0',
+                    `avg_age` decimal(4,1) DEFAULT '0.0' COMMENT '平均年龄',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_date` (`stat_date`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='每日用户统计'
+            """,
+
+            # ============================================
+            # 50. 每日活跃/互动统计
+            # ============================================
+            'stat_daily_activity': """
+                CREATE TABLE IF NOT EXISTS `stat_daily_activity` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `stat_date` date NOT NULL,
+                    `dau` int DEFAULT '0' COMMENT '日活跃用户数',
+                    `wau` int DEFAULT '0' COMMENT '周活跃用户数',
+                    `mau` int DEFAULT '0' COMMENT '月活跃用户数',
+                    `avg_session_duration` int DEFAULT '0' COMMENT '平均会话时长（秒）',
+                    `avg_daily_visits` decimal(5,2) DEFAULT '0.00' COMMENT '人均每日访问次数',
+                    `total_swipes` int DEFAULT '0' COMMENT '总滑动次数',
+                    `total_likes` int DEFAULT '0' COMMENT '总点赞数',
+                    `total_matches` int DEFAULT '0' COMMENT '匹配成功数',
+                    `total_chat_messages` int DEFAULT '0' COMMENT '总消息数',
+                    `total_posts` int DEFAULT '0' COMMENT '总动态发布数',
+                    `total_comments` int DEFAULT '0' COMMENT '总评论数',
+                    `total_paper_planes` int DEFAULT '0' COMMENT '总纸飞机数',
+                    `like_to_match_rate` decimal(5,2) DEFAULT '0.00' COMMENT '点赞转匹配率 %',
+                    `match_to_chat_rate` decimal(5,2) DEFAULT '0.00' COMMENT '匹配转聊天率 %',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_date` (`stat_date`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='每日活跃/互动统计'
+            """,
+
+            # ============================================
+            # 51. 每日匹配/牵线统计
+            # ============================================
+            'stat_daily_match': """
+                CREATE TABLE IF NOT EXISTS `stat_daily_match` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `stat_date` date NOT NULL,
+                    `total_recommendations` int DEFAULT '0' COMMENT '总推荐次数',
+                    `avg_recommend_score` decimal(5,2) DEFAULT '0.00' COMMENT '平均推荐分',
+                    `like_count` int DEFAULT '0' COMMENT '点赞数',
+                    `pass_count` int DEFAULT '0' COMMENT '无感数',
+                    `apply_count` int DEFAULT '0' COMMENT '申请认识数',
+                    `match_success_count` int DEFAULT '0' COMMENT '互相匹配成功数',
+                    `match_apply_count` int DEFAULT '0' COMMENT '牵线申请数',
+                    `match_apply_agree_count` int DEFAULT '0' COMMENT '牵线同意数',
+                    `match_apply_reject_count` int DEFAULT '0' COMMENT '牵线拒绝数',
+                    `like_match_rate` decimal(5,2) DEFAULT '0.00' COMMENT '点赞→匹配率',
+                    `apply_agree_rate` decimal(5,2) DEFAULT '0.00' COMMENT '申请→同意率',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_date` (`stat_date`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='每日匹配/牵线统计'
+            """,
+
+            # ============================================
+            # 52. 每日营收统计
+            # ============================================
+            'stat_daily_revenue': """
+                CREATE TABLE IF NOT EXISTS `stat_daily_revenue` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `stat_date` date NOT NULL,
+                    `total_revenue` decimal(12,2) DEFAULT '0.00' COMMENT '总营收',
+                    `membership_revenue` decimal(12,2) DEFAULT '0.00' COMMENT '会员营收',
+                    `boost_revenue` decimal(12,2) DEFAULT '0.00' COMMENT '爆灯营收',
+                    `exposure_revenue` decimal(12,2) DEFAULT '0.00' COMMENT '置顶曝光营收',
+                    `activity_revenue` decimal(12,2) DEFAULT '0.00' COMMENT '活动报名营收',
+                    `consulting_revenue` decimal(12,2) DEFAULT '0.00' COMMENT '情感咨询营收',
+                    `matchmaker_revenue` decimal(12,2) DEFAULT '0.00' COMMENT '红娘服务营收',
+                    `other_revenue` decimal(12,2) DEFAULT '0.00' COMMENT '其他营收',
+                    `total_orders` int DEFAULT '0' COMMENT '总订单数',
+                    `membership_orders` int DEFAULT '0',
+                    `boost_orders` int DEFAULT '0',
+                    `exposure_orders` int DEFAULT '0',
+                    `activity_orders` int DEFAULT '0',
+                    `arpu` decimal(10,2) DEFAULT '0.00' COMMENT '每用户平均收入',
+                    `ltv` decimal(10,2) DEFAULT '0.00' COMMENT '用户生命周期价值（累计）',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_date` (`stat_date`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='每日营收统计'
+            """,
+
+            # ============================================
+            # 53. 用户行为漏斗（转化分析）
+            # ============================================
+            'stat_user_behavior_funnel': """
+                CREATE TABLE IF NOT EXISTS `stat_user_behavior_funnel` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `stat_date` date NOT NULL,
+                    `funnel_name` varchar(64) NOT NULL COMMENT '漏斗名称: 注册-认证-匹配-聊天',
+                    `step_1_count` int DEFAULT '0' COMMENT '阶段1: 注册',
+                    `step_2_count` int DEFAULT '0' COMMENT '阶段2: 完善资料（80%+）',
+                    `step_3_count` int DEFAULT '0' COMMENT '阶段3: 实名认证',
+                    `step_4_count` int DEFAULT '0' COMMENT '阶段4: 首次点赞',
+                    `step_5_count` int DEFAULT '0' COMMENT '阶段5: 首次匹配成功',
+                    `step_6_count` int DEFAULT '0' COMMENT '阶段6: 首次聊天',
+                    `step_7_count` int DEFAULT '0' COMMENT '阶段7: 首次线下见面',
+                    `step_1_to_2_rate` decimal(5,2) DEFAULT '0.00',
+                    `step_2_to_3_rate` decimal(5,2) DEFAULT '0.00',
+                    `step_3_to_4_rate` decimal(5,2) DEFAULT '0.00',
+                    `step_4_to_5_rate` decimal(5,2) DEFAULT '0.00',
+                    `step_5_to_6_rate` decimal(5,2) DEFAULT '0.00',
+                    `step_6_to_7_rate` decimal(5,2) DEFAULT '0.00',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_date_name` (`stat_date`,`funnel_name`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户行为漏斗'
+            """,
+
+            # ============================================
+            # 54. 用户留存统计
+            # ============================================
+            'stat_retention': """
+                CREATE TABLE IF NOT EXISTS `stat_retention` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `cohort_date` date NOT NULL COMMENT '注册批次日期',
+                    `day_1` decimal(5,2) DEFAULT '0.00' COMMENT '次日留存率 %',
+                    `day_3` decimal(5,2) DEFAULT '0.00' COMMENT '3日留存',
+                    `day_7` decimal(5,2) DEFAULT '0.00' COMMENT '7日留存',
+                    `day_14` decimal(5,2) DEFAULT '0.00' COMMENT '14日留存',
+                    `day_30` decimal(5,2) DEFAULT '0.00' COMMENT '30日留存',
+                    `day_60` decimal(5,2) DEFAULT '0.00' COMMENT '60日留存',
+                    `day_90` decimal(5,2) DEFAULT '0.00' COMMENT '90日留存',
+                    `cohort_size` int DEFAULT '0' COMMENT '该批次总人数',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_cohort_date` (`cohort_date`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户留存统计'
+            """,
+
+            # ============================================
+            # 55. 用户置顶曝光购买记录
+            # ============================================
+            'user_exposure': """
+                CREATE TABLE IF NOT EXISTS `user_exposure` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL COMMENT '用户ID',
+                    `package_id` bigint unsigned NOT NULL COMMENT '关联 config_boost_package.id (type=2置顶)',
+                    `order_no` varchar(64) DEFAULT NULL COMMENT '关联支付订单号',
+                    `start_at` datetime NOT NULL COMMENT '生效开始时间',
+                    `end_at` datetime NOT NULL COMMENT '生效结束时间',
+                    `status` tinyint DEFAULT '1' COMMENT '1生效中 2已过期 3已退款',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_user` (`user_id`),
+                    KEY `idx_package` (`package_id`),
+                    KEY `idx_status_time` (`status`,`start_at`,`end_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户置顶曝光购买记录'
+            """,
+        }
+
+        # 创建所有表
+        for table_name, sql in tables.items():
+            cursor.execute(sql)
+            logger.debug(f"表 `{table_name}` 已创建/确认")
+
+        # 添加外键约束
+        self._add_all_foreign_keys(cursor)
+
+        logger.info("✅ 数据库表结构初始化完成（55张表）")
+
+    def create_test_data(self, cursor, conn) -> int:
+        """创建测试数据（可选）"""
+        # 环境检查：防止在生产环境误执行
+        env = os.getenv('ENV', 'development').lower()
+        if env in ('production', 'prod'):
+            logger.warning("⚠️ 当前为生产环境，跳过测试数据创建")
+            return 0
+
+        logger.info("创建测试数据...")
+
+        phone = '13800138000'
+
+        # 插入或更新测试用户
+        cursor.execute("""
+            INSERT INTO `users` (phone, nickname, gender, status)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE nickname = VALUES(nickname)
+        """, (phone, '测试用户', 1, 1))
+
+        # 显式查询用户 ID（ON DUPLICATE KEY UPDATE 时 lastrowid 不可靠）
+        cursor.execute("SELECT id FROM `users` WHERE phone = %s", (phone,))
+        row = cursor.fetchone()
+        if not row:
+            raise RuntimeError(f"创建或查询测试用户失败，手机号: {phone}")
+        user_id = row['id']
+
+        # 创建测试用户资料
+        cursor.execute("""
+            INSERT INTO `user_profile` (user_id, height, income, hometown, residence, mbti, constellation, tags)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE height = VALUES(height)
+        """, (user_id, 175, 15000.00, '杭州', '上海', 'ENFJ', '天秤座', '["颜控", "宠物"]'))
+
+        # 创建隐私设置
+        cursor.execute("""
+            INSERT INTO `user_privacy` (user_id)
+            VALUES (%s)
+            ON DUPLICATE KEY UPDATE user_id = user_id
+        """, (user_id,))
+
+        conn.commit()
+        logger.info(f"✅ 测试数据创建完成 | 用户ID: {user_id}")
+        return user_id
+
+
+# ==================== 对外接口函数 ====================
+
+def create_database():
+    """根据 `.env` 中的配置，创建 MySQL 数据库（如果不存在）"""
+    import pymysql
+    cfg = get_db_config()
+    host = cfg['host']
+    port = cfg['port']
+    user = cfg['user']
+    password = cfg['password']
+    dbname = cfg['database']
+
+    conn = pymysql.connect(host=host, port=port, user=user, password=password, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE DATABASE IF NOT EXISTS `{dbname}` "
+                f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+            )
+    finally:
+        conn.close()
+
+    logger.info("✅ 数据库创建完成（若不存在）")
+
+
+def initialize_database():
+    """初始化数据库表结构（如果尚未创建）"""
+    logger.info("正在检查数据库表结构...")
+    create_database()
+
+    cfg = get_db_config()
+    conn = pymysql.connect(**cfg, cursorclass=pymysql.cursors.DictCursor)
+    try:
+        with conn.cursor() as cursor:
+            db_manager = DatabaseManager()
+            db_manager.init_all_tables(cursor)
+        conn.commit()
+    finally:
+        conn.close()
+
+    logger.info("✅ 数据库表结构初始化完成。")
+
+
+def create_test_data():
+    """创建测试数据（可选）"""
+    logger.info("正在创建测试数据...")
+    cfg = get_db_config()
+    conn = pymysql.connect(**cfg, cursorclass=pymysql.cursors.DictCursor)
+    try:
+        with conn.cursor() as cursor:
+            db_manager = DatabaseManager()
+            db_manager.create_test_data(cursor, conn)
+    finally:
+        conn.close()
+    logger.info("✅ 测试数据创建完成。")
+
+
+def init_db():
+    """一键初始化数据库（兼容接口）"""
+    initialize_database()
+    logger.info("[database_setup_marriage] 初始化完成！")
+
+
+# ==================== 主入口 ====================
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == '--test':
+        initialize_database()
+        create_test_data()
+    else:
+        initialize_database()
