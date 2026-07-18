@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     port: int = 8000
     api_prefix: str = "/api/v1"
 
-    database_url: str = "mysql+aiomysql://root:password@127.0.0.1:3306/xuanshiai"
+    database_url: str = "mysql+aiomysql://root:YOUR_MYSQL_PASSWORD@127.0.0.1:3306/xuanshiai"
     redis_url: str = "redis://127.0.0.1:6379/0"
 
     secret_key: str = "change-me-in-local-env"

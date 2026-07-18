@@ -57,13 +57,52 @@ code .env
 
 | 配置项 | 用途 | 本地默认值 |
 | --- | --- | --- |
-| `DATABASE_URL` | MySQL 异步连接地址 | `mysql+aiomysql://root:password@127.0.0.1:3306/xuanshiai` |
+| `DATABASE_URL` | MySQL 异步连接地址 | `mysql+aiomysql://root:YOUR_MYSQL_PASSWORD@127.0.0.1:3306/xuanshiai` |
 | `REDIS_URL` | Redis 连接地址 | `redis://127.0.0.1:6379/0` |
 | `SECRET_KEY` | JWT 签名密钥 | 仅开发占位值，部署前必须替换 |
 | `CORS_ORIGINS_RAW` | 允许跨域的前端地址 | `http://localhost:3000,http://localhost:5173` |
 | `UPLOAD_DIR` | 上传文件目录 | `storage/uploads` |
 
 `.env` 包含本地密钥和连接信息，不要提交到 Git。完整配置说明见 `.env.example`。
+
+### MySQL 项目数据库配置
+
+1. 打开 `.env`，把 `YOUR_MYSQL_PASSWORD` 替换为你安装 MySQL 时设置的 `root` 密码：
+
+```env
+DATABASE_URL=mysql+aiomysql://root:你的密码@127.0.0.1:3306/xuanshiai
+```
+
+2. 使用 MySQL 客户端登录并创建项目数据库。下面命令会提示输入密码，不会把密码写进命令历史：
+
+```powershell
+& 'H:\mysql\bin\mysql.exe' --protocol=TCP --host=127.0.0.1 --port=3306 --user=root --password
+```
+
+登录后执行：
+
+```sql
+CREATE DATABASE IF NOT EXISTS xuanshiai
+  DEFAULT CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+```
+
+退出 MySQL：
+
+```sql
+EXIT;
+```
+
+3. 如果密码中包含 `@`、`:`、`/`、`#` 或空格，需要先进行 URL 编码，再填入 `DATABASE_URL`。例如 `@` 编码为 `%40`。
+
+4. 验证数据库连接。命令会提示输入密码，并执行 `SELECT 1`：
+
+```powershell
+Test-NetConnection 127.0.0.1 -Port 3306
+& 'H:\mysql\bin\mysql.exe' --protocol=TCP --host=127.0.0.1 --port=3306 --user=root --password --database=xuanshiai --execute="SELECT 1 AS connection_ok;"
+```
+
+当前项目已预留数据库连接配置，但尚未自动执行建表迁移；后续接入 ORM 模型后，再增加 Alembic 迁移命令。
 
 ## 四、启动服务
 
