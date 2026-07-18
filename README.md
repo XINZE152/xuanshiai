@@ -2,6 +2,8 @@
 
 这是一个基于 FastAPI 的后端项目基础骨架，当前已包含应用入口、环境配置、健康检查、测试和后续业务模块预留目录。
 
+详细操作命令请阅读 [项目操作文档](docs/DEVELOPMENT.md)。
+
 ## 环境要求
 
 - Python 3.11+
@@ -11,10 +13,13 @@
 ## 本地启动
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -e ".[dev]"
+uv sync --extra dev
+uv run uvicorn app.main:app --reload
+```
+
+兼容入口：
+
+```powershell
 python main.py
 ```
 
@@ -31,7 +36,8 @@ python main.py
 ## 测试
 
 ```powershell
-pytest
+uv run pytest
+uv run ruff check .
 ```
 
 ## 目录说明
@@ -44,7 +50,16 @@ app/
   models/    ORM 模型
   schemas/   Pydantic 请求/响应模型
   services/  业务服务层
+docs/        项目操作和开发文档
 tests/       自动化测试
 storage/     本地运行时文件
 logs/        本地日志目录
 ```
+
+## AI 编码规则
+
+使用 Codex 或 Claude Code 修改代码前，请先阅读：
+
+- `AGENTS.md`：Codex 规则入口
+- `CLAUDE.md`：Claude Code 规则入口
+- `PROJECT_RULES.md`：共享规则正文，可由项目负责人继续填写
