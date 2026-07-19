@@ -8,6 +8,14 @@ import logging
 import json
 import pymysql
 import re
+from urllib.parse import unquote, urlsplit
+
+
+def _validate_database_name(database: str) -> str:
+    """只允许配置中的安全数据库标识符，避免拼接 SQL 时产生注入风险。"""
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", database):
+        raise ValueError("数据库名只能包含字母、数字和下划线，长度不能超过64")
+    return database
 
 def get_db_config():
     """
@@ -17,15 +25,17 @@ def get_db_config():
     # 1. 优先尝试从 DATABASE_URL 解析
     database_url = os.getenv('DATABASE_URL', '')
     if database_url:
-        # 匹配格式: mysql+aiomysql://user:password@host:port/database
-        # 兼容 mysql:// 和 mysql+aiomysql://
-        pattern = r'mysql(?:\+[^:]+)?://([^:]+):([^@]+)@([^:]+):(\d+)/([^?]+)'
-        match = re.match(pattern, database_url)
-        if match:
-            user, password, host, port, database = match.groups()
+        # 兼容 mysql:// 和 mysql+aiomysql://，并正确解码 URL 中的特殊字符。
+        parsed = urlsplit(database_url.replace("mysql+aiomysql://", "mysql://", 1))
+        if parsed.scheme == "mysql" and parsed.hostname and parsed.username and parsed.password is not None and parsed.port:
+            user = unquote(parsed.username)
+            password = unquote(parsed.password)
+            host = parsed.hostname
+            port = parsed.port
+            database = _validate_database_name(parsed.path.lstrip("/"))
             return {
                 'host': host,
-                'port': int(port),
+                'port': port,
                 'user': user,
                 'password': password,
                 'database': database,
@@ -39,8 +49,8 @@ def get_db_config():
         'port': int(os.getenv('DB_PORT', 3306)),
         'user': os.getenv('DB_USER', 'root'),
         'password': os.getenv('DB_PASSWORD', ''),
-        'database': os.getenv('DB_NAME', 'xuanshiai'),
-    }
+            'database': _validate_database_name(os.getenv('DB_NAME', 'xuanshiai')),
+        }
 
 
 # =============================================
@@ -72,7 +82,7 @@ class DatabaseManager:
         """确保数据库存在，如果不存在则创建"""
         try:
             temp_config = get_db_config().copy()
-            database = temp_config.pop('database')
+            database = _validate_database_name(temp_config.pop('database'))
             import pymysql
             conn = pymysql.connect(**temp_config)
             cursor = conn.cursor()
@@ -110,6 +120,120 @@ class DatabaseManager:
         except Exception as e:
             logger.debug(f"表 {table_name} 可能不存在，将在创建表时处理: {e}")
 
+    def _ensure_required_columns(self, cursor):
+        """补齐已存在旧表缺少的用户与认证模块字段。"""
+        required_columns = {
+            'users': {
+                'password_algo': "`password_algo` varchar(32) DEFAULT NULL COMMENT '密码哈希算法'",
+                'password_updated_at': "`password_updated_at` datetime DEFAULT NULL",
+                'password_failed_count': "`password_failed_count` int unsigned NOT NULL DEFAULT '0'",
+                'password_locked_until': "`password_locked_until` datetime DEFAULT NULL",
+                'phone_verified_at': "`phone_verified_at` datetime DEFAULT NULL",
+                'wechat_bound_at': "`wechat_bound_at` datetime DEFAULT NULL",
+                'last_login_ip': "`last_login_ip` varchar(64) DEFAULT NULL",
+                'last_login_device_id': "`last_login_device_id` varchar(128) DEFAULT NULL",
+                'risk_status': "`risk_status` tinyint NOT NULL DEFAULT '0' COMMENT '0正常 1关注 2限制'",
+                'frozen_at': "`frozen_at` datetime DEFAULT NULL",
+                'frozen_reason': "`frozen_reason` varchar(255) DEFAULT NULL",
+                'deletion_requested_at': "`deletion_requested_at` datetime DEFAULT NULL",
+                'deletion_scheduled_at': "`deletion_scheduled_at` datetime DEFAULT NULL",
+                'deletion_cancelled_at': "`deletion_cancelled_at` datetime DEFAULT NULL",
+                'deleted_at': "`deleted_at` datetime DEFAULT NULL",
+            },
+            'user_auth': {
+                'realname_status': "`realname_status` tinyint NOT NULL DEFAULT '0' COMMENT '0未认证 1认证中 2通过 3失败 4人工复核 5撤销'",
+                'realname_provider': "`realname_provider` varchar(64) DEFAULT NULL",
+                'provider_request_id': "`provider_request_id` varchar(128) DEFAULT NULL",
+                'provider_result_code': "`provider_result_code` varchar(64) DEFAULT NULL",
+                'submitted_at': "`submitted_at` datetime DEFAULT NULL",
+                'verified_at': "`verified_at` datetime DEFAULT NULL",
+                'failed_at': "`failed_at` datetime DEFAULT NULL",
+                'retry_count': "`retry_count` int unsigned NOT NULL DEFAULT '0'",
+                'next_retry_at': "`next_retry_at` datetime DEFAULT NULL",
+                'manual_review_by': "`manual_review_by` bigint unsigned DEFAULT NULL",
+                'manual_review_at': "`manual_review_at` datetime DEFAULT NULL",
+                'revoked_at': "`revoked_at` datetime DEFAULT NULL",
+                'revoked_reason': "`revoked_reason` varchar(255) DEFAULT NULL",
+                'id_card_hash': "`id_card_hash` char(64) DEFAULT NULL COMMENT '身份证号哈希，用于去重'",
+                'id_card_masked': "`id_card_masked` varchar(32) DEFAULT NULL",
+                'encryption_version': "`encryption_version` varchar(32) DEFAULT NULL",
+            },
+            'user_profile': {
+                'occupation': "`occupation` varchar(128) DEFAULT NULL COMMENT '职业'",
+                'industry': "`industry` varchar(128) DEFAULT NULL COMMENT '行业'",
+                'education_level': "`education_level` tinyint DEFAULT NULL COMMENT '学历等级'",
+                'hometown_province_code': "`hometown_province_code` varchar(32) DEFAULT NULL",
+                'hometown_city_code': "`hometown_city_code` varchar(32) DEFAULT NULL",
+                'hometown_district_code': "`hometown_district_code` varchar(32) DEFAULT NULL",
+                'residence_province_code': "`residence_province_code` varchar(32) DEFAULT NULL",
+                'residence_city_code': "`residence_city_code` varchar(32) DEFAULT NULL",
+                'residence_district_code': "`residence_district_code` varchar(32) DEFAULT NULL",
+                'location_source': "`location_source` varchar(32) DEFAULT NULL",
+                'location_updated_at': "`location_updated_at` datetime DEFAULT NULL",
+                'location_precision': "`location_precision` decimal(10,2) DEFAULT NULL",
+                'location_consent': "`location_consent` tinyint NOT NULL DEFAULT '0'",
+                'location_visible': "`location_visible` tinyint NOT NULL DEFAULT '0'",
+                'interest_tags': "`interest_tags` json DEFAULT NULL",
+                'personality_tags': "`personality_tags` json DEFAULT NULL",
+                'completion_algorithm_version': "`completion_algorithm_version` varchar(32) DEFAULT NULL",
+                'completion_calculated_at': "`completion_calculated_at` datetime DEFAULT NULL",
+            },
+            'user_privacy': {
+                'anonymous_browse_enabled': "`anonymous_browse_enabled` tinyint NOT NULL DEFAULT '0' COMMENT 'VIP无痕浏览'",
+                'notify_message': "`notify_message` tinyint NOT NULL DEFAULT '1' COMMENT '新消息通知'",
+                'privacy_version': "`privacy_version` varchar(32) DEFAULT NULL",
+                'privacy_updated_at': "`privacy_updated_at` datetime DEFAULT NULL",
+            },
+            'user_login_log': {
+                'login_status': "`login_status` tinyint NOT NULL DEFAULT '1' COMMENT '1成功 2失败'",
+                'failure_reason': "`failure_reason` varchar(255) DEFAULT NULL",
+                'session_id': "`session_id` bigint unsigned DEFAULT NULL",
+                'device_id': "`device_id` varchar(128) DEFAULT NULL",
+                'platform': "`platform` varchar(32) DEFAULT NULL",
+                'os_version': "`os_version` varchar(32) DEFAULT NULL",
+                'app_version': "`app_version` varchar(32) DEFAULT NULL",
+                'user_agent': "`user_agent` varchar(512) DEFAULT NULL",
+                'region': "`region` varchar(128) DEFAULT NULL",
+                'risk_level': "`risk_level` tinyint NOT NULL DEFAULT '0'",
+                'is_suspicious': "`is_suspicious` tinyint NOT NULL DEFAULT '0'",
+            },
+            'user_matchmaker_apply': {
+                'application_type': "`application_type` varchar(32) NOT NULL DEFAULT 'service_matchmaker' COMMENT '申请类型 promoter推广红娘 partner合伙人 service_matchmaker服务红娘'",
+                'reviewed_by': "`reviewed_by` bigint unsigned DEFAULT NULL",
+                'reviewed_at': "`reviewed_at` datetime DEFAULT NULL",
+                'suspended_at': "`suspended_at` datetime DEFAULT NULL",
+                'suspension_reason': "`suspension_reason` varchar(255) DEFAULT NULL",
+            },
+        }
+
+        for table_name, columns in required_columns.items():
+            self._ensure_table_columns(cursor, f'`{table_name}`', columns)
+        self._ensure_matchmaker_application_index(cursor)
+
+    def _ensure_matchmaker_application_index(self, cursor):
+        """将旧版红娘申请的单用户唯一索引升级为单用户单申请类型唯一索引。"""
+        try:
+            cursor.execute("""
+                SELECT INDEX_NAME
+                FROM information_schema.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'user_matchmaker_apply'
+                  AND INDEX_NAME = 'uk_user_id'
+            """)
+            if cursor.fetchone():
+                cursor.execute("ALTER TABLE `user_matchmaker_apply` DROP INDEX `uk_user_id`")
+            cursor.execute("""
+                SELECT INDEX_NAME
+                FROM information_schema.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'user_matchmaker_apply'
+                  AND INDEX_NAME = 'uk_user_id_type'
+            """)
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE `user_matchmaker_apply` ADD UNIQUE KEY `uk_user_id_type` (`user_id`,`application_type`)")
+        except pymysql.MySQLError as exc:
+            logger.warning(f"⚠️ 红娘申请索引升级失败，请检查历史重复数据: {exc}")
+
     def _add_foreign_key(self, cursor, table_name: str, column: str, ref_table: str = 'users', ref_column: str = 'id'):
         """添加外键约束（幂等）"""
         try:
@@ -143,9 +267,16 @@ class DatabaseManager:
         # 所有引用 users.id 的 user_id 字段
         user_id_tables = [
             ('user_auth', 'user_id'),
+            ('user_registration_intent', 'user_id'),
+            ('user_role', 'user_id'),
             ('user_profile', 'user_id'),
             ('user_privacy', 'user_id'),
             ('user_login_log', 'user_id'),
+            ('user_session', 'user_id'),
+            ('user_agreement_acceptance', 'user_id'),
+            ('user_partner_preference', 'user_id'),
+            ('user_media', 'user_id'),
+            ('user_profile_completion', 'user_id'),
             ('user_block', 'user_id'),
             ('user_block', 'target_user_id'),
             ('user_report', 'user_id'),
@@ -202,6 +333,9 @@ class DatabaseManager:
 
         for table, column in user_id_tables:
             self._add_foreign_key(cursor, table, column)
+
+        # 登录日志中的会话关联允许为空，保留历史日志兼容性。
+        self._add_foreign_key(cursor, 'user_login_log', 'session_id', 'user_session')
 
         # 社区相关外键
         try:
@@ -324,6 +458,184 @@ class DatabaseManager:
                     UNIQUE KEY `uk_phone` (`phone`),
                     UNIQUE KEY `uk_openid` (`openid`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户主表'
+            """,
+
+            # ============================================
+            # 1.1 用户注册意图
+            # ============================================
+            'user_registration_intent': """
+                CREATE TABLE IF NOT EXISTS `user_registration_intent` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `intent_type` varchar(32) NOT NULL COMMENT 'self_match自己找 parent_match父母帮找 companion找搭子',
+                    `source` varchar(32) DEFAULT NULL COMMENT '选择来源 register/profile',
+                    `version` varchar(16) NOT NULL DEFAULT 'v1',
+                    `status` tinyint NOT NULL DEFAULT '1' COMMENT '1当前有效 2已撤销',
+                    `selected_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `revoked_at` datetime DEFAULT NULL,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_intent_user` (`user_id`),
+                    KEY `idx_intent_type_status` (`intent_type`,`status`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户注册意图'
+            """,
+
+            # ============================================
+            # 1.2 用户平台角色
+            # ============================================
+            'user_role': """
+                CREATE TABLE IF NOT EXISTS `user_role` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `role_code` varchar(32) NOT NULL COMMENT 'user普通用户 promoter推广红娘 partner合伙人 service_matchmaker服务红娘 admin管理员',
+                    `status` tinyint NOT NULL DEFAULT '1' COMMENT '1有效 2暂停 3撤销',
+                    `granted_by` bigint unsigned DEFAULT NULL,
+                    `granted_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `revoked_at` datetime DEFAULT NULL,
+                    `revoke_reason` varchar(255) DEFAULT NULL,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_role` (`user_id`,`role_code`),
+                    KEY `idx_role_status` (`role_code`,`status`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户平台角色'
+            """,
+
+            # ============================================
+            # 1.3 用户登录会话
+            # ============================================
+            'user_session': """
+                CREATE TABLE IF NOT EXISTS `user_session` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `access_token_hash` char(64) DEFAULT NULL COMMENT 'Access Token哈希',
+                    `refresh_token_hash` char(64) NOT NULL COMMENT 'Refresh Token哈希',
+                    `device_id` varchar(128) DEFAULT NULL,
+                    `platform` varchar(32) DEFAULT NULL,
+                    `app_version` varchar(32) DEFAULT NULL,
+                    `ip` varchar(64) DEFAULT NULL,
+                    `user_agent` varchar(512) DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `last_used_at` datetime DEFAULT NULL,
+                    `access_expire_at` datetime NOT NULL,
+                    `refresh_expire_at` datetime NOT NULL,
+                    `revoked_at` datetime DEFAULT NULL,
+                    `revoke_reason` varchar(64) DEFAULT NULL,
+                    `status` tinyint NOT NULL DEFAULT '1' COMMENT '1有效 2撤销 3过期',
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_refresh_token_hash` (`refresh_token_hash`),
+                    KEY `idx_session_user_status` (`user_id`,`status`),
+                    KEY `idx_session_device` (`device_id`),
+                    KEY `idx_session_refresh_expire` (`refresh_expire_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户登录会话'
+            """,
+
+            # ============================================
+            # 1.2 协议和安全承诺签署记录
+            # ============================================
+            'user_agreement_acceptance': """
+                CREATE TABLE IF NOT EXISTS `user_agreement_acceptance` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `agreement_type` varchar(64) NOT NULL COMMENT '协议类型',
+                    `agreement_version` varchar(32) NOT NULL COMMENT '协议版本',
+                    `content_hash` char(64) DEFAULT NULL COMMENT '协议内容哈希',
+                    `accepted_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `accepted_ip` varchar(64) DEFAULT NULL,
+                    `device_id` varchar(128) DEFAULT NULL,
+                    `scene` varchar(32) DEFAULT NULL COMMENT '注册/资料/聊天/社区',
+                    `status` tinyint NOT NULL DEFAULT '1' COMMENT '1有效 2撤销',
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_user_agreement_version` (`user_id`,`agreement_type`,`agreement_version`),
+                    KEY `idx_agreement_type_version` (`agreement_type`,`agreement_version`),
+                    KEY `idx_agreement_user_time` (`user_id`,`accepted_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户协议签署记录'
+            """,
+
+            # ============================================
+            # 1.3 用户择偶要求
+            # ============================================
+            'user_partner_preference': """
+                CREATE TABLE IF NOT EXISTS `user_partner_preference` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `age_min` tinyint unsigned DEFAULT NULL,
+                    `age_max` tinyint unsigned DEFAULT NULL,
+                    `height_min` smallint unsigned DEFAULT NULL,
+                    `height_max` smallint unsigned DEFAULT NULL,
+                    `education_min` tinyint unsigned DEFAULT NULL,
+                    `income_min` decimal(10,2) DEFAULT NULL,
+                    `marriage_status` tinyint DEFAULT NULL COMMENT '婚姻状况要求',
+                    `preferred_province_code` varchar(32) DEFAULT NULL,
+                    `preferred_city_codes` json DEFAULT NULL COMMENT '期望城市编码列表',
+                    `accept_long_distance` tinyint NOT NULL DEFAULT '0',
+                    `accept_cross_province` tinyint NOT NULL DEFAULT '0',
+                    `housing_requirement` tinyint DEFAULT NULL COMMENT '0不限 1有房 2无房',
+                    `smoking_requirement` tinyint DEFAULT NULL COMMENT '0不限 1不抽烟 2可接受',
+                    `drinking_requirement` tinyint DEFAULT NULL COMMENT '0不限 1不饮酒 2可接受',
+                    `extra_requirement` varchar(1000) DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_preference_user` (`user_id`),
+                    KEY `idx_preference_age` (`age_min`,`age_max`),
+                    KEY `idx_preference_height` (`height_min`,`height_max`),
+                    KEY `idx_preference_province` (`preferred_province_code`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户择偶要求'
+            """,
+
+            # ============================================
+            # 1.4 用户媒体明细
+            # ============================================
+            'user_media': """
+                CREATE TABLE IF NOT EXISTS `user_media` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `media_type` varchar(16) NOT NULL COMMENT 'avatar/photo/video',
+                    `file_url` varchar(512) NOT NULL,
+                    `storage_key` varchar(512) DEFAULT NULL,
+                    `thumbnail_url` varchar(512) DEFAULT NULL,
+                    `mime_type` varchar(128) DEFAULT NULL,
+                    `file_size` bigint unsigned DEFAULT NULL,
+                    `duration_seconds` smallint unsigned DEFAULT NULL,
+                    `sort_order` smallint unsigned NOT NULL DEFAULT '0',
+                    `is_primary` tinyint NOT NULL DEFAULT '0',
+                    `review_status` tinyint NOT NULL DEFAULT '0' COMMENT '0审核中 1通过 2拒绝 3隐藏',
+                    `review_reason` varchar(255) DEFAULT NULL,
+                    `reviewed_at` datetime DEFAULT NULL,
+                    `deleted_at` datetime DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_media_storage_key` (`storage_key`),
+                    KEY `idx_media_user_type` (`user_id`,`media_type`,`deleted_at`),
+                    KEY `idx_media_user_order` (`user_id`,`sort_order`),
+                    KEY `idx_media_review_status` (`review_status`,`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户头像相册和视频'
+            """,
+
+            # ============================================
+            # 1.5 用户资料完整度明细
+            # ============================================
+            'user_profile_completion': """
+                CREATE TABLE IF NOT EXISTS `user_profile_completion` (
+                    `user_id` bigint unsigned NOT NULL,
+                    `gender_completed` tinyint NOT NULL DEFAULT '0',
+                    `birthday_completed` tinyint NOT NULL DEFAULT '0',
+                    `location_completed` tinyint NOT NULL DEFAULT '0',
+                    `marriage_completed` tinyint NOT NULL DEFAULT '0',
+                    `occupation_completed` tinyint NOT NULL DEFAULT '0',
+                    `education_completed` tinyint NOT NULL DEFAULT '0',
+                    `income_completed` tinyint NOT NULL DEFAULT '0',
+                    `height_completed` tinyint NOT NULL DEFAULT '0',
+                    `avatar_completed` tinyint NOT NULL DEFAULT '0',
+                    `intro_completed` tinyint NOT NULL DEFAULT '0',
+                    `album_completed` tinyint NOT NULL DEFAULT '0',
+                    `interest_completed` tinyint NOT NULL DEFAULT '0',
+                    `preference_completed` tinyint NOT NULL DEFAULT '0',
+                    `realname_completed` tinyint NOT NULL DEFAULT '0',
+                    `score` decimal(5,2) NOT NULL DEFAULT '0.00',
+                    `algorithm_version` varchar(32) DEFAULT NULL,
+                    `calculated_at` datetime DEFAULT NULL,
+                    PRIMARY KEY (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户资料完整度明细'
             """,
 
             # ============================================
@@ -614,16 +926,22 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS `user_matchmaker_apply` (
                     `id` bigint unsigned NOT NULL AUTO_INCREMENT,
                     `user_id` bigint unsigned NOT NULL,
+                    `application_type` varchar(32) NOT NULL DEFAULT 'service_matchmaker' COMMENT '申请类型 promoter推广红娘 partner合伙人 service_matchmaker服务红娘',
                     `real_name` varchar(64) DEFAULT NULL,
                     `phone` varchar(20) DEFAULT NULL,
                     `intro` text COMMENT '自我介绍/优势',
                     `cert_images` json DEFAULT NULL COMMENT '资质证书图片',
                     `status` tinyint DEFAULT '0' COMMENT '0待审核 1通过 2驳回',
                     `fail_reason` varchar(255) DEFAULT NULL,
+                    `reviewed_by` bigint unsigned DEFAULT NULL,
+                    `reviewed_at` datetime DEFAULT NULL,
+                    `suspended_at` datetime DEFAULT NULL,
+                    `suspension_reason` varchar(255) DEFAULT NULL,
                     `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
                     `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     PRIMARY KEY (`id`),
-                    UNIQUE KEY `uk_user_id` (`user_id`)
+                    UNIQUE KEY `uk_user_id_type` (`user_id`,`application_type`),
+                    KEY `idx_application_type_status` (`application_type`,`status`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘申请表'
             """,
 
@@ -1482,15 +1800,18 @@ class DatabaseManager:
             cursor.execute(sql)
             logger.debug(f"表 `{table_name}` 已创建/确认")
 
+        # 兼容已存在的旧库：CREATE TABLE IF NOT EXISTS 不会补齐新增字段。
+        self._ensure_required_columns(cursor)
+
         # 添加外键约束
         self._add_all_foreign_keys(cursor)
 
-        logger.info("✅ 数据库表结构初始化完成（55张表）")
+        logger.info(f"✅ 数据库表结构初始化完成（{len(tables)}张表）")
 
     def create_test_data(self, cursor, conn) -> int:
         """创建测试数据（可选）"""
         # 环境检查：防止在生产环境误执行
-        env = os.getenv('ENV', 'development').lower()
+        env = os.getenv('ENV', os.getenv('ENVIRONMENT', 'development')).lower()
         if env in ('production', 'prod'):
             logger.warning("⚠️ 当前为生产环境，跳过测试数据创建")
             return 0
@@ -1542,7 +1863,7 @@ def create_database():
     port = cfg['port']
     user = cfg['user']
     password = cfg['password']
-    dbname = cfg['database']
+    dbname = _validate_database_name(cfg['database'])
 
     conn = pymysql.connect(host=host, port=port, user=user, password=password, autocommit=True)
     try:
