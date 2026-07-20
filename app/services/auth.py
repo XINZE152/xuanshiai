@@ -23,7 +23,6 @@ from app.core.security import (
 from app.schemas.auth import (
     BindPhoneRequest,
     PhoneLoginRequest,
-    ProfileUpdateRequest,
     RealNameRequest,
     RefreshRequest,
     WechatLoginRequest,
@@ -254,6 +253,8 @@ async def accept_agreement(db: AsyncSession, user_id: int, agreement_type: str, 
     if not current or version != current:
         raise HTTPException(409, detail="协议版本不是当前发布版本")
     await db.execute(text("INSERT INTO user_agreement_acceptance (user_id, agreement_type, agreement_version, content_hash, accepted_ip, device_id, scene) VALUES (:uid, :type, :version, :content_hash, :ip, :device, :scene) ON DUPLICATE KEY UPDATE accepted_at = UTC_TIMESTAMP(), accepted_ip = VALUES(accepted_ip), device_id = VALUES(device_id), scene = VALUES(scene), status = 1"), {"uid": user_id, "type": agreement_type, "version": version, "content_hash": content_hash, "ip": ip, "device": device_id, "scene": scene})
+    if agreement_type == "safety_pledge":
+        await db.execute(text("UPDATE users SET is_single_pledge = 1, updated_at = UTC_TIMESTAMP() WHERE id = :uid"), {"uid": user_id})
 
 
 def calculate_age(birthday: date) -> int:
@@ -281,78 +282,3 @@ async def submit_realname(db: AsyncSession, user_id: int, request: RealNameReque
     return {"status": 1, "id_card_masked": mask_id_card(request.id_card)}
 
 
-async def update_profile(db: AsyncSession, user_id: int, request: ProfileUpdateRequest) -> dict[str, Any]:
-    values = request.model_dump(exclude_unset=True)
-    if "birthday" in values:
-        if calculate_age(values["birthday"]) < 18:
-            raise HTTPException(422, detail="用户必须年满18周岁")
-    if "gender" in values:
-        result = await db.execute(text("SELECT gender FROM users WHERE id = :id"), {"id": user_id})
-        old_gender = result.scalar()
-        if old_gender is not None and old_gender != values["gender"]:
-            raise HTTPException(409, detail="性别提交后不可自行修改")
-    user_fields = {key: values.pop(key) for key in ("gender", "birthday") if key in values}
-    if user_fields:
-        assignments = ", ".join(f"{key} = :{key}" for key in user_fields)
-        await db.execute(text(f"UPDATE users SET {assignments}, updated_at = UTC_TIMESTAMP() WHERE id = :user_id"), {**user_fields, "user_id": user_id})
-    if values:
-        if "interest_tags" in values:
-            values["interest_tags"] = values.pop("interest_tags")
-        profile_fields = {key: value for key, value in values.items() if value is not None}
-        if profile_fields:
-            columns = ["user_id", *profile_fields]
-            params = {"user_id": user_id, **profile_fields}
-            placeholders = ", ".join(f":{column}" for column in columns)
-            updates = ", ".join(f"{column} = VALUES({column})" for column in profile_fields)
-            await db.execute(text(f"INSERT INTO user_profile ({', '.join(columns)}) VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {updates}"), params)
-    await recalculate_completion(db, user_id)
-    await db.commit()
-    return await get_profile(db, user_id)
-
-
-async def recalculate_completion(db: AsyncSession, user_id: int) -> float:
-    result = await db.execute(text("""SELECT u.gender, u.birthday, u.is_married, u.avatar, p.occupation, p.education_level, p.income,
-           p.height, p.self_intro, p.tags, p.photos, pref.user_id AS preference_done,
-           COALESCE(ua.realname_status, 0) AS realname_status
-           FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
-           LEFT JOIN user_partner_preference pref ON pref.user_id = u.id
-           LEFT JOIN user_auth ua ON ua.user_id = u.id WHERE u.id = :id"""), {"id": user_id})
-    row = result.mappings().first()
-    if not row:
-        raise HTTPException(404, detail="用户不存在")
-    weights = {
-        "basic": 20, "marriage": 8, "work": 15, "height": 5, "avatar": 15,
-        "intro": 10, "album": 10, "tags": 7, "preference": 5, "realname": 5,
-    }
-    done = {
-        "basic": bool(row["gender"] and row["birthday"]), "marriage": bool(row["is_married"]),
-        "work": bool(row["occupation"] and row["education_level"] and row["income"] is not None),
-        "height": row["height"] is not None, "avatar": bool(row["avatar"]),
-        "intro": bool(row["self_intro"] and len(row["self_intro"].strip()) >= 20),
-        "album": bool(row["photos"]), "tags": bool(row["tags"] and len(row["tags"]) >= 3),
-        "preference": bool(row["preference_done"]), "realname": row["realname_status"] == 2,
-    }
-    score = float(sum(weights[key] for key, value in done.items() if value))
-    missing = [key for key, value in done.items() if not value]
-    await db.execute(text("""INSERT INTO user_profile_completion (user_id, score, algorithm_version, calculated_at)
-        VALUES (:id, :score, 'mvp-v1', UTC_TIMESTAMP())
-        ON DUPLICATE KEY UPDATE score = VALUES(score), algorithm_version = VALUES(algorithm_version), calculated_at = VALUES(calculated_at)"""), {"id": user_id, "score": score})
-    await db.execute(text("UPDATE users SET data_complete_rate = :score WHERE id = :id"), {"score": score, "id": user_id})
-    return score
-
-
-async def get_profile(db: AsyncSession, user_id: int) -> dict[str, Any]:
-    result = await db.execute(text("""SELECT u.id AS user_id, u.gender, u.birthday, p.height, p.occupation, p.industry,
-      p.education_level, p.income, p.hometown_province_code, p.hometown_city_code, p.hometown_district_code,
-      p.residence_province_code, p.residence_city_code, p.residence_district_code, p.self_intro,
-      p.interest_tags, p.personality_tags, COALESCE(c.score, 0) AS completion_score
-      FROM users u LEFT JOIN user_profile p ON p.user_id = u.id LEFT JOIN user_profile_completion c ON c.user_id = u.id
-      WHERE u.id = :id"""), {"id": user_id})
-    row = result.mappings().first()
-    if not row:
-        raise HTTPException(404, detail="用户不存在")
-    data = dict(row)
-    data["age"] = calculate_age(data["birthday"]) if data["birthday"] else None
-    data["interest_tags"] = data["interest_tags"] or []
-    data["personality_tags"] = data["personality_tags"] or []
-    return data

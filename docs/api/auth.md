@@ -84,7 +84,9 @@ Header：`Authorization: Bearer <access_token>`。请求体与验证码请求相
 - `PATCH /api/v1/users/me/profile`
 - `GET /api/v1/users/me/completion`
 
-出生日期由服务端计算年龄且必须满 18 周岁；性别首次提交后不可自行修改。完整度使用总和 100% 的 MVP 权重，申请和聊天还必须通过实名认证。
+出生日期由服务端计算年龄且必须满 18 周岁；性别首次提交后不可自行修改。完整的资料、媒体、择偶要求和主页预览接口见 [`docs/api/profile.md`](profile.md)。
+
+签署当前版本的 `safety_pledge` 协议后，会同步记录用户的单身承诺完成状态。
 
 ## 错误码
 

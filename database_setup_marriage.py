@@ -5,7 +5,6 @@
 import os
 import sys
 import logging
-import json
 import pymysql
 import re
 from urllib.parse import unquote, urlsplit

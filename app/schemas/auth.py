@@ -1,9 +1,19 @@
 """Request and response contracts for the MVP authentication module."""
 
-from datetime import date, datetime
+from __future__ import annotations
+
+from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.core.profile_tags import ALL_TAG_OPTIONS, TAG_OPTIONS_BY_CATEGORY
+
+
+MbtiType = Literal[
+    "INTJ", "INTP", "ENTJ", "ENTP", "INFJ", "INFP", "ENFJ", "ENFP",
+    "ISTJ", "ISFJ", "ESTJ", "ESFJ", "ISTP", "ISFP", "ESTP", "ESFP",
+]
 
 
 class SmsSendRequest(BaseModel):
@@ -74,7 +84,8 @@ class RealNameRequest(BaseModel):
 class ProfileUpdateRequest(BaseModel):
     gender: Literal[1, 2] | None = None
     birthday: date | None = None
-    height: int | None = Field(default=None, ge=100, le=250)
+    is_married: Literal[1, 2, 3] | None = None
+    height: int | None = Field(default=None, ge=150, le=200)
     occupation: str | None = Field(default=None, max_length=128)
     industry: str | None = Field(default=None, max_length=128)
     education_level: int | None = Field(default=None, ge=1, le=8)
@@ -86,14 +97,34 @@ class ProfileUpdateRequest(BaseModel):
     residence_city_code: str | None = Field(default=None, max_length=32)
     residence_district_code: str | None = Field(default=None, max_length=32)
     self_intro: str | None = Field(default=None, max_length=1000)
-    interest_tags: list[str] | None = Field(default=None, max_length=20)
-    personality_tags: list[str] | None = Field(default=None, max_length=20)
+    interest_tags: list[str] | None = Field(default=None, max_length=5)
+    personality_tags: list[str] | None = Field(default=None, max_length=5)
+    mbti: MbtiType | None = None
+    tag_selections: dict[str, list[str]] | None = None
 
     @field_validator("interest_tags", "personality_tags")
     @classmethod
     def validate_tags(cls, value: list[str] | None) -> list[str] | None:
-        if value is not None and any(not tag.strip() or len(tag) > 32 for tag in value):
-            raise ValueError("标签不能为空且长度不能超过32个字符")
+        if value is not None:
+            if not 3 <= len(value) <= 5:
+                raise ValueError("标签数量必须为3到5个")
+            if any(tag not in ALL_TAG_OPTIONS for tag in value):
+                raise ValueError("只能选择系统提供的标签")
+        return value
+
+    @field_validator("tag_selections")
+    @classmethod
+    def validate_tag_selections(cls, value: dict[str, list[str]] | None) -> dict[str, list[str]] | None:
+        if value is None:
+            return value
+        for category, selected in value.items():
+            options = TAG_OPTIONS_BY_CATEGORY.get(category)
+            if options is None:
+                raise ValueError(f"不支持的标签分类: {category}")
+            if not selected or len(selected) > 5:
+                raise ValueError("每个标签分类最多选择5项")
+            if len(selected) != len(set(selected)) or any(item not in options for item in selected):
+                raise ValueError("标签必须来自对应分类且不能重复")
         return value
 
 
@@ -112,9 +143,11 @@ class UserResponse(BaseModel):
 
 class ProfileResponse(BaseModel):
     user_id: int
+    nickname: str | None
     gender: int | None
     birthday: date | None
     age: int | None
+    is_married: int | None
     height: int | None
     occupation: str | None
     industry: str | None
@@ -129,15 +162,117 @@ class ProfileResponse(BaseModel):
     self_intro: str | None
     interest_tags: list[str]
     personality_tags: list[str]
+    mbti: MbtiType | None
+    avatar: str | None
+    background_wall: str | None
+    tag_selections: dict[str, list[str]]
+    photos: list[ProfileMediaResponse]
+    video: ProfileMediaResponse | None
     completion_score: float
 
 
 class CompletionResponse(BaseModel):
     score: float
     missing_items: list[str]
+    items: list[CompletionItemResponse]
     can_browse: bool
     can_apply: bool
     can_chat: bool
+
+
+class CompletionItemResponse(BaseModel):
+    key: str
+    label: str
+    weight: int
+    completed: bool
+
+
+class TagCategoryResponse(BaseModel):
+    key: str
+    label: str
+    options: list[str]
+
+
+class TagOptionsResponse(BaseModel):
+    version: str
+    categories: list[TagCategoryResponse]
+
+
+class ProfileMediaResponse(BaseModel):
+    id: int
+    media_type: Literal["avatar", "background", "photo", "video"]
+    file_url: str
+    thumbnail_url: str | None
+    sort_order: int
+    is_primary: bool
+    duration_seconds: int | None
+
+
+class ProfilePreviewResponse(BaseModel):
+    preview_notice: str
+    profile: ProfileResponse
+
+
+class IntroTemplateResponse(BaseModel):
+    key: str
+    title: str
+    content: str
+
+
+class PreferenceUpdateRequest(BaseModel):
+    age_min: int | None = Field(default=None, ge=18, le=100)
+    age_max: int | None = Field(default=None, ge=18, le=100)
+    height_min: int | None = Field(default=None, ge=100, le=250)
+    height_max: int | None = Field(default=None, ge=100, le=250)
+    education_min: int | None = Field(default=None, ge=1, le=8)
+    income_min: float | None = Field(default=None, ge=0, le=1_000_000)
+    marriage_status: Literal[0, 1, 2, 3] | None = None
+    preferred_province_code: str | None = Field(default=None, max_length=32)
+    preferred_city_codes: list[str] | None = Field(default=None, max_length=20)
+    accept_long_distance: bool | None = None
+    accept_cross_province: bool | None = None
+    housing_requirement: Literal[0, 1, 2] | None = None
+    smoking_requirement: Literal[0, 1, 2] | None = None
+    drinking_requirement: Literal[0, 1, 2] | None = None
+    extra_requirement: str | None = Field(default=None, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_ranges(self):
+        if self.age_min is not None and self.age_max is not None and self.age_min > self.age_max:
+            raise ValueError("期望年龄下限不能大于上限")
+        if self.height_min is not None and self.height_max is not None and self.height_min > self.height_max:
+            raise ValueError("期望身高下限不能大于上限")
+        return self
+
+
+class PreferenceResponse(BaseModel):
+    user_id: int
+    age_min: int | None
+    age_max: int | None
+    height_min: int | None
+    height_max: int | None
+    education_min: int | None
+    income_min: float | None
+    marriage_status: int | None
+    preferred_province_code: str | None
+    preferred_city_codes: list[str]
+    accept_long_distance: bool
+    accept_cross_province: bool
+    housing_requirement: int | None
+    smoking_requirement: int | None
+    drinking_requirement: int | None
+    extra_requirement: str | None
+
+
+class PhotoOrderRequest(BaseModel):
+    media_ids: list[int] = Field(min_length=1, max_length=9)
+
+    @field_validator("media_ids")
+    @classmethod
+    def validate_unique_ids(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("相册排序不能包含重复图片")
+        return value
 
 
 class RegistrationIntentResponse(BaseModel):
