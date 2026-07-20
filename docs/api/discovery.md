@@ -1,170 +1,311 @@
-# 首页推荐与名片浏览接口
+# 首页推荐、搜索与名片互动接口
 
-统一前缀：`/api/v1`。
+接口前缀：`/api/v1`。
 
-除 `GET /discovery/filter-options` 外，接口都需要登录态：
+除 `GET /discovery/filter-options` 外，本文件接口需要登录。推荐、广场、搜索、保存筛选还要求手机号已绑定且资料完整度为 100%。
+
+通用请求头：
 
 ```http
 Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
 
-## 筛选选项
+错误响应统一为：
 
-### `GET /discovery/filter-options`
+```json
+{"detail":"请先完善资料后再进入推荐"}
+```
 
-返回性别、婚姻状况、学历和固定城市选项。无需登录。
+## 1. 筛选选项
 
-响应示例：
+### `GET /api/v1/discovery/filter-options`
+
+- 权限：公开
+- 请求参数：无
+- 成功：`200 OK`
+
+返回字段：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `genders` | array | 性别选项，每项含 `value`、`label` |
+| `marriage_statuses` | array | 婚姻选项，每项含 `value`、`label` |
+| `education_levels` | array | 学历选项，每项含 `value`、`label` |
+| `cities` | array[string] | 固定城市展示名称 |
+
+响应：
 
 ```json
 {
-  "genders": [{"value": 1, "label": "男"}, {"value": 2, "label": "女"}],
-  "marriage_statuses": [{"value": 1, "label": "未婚"}],
-  "education_levels": [{"value": 3, "label": "本科"}],
-  "cities": ["北京", "上海"]
+  "genders":[{"value":1,"label":"男"},{"value":2,"label":"女"}],
+  "marriage_statuses":[{"value":1,"label":"未婚"},{"value":2,"label":"离异"},{"value":3,"label":"丧偶"}],
+  "education_levels":[{"value":1,"label":"博士"},{"value":3,"label":"本科"}],
+  "cities":["北京","上海","杭州"]
 }
 ```
 
-### `GET /discovery/recommendations`
+## 2. 名片对象
 
-推荐名片流。分页默认每页 20 条，推荐流会排除已浏览、已划过、申请中、匹配中和互相拉黑的用户。
+推荐、搜索、广场和主页摘要中的 `DiscoveryCard` 字段如下：
 
-可选查询参数：`gender`、`age_min`、`age_max`、`province_code`、`city_code`、`district_code`、`marriage_status`、`education_min`、`height_min`、`height_max`、`income_min`、`income_max`、`pure_free`、`page`、`page_size`。
+| 字段 | 类型 | 空值/枚举 | 含义 |
+| --- | --- | --- | --- |
+| `user_id` | integer | 必返 | 目标用户 ID |
+| `nickname` | string/null | 可空 | 昵称 |
+| `avatar` | string/null | 可空 | 头像地址 |
+| `age` | integer/null | 可空 | 根据出生日期计算的年龄 |
+| `height` | integer/null | 锁定时为空 | 身高厘米 |
+| `education_level` | integer/null | 锁定时为空 | 学历等级 |
+| `occupation` | string/null | 锁定时为空 | 职业 |
+| `is_married` | integer/null | 1 未婚、2 离异、3 丧偶 | 婚姻状态 |
+| `online_status` | integer | 0 离线、1 在线、2 隐身 | 在线状态 |
+| `mbti` | string/null | 锁定时为空 | MBTI 类型 |
+| `interest_tags` | array[string] | 锁定时为空数组 | 最多展示 5 个兴趣标签 |
+| `certification_tags` | array[string] | 可为空数组 | 实名、单身承诺等认证标签 |
+| `match_score` | number | 0~100 | 合拍度分值 |
+| `match_reason` | string | 必返 | 合拍原因 |
+| `is_favorite` | boolean | 必返 | 当前用户是否收藏 |
+| `is_pure_free` | boolean | 必返 | 无 VIP 且无有效置顶/爆灯权益 |
+| `is_boosted` | boolean | 必返 | 是否有有效置顶记录 |
+| `detail_locked` | boolean | 必返 | 详细资料是否因额度/隐私锁定 |
 
-`page_size` 范围为 1~20；年龄范围为 18~100；身高和收入的上下限必须合法且下限不大于上限。
+分页响应结构：
 
-### `GET /discovery/plaza`
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `items` | array[DiscoveryCard] | 当前页名片 |
+| `page` | integer | 当前页，从 1 开始 |
+| `page_size` | integer | 当前页大小，1~20 |
+| `total` | integer | 当前查询候选数，当前实现最多统计 500 条候选 |
+| `has_more` | boolean | 是否还有下一页 |
 
-广场名片流。参数与推荐流一致，不排除已浏览用户，但仍过滤未完善资料、不可见、拉黑和停用用户。
+## 3. 推荐和广场
 
-### `GET /discovery/search`
+### `GET /api/v1/discovery/recommendations`
 
-登录后按昵称或标签搜索用户，返回同样的名片分页结构。支持参数：
+- 权限：已绑定手机号、资料完整度 100% 的登录用户
+- 成功：`200 OK`
+- 排序：有效置顶优先，其次按年龄相近、标签重合、择偶要求匹配度和活跃度排序
+- 排除：自己、未完善用户、不可见用户、互相拉黑、已浏览、已划过、申请中和已匹配用户
 
-- `nickname`：昵称模糊搜索，最多 64 字；会按字面匹配 `%` 和 `_`，不会把它们当作通配符。
-- `tag`：搜索用户的兴趣标签、性格标签或固定标签分类中的标签值，最多 64 字。
-- `page`、`page_size`：分页参数，`page_size` 范围为 1~20。
+查询参数：
 
-`nickname` 和 `tag` 至少传一个，同时传入时需要同时满足。搜索结果只展示资料完善且当前可见的用户，并按年龄相仿度、标签重合度和活跃时间排序。
+| 参数 | 类型 | 必填 | 规则 | 含义 |
+| --- | --- | --- | --- | --- |
+| `gender` | integer | 否 | `1` 或 `2` | 目标性别 |
+| `age_min`/`age_max` | integer | 否 | 18~100，下限不能大于上限 | 临时年龄筛选 |
+| `province_code` | string | 否 | 最长 32 字符 | 目标居住省编码 |
+| `city_code` | string | 否 | 最长 32 字符 | 目标居住市编码 |
+| `district_code` | string | 否 | 最长 32 字符 | 目标居住区编码 |
+| `marriage_status` | integer | 否 | `1`、`2`、`3` | 婚姻状态 |
+| `education_min` | integer | 否 | 1~8 | 学历下限 |
+| `height_min`/`height_max` | integer | 否 | 100~250，下限不能大于上限 | 身高区间 |
+| `income_min`/`income_max` | number | 否 | 0~1,000,000，下限不能大于上限 | 收入区间 |
+| `pure_free` | boolean | 否 | 默认 `false` | 仅展示无 VIP 且无有效置顶/爆灯权益用户 |
+| `page` | integer | 否 | 1~1000，默认 1 | 页码 |
+| `page_size` | integer | 否 | 1~20，默认 20 | 每页数量 |
+
+请求示例：
+
+```text
+GET /api/v1/discovery/recommendations?age_min=25&age_max=35&city_code=310100&page=1&page_size=20
+```
+
+成功返回分页结构。没有候选时：
+
+```json
+{"items":[],"page":1,"page_size":20,"total":0,"has_more":false}
+```
+
+### `GET /api/v1/discovery/plaza`
+
+权限、参数和返回结构与推荐接口相同。广场不排除已浏览和已划过用户，但仍过滤未完善、不可见、停用和互相拉黑用户。
+
+## 4. 按昵称或标签搜索
+
+### `GET /api/v1/discovery/search`
+
+- 权限：已绑定手机号、资料完整度 100% 的登录用户
+- 成功：`200 OK`
+
+| 参数 | 类型 | 必填 | 规则 | 含义 |
+| --- | --- | --- | --- | --- |
+| `nickname` | string | 否 | 最长 64 字符；空白会被去除 | 昵称字面模糊匹配，`%` 和 `_` 不作为通配符 |
+| `tag` | string | 否 | 最长 64 字符 | 在兴趣、性格和固定分类标签中搜索 |
+| `page` | integer | 否 | 1~1000，默认 1 | 页码 |
+| `page_size` | integer | 否 | 1~20，默认 20 | 每页数量 |
+
+`nickname` 与 `tag` 至少提供一个；同时提供时按 AND 条件匹配。搜索结果按年龄相近度、标签重合度和活跃时间排序。
 
 示例：
 
 ```text
-GET /api/v1/discovery/search?tag=旅行&page=1&page_size=20
 GET /api/v1/discovery/search?nickname=小明
+GET /api/v1/discovery/search?tag=旅行&page=1&page_size=20
 GET /api/v1/discovery/search?nickname=小明&tag=摄影
 ```
 
-### `GET /discovery/filters/saved`
+## 5. 保存筛选条件
 
-返回当前用户保存的筛选条件。未保存时返回：
+### `GET /api/v1/discovery/filters/saved`
 
-```json
-{"filters": null}
-```
+- 权限：已绑定手机号的登录用户
+- 参数：无
 
-### `PUT /discovery/filters/saved`
-
-保存当前用户的筛选条件，请求体与推荐接口查询参数对应：
+已保存时返回：
 
 ```json
-{
-  "gender": 2,
-  "age_min": 25,
-  "age_max": 35,
-  "city_code": "310100",
-  "page": 1,
-  "page_size": 20
-}
+{"filters":{"gender":2,"age_min":25,"age_max":35,"page":1,"page_size":20}}
 ```
 
-## 浏览、收藏和主页
+未保存时返回：
 
-### `GET /users/{user_id}/profile`
+```json
+{"filters":null}
+```
 
-查看他人主页并记录浏览行为。普通用户每天 20 次完整浏览；合拍度大于 80 分时额外获得 5 次；VIP 不受该额度限制。普通用户超过额度后仍返回头像、昵称和年龄，其余名片字段置空并将 `detail_locked` 设为 `true`。
+### `PUT /api/v1/discovery/filters/saved`
 
-如果对方开启“仅 VIP 查看详情”，普通用户只能看到锁定名片。VIP 开启无痕浏览后，不会写入对方访客记录。
+请求体字段与推荐筛选参数相同，保存当前用户唯一一组筛选条件，重复保存覆盖旧条件：
 
-### `GET /discovery/browse-history`
+```json
+{"gender":2,"age_min":25,"age_max":35,"city_code":"310100","page":1,"page_size":20}
+```
 
-浏览记录。普通用户只返回当天记录，VIP 返回历史记录。支持 `page` 和 `page_size`（1~50）。
+## 6. 浏览记录、访客和收藏
 
-### `GET /discovery/visitors`
+### `GET /api/v1/discovery/browse-history`
 
-查看谁看过我。普通用户只返回数量，VIP 返回访客名片列表。
+查询参数：`page` 1~1000，默认 1；`page_size` 1~50，默认 20。返回分页对象，`items[].target` 为名片，`items[].viewed_at` 为浏览时间。
 
-### `GET /discovery/favorites`
+普通用户只能查看当天记录，VIP 可以查看历史记录。访问他人主页时记录浏览；开启 VIP 无痕浏览后不写入对方访客记录。
 
-返回当前用户收藏的名片列表。
+### `GET /api/v1/discovery/visitors`
 
-### `PUT /discovery/favorites/{target_id}` / `DELETE /discovery/favorites/{target_id}`
+无请求参数。普通用户返回：
 
-收藏或取消收藏。收藏只对当前用户可见，不通知对方。
+```json
+{"can_view_details":false,"count":3,"items":[]}
+```
 
-## 认识申请与爆灯
+VIP 返回 `can_view_details=true` 和访客名片数组。
 
-### `POST /discovery/applications/{target_id}`
+### `GET /api/v1/discovery/favorites`
+
+无请求参数。返回 `DiscoveryCard[]`；没有收藏时返回 `[]`。
+
+### `PUT /api/v1/discovery/favorites/{target_id}`
+
+Path `target_id` 为正整数。收藏成功返回：
+
+```json
+{"target_user_id":23,"is_favorite":true}
+```
+
+### `DELETE /api/v1/discovery/favorites/{target_id}`
+
+取消当前用户自己的收藏，成功返回 `{"target_user_id":23,"is_favorite":false}`。收藏不通知对方，也不产生匹配。
+
+## 7. 认识申请
+
+### `POST /api/v1/discovery/applications/{target_id}`
+
+- 权限：已绑定手机号、资料完整度 100% 的登录用户
+- Path：`target_id` 正整数
+- 成功：`201 Created`
 
 请求体：
 
+| 字段 | 类型 | 必填 | 规则 | 含义 |
+| --- | --- | --- | --- | --- |
+| `message` | string/null | 否 | 最长 255 字符 | 给对方的留言 |
+
+示例：
+
 ```json
-{"message": "你好，很高兴认识你"}
+{"message":"你好，很高兴认识你"}
 ```
 
-留言可为空，最多 255 字。资料完整度未达到 100% 时返回 `403`。普通用户每日 3 次，VIP 每日 10 次；申请有效期 48 小时，超过有效期会在后续访问时自动标记为 `status=3`。
+返回字段：`id` 申请 ID、`from_user_id` 发起方、`to_user_id` 接收方、`message` 留言、`status` 状态、`expire_at` 过期时间、`created_at` 创建时间。
 
-### `GET /discovery/applications/incoming`
+申请状态：`0` 待处理、`1` 同意、`2` 拒绝、`3` 过期。普通用户每天 3 次，VIP 每天 10 次，申请 48 小时后过期；拒绝会退还发起方当日 1 次额度。
 
-返回收到的申请。
+### `GET /api/v1/discovery/applications/incoming`
 
-### `GET /discovery/applications/outgoing`
+返回当前用户收到的申请数组，最多最近 100 条；无数据返回 `[]`。
 
-返回发出的申请。
+### `GET /api/v1/discovery/applications/outgoing`
 
-### `POST /discovery/applications/{application_id}/accept`
+返回当前用户发出的申请数组，最多最近 100 条；无数据返回 `[]`。
 
-仅申请接收方可调用。状态改为同意，同时创建双方匹配记录和私信会话。
+### `POST /api/v1/discovery/applications/{application_id}/accept`
 
-### `POST /discovery/applications/{application_id}/reject`
+仅申请接收方可调用。Path `application_id` 为正整数。成功后更新为 `status=1`，创建双方匹配记录、聊天会话，并通知发起方。
 
-仅申请接收方可调用。请求体可选：`{"reason": "暂时不合适"}`。拒绝不可撤回，并退还申请发起方当日 1 次额度。
+### `POST /api/v1/discovery/applications/{application_id}/reject`
 
-### `POST /discovery/superlikes/{target_id}`
+仅接收方可调用。请求体可省略，也可以传：
 
-普通用户每日 1 次，VIP 每日 3 次。成功后写入爆灯记录并创建对方通知。
-
-## 分享海报
-
-### `GET /users/{user_id}/poster?template=1`
-
-`template` 范围为 1~25，返回 `image/png`。服务端调用微信小程序码接口生成目标用户主页二维码，再合成海报。
-
-## 错误码
-
-- `401`：未登录或登录会话失效。
-- `403`：资料未完善、无权处理该资源或被拉黑。
-- `404`：用户不存在、用户不可见或资源不属于当前用户可操作范围。
-- `409`：重复收藏、已有进行中的申请或申请已被处理。
-- `422`：请求参数格式、范围或上下限校验失败。
-- `429`：当日浏览、申请或爆灯额度已用完。
-- `503`：Redis 不可用，或微信小程序码配置/调用失败。
-
-## 必填配置
-
-请在项目根目录 `.env`（不要提交到 Git）填写实际值：
-
-```env
-DATABASE_URL=mysql+aiomysql://<user>:<password>@<host>:3306/<database>
-REDIS_URL=redis://<host>:6379/0
-SECRET_KEY=<long-random-secret>
-WECHAT_APP_ID=<your-wechat-app-id>
-WECHAT_APP_SECRET=<your-wechat-app-secret>
-WECHAT_MINI_PROGRAM_PAGE=pages/profile/profile
-PUBLIC_BASE_URL=https://<your-api-domain>
+```json
+{"reason":"暂时不合适"}
 ```
 
-Redis 是每日额度和配额回退的必需依赖；Redis 未启动时相关操作会返回 `503`，不会放行超额请求。生成海报必须填写微信 AppID 和 AppSecret。数据库初始化脚本会创建 `user_notification`、`user_discovery_filter`，并为旧版 `user_boost` 补齐 `start_at`、`end_at`、`status` 字段。
+成功后更新为 `status=2`，拒绝不可撤回，并退还发起方当日额度。
 
-底部五 Tab 和首页顶部本地 Tab 属于小程序前端交互；当前仓库没有前端代码，因此本次只提供后端接口和数据契约。
+## 8. 爆灯
+
+### `POST /api/v1/discovery/superlikes/{target_id}`
+
+- Path：`target_id` 正整数
+- 权限：已绑定手机号的登录用户
+- 成功：`201 Created`
+
+普通用户每日 1 次，VIP 每日 3 次。返回：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `target_user_id` | integer | 目标用户 |
+| `remaining_today` | integer/null | 当日剩余次数 |
+| `created_at` | datetime | 爆灯时间 |
+
+爆灯会写入有效记录并通知对方；Redis 不可用返回 `503`。
+
+## 9. 他人主页和海报
+
+### `GET /api/v1/users/{user_id}/profile`
+
+Path `user_id` 为正整数。返回：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `user_id` | integer | 目标用户 ID |
+| `card` | DiscoveryCard | 名片摘要 |
+| `profile` | object/null | 额度允许时的公开完整资料 |
+| `is_vip_viewer` | boolean | 当前访问者是否 VIP |
+| `browse_quota_remaining` | integer/null | 普通用户剩余完整浏览次数，VIP 为 null |
+| `can_apply` | boolean | 当前用户是否满足申请门槛 |
+
+普通用户每日 20 次完整浏览，高合拍度名片额外 5 次；超过后 `card.detail_locked=true`，只保留基础字段。
+
+### `GET /api/v1/users/{user_id}/poster?template=1`
+
+- Path：`user_id` 正整数
+- Query：`template` 1~25，默认 1
+- 成功：`200 OK`
+- Content-Type：`image/png`
+- 请求体：无
+
+服务端调用微信小程序码接口生成个人主页二维码并合成 PNG。未配置 `WECHAT_APP_ID`/`WECHAT_APP_SECRET` 或微信调用失败返回 `503`。
+
+## 10. 错误码
+
+| HTTP | 触发条件 | 前端处理 |
+| --- | --- | --- |
+| `401` | 未登录或会话失效 | 清理 Token 并回登录页 |
+| `403` | 未绑定手机号、资料未完成、无资源权限或被拉黑 | 展示绑定/完善资料/权限提示 |
+| `404` | 用户、申请、名片或会话目标不存在/不可见 | 移除列表项或提示不可用 |
+| `409` | 重复收藏、申请冲突或状态已处理 | 刷新当前状态 |
+| `422` | 参数类型、范围、枚举或区间错误 | 修正请求参数 |
+| `429` | 浏览、申请或爆灯次数用完 | 展示额度/会员提示 |
+| `503` | Redis 或微信服务不可用 | 稍后重试 |

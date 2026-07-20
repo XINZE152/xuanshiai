@@ -1,11 +1,31 @@
-# 注册身份与红娘申请 API
+# 注册身份与红娘申请接口
 
-统一前缀：`/api/v1`。除查询身份选项和红娘申请类型外，接口使用：
-`Authorization: Bearer <access_token>`。
+接口前缀：`/api/v1`。
 
-## 查询注册身份选项
+需要登录的接口携带：
 
-`GET /api/v1/registration/intents`
+```http
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+管理员接口需要具备 `admin` 角色。普通登录用户没有管理员权限。
+
+## 1. 注册身份选项
+
+### `GET /api/v1/registration/intents`
+
+- 权限：公开
+- 请求参数：无
+- 成功状态：`200 OK`
+
+响应数组字段：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `intent_type` | string | 稳定枚举值 |
+| `label` | string | 前端展示名称 |
+| `description` | string | 选项说明 |
 
 响应：
 
@@ -17,11 +37,18 @@
 ]
 ```
 
-## 提交或修改注册身份
+## 2. 提交注册身份
 
-`PUT /api/v1/auth/registration-intent`
+### `PUT /api/v1/auth/registration-intent`
 
-请求头：`Authorization: Bearer <access_token>`。
+- 权限：登录用户
+- 成功状态：`200 OK`
+- 幂等：同一用户重复提交会更新当前记录，不创建重复记录
+
+| 字段 | 位置 | 类型 | 必填 | 枚举/默认值 | 含义 |
+| --- | --- | --- | --- | --- | --- |
+| `intent_type` | body | string | 是 | `self_match`、`parent_match`、`companion` | 当前业务意图 |
+| `source` | body | string | 否 | `register` 或 `profile`，默认 `register` | 选择来源 |
 
 请求：
 
@@ -29,17 +56,33 @@
 {"intent_type":"self_match","source":"register"}
 ```
 
-`intent_type` 可选 `self_match`、`parent_match`、`companion`。接口是幂等的，当前版本允许重新选择，后续如需限制修改应增加冷却期或人工审核规则。
+返回：
 
-## 查询当前注册身份
+```json
+{"intent_type":"self_match","label":"自己找","description":"以本人交友和婚恋匹配为主要目的"}
+```
 
-`GET /api/v1/auth/registration-intent`
+当前允许重新选择；身份差异化首页、父母授权关系和找搭子独立匹配规则仍需产品确认。
 
-未选择身份时返回 `null`。
+## 3. 查询当前注册身份
 
-## 查询红娘申请类型
+### `GET /api/v1/auth/registration-intent`
 
-`GET /api/v1/matchmaker/application-types`
+- 权限：登录用户
+- 参数：无
+
+已选择时返回与提交接口相同的对象；未选择时返回：
+
+```json
+null
+```
+
+## 4. 红娘申请类型
+
+### `GET /api/v1/matchmaker/application-types`
+
+- 权限：公开
+- 参数：无
 
 响应：
 
@@ -51,11 +94,23 @@
 ]
 ```
 
-## 提交红娘申请
+`application_type` 是后续提交接口的稳定枚举值。
 
-`POST /api/v1/matchmaker/applications`
+## 5. 提交红娘申请
 
-请求头：`Authorization: Bearer <access_token>`。
+### `POST /api/v1/matchmaker/applications`
+
+- 权限：登录用户
+- 前置条件：绑定手机号、实名认证通过
+- 成功状态：`201 Created`
+
+| 字段 | 位置 | 类型 | 必填 | 规则 | 含义 |
+| --- | --- | --- | --- | --- | --- |
+| `application_type` | body | string | 是 | 三种申请类型之一 | 申请分支 |
+| `real_name` | body | string | 是 | 2~64 字符 | 申请人姓名 |
+| `phone` | body | string | 是 | 11 位大陆手机号 | 联系电话 |
+| `intro` | body | string | 是 | 10~2000 字符 | 申请说明 |
+| `cert_images` | body | array[string] | 否 | 最多 6 个地址 | 资质材料地址 |
 
 请求：
 
@@ -69,19 +124,51 @@
 }
 ```
 
-申请人必须已绑定手机号并完成实名认证。每个用户可以分别申请不同类型；同一类型存在待审核、已通过或已暂停申请时不能重复提交。身份证、Token 等敏感信息不会出现在响应中。
+返回字段：
 
-## 查询我的红娘申请
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `id` | integer | 申请 ID |
+| `application_type` | string | 申请类型 |
+| `status` | integer | `0` 待审核、`1` 通过、`2` 驳回、`3` 暂停 |
+| `real_name` | string | 姓名 |
+| `phone_masked` | string | 脱敏手机号 |
+| `intro` | string | 申请说明 |
+| `cert_images` | array[string] | 材料地址 |
+| `fail_reason` | string/null | 驳回/暂停原因 |
+| `created_at` | string | ISO 时间 |
+| `reviewed_at` | string/null | 审核时间 |
 
-`GET /api/v1/matchmaker/applications/mine`
+已存在同类型待审核、通过或暂停记录时返回 `409`；驳回记录允许重新提交。
 
-返回当前用户全部申请，申请状态：`0`待审核、`1`通过、`2`驳回、`3`暂停。
+## 6. 查询我的申请
 
-## 管理员审核红娘申请
+### `GET /api/v1/matchmaker/applications/mine`
 
-`PATCH /api/v1/admin/matchmaker/applications/{application_id}`
+- 权限：登录用户
+- 参数：无
+- 成功状态：`200 OK`
 
-请求头：`Authorization: Bearer <admin_access_token>`。
+返回申请对象数组；没有申请时返回：
+
+```json
+[]
+```
+
+## 7. 管理员审核红娘申请
+
+### `PATCH /api/v1/admin/matchmaker/applications/{application_id}`
+
+- 权限：管理员
+- Path 参数：`application_id`，正整数，申请 ID
+- 成功状态：`200 OK`
+
+请求参数：
+
+| 字段 | 类型 | 必填 | 规则 | 含义 |
+| --- | --- | --- | --- | --- |
+| `status` | integer | 是 | `1` 通过、`2` 驳回、`3` 暂停 | 审核结果 |
+| `fail_reason` | string/null | 否 | 最长 255 字符；驳回/暂停建议填写 | 处理原因 |
 
 请求：
 
@@ -89,14 +176,18 @@
 {"status":1,"fail_reason":null}
 ```
 
-`status`：`1`通过、`2`驳回、`3`暂停。驳回或暂停时必须填写 `fail_reason`。审核通过后服务端授予对应平台角色，普通用户不能调用该接口。
+通过后授予对应角色；驳回或暂停会撤销对应角色状态。只有待审核或暂停申请可进入审核流。
 
-## 错误码
+## 8. 错误响应
 
-| HTTP | 场景 |
+```json
+{"detail":"申请红娘或合伙人前必须绑定手机号并完成实名认证"}
+```
+
+| HTTP | 触发条件 |
 | --- | --- |
-| `401` | 未登录或登录会话失效 |
-| `403` | 未实名、未绑定手机号或无管理员权限 |
+| `401` | 未登录或会话失效 |
+| `403` | 未绑定手机号、未实名或无管理员权限 |
 | `404` | 申请不存在 |
-| `409` | 身份或同类型申请状态冲突 |
-| `422` | 身份类型、手机号、申请材料或审核参数不合法 |
+| `409` | 同类型申请状态冲突 |
+| `422` | 枚举、手机号、长度或审核参数不合法 |

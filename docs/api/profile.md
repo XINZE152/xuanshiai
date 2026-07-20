@@ -1,199 +1,338 @@
-# 个人资料与媒体 API
+# 个人资料、媒体与择偶要求接口
 
-统一前缀：`/api/v1`。除固定标签选项接口外，以下接口都需要：
-`Authorization: Bearer <access_token>`。
+接口前缀：`/api/v1`。
 
-## 固定标签选项
+除 `GET /profile/tag-options` 和 `GET /users/me/intro-templates` 外，接口需要：
 
-`GET /api/v1/profile/tag-options`
+```http
+Authorization: Bearer <access_token>
+```
 
-该接口无需登录，返回前端资料表单使用的固定标签目录。当前版本为 `v1`，标签只能从返回的分类选项中选择，不能提交自定义文本。
+JSON 接口使用 `Content-Type: application/json`；上传接口使用 `multipart/form-data`。
+
+## 1. 固定标签目录
+
+### `GET /api/v1/profile/tag-options`
+
+- 权限：公开
+- 请求参数：无
+- 成功状态：`200 OK`
+
+返回字段：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `version` | string | 标签目录版本 |
+| `categories` | array | 标签分类数组 |
+| `categories[].key` | string | 提交时使用的分类 key |
+| `categories[].label` | string | 分类展示名称 |
+| `categories[].options` | array[string] | 可选择的固定标签值 |
 
 响应示例：
 
 ```json
 {
-  "version": "v1",
-  "categories": [
-    {
-      "key": "relationship_expectation",
-      "label": "期望关系",
-      "options": ["寻找长期伴侣", "先交友看缘分", "轻松约会"]
-    }
+  "version":"v1",
+  "categories":[
+    {"key":"relationship_expectation","label":"期望关系","options":["寻找长期伴侣","先交友看缘分","轻松约会"]}
   ]
 }
 ```
 
-## 资料完善度
+标签只能从该接口返回的选项中选择，不能提交自定义标签。
 
-`GET /api/v1/users/me/completion`
+## 2. 查询资料完整度
+
+### `GET /api/v1/users/me/completion`
+
+- 权限：登录用户
+- 参数：无
+- 成功状态：`200 OK`
+
+返回字段：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `score` | number | 服务端计算的完整度，0~100 |
+| `missing_items` | array[string] | 未完成项目展示名称 |
+| `items` | array | 逐项完成状态 |
+| `items[].key` | string | 稳定项目 key |
+| `items[].label` | string | 项目名称 |
+| `items[].weight` | integer | 项目权重 |
+| `items[].completed` | boolean | 是否完成 |
+| `can_browse` | boolean | 是否满足推荐浏览门槛 |
+| `can_apply` | boolean | 是否满足申请认识门槛 |
+| `can_chat` | boolean | 是否满足聊天门槛 |
 
 响应示例：
 
 ```json
 {
-  "score": 57,
-  "missing_items": ["相册", "实名认证"],
-  "items": [
+  "score":57,
+  "missing_items":["相册","实名认证"],
+  "items":[
     {"key":"gender","label":"性别","weight":7,"completed":true},
     {"key":"avatar","label":"头像","weight":15,"completed":true}
   ],
-  "can_browse": false,
-  "can_apply": false,
-  "can_chat": false
+  "can_browse":false,
+  "can_apply":false,
+  "can_chat":false
 }
 ```
 
-完善度权重总计 100：
+当前权重：
 
-| 项目 | 权重 |
-| --- | ---: |
-| 性别 | 7 |
-| 出生日期/年龄 | 7 |
-| 所在地区 | 7 |
-| 婚姻状况 | 5 |
-| 职业 | 4 |
-| 学历 | 4 |
-| 收入 | 4 |
-| 身高 | 4 |
-| 头像 | 15 |
-| 自我介绍 | 10 |
-| 相册 | 10 |
-| 兴趣标签 | 5 |
-| 性格标签 | 3 |
-| MBTI | 2 |
-| 择偶要求 | 3 |
-| 实名认证 | 5 |
-| 单身承诺 | 5 |
+| 项目 | key | 权重 |
+| --- | --- | ---: |
+| 性别 | `gender` | 7 |
+| 出生日期/年龄 | `birthday` | 7 |
+| 所在地区 | `location` | 7 |
+| 婚姻状况 | `marriage` | 5 |
+| 职业 | `occupation` | 4 |
+| 学历 | `education` | 4 |
+| 收入 | `income` | 4 |
+| 身高 | `height` | 4 |
+| 头像 | `avatar` | 15 |
+| 自我介绍 | `intro` | 10 |
+| 相册 | `album` | 10 |
+| 兴趣标签 | `interest` | 5 |
+| 性格标签 | `personality` | 3 |
+| MBTI | `mbti` | 2 |
+| 择偶要求 | `preference` | 3 |
+| 实名认证 | `realname` | 5 |
+| 单身承诺 | `single_pledge` | 5 |
 
-推荐、申请和聊天权限只有在 `score=100` 时开放；申请和聊天还要求实名认证通过。
+总和为 100。推荐、申请和聊天还要求手机号绑定；申请和聊天要求实名认证通过。
 
-## 基础资料
+## 3. 查询和更新基础资料
 
-### 查询资料
+### `GET /api/v1/users/me/profile`
 
-`GET /api/v1/users/me/profile`
+- 权限：登录用户
+- 参数：无
+- 成功状态：`200 OK`
 
-返回性别、出生日期、年龄、婚姻状况、身高、职业、学历、收入、地区、MBTI、标签、头像、背景墙和媒体列表。
+返回字段：
 
-### 更新资料
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `user_id` | integer | 用户 ID |
+| `nickname` | string/null | 昵称 |
+| `gender` | integer/null | `1` 男、`2` 女 |
+| `birthday` | string/date/null | 出生日期，`YYYY-MM-DD` |
+| `age` | integer/null | 服务端根据生日计算的年龄 |
+| `is_married` | integer/null | `1` 未婚、`2` 离异、`3` 丧偶 |
+| `height` | integer/null | 身高，厘米 |
+| `occupation` | string/null | 职业 |
+| `industry` | string/null | 行业 |
+| `education_level` | integer/null | 学历等级 |
+| `income` | number/null | 月收入区间对应值 |
+| `hometown_province_code/city_code/district_code` | string/null | 籍贯省市区编码 |
+| `residence_province_code/city_code/district_code` | string/null | 居住/工作地省市区编码 |
+| `self_intro` | string/null | 自我介绍 |
+| `interest_tags` | array[string] | 兴趣标签 |
+| `personality_tags` | array[string] | 性格标签 |
+| `mbti` | string/null | 16 种 MBTI 值之一 |
+| `avatar` | string/null | 头像地址 |
+| `background_wall` | string/null | 背景墙地址 |
+| `tag_selections` | object | 分类 key 到标签数组的映射 |
+| `photos` | array | 相册媒体对象 |
+| `video` | object/null | 视频媒体对象 |
+| `completion_score` | number | 当前完整度 |
 
-`PATCH /api/v1/users/me/profile`
+媒体对象字段：`id` 媒体 ID、`media_type` 媒体类型、`file_url` 文件地址、`thumbnail_url` 缩略图地址、`sort_order` 排序、`is_primary` 是否首图、`duration_seconds` 视频时长。
+
+### `PATCH /api/v1/users/me/profile`
+
+- 权限：登录用户
+- 成功状态：`200 OK`
+- 更新方式：只更新请求体中提供的字段，未提供字段保持原值
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 规则和含义 |
+| --- | --- | --- | --- |
+| `gender` | integer/null | 否 | `1` 男、`2` 女；首次写入后不可自行修改 |
+| `birthday` | date/null | 否 | `YYYY-MM-DD`；服务端计算年龄且必须满 18 岁 |
+| `is_married` | integer/null | 否 | `1` 未婚、`2` 离异、`3` 丧偶 |
+| `height` | integer/null | 否 | 150~200cm |
+| `occupation` | string/null | 否 | 最长 128 字符 |
+| `industry` | string/null | 否 | 最长 128 字符 |
+| `education_level` | integer/null | 否 | 1~8 |
+| `income` | number/null | 否 | 0~1,000,000 |
+| `hometown_province_code/city_code/district_code` | string/null | 否 | 各最长 32 字符 |
+| `residence_province_code/city_code/district_code` | string/null | 否 | 各最长 32 字符 |
+| `self_intro` | string/null | 否 | 最长 1000 字符 |
+| `interest_tags` | array[string] | 否 | 3~5 个，必须来自固定目录 |
+| `personality_tags` | array[string] | 否 | 3~5 个，必须来自固定目录 |
+| `mbti` | string/null | 否 | `INTJ` 等 16 种标准值 |
+| `tag_selections` | object | 否 | 分类 key 和标签必须来自固定目录，每类最多 5 个 |
 
 请求示例：
 
 ```json
 {
-  "gender": 1,
-  "birthday": "1995-05-20",
-  "is_married": 1,
-  "height": 175,
-  "occupation": "软件工程师",
-  "industry": "互联网",
-  "education_level": 3,
-  "income": 15000,
-  "residence_province_code": "310000",
-  "residence_city_code": "310100",
-  "self_intro": "喜欢旅行、摄影和运动，希望认识真诚的人。",
-  "interest_tags": ["旅行", "摄影", "健身"],
-  "personality_tags": ["真诚", "耐心", "乐观"],
-  "mbti": "ENFP",
-  "tag_selections": {
-    "relationship_expectation": ["寻找长期伴侣"],
-    "sports": ["健身", "跑步"]
-  }
+  "gender":1,
+  "birthday":"1995-05-20",
+  "is_married":1,
+  "height":175,
+  "occupation":"软件工程师",
+  "industry":"互联网",
+  "education_level":3,
+  "income":15000,
+  "residence_province_code":"310000",
+  "residence_city_code":"310100",
+  "self_intro":"喜欢旅行、摄影和运动，希望认识真诚的人。",
+  "interest_tags":["旅行","摄影","健身"],
+  "personality_tags":["真诚","耐心","乐观"],
+  "mbti":"ENFP",
+  "tag_selections":{"relationship_expectation":["寻找长期伴侣"]}
 }
 ```
 
-性别一旦写入不可修改；出生日期必须对应年满 18 岁；身高范围为 150~200cm；标签必须各选择 3~5 个；MBTI 必须是 16 种标准类型之一。
-`tag_selections` 的分类 key 和选项值必须来自 `/api/v1/profile/tag-options`，每个分类最多选择 5 项。
+成功响应为完整 `ProfileResponse`。非法枚举、标签不在目录、标签数量不足、未成年、超长文本和性别修改返回 `422` 或 `409`。
 
-### 主页预览
+## 4. 主页预览与自我介绍模板
 
-`GET /api/v1/users/me/profile/preview`
+### `GET /api/v1/users/me/profile/preview`
 
-返回：
+- 权限：登录用户
+- 参数：无
+- 返回：
 
 ```json
 {
-  "preview_notice": "这是别人看到你的样子",
-  "profile": {}
+  "preview_notice":"这是别人看到你的样子",
+  "profile": {"user_id":1,"nickname":"小明","completion_score":80}
 }
 ```
 
-## 自我介绍模板
+`profile` 内部字段与个人资料查询一致。
 
-`GET /api/v1/users/me/intro-templates`
+### `GET /api/v1/users/me/intro-templates`
 
-返回一期内置模板。模板库后台配置和录音转文字暂未接入第三方服务。
+- 权限：公开
+- 参数：无
 
-## 头像和相册
+返回数组字段：
 
-以下接口使用 `multipart/form-data`，字段名均为 `file`。
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `key` | string | 模板 key |
+| `title` | string | 模板标题 |
+| `content` | string | 可填充到输入框的模板正文 |
 
-- `POST /api/v1/users/me/avatar`：上传头像，支持 JPG/JPEG/PNG，单文件最大 5MB，服务端转换为 WebP 并生成缩略图；重复上传覆盖旧头像。
-- `POST /api/v1/users/me/background`：上传主页背景墙，支持 JPG/JPEG/PNG，单文件最大 5MB，重复上传覆盖旧背景。
-- `POST /api/v1/users/me/photos`：上传相册图片，支持 JPG/JPEG/PNG，单文件最大 5MB，最多 9 张，服务端转换为 WebP。
-- `DELETE /api/v1/users/me/photos/{media_id}`：删除相册图片。
-- `PUT /api/v1/users/me/photos/{media_id}/primary`：设置首图。
-- `PUT /api/v1/users/me/photos/order`：调整顺序。
+录音转文字和后台模板配置尚未接入。
 
-排序请求：
+## 5. 媒体上传
+
+所有上传接口：
+
+- Header：`Authorization: Bearer <access_token>`
+- Content-Type：`multipart/form-data`
+- 文件字段名：`file`
+- 成功状态：`201 Created`
+- 响应：媒体对象，字段含义见第 3 节
+
+| 接口 | 文件规则 | 业务规则 |
+| --- | --- | --- |
+| `POST /api/v1/users/me/avatar` | JPG/JPEG/PNG，最大 5MB | 覆盖旧头像；转换 WebP 并生成缩略图 |
+| `POST /api/v1/users/me/background` | JPG/JPEG/PNG，最大 5MB | 覆盖旧背景墙 |
+| `POST /api/v1/users/me/photos` | JPG/JPEG/PNG，最大 5MB | 最多 9 张，转换 WebP |
+| `POST /api/v1/users/me/video` | MP4，最大 50MB，最长 30 秒 | 每个用户最多 1 个；服务端使用 ffprobe 检测真实时长 |
+
+图片示例：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/users/me/photos" \
+  -H "Authorization: Bearer <access_token>" \
+  -F "file=@photo.jpg"
+```
+
+视频时长不接受客户端提交值；未安装 `ffprobe` 返回 `503`。
+
+### 相册操作
+
+#### `PUT /api/v1/users/me/photos/order`
+
+JSON 请求体：
 
 ```json
 {"media_ids":[12,8,15]}
 ```
 
-## 视频
+`media_ids` 必须是当前用户全部未删除相册图片 ID，1~9 个且不能重复。成功返回 `204`。
 
-`POST /api/v1/users/me/video`
+#### `PUT /api/v1/users/me/photos/{media_id}/primary`
 
-使用 `multipart/form-data` 上传 MP4 视频。单文件最大 50MB，每个用户最多 1 个，时长最长 30 秒。服务端使用 `ffprobe` 从文件元数据读取真实时长，不接受客户端提交的时长字段。
+Path 参数 `media_id` 为正整数且必须属于当前用户；成功返回新的媒体对象，并同步头像地址。
 
-如果服务端没有安装 `ffprobe`，返回 `503`；无法识别或格式不是 MP4 返回 `415`；超过大小返回 `413`；超过时长返回 `422`。
+#### `DELETE /api/v1/users/me/photos/{media_id}`
 
-## 择偶要求
+只能删除自己的相册图片；首图删除后自动选择下一张有效图片。成功返回 `204`。
 
-### 查询
+## 6. 择偶要求
 
-`GET /api/v1/users/me/preferences`
+### `GET /api/v1/users/me/preferences`
 
-### 更新
+无请求参数。没有记录时返回所有字段的默认“不限”值：
 
-`PUT /api/v1/users/me/preferences`
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `user_id` | integer | 用户 ID |
+| `age_min/age_max` | integer/null | 期望年龄区间 |
+| `height_min/height_max` | integer/null | 期望身高区间 |
+| `education_min` | integer/null | 学历下限 |
+| `income_min` | number/null | 收入下限 |
+| `marriage_status` | integer/null | 婚姻要求，`0` 表示不限 |
+| `preferred_province_code` | string/null | 期望省份 |
+| `preferred_city_codes` | array[string] | 期望城市编码 |
+| `accept_long_distance` | boolean | 是否接受异地 |
+| `accept_cross_province` | boolean | 是否接受跨省 |
+| `housing_requirement` | integer/null | 房产要求 |
+| `smoking_requirement` | integer/null | 抽烟要求 |
+| `drinking_requirement` | integer/null | 饮酒要求 |
+| `extra_requirement` | string/null | 其他要求，最长 255 字符 |
+
+### `PUT /api/v1/users/me/preferences`
+
+请求体字段与返回字段相同，均为可选更新字段；年龄和身高下限不能大于上限。更新后影响后续推荐，不修改已经产生的历史记录。
 
 请求示例：
 
 ```json
 {
-  "age_min": 25,
-  "age_max": 35,
-  "height_min": 160,
-  "height_max": 175,
-  "education_min": 3,
-  "income_min": 10000,
-  "marriage_status": 1,
-  "preferred_province_code": "310000",
-  "preferred_city_codes": ["310100"],
-  "accept_long_distance": false,
-  "accept_cross_province": false,
-  "housing_requirement": 0,
-  "smoking_requirement": 2,
-  "drinking_requirement": 1,
-  "extra_requirement": "希望作息规律，愿意沟通。"
+  "age_min":25,
+  "age_max":35,
+  "height_min":160,
+  "height_max":175,
+  "education_min":3,
+  "income_min":10000,
+  "marriage_status":1,
+  "preferred_province_code":"310000",
+  "preferred_city_codes":["310100"],
+  "accept_long_distance":false,
+  "accept_cross_province":false,
+  "housing_requirement":0,
+  "smoking_requirement":2,
+  "drinking_requirement":1,
+  "extra_requirement":"希望作息规律，愿意沟通。"
 }
 ```
 
-年龄和身高下限不能大于上限；更新成功后立即影响后续推荐，不追溯已生成的推荐列表。
+## 7. 错误响应
 
-## 错误码
+```json
+{"detail":"相册最多保存9张图片"}
+```
 
-| HTTP | 场景 |
+| HTTP | 触发条件 |
 | --- | --- |
 | `401` | 未登录或 Token 无效 |
-| `404` | 媒体不存在或用户不存在 |
-| `409` | 性别修改、相册数量、视频数量或媒体状态冲突 |
+| `403` | 没有访问权限 |
+| `404` | 用户或媒体不存在 |
+| `409` | 性别不可修改、相册/视频数量冲突 |
 | `413` | 文件超过大小限制 |
-| `415` | 图片/视频格式不支持或内容无法识别 |
-| `422` | 字段范围、标签数量、MBTI、年龄、时长或排序参数不合法 |
-| `503` | `ffprobe` 未安装或视频处理能力未配置 |
+| `415` | 文件格式或真实内容无法识别 |
+| `422` | 字段、标签、MBTI、年龄、时长或排序校验失败 |
+| `503` | ffprobe 未安装或视频处理服务不可用 |

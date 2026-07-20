@@ -1,117 +1,453 @@
-# 关系、聊天与安全接口
+# 关系、聊天、通知与安全接口
 
-统一前缀：`/api/v1`。所有接口需要：
+## 1. 通用约定
+
+接口前缀：`/api/v1`。
+
+本文件所有接口都要求登录，并且通过 `get_verified_user` 校验手机号已绑定：
 
 ```http
 Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
 
-除查看个人资料和资料编辑外，本组社交接口要求账号已绑定手机号。聊天还要求双方存在有效匹配关系，且没有互相拉黑。
+`access_token` 中的内部 `sid` 是登录会话标识，仅由服务端解析。聊天接口使用的 `session_id` 是 `GET /api/v1/chat/sessions` 返回的聊天会话 ID，两者不是同一个值，前端不需要自行拼接或上传登录 `session_id`。
 
-## 喜欢、关注和匹配
-
-### `PUT /users/{target_id}/like`
-
-喜欢用户。双方互相喜欢时自动创建双方匹配记录和聊天会话，并向双方写入匹配通知。
-
-### `DELETE /users/{target_id}/like`
-
-取消喜欢。若双方已经匹配，同时将匹配状态改为取消。
-
-### `PUT /users/{target_id}/follow` / `DELETE /users/{target_id}/follow`
-
-关注或取消关注用户。关注关系不产生匹配。
-
-### 关系列表
-
-- `GET /relations/likes`：我喜欢的人。
-- `GET /relations/liked-by`：喜欢我的人。
-- `GET /relations/following`：我的关注。
-- `GET /relations/followers`：我的粉丝。
-- `GET /relations/matches`：我的匹配。
-- `DELETE /relations/matches/{target_id}`：取消匹配。
-
-列表支持 `page` 和 `page_size`，每页最多 50 条。
-
-## 聊天
-
-### `GET /chat/sessions`
-
-返回当前用户的聊天会话和未读数。
-
-### `GET /chat/sessions/{session_id}/messages`
-
-分页返回聊天记录，支持 `page`、`page_size`（每页最多 50 条）。
-
-### `POST /chat/sessions/{session_id}/messages`
-
-文本消息：
+成功响应没有统一 `data` 包装层；`204 No Content` 接口没有响应体。除特别说明外，错误响应为：
 
 ```json
-{"type": 1, "content": "你好"}
+{"detail":"错误原因"}
 ```
 
-媒体消息需要提供已上传的资源地址：
+### 1.1 公共状态和权限
+
+- 关系、聊天、社区和安全接口要求账号存在有效手机号。
+- 目标用户必须处于公开交友状态，不能是当前用户本人，也不能与当前用户互相拉黑。
+- 聊天要求双方存在有效匹配关系（匹配状态 `1` 或 `2`）。
+- 关系写入使用数据库唯一约束和 `INSERT IGNORE`，重复喜欢/关注通常会返回当前状态，不会新增重复记录。
+- 当前发送消息、发布内容、举报没有 `Idempotency-Key` 机制；网络超时后不要盲目重试写请求，应先查询结果。
+
+## 2. 喜欢、关注和匹配
+
+### 2.1 喜欢用户
+
+#### `PUT /api/v1/users/{target_id}/like`
+
+权限：已登录且已绑定手机号。成功状态：`200 OK`。
+
+路径参数：
+
+| 参数 | 位置 | 类型 | 必填 | 规则 | 含义 |
+| --- | --- | --- | --- | --- | --- |
+| `target_id` | path | integer | 是 | `>=1`，不能是自己 | 被喜欢用户 ID |
+
+请求体：无。
+
+请求示例：
+
+```http
+PUT /api/v1/users/23/like
+Authorization: Bearer <access_token>
+```
+
+返回参数：
+
+| 字段 | 类型 | 必返 | 空值含义 | 含义 |
+| --- | --- | --- | --- | --- |
+| `target_user_id` | integer | 是 | 不为空 | 目标用户 ID |
+| `relation_type` | string | 是 | 不为空 | 固定为 `like` |
+| `enabled` | boolean | 是 | 不为空 | 本次操作后是否喜欢 |
+| `matched` | boolean | 是 | 不为空 | 双方是否已互相喜欢并建立匹配 |
+
+成功响应：
 
 ```json
-{"type": 2, "media_url": "/storage/uploads/chat/example.jpg"}
+{"target_user_id":23,"relation_type":"like","enabled":true,"matched":false}
 ```
 
-消息类型：`1` 文本、`2` 图片、`3` 语音、`4` 视频、`5` 小程序卡片、`6` 系统消息。当前接口校验消息内容和地址，不负责聊天媒体上传。
+当对方已经喜欢当前用户时，服务端会创建双方匹配记录和聊天会话，并写入匹配通知，此时 `matched=true`。
 
-### `POST /chat/sessions/{session_id}/read`
+#### `DELETE /api/v1/users/{target_id}/like`
 
-将当前会话中发给当前用户的未读消息标记为已读，并清零会话未读数。
+路径参数和权限与喜欢接口相同，请求体无，成功状态 `200 OK`。响应示例：
 
-### `DELETE /chat/messages/{message_id}`
+```json
+{"target_user_id":23,"relation_type":"like","enabled":false,"matched":false}
+```
 
-撤回自己发送的消息。撤回后不再返回原文本或媒体地址。
+取消喜欢会把双方匹配记录状态更新为 `3`（已取消）；不会删除聊天历史。目标用户不存在、不可见或已拉黑时返回 `404` 或 `403`。
 
-## 通知
+### 2.2 关注用户
 
-- `GET /notifications`：分页查询通知，返回 `unread_count`。
-- `POST /notifications/{notification_id}/read`：标记单条通知已读。
-- `POST /notifications/read-all`：标记当前用户全部通知已读。
+#### `PUT /api/v1/users/{target_id}/follow`
 
-喜欢、匹配、认识申请和爆灯会写入用户通知表。
+请求体无，成功状态 `200 OK`。返回格式与喜欢接口相同，但 `relation_type` 固定为 `follow`，`matched` 固定为 `false`：
 
-## 隐私、拉黑和举报
+```json
+{"target_user_id":23,"relation_type":"follow","enabled":true,"matched":false}
+```
 
-### `GET /users/me/privacy` / `PUT /users/me/privacy`
+#### `DELETE /api/v1/users/{target_id}/follow`
 
-读取或更新隐私设置，包括谁可以看我、仅 VIP 查看详情、无痕浏览、仅认证用户联系、展示状态和通知开关。
+请求体无，成功状态 `200 OK`。返回 `enabled=false`。关注不会触发匹配，也不会建立聊天会话。
 
-### `GET /security/blocks`
+### 2.3 关系列表
 
-返回当前用户黑名单。
+以下接口都返回同一结构 `RelationPage`，成功状态 `200 OK`：
 
-### `PUT /security/blocks/{target_id}`
+| 方法和路径 | 关系方向 | 结果 |
+| --- | --- | --- |
+| `GET /api/v1/relations/likes` | 当前用户 -> 他人 | 我喜欢的人 |
+| `GET /api/v1/relations/liked-by` | 他人 -> 当前用户 | 喜欢我的人 |
+| `GET /api/v1/relations/following` | 当前用户 -> 他人 | 我关注的人 |
+| `GET /api/v1/relations/followers` | 他人 -> 当前用户 | 我的粉丝 |
+| `GET /api/v1/relations/matches` | 当前用户的有效匹配 | 我的匹配 |
 
-请求体可选：`{"reason": "骚扰"}`。拉黑后会取消双方匹配、关闭待处理认识申请，并阻止主页、申请和聊天操作。
+公共查询参数：
 
-### `DELETE /security/blocks/{target_id}`
+| 参数 | 位置 | 类型 | 必填 | 默认值 | 规则 | 含义 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `page` | query | integer | 否 | `1` | `1~1000` | 页码，从 1 开始 |
+| `page_size` | query | integer | 否 | `20` | `1~50` | 每页数量 |
 
-解除当前用户对目标用户的拉黑。
+请求示例：
 
-### `POST /security/reports/{target_id}`
+```http
+GET /api/v1/relations/matches?page=1&page_size=20
+Authorization: Bearer <access_token>
+```
 
-请求体：
+返回参数：
+
+| 字段 | 类型 | 必返 | 空值含义 | 含义 |
+| --- | --- | --- | --- | --- |
+| `items` | array[SocialUser] | 是 | 无数据时为 `[]` | 用户列表 |
+| `items[].user_id` | integer | 是 | 不为空 | 用户 ID |
+| `items[].nickname` | string/null | 是 | 未设置时 `null` | 昵称 |
+| `items[].avatar` | string/null | 是 | 未设置时 `null` | 头像地址 |
+| `items[].age` | integer/null | 是 | 未设置生日时 `null` | 根据生日计算的年龄 |
+| `page` | integer | 是 | 不为空 | 当前页码 |
+| `page_size` | integer | 是 | 不为空 | 当前页大小 |
+| `total` | integer | 是 | 无数据时为 `0` | 总记录数 |
+
+响应示例：
 
 ```json
 {
-  "type": "骚扰",
-  "description": "持续发送不当消息",
-  "images": ["/storage/uploads/report/example.png"]
+  "items":[{"user_id":23,"nickname":"小雨","avatar":"/storage/uploads/23/avatar.webp","age":28}],
+  "page":1,
+  "page_size":20,
+  "total":1
 }
 ```
 
-举报写入待处理记录，后台审核接口仍需后续补充。
+无数据响应：
 
-## 权限和错误码
+```json
+{"items":[],"page":1,"page_size":20,"total":0}
+```
 
-- `401`：未登录或会话失效。
-- `403`：未绑定手机号、没有匹配关系、已拉黑或无权访问。
-- `404`：目标用户、会话或消息不存在。
-- `409`：关系状态冲突。
-- `422`：请求字段不合法。
+### 2.4 取消匹配
+
+#### `DELETE /api/v1/relations/matches/{target_id}`
+
+路径参数 `target_id` 为 `>=1` 的目标用户 ID。请求体无，成功状态 `204 No Content`。仅能取消当前用户参与的有效匹配；匹配不存在返回：
+
+```json
+{"detail":"匹配关系不存在"}
+```
+
+## 3. 聊天
+
+### 3.1 获取对话列表
+
+#### `GET /api/v1/chat/sessions`
+
+成功状态 `200 OK`，返回当前用户可访问的聊天会话数组，按最近消息时间倒序。列表只包含有效匹配且未互相拉黑的双方。
+
+查询参数：`page` 为 `1~1000`，默认 `1`；`page_size` 为 `1~50`，默认 `20`。当前代码返回数组，没有 `total` 和 `has_more` 字段；前端可通过返回数量小于 `page_size` 判断是否可能到达末页。
+
+返回参数：
+
+| 字段 | 类型 | 必返 | 空值含义 | 含义 |
+| --- | --- | --- | --- | --- |
+| `id` | integer | 是 | 不为空 | 聊天会话 ID，后续消息接口的 `session_id` |
+| `target` | object | 是 | 不为空 | 对方用户摘要 |
+| `target.user_id` | integer | 是 | 不为空 | 对方用户 ID |
+| `target.nickname` | string/null | 是 | 未设置时 `null` | 对方昵称 |
+| `target.avatar` | string/null | 是 | 未设置时 `null` | 对方头像 |
+| `target.age` | integer/null | 是 | 未设置生日时 `null` | 对方年龄 |
+| `last_message` | string/null | 是 | 尚未发消息时 `null` | 最后一条消息预览；媒体消息为 `[媒体消息]` |
+| `last_message_time` | datetime/null | 是 | 尚未发消息时 `null` | 最后一条消息时间，UTC 数据库时间 |
+| `unread_count` | integer | 是 | 无未读时为 `0` | 当前用户未读消息数 |
+
+响应示例：
+
+```json
+[
+  {
+    "id":8,
+    "target":{"user_id":23,"nickname":"小雨","avatar":"/storage/uploads/23/avatar.webp","age":28},
+    "last_message":"你好，很高兴认识你",
+    "last_message_time":"2026-07-20T10:30:00",
+    "unread_count":2
+  }
+]
+```
+
+没有会话时返回 `[]`。
+
+### 3.2 获取聊天记录
+
+#### `GET /api/v1/chat/sessions/{session_id}/messages`
+
+路径参数 `session_id` 必须使用对话列表返回的 `id`，不能使用登录 Token 中的内部会话 `sid`。查询参数 `page` 默认 `1`、范围 `1~1000`；`page_size` 默认 `20`、范围 `1~50`。成功状态 `200 OK`，消息按时间正序返回当前页。
+
+返回参数：
+
+| 字段 | 类型 | 必返 | 空值含义 | 含义 |
+| --- | --- | --- | --- | --- |
+| `id` | integer | 是 | 不为空 | 消息 ID |
+| `session_id` | integer | 是 | 不为空 | 所属聊天会话 ID |
+| `from_user_id` | integer | 是 | 不为空 | 发送者 ID |
+| `to_user_id` | integer | 是 | 不为空 | 接收者 ID |
+| `type` | integer | 是 | `1~6` | 消息类型 |
+| `content` | string/null | 是 | 媒体消息可为 `null`；撤回后为 `消息已撤回` | 文本或系统消息内容 |
+| `media_url` | string/null | 是 | 非媒体消息为 `null`；撤回后为 `null` | 已上传媒体地址 |
+| `is_read` | boolean | 是 | 不为空 | 是否已读 |
+| `revoked` | boolean | 是 | 不为空 | 是否已撤回 |
+| `created_at` | datetime | 是 | 不为空 | 创建时间 |
+
+消息类型：`1` 文本，`2` 图片，`3` 语音，`4` 视频，`5` 小程序卡片，`6` 系统消息。空数据返回 `[]`。
+
+请求示例：
+
+```http
+GET /api/v1/chat/sessions/8/messages?page=1&page_size=20
+Authorization: Bearer <access_token>
+```
+
+### 3.3 发送聊天消息
+
+#### `POST /api/v1/chat/sessions/{session_id}/messages`
+
+成功状态 `201 Created`。服务端只校验消息字段，不负责聊天媒体上传；`media_url` 必须是前端已经获得的资源地址。
+
+请求参数：
+
+| 字段 | 位置 | 类型 | 必填 | 默认值 | 规则 | 含义 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `session_id` | path | integer | 是 | 无 | `>=1`，必须属于当前用户 | 聊天会话 ID |
+| `type` | body | integer | 否 | `1` | `1~6` | 消息类型 |
+| `content` | body | string/null | 条件必填 | `null` | 最长 5000；`type=1` 时必填 | 文本/系统/卡片内容 |
+| `media_url` | body | string/null | 条件必填 | `null` | 最长 500；`type=2/3/4` 时必填 | 图片、语音或视频地址 |
+
+文本示例：
+
+```json
+{"type":1,"content":"你好，很高兴认识你"}
+```
+
+图片示例：
+
+```json
+{"type":2,"media_url":"/storage/uploads/chat/message.webp"}
+```
+
+校验规则：文本消息不能没有 `content`；图片/语音/视频不能没有 `media_url`；卡片和系统消息至少提供 `content` 或 `media_url`。成功响应为 `ChatMessageResponse`，字段与 3.2 相同。
+
+### 3.4 标记会话已读
+
+#### `POST /api/v1/chat/sessions/{session_id}/read`
+
+请求体无，成功状态 `204 No Content`。服务端只将发给当前用户的未读消息改为已读，并清零当前用户在该会话中的未读计数。会话不存在、非参与者、未匹配或已拉黑返回 `403/404`。
+
+### 3.5 撤回消息
+
+#### `DELETE /api/v1/chat/messages/{message_id}`
+
+请求体无，成功状态 `204 No Content`。只能撤回自己发送且尚未撤回的消息；撤回后查询接口返回 `content="消息已撤回"`、`media_url=null`、`revoked=true`。消息不存在、不是本人发送或已撤回时返回：
+
+```json
+{"detail":"消息不存在或无法撤回"}
+```
+
+## 4. 通知
+
+### 4.1 查询通知
+
+#### `GET /api/v1/notifications`
+
+查询参数 `page` 默认 `1`、范围 `1~1000`；`page_size` 默认 `20`、范围 `1~50`。成功状态 `200 OK`，按创建时间倒序。
+
+返回参数：
+
+| 字段 | 类型 | 必返 | 空值含义 | 含义 |
+| --- | --- | --- | --- | --- |
+| `items` | array | 是 | 无数据时 `[]` | 通知列表 |
+| `items[].id` | integer | 是 | 不为空 | 通知 ID |
+| `items[].notification_type` | string | 是 | 不为空 | 通知类型，如 `like`、`match` |
+| `items[].title` | string/null | 是 | 无标题时 `null` | 通知标题 |
+| `items[].content` | string | 是 | 无正文时为空字符串 | 通知正文 |
+| `items[].payload` | object/null | 是 | 无附加数据时 `null` | 结构化附加数据 |
+| `items[].related_user_id` | integer/null | 是 | 无关联用户时 `null` | 关联用户 ID |
+| `items[].related_id` | integer/null | 是 | 无关联业务记录时 `null` | 关联记录 ID |
+| `items[].is_read` | boolean | 是 | 不为空 | 是否已读 |
+| `items[].created_at` | datetime | 是 | 不为空 | 创建时间 |
+| `page` | integer | 是 | 不为空 | 当前页 |
+| `page_size` | integer | 是 | 不为空 | 当前页大小 |
+| `total` | integer | 是 | 无通知时 `0` | 总通知数 |
+| `unread_count` | integer | 是 | 无未读时 `0` | 未读通知总数 |
+
+成功示例：
+
+```json
+{
+  "items":[{"id":10,"notification_type":"match","title":"你们互相喜欢了","content":"恭喜匹配成功，可以开始聊天了","payload":{"related_user_id":23},"related_user_id":23,"related_id":null,"is_read":false,"created_at":"2026-07-20T10:30:00"}],
+  "page":1,"page_size":20,"total":1,"unread_count":1
+}
+```
+
+### 4.2 标记通知已读
+
+#### `POST /api/v1/notifications/{notification_id}/read`
+
+路径参数 `notification_id>=1`。请求体无，成功状态 `204 No Content`。只更新属于当前用户的通知；重复标记已读可安全调用。
+
+#### `POST /api/v1/notifications/read-all`
+
+请求体无，成功状态 `204 No Content`。将当前用户全部通知标记为已读；重复调用可安全调用。
+
+## 5. 隐私设置
+
+### 5.1 查询隐私设置
+
+#### `GET /api/v1/users/me/privacy`
+
+无请求参数，成功状态 `200 OK`。不存在设置记录时返回默认值。
+
+### 5.2 更新隐私设置
+
+#### `PUT /api/v1/users/me/privacy`
+
+请求体支持部分更新；只提交需要改变的字段。空对象 `{}` 合法，表示不修改并返回当前设置。成功状态 `200 OK`。
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 默认/空值 | 规则 | 含义 |
+| --- | --- | --- | --- | --- | --- |
+| `hide_phone` | boolean/null | 否 | `false` | 布尔值 | 隐藏手机号 |
+| `hide_school` | boolean/null | 否 | `false` | 布尔值 | 隐藏学校信息 |
+| `hide_company` | boolean/null | 否 | `false` | 布尔值 | 隐藏公司信息 |
+| `hide_distance` | boolean/null | 否 | `false` | 布尔值 | 隐藏距离信息 |
+| `hide_online_status` | boolean/null | 否 | `false` | 布尔值 | 隐藏在线状态 |
+| `only_auth_can_contact` | boolean/null | 否 | `false` | 布尔值 | 仅认证用户可联系 |
+| `only_vip_can_see_detail` | boolean/null | 否 | `false` | 布尔值 | 仅 VIP 可查看详细资料 |
+| `who_can_see_me` | integer/null | 否 | `1` | `1` 所有人，`2` 仅认证，`3` 仅 VIP，`4` 完全私密 | 谁可以在公开流中看到我 |
+| `match_status` | integer/null | 否 | `1` | `1` 公开展示，`2` 委托红娘，`3` 完全私密，`4` 暂停服务，`5` 已脱单 | 当前交友展示状态 |
+| `anonymous_browse_enabled` | boolean/null | 否 | `false` | VIP 无痕浏览能力 | 浏览他人时不写入对方访客记录 |
+| `notify_like` | boolean/null | 否 | `true` | 布尔值 | 喜欢通知开关 |
+| `notify_comment` | boolean/null | 否 | `true` | 布尔值 | 评论通知开关 |
+| `notify_match` | boolean/null | 否 | `true` | 布尔值 | 匹配通知开关 |
+| `notify_apply` | boolean/null | 否 | `true` | 布尔值 | 认识申请通知开关 |
+| `notify_system` | boolean/null | 否 | `true` | 布尔值 | 系统通知开关 |
+| `notify_activity` | boolean/null | 否 | `true` | 布尔值 | 动态活动通知开关 |
+
+请求示例：
+
+```json
+{
+  "only_vip_can_see_detail":true,
+  "who_can_see_me":1,
+  "anonymous_browse_enabled":false,
+  "notify_like":true
+}
+```
+
+响应字段与请求字段相同，并额外返回 `user_id`。所有布尔字段始终返回 `true/false`，不会返回 `null`。
+
+## 6. 黑名单
+
+### `GET /api/v1/security/blocks`
+
+无参数，成功状态 `200 OK`，返回 `SocialUser[]`。用户字段为 `user_id`、`nickname`、`avatar`、`age`；无黑名单时返回 `[]`。
+
+### `PUT /api/v1/security/blocks/{target_id}`
+
+路径参数 `target_id>=1`，成功状态 `204 No Content`。请求体可省略；也可传：
+
+```json
+{"reason":"骚扰"}
+```
+
+`reason` 类型为 `string/null`，最长 255 字符。拉黑会取消双方有效匹配、关闭双方待处理认识申请，并阻止主页、关系、申请和聊天操作。重复拉黑使用 `INSERT IGNORE`，可安全重复调用。
+
+### `DELETE /api/v1/security/blocks/{target_id}`
+
+请求体无，成功状态 `204 No Content`。只解除当前用户发起的拉黑；目标账号不存在或已停用返回 `404`。
+
+## 7. 举报
+
+### `POST /api/v1/security/reports/{target_id}`
+
+路径参数 `target_id>=1`，成功状态 `201 Created`。请求体：
+
+| 字段 | 类型 | 必填 | 默认值 | 规则 | 含义 |
+| --- | --- | --- | --- | --- | --- |
+| `type` | string | 是 | 无 | 1~64 字符 | 举报类型，当前由客户端传入 |
+| `description` | string/null | 否 | `null` | 最长 1000 字符 | 举报说明 |
+| `images` | array[string] | 否 | `[]` | 最多 6 个地址 | 举报证据图片地址 |
+
+请求示例：
+
+```json
+{
+  "type":"骚扰",
+  "description":"持续发送不当消息",
+  "images":["/storage/uploads/report/example.png"]
+}
+```
+
+返回参数：
+
+| 字段 | 类型 | 必返 | 含义 |
+| --- | --- | --- | --- |
+| `id` | integer | 是 | 举报记录 ID |
+| `target_user_id` | integer | 是 | 被举报用户 ID |
+| `type` | string | 是 | 举报类型 |
+| `status` | integer | 是 | `0` 待处理，`1` 已处理，`2` 已驳回 |
+| `created_at` | datetime | 是 | 创建时间 |
+
+成功响应：
+
+```json
+{"id":31,"target_user_id":23,"type":"骚扰","status":0,"created_at":"2026-07-20T11:00:00"}
+```
+
+当前接口只保存举报记录，不会自动封禁目标用户；后台处理见 `docs/api/admin.md`。
+
+## 8. 错误响应
+
+| HTTP | 触发条件 | 示例 detail | 前端处理 |
+| --- | --- | --- | --- |
+| `401` | 未登录、Token 无效或会话失效 | `请先登录` | 清理 Token 并重新登录 |
+| `403` | 未绑定手机号、未匹配、已拉黑或无权限 | `当前没有聊天权限` | 展示绑定/匹配/权限提示 |
+| `404` | 用户、会话、消息、关系或举报目标不存在 | `聊天会话不存在` | 刷新列表并移除失效项 |
+| `409` | 业务状态冲突 | `关系状态冲突` | 重新查询当前状态 |
+| `422` | 类型、长度、范围或枚举不合法 | `文本消息内容不能为空` | 修正请求参数 |
+
+## 9. 状态、兼容性与现有能力复用
+
+- 关系状态：喜欢/关注通过 `user_favorite.type` 区分，匹配状态 `1/2` 表示有效，`3` 表示取消。
+- 聊天会话由互相喜欢或申请同意时创建；会话 ID 稳定对应 `chat_session.id`。
+- 本组接口复用 FastAPI 的 `HTTPBearer`、Pydantic Schema、SQLAlchemy AsyncSession 和已有关系/通知/Redis 能力，不新增重复的认证、分页或缓存实现。
+- 当前分页列表响应格式已上线，后续如要增加 `has_more` 或改成统一 `{items,...}` 包装，属于响应契约变更，必须先增加兼容版本或同步前端迁移。
+
+## 10. 变更记录
+
+### 2026-07-20
+
+- 将所有接口补充为请求位置、类型、必填性、规则、返回字段和完整示例。
+- 明确登录 Token 中的内部会话 `sid` 与聊天 `session_id` 的区别。
+- 明确匹配、聊天权限、黑名单、隐私枚举、通知和举报状态。
+- 明确当前未提供消息幂等键、媒体上传和自动审核的边界。
