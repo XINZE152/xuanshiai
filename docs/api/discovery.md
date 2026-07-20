@@ -38,6 +38,24 @@ Content-Type: application/json
 
 广场名片流。参数与推荐流一致，不排除已浏览用户，但仍过滤未完善资料、不可见、拉黑和停用用户。
 
+### `GET /discovery/search`
+
+登录后按昵称或标签搜索用户，返回同样的名片分页结构。支持参数：
+
+- `nickname`：昵称模糊搜索，最多 64 字；会按字面匹配 `%` 和 `_`，不会把它们当作通配符。
+- `tag`：搜索用户的兴趣标签、性格标签或固定标签分类中的标签值，最多 64 字。
+- `page`、`page_size`：分页参数，`page_size` 范围为 1~20。
+
+`nickname` 和 `tag` 至少传一个，同时传入时需要同时满足。搜索结果只展示资料完善且当前可见的用户，并按年龄相仿度、标签重合度和活跃时间排序。
+
+示例：
+
+```text
+GET /api/v1/discovery/search?tag=旅行&page=1&page_size=20
+GET /api/v1/discovery/search?nickname=小明
+GET /api/v1/discovery/search?nickname=小明&tag=摄影
+```
+
 ### `GET /discovery/filters/saved`
 
 返回当前用户保存的筛选条件。未保存时返回：

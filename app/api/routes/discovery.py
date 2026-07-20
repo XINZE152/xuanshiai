@@ -13,6 +13,7 @@ from app.schemas.discovery import (
     DiscoveryFilters,
     DiscoveryCard,
     DiscoveryPage,
+    DiscoverySearch,
     FavoriteResponse,
     FilterOptionsResponse,
     PublicProfileResponse,
@@ -28,6 +29,7 @@ from app.services.discovery import (
     get_discovery_page,
     get_filter_options,
     get_saved_filter,
+    search_discovery,
     list_applications,
     list_favorites,
     respond_application,
@@ -54,6 +56,11 @@ async def recommendations(filters: DiscoveryFilters = Depends(), current: Curren
 @router.get("/plaza", response_model=DiscoveryPage, summary="查询广场名片流")
 async def plaza(filters: DiscoveryFilters = Depends(), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> DiscoveryPage:
     return await get_discovery_page(db, current.id, filters, plaza=True)
+
+
+@router.get("/search", response_model=DiscoveryPage, summary="按昵称或标签搜索用户")
+async def search(query: DiscoverySearch = Depends(), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> DiscoveryPage:
+    return await search_discovery(db, current.id, query)
 
 
 @router.get("/filters/saved", response_model=SavedFilterResponse, summary="获取已保存筛选条件")

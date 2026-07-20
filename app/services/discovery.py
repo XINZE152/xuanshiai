@@ -25,6 +25,7 @@ from app.schemas.discovery import (
     DiscoveryCard,
     DiscoveryFilters,
     DiscoveryPage,
+    DiscoverySearch,
     FavoriteResponse,
     FilterOptionsResponse,
     PublicProfileResponse,
@@ -119,10 +120,18 @@ def _candidate_score(viewer: dict[str, Any], candidate: dict[str, Any]) -> tuple
     candidate_age = _calculate_age(candidate["birthday"]) if candidate.get("birthday") else None
     viewer_age = _calculate_age(viewer["birthday"]) if viewer.get("birthday") else None
     if viewer.get("age_min") and candidate_age and viewer["age_min"] <= candidate_age <= (viewer.get("age_max") or 100):
-        points += 25
+        points += 30
         reasons.append("符合年龄偏好")
-    elif candidate_age and viewer_age and abs(candidate_age - viewer_age) <= 5:
-        points += 15
+    elif candidate_age and viewer_age:
+        age_gap = abs(candidate_age - viewer_age)
+        if age_gap <= 3:
+            points += 30
+            reasons.append("年龄相仿")
+        elif age_gap <= 6:
+            points += 20
+            reasons.append("年龄较为接近")
+        elif age_gap <= 10:
+            points += 10
     if viewer.get("residence_city_code") and viewer["residence_city_code"] == candidate.get("residence_city_code"):
         points += 15
         reasons.append("同城")
@@ -130,7 +139,7 @@ def _candidate_score(viewer: dict[str, Any], candidate: dict[str, Any]) -> tuple
     candidate_tags = _all_tags(candidate)
     overlap = viewer_tags & candidate_tags
     if overlap:
-        points += min(25, len(overlap) * 5)
+        points += min(35, len(overlap) * 7)
         reasons.append("共同兴趣：" + "、".join(sorted(overlap)[:3]))
     viewer_mbti = viewer.get("mbti")
     candidate_mbti = candidate.get("mbti")
@@ -179,6 +188,10 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
     )
 
 
+def _escape_like(value: str) -> str:
+    return value.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+
+
 def _filter_sql(filters: DiscoveryFilters, params: dict[str, Any]) -> list[str]:
     clauses: list[str] = []
     if filters.gender:
@@ -217,7 +230,15 @@ def _filter_sql(filters: DiscoveryFilters, params: dict[str, Any]) -> list[str]:
     return clauses
 
 
-async def _fetch_rows(db: AsyncSession, viewer_id: int, filters: DiscoveryFilters, *, plaza: bool) -> list[dict[str, Any]]:
+async def _fetch_rows(
+    db: AsyncSession,
+    viewer_id: int,
+    filters: DiscoveryFilters,
+    *,
+    plaza: bool,
+    nickname: str | None = None,
+    tag: str | None = None,
+) -> list[dict[str, Any]]:
     viewer = await _viewer_context(db, viewer_id)
     viewer_is_vip = await _is_vip(db, viewer_id)
     params: dict[str, Any] = {
@@ -231,6 +252,16 @@ async def _fetch_rows(db: AsyncSession, viewer_id: int, filters: DiscoveryFilter
         "(:viewer_is_vip = 1 OR COALESCE(pr.who_can_see_me, 1) <> 3)",
         "NOT EXISTS (SELECT 1 FROM user_block bl WHERE (bl.user_id = :viewer_id AND bl.target_user_id = u.id) OR (bl.user_id = u.id AND bl.target_user_id = :viewer_id))",
     ]
+    if nickname:
+        clauses.append("u.nickname LIKE CONCAT('%', :search_nickname, '%') ESCAPE '!' ")
+        params["search_nickname"] = _escape_like(nickname)
+    if tag:
+        clauses.append("""(
+            JSON_CONTAINS(p.interest_tags, JSON_QUOTE(:search_tag))
+            OR JSON_CONTAINS(p.personality_tags, JSON_QUOTE(:search_tag))
+            OR JSON_SEARCH(p.tags, 'one', :search_tag) IS NOT NULL
+        )""")
+        params["search_tag"] = tag
     if viewer.get("gender") in (1, 2):
         clauses.append("u.gender <> :opposite_gender")
         params["opposite_gender"] = viewer["gender"]
@@ -255,6 +286,31 @@ async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: Discover
     selected = scored[start:start + filters.page_size]
     items = [_card(row, score, reason) for (score, reason), row in selected]
     return DiscoveryPage(items=items, page=filters.page, page_size=filters.page_size, total=len(scored), has_more=start + filters.page_size < len(scored))
+
+
+async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySearch) -> DiscoveryPage:
+    filters = DiscoveryFilters(page=query.page, page_size=query.page_size)
+    viewer = await _viewer_context(db, viewer_id)
+    rows = await _fetch_rows(
+        db,
+        viewer_id,
+        filters,
+        plaza=True,
+        nickname=query.nickname,
+        tag=query.tag,
+    )
+    scored = [(_candidate_score(viewer, row), row) for row in rows]
+    scored.sort(key=lambda item: (item[0][0], item[1].get("last_active_at") or datetime.min), reverse=True)
+    start = (query.page - 1) * query.page_size
+    selected = scored[start:start + query.page_size]
+    items = [_card(row, score, reason) for (score, reason), row in selected]
+    return DiscoveryPage(
+        items=items,
+        page=query.page,
+        page_size=query.page_size,
+        total=len(scored),
+        has_more=start + query.page_size < len(scored),
+    )
 
 
 async def get_filter_options() -> FilterOptionsResponse:

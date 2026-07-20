@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class DiscoveryFilters(BaseModel):
@@ -33,6 +33,27 @@ class DiscoveryFilters(BaseModel):
             raise ValueError("身高下限不能大于上限")
         if self.income_min is not None and self.income_max is not None and self.income_min > self.income_max:
             raise ValueError("收入下限不能大于上限")
+        return self
+
+
+class DiscoverySearch(BaseModel):
+    nickname: str | None = Field(default=None, max_length=64)
+    tag: str | None = Field(default=None, max_length=64)
+    page: int = Field(default=1, ge=1, le=1000)
+    page_size: int = Field(default=20, ge=1, le=20)
+
+    @field_validator("nickname", "tag", mode="before")
+    @classmethod
+    def normalize_keyword(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_keywords(self):
+        if not self.nickname and not self.tag:
+            raise ValueError("昵称或标签至少填写一项")
         return self
 
 
