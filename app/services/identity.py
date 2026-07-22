@@ -52,6 +52,26 @@ async def get_registration_intent(db: AsyncSession, user_id: int) -> dict[str, s
     return {"intent_type": intent_type, "label": label, "description": description}
 
 
+async def _notify_matchmaker_review(
+    db: AsyncSession, user_id: int, application_id: int, status: int, reason: str | None
+) -> None:
+    title = {1: "红娘申请已通过", 2: "红娘申请未通过", 3: "红娘服务已暂停"}[status]
+    content = {
+        1: "你的服务红娘申请已通过审核。",
+        2: f"你的服务红娘申请未通过审核：{reason or '请补充材料后重新提交'}",
+        3: f"你的红娘服务已暂停：{reason or '请联系平台客服'}",
+    }[status]
+    await db.execute(text("""INSERT INTO user_notification
+        (user_id, notification_type, title, content, related_id, is_read)
+        VALUES (:user_id, :notification_type, :title, :content, :related_id, 0)"""), {
+        "user_id": user_id,
+        "notification_type": "matchmaker_application_reviewed",
+        "title": title,
+        "content": content,
+        "related_id": application_id,
+    })
+
+
 def mask_phone(phone: str) -> str:
     return f"{phone[:3]}****{phone[-4:]}"
 
@@ -140,6 +160,7 @@ async def review_matchmaker_application(
             revoked_at = UTC_TIMESTAMP(), revoke_reason = :reason
             WHERE user_id = :user_id AND role_code = :role_code"""),
             {"status": request.status, "reason": request.fail_reason, "user_id": row["user_id"], "role_code": role_code})
+    await _notify_matchmaker_review(db, int(row["user_id"]), application_id, request.status, request.fail_reason)
     await db.commit()
     result = await db.execute(text("""SELECT id, application_type, status, real_name, phone, intro,
         cert_images, fail_reason, created_at, reviewed_at FROM user_matchmaker_apply WHERE id = :id"""), {"id": application_id})
