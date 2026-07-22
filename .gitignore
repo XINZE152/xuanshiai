@@ -32,3 +32,4 @@ storage/uploads/*
 .vscode/*.log
 .DS_Store
 Thumbs.db
+docs/后端功能模块划分汇总.md
