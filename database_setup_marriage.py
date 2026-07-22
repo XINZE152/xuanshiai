@@ -661,7 +661,7 @@ class DatabaseManager:
                     `id` bigint unsigned NOT NULL AUTO_INCREMENT,
                     `user_id` bigint unsigned NOT NULL,
                     `real_name` varchar(64) DEFAULT NULL COMMENT '真实姓名',
-                    `id_card` varchar(18) DEFAULT NULL COMMENT '身份证号（加密）',
+                    `id_card` varchar(255) DEFAULT NULL COMMENT '身份证号（加密）',
                     `id_card_front` varchar(255) DEFAULT NULL COMMENT '身份证正面',
                     `id_card_back` varchar(255) DEFAULT NULL COMMENT '身份证反面',
                     `face_photo` varchar(255) DEFAULT NULL COMMENT '人脸照片',
