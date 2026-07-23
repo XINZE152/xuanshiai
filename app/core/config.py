@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     api_prefix: str = "/api/v1"
+    auto_init_db: bool = True
 
     database_url: str = "mysql+aiomysql://root:YOUR_MYSQL_PASSWORD@127.0.0.1:3306/xuanshiai"
     redis_url: str = "redis://127.0.0.1:6379/0"
@@ -56,6 +57,7 @@ class Settings(BaseSettings):
     browse_high_match_bonus: int = 5
     apply_daily_free_limit: int = 3
     apply_daily_vip_limit: int = 10
+    matchmaker_service_default_quota: int = 3
     superlike_daily_free_limit: int = 1
     superlike_daily_vip_limit: int = 3
     log_level: str = "INFO"
@@ -83,6 +85,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_test_providers(self) -> "Settings":
         """Prevent Mock providers from being enabled in production."""
+        if self.environment in {"staging", "production"} and self.auto_init_db:
+            raise ValueError("staging/production 环境必须关闭 AUTO_INIT_DB")
         if not self.is_test_mode and (
             self.sms_provider == "mock" or self.wechat_provider == "mock"
         ):

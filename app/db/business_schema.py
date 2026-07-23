@@ -1,0 +1,295 @@
+"""一期商业化和组织归属领域的数据库表定义。"""
+
+BUSINESS_TABLES = {
+    "organization": """
+        CREATE TABLE IF NOT EXISTS `organization` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `parent_id` bigint unsigned DEFAULT NULL,
+            `org_type` varchar(32) NOT NULL COMMENT 'platform/store',
+            `code` varchar(64) NOT NULL,
+            `name` varchar(128) NOT NULL,
+            `display_name` varchar(128) DEFAULT NULL,
+            `region_code` varchar(64) DEFAULT NULL,
+            `status` tinyint NOT NULL DEFAULT '1' COMMENT '1正常 2关闭 3停用',
+            `auto_redirect` tinyint NOT NULL DEFAULT '0',
+            `created_by` bigint unsigned DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_organization_code` (`code`),
+            KEY `idx_organization_parent_status` (`parent_id`, `status`),
+            KEY `idx_organization_region` (`region_code`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='平台和门店组织'
+    """,
+    "organization_member": """
+        CREATE TABLE IF NOT EXISTS `organization_member` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `organization_id` bigint unsigned NOT NULL,
+            `user_id` bigint unsigned NOT NULL,
+            `role_code` varchar(64) NOT NULL,
+            `status` tinyint NOT NULL DEFAULT '1' COMMENT '1有效 2暂停 3结束',
+            `granted_by` bigint unsigned DEFAULT NULL,
+            `started_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `ended_at` datetime DEFAULT NULL,
+            `end_reason` varchar(255) DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_organization_member_role` (`organization_id`, `user_id`, `role_code`, `status`),
+            KEY `idx_organization_member_user` (`user_id`, `status`),
+            KEY `idx_organization_member_org` (`organization_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='组织成员关系历史'
+    """,
+    "resource_assignment": """
+        CREATE TABLE IF NOT EXISTS `resource_assignment` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `user_id` bigint unsigned NOT NULL COMMENT '被分派的会员/客源用户',
+            `organization_id` bigint unsigned DEFAULT NULL,
+            `matchmaker_id` bigint unsigned DEFAULT NULL,
+            `source` varchar(32) NOT NULL DEFAULT 'manual',
+            `status` tinyint NOT NULL DEFAULT '1' COMMENT '1生效 2结束',
+            `assigned_by` bigint unsigned DEFAULT NULL,
+            `effective_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `ended_at` datetime DEFAULT NULL,
+            `end_reason` varchar(255) DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `idx_resource_assignment_user` (`user_id`, `status`),
+            KEY `idx_resource_assignment_matchmaker` (`matchmaker_id`, `status`),
+            KEY `idx_resource_assignment_org` (`organization_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员资源归属历史'
+    """,
+    "promotion_touch": """
+        CREATE TABLE IF NOT EXISTS `promotion_touch` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `code` varchar(128) NOT NULL,
+            `promoter_id` bigint unsigned DEFAULT NULL,
+            `partner_team_id` bigint unsigned DEFAULT NULL,
+            `registered_user_id` bigint unsigned DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `expires_at` datetime DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_promotion_touch_code` (`code`),
+            KEY `idx_promotion_touch_promoter` (`promoter_id`),
+            KEY `idx_promotion_touch_registered` (`registered_user_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='推广触点'
+    """,
+    "promotion_attribution": """
+        CREATE TABLE IF NOT EXISTS `promotion_attribution` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `user_id` bigint unsigned NOT NULL,
+            `promoter_id` bigint unsigned NOT NULL,
+            `organization_id` bigint unsigned DEFAULT NULL,
+            `touch_id` bigint unsigned DEFAULT NULL,
+            `status` tinyint NOT NULL DEFAULT '1' COMMENT '1有效 2结束 3作弊',
+            `effective_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `ended_at` datetime DEFAULT NULL,
+            `end_reason` varchar(255) DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_promotion_attribution_active` (`user_id`, `status`),
+            KEY `idx_promotion_attribution_promoter` (`promoter_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员推广归属'
+    """,
+    "partner_team": """
+        CREATE TABLE IF NOT EXISTS `partner_team` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `owner_user_id` bigint unsigned NOT NULL,
+            `name` varchar(128) NOT NULL,
+            `status` tinyint NOT NULL DEFAULT '1' COMMENT '1正常 2关闭 3冻结',
+            `open_mode` varchar(32) NOT NULL DEFAULT 'manual' COMMENT 'manual/paid',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_partner_team_owner` (`owner_user_id`),
+            KEY `idx_partner_team_status` (`status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='合伙人团队'
+    """,
+    "partner_membership": """
+        CREATE TABLE IF NOT EXISTS `partner_membership` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `team_id` bigint unsigned NOT NULL,
+            `promoter_id` bigint unsigned NOT NULL,
+            `status` tinyint NOT NULL DEFAULT '1' COMMENT '1正常 2移出 3变更',
+            `joined_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `left_at` datetime DEFAULT NULL,
+            `changed_by` bigint unsigned DEFAULT NULL,
+            `change_reason` varchar(255) DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_partner_membership_active` (`promoter_id`, `status`),
+            KEY `idx_partner_membership_team` (`team_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='合伙团队成员关系'
+    """,
+    "business_audit_log": """
+        CREATE TABLE IF NOT EXISTS `business_audit_log` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `actor_user_id` bigint unsigned DEFAULT NULL,
+            `action` varchar(128) NOT NULL,
+            `resource_type` varchar(64) NOT NULL,
+            `resource_id` bigint unsigned DEFAULT NULL,
+            `before_json` json DEFAULT NULL,
+            `after_json` json DEFAULT NULL,
+            `reason` varchar(255) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_business_audit_resource` (`resource_type`, `resource_id`),
+            KEY `idx_business_audit_actor` (`actor_user_id`, `created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='商业化业务审计日志'
+    """,
+    "matchmaker_service_quota": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_service_quota` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `user_id` bigint unsigned NOT NULL,
+            `available_count` int unsigned NOT NULL DEFAULT '0',
+            `used_count` int unsigned NOT NULL DEFAULT '0',
+            `refunded_count` int unsigned NOT NULL DEFAULT '0',
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_matchmaker_quota_user` (`user_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵线服务次数账户'
+    """,
+    "matchmaker_quota_entry": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_quota_entry` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `user_id` bigint unsigned NOT NULL,
+            `service_id` bigint unsigned NOT NULL,
+            `entry_type` varchar(32) NOT NULL COMMENT 'consume/refund',
+            `quantity` int unsigned NOT NULL,
+            `idempotency_key` varchar(128) NOT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_matchmaker_quota_entry_key` (`idempotency_key`),
+            KEY `idx_matchmaker_quota_entry_service` (`service_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='牵线次数流水'
+    """,
+    "meeting_request": """
+        CREATE TABLE IF NOT EXISTS `meeting_request` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `user_id` bigint unsigned NOT NULL,
+            `target_user_id` bigint unsigned NOT NULL,
+            `matchmaker_id` bigint unsigned DEFAULT NULL,
+            `organization_id` bigint unsigned DEFAULT NULL,
+            `status` varchar(32) NOT NULL DEFAULT 'SUBMITTED' COMMENT 'SUBMITTED/CONTACTED/ACCEPTED/DECLINED/CLOSED',
+            `note` varchar(2000) NOT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_meeting_request_user` (`user_id`, `created_at`),
+            KEY `idx_meeting_request_target` (`target_user_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='线下约见意向'
+    """,
+    "meeting_record": """
+        CREATE TABLE IF NOT EXISTS `meeting_record` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `request_id` bigint unsigned NOT NULL,
+            `organizer_id` bigint unsigned NOT NULL,
+            `organization_id` bigint unsigned DEFAULT NULL,
+            `scheduled_at` datetime NOT NULL,
+            `location` varchar(255) NOT NULL,
+            `status` varchar(32) NOT NULL DEFAULT 'SCHEDULED' COMMENT 'SCHEDULED/REMINDED/CHECKED_IN/COMPLETED/CANCELLED/NO_SHOW',
+            `cancel_reason` varchar(255) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_meeting_record_request` (`request_id`),
+            KEY `idx_meeting_record_time` (`scheduled_at`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='线下约会记录'
+    """,
+    "meeting_feedback": """
+        CREATE TABLE IF NOT EXISTS `meeting_feedback` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `meeting_id` bigint unsigned NOT NULL,
+            `user_id` bigint unsigned NOT NULL,
+            `target_rating` tinyint unsigned DEFAULT NULL,
+            `matchmaker_rating` tinyint unsigned DEFAULT NULL,
+            `continue_intent` tinyint DEFAULT NULL COMMENT '1愿意 2不确定 3不愿意',
+            `private_feedback` varchar(2000) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_meeting_feedback_user` (`meeting_id`, `user_id`),
+            KEY `idx_meeting_feedback_meeting` (`meeting_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='约会反馈'
+    """,
+    "commission_rule": """
+        CREATE TABLE IF NOT EXISTS `commission_rule` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `beneficiary_type` varchar(32) NOT NULL COMMENT 'service_matchmaker/store/promoter/partner',
+            `name` varchar(128) NOT NULL,
+            `mode` varchar(16) NOT NULL COMMENT 'fixed/rate',
+            `fixed_amount` decimal(12,2) DEFAULT NULL,
+            `rate_percent` decimal(7,4) DEFAULT NULL,
+            `priority` int NOT NULL DEFAULT '0',
+            `status` tinyint NOT NULL DEFAULT '1',
+            `version` int unsigned NOT NULL DEFAULT '1',
+            `created_by` bigint unsigned DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_commission_rule_scope` (`beneficiary_type`, `status`, `priority`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='分成规则版本'
+    """,
+    "commission_entry": """
+        CREATE TABLE IF NOT EXISTS `commission_entry` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `order_id` bigint unsigned NOT NULL,
+            `beneficiary_type` varchar(32) NOT NULL,
+            `beneficiary_id` bigint unsigned NOT NULL,
+            `rule_id` bigint unsigned DEFAULT NULL,
+            `rule_version` int unsigned DEFAULT NULL,
+            `base_amount` decimal(12,2) NOT NULL,
+            `amount` decimal(12,2) NOT NULL,
+            `status` varchar(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/AVAILABLE/FROZEN/REVERSED',
+            `idempotency_key` varchar(160) NOT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_commission_entry_key` (`idempotency_key`),
+            KEY `idx_commission_entry_beneficiary` (`beneficiary_type`, `beneficiary_id`, `status`),
+            KEY `idx_commission_entry_order` (`order_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='订单分成明细'
+    """,
+    "account_ledger": """
+        CREATE TABLE IF NOT EXISTS `account_ledger` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `account_type` varchar(32) NOT NULL COMMENT 'user/store/platform',
+            `account_id` bigint unsigned NOT NULL,
+            `direction` varchar(8) NOT NULL COMMENT 'CREDIT/DEBIT',
+            `amount` decimal(12,2) NOT NULL,
+            `state` varchar(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/AVAILABLE/REVERSED',
+            `source_type` varchar(32) NOT NULL,
+            `source_id` bigint unsigned NOT NULL,
+            `idempotency_key` varchar(160) NOT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_account_ledger_key` (`idempotency_key`),
+            KEY `idx_account_ledger_account` (`account_type`, `account_id`, `state`),
+            KEY `idx_account_ledger_source` (`source_type`, `source_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='不可变资金账本'
+    """,
+    "withdrawal_request": """
+        CREATE TABLE IF NOT EXISTS `withdrawal_request` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `account_type` varchar(32) NOT NULL,
+            `account_id` bigint unsigned NOT NULL,
+            `amount` decimal(12,2) NOT NULL,
+            `status` varchar(16) NOT NULL DEFAULT 'PENDING_REVIEW' COMMENT 'PENDING_REVIEW/APPROVED/REJECTED/PROCESSING/SUCCEEDED/FAILED',
+            `payee_masked` varchar(128) DEFAULT NULL,
+            `reviewed_by` bigint unsigned DEFAULT NULL,
+            `reviewed_at` datetime DEFAULT NULL,
+            `failure_reason` varchar(255) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_withdrawal_account` (`account_type`, `account_id`, `status`),
+            KEY `idx_withdrawal_status` (`status`, `created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='提现申请'
+    """,
+    "withdrawal_event": """
+        CREATE TABLE IF NOT EXISTS `withdrawal_event` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `withdrawal_id` bigint unsigned NOT NULL,
+            `event_type` varchar(32) NOT NULL,
+            `provider_event_id` varchar(128) DEFAULT NULL,
+            `payload_hash` char(64) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_withdrawal_provider_event` (`provider_event_id`),
+            KEY `idx_withdrawal_event_withdrawal` (`withdrawal_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='提现支付事件'
+    """,
+}
