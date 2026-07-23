@@ -3,14 +3,34 @@
 from fastapi import APIRouter
 
 from app.api.routes import health
-from app.api.routes import admin, auth, community, discovery, identity, matchmaker, profile, social, users
-from app.api.routes import organization, meeting, finance
+from app.api.routes import (
+    admin,
+    auth,
+    certifications,
+    community,
+    discovery,
+    identity,
+    matchmaker,
+    membership,
+    meeting,
+    organization,
+    points,
+    profile,
+    regions,
+    social,
+    users,
+    finance,
+)
 
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["系统"])
 api_router.include_router(auth.router, tags=["账号与认证"])
 api_router.include_router(users.router, tags=["账号与认证"])
+api_router.include_router(certifications.router, tags=["认证审核"])
+api_router.include_router(membership.router, tags=["会员"])
+api_router.include_router(points.router, tags=["积分"])
+api_router.include_router(regions.router, tags=["地区"])
 api_router.include_router(identity.router, tags=["账号与认证"])
 api_router.include_router(profile.router, tags=["首页与资料"])
 api_router.include_router(discovery.router, tags=["首页与资料"])
@@ -32,6 +52,10 @@ api_router.include_router(finance.router, tags=["财务与结算"])
 
 OPENAPI_TAGS = [
     {"name": "账号与认证", "description": "登录、账号身份、实名认证和账号安全。"},
+    {"name": "认证审核", "description": "认证资料和认证审核相关能力。"},
+    {"name": "会员", "description": "会员相关能力。"},
+    {"name": "积分", "description": "积分账户和积分流水相关能力。"},
+    {"name": "地区", "description": "省市区等地区数据查询。"},
     {"name": "首页与资料", "description": "推荐、搜索、公开资料和用户资料管理。"},
     {"name": "红娘", "description": "红娘申请、服务牵线、约见申请和约会记录。"},
     {"name": "社区", "description": "帖子、评论、互动、话题和纸飞机。"},

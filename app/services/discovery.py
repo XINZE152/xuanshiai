@@ -41,6 +41,8 @@ CARD_SELECT = """
     SELECT u.id AS user_id, u.nickname, u.avatar, u.gender, u.birthday, u.is_married,
            u.is_single_pledge, p.height, p.education_level, p.occupation, p.income,
            p.residence_province_code, p.residence_city_code, p.residence_district_code,
+           (p.residence_city_code IS NOT NULL AND p.residence_city_code =
+             (SELECT vp2.residence_city_code FROM user_profile vp2 WHERE vp2.user_id = :viewer_id)) AS same_city,
            p.mbti, p.interest_tags, p.personality_tags, p.tags, p.online_status,
            p.last_active_at, COALESCE(c.score, 0) AS completion_score,
            COALESCE(ua.realname_status, 0) AS realname_status,
@@ -179,6 +181,9 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         height=row.get("height") if not detail_locked else None,
         education_level=row.get("education_level") if not detail_locked else None,
         occupation=row.get("occupation") if not detail_locked else None,
+        city_code=row.get("residence_city_code") if not detail_locked else None,
+        income=float(row["income"]) if row.get("income") is not None and not detail_locked else None,
+        distance_km=(0.0 if row.get("same_city") else None) if not detail_locked else None,
         is_married=row.get("is_married") if not detail_locked else None,
         online_status=0 if row.get("hide_online_status") else int(row.get("online_status") or 0),
         mbti=row.get("mbti") if not detail_locked else None,

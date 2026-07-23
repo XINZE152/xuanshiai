@@ -67,6 +67,9 @@ class DiscoveryCard(BaseModel):
     height: int | None
     education_level: int | None
     occupation: str | None
+    city_code: str | None
+    income: float | None
+    distance_km: float | None
     is_married: int | None
     online_status: int
     mbti: str | None

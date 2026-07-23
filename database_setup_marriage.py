@@ -166,6 +166,11 @@ class DatabaseManager:
                 'id_card_hash': "`id_card_hash` char(64) DEFAULT NULL COMMENT '身份证号哈希，用于去重'",
                 'id_card_masked': "`id_card_masked` varchar(32) DEFAULT NULL",
                 'encryption_version': "`encryption_version` varchar(32) DEFAULT NULL",
+                'marriage_cert': "`marriage_cert` varchar(255) DEFAULT NULL COMMENT '婚姻认证材料描述或地址'",
+                'marriage_verified': "`marriage_verified` tinyint NOT NULL DEFAULT '0' COMMENT '0未提交 1审核中 2通过 3失败'",
+                'marriage_fail_reason': "`marriage_fail_reason` varchar(255) DEFAULT NULL",
+                'marriage_submitted_at': "`marriage_submitted_at` datetime DEFAULT NULL",
+                'marriage_reviewed_at': "`marriage_reviewed_at` datetime DEFAULT NULL",
             },
             'user_profile': {
                 'occupation': "`occupation` varchar(128) DEFAULT NULL COMMENT '职业'",
@@ -215,6 +220,9 @@ class DatabaseManager:
                 'reviewed_at': "`reviewed_at` datetime DEFAULT NULL",
                 'suspended_at': "`suspended_at` datetime DEFAULT NULL",
                 'suspension_reason': "`suspension_reason` varchar(255) DEFAULT NULL",
+            },
+            'payment_order': {
+                'idempotency_key': "`idempotency_key` varchar(128) DEFAULT NULL COMMENT '客户端幂等键'",
             },
             'user_boost': {
                 'start_at': "`start_at` datetime DEFAULT CURRENT_TIMESTAMP",
@@ -928,6 +936,45 @@ class DatabaseManager:
             # ============================================
             # 13. 会员购买记录
             # ============================================
+            'config_point_product': """
+                CREATE TABLE IF NOT EXISTS `config_point_product` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `code` varchar(64) NOT NULL,
+                    `name` varchar(128) NOT NULL,
+                    `product_type` varchar(16) NOT NULL,
+                    `points_cost` int unsigned NOT NULL,
+                    `value` varchar(255) DEFAULT NULL,
+                    `stock` int DEFAULT NULL,
+                    `sort` int NOT NULL DEFAULT '0',
+                    `is_active` tinyint NOT NULL DEFAULT '1',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_point_product_code` (`code`),
+                    KEY `idx_point_product_active` (`is_active`,`sort`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
+
+            'point_redeem_order': """
+                CREATE TABLE IF NOT EXISTS `point_redeem_order` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `order_no` varchar(64) NOT NULL,
+                    `user_id` bigint unsigned NOT NULL,
+                    `product_id` bigint unsigned NOT NULL,
+                    `product_code` varchar(64) NOT NULL,
+                    `points_cost` int unsigned NOT NULL,
+                    `status` tinyint NOT NULL DEFAULT '0',
+                    `idempotency_key` varchar(128) NOT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_point_redeem_order_no` (`order_no`),
+                    UNIQUE KEY `uk_point_redeem_idempotency` (`user_id`,`idempotency_key`),
+                    KEY `idx_point_redeem_user` (`user_id`,`created_at`),
+                    KEY `idx_point_redeem_status` (`status`,`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
+
             'user_membership': """
                 CREATE TABLE IF NOT EXISTS `user_membership` (
                     `id` bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -1340,6 +1387,7 @@ class DatabaseManager:
                     `pay_time` datetime DEFAULT NULL,
                     `refund_time` datetime DEFAULT NULL,
                     `expire_at` datetime DEFAULT NULL COMMENT '支付过期时间',
+                    `idempotency_key` varchar(128) DEFAULT NULL COMMENT '客户端幂等键',
                     `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
                     `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     PRIMARY KEY (`id`),
