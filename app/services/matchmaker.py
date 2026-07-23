@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser
+from app.core.config import settings
 from app.schemas.matchmaker import (
     MatchmakerAdminServiceRequestUpdate,
     MatchmakerCard,
@@ -143,6 +144,39 @@ async def _notify(db: AsyncSession, user_id: int, notification_type: str, title:
     })
 
 
+async def _consume_quota(db: AsyncSession, user_id: int, service_id: int) -> None:
+    """在当前事务中扣减一次牵线服务次数，并写入幂等流水。"""
+    await db.execute(text("""INSERT INTO matchmaker_service_quota (user_id, available_count)
+        VALUES (:user_id, :initial_count)
+        ON DUPLICATE KEY UPDATE user_id = user_id"""), {
+        "user_id": user_id, "initial_count": settings.matchmaker_service_default_quota,
+    })
+    quota = await db.execute(text("""SELECT available_count FROM matchmaker_service_quota
+        WHERE user_id = :user_id FOR UPDATE"""), {"user_id": user_id})
+    available = int(quota.scalar() or 0)
+    if available <= 0:
+        raise HTTPException(409, detail="牵线服务次数不足")
+    await db.execute(text("""INSERT INTO matchmaker_quota_entry
+        (user_id, service_id, entry_type, quantity, idempotency_key)
+        VALUES (:user_id, :service_id, 'consume', 1, :key)"""), {
+        "user_id": user_id, "service_id": service_id, "key": f"quota:consume:{service_id}",
+    })
+    await db.execute(text("""UPDATE matchmaker_service_quota SET available_count = available_count - 1,
+        used_count = used_count + 1 WHERE user_id = :user_id"""), {"user_id": user_id})
+
+
+async def _refund_quota(db: AsyncSession, user_id: int, service_id: int) -> None:
+    """为失败/取消的牵线申请最多返还一次服务次数。"""
+    result = await db.execute(text("""INSERT IGNORE INTO matchmaker_quota_entry
+        (user_id, service_id, entry_type, quantity, idempotency_key)
+        VALUES (:user_id, :service_id, 'refund', 1, :key)"""), {
+        "user_id": user_id, "service_id": service_id, "key": f"quota:refund:{service_id}",
+    })
+    if result.rowcount:
+        await db.execute(text("""UPDATE matchmaker_service_quota SET available_count = available_count + 1,
+            refunded_count = refunded_count + 1 WHERE user_id = :user_id"""), {"user_id": user_id})
+
+
 async def create_service_request(
     db: AsyncSession, current: CurrentUser, request: MatchmakerServiceRequestCreate
 ) -> MatchmakerServiceRequestResponse:
@@ -170,6 +204,7 @@ async def create_service_request(
         "requirement": request.requirement,
     })
     service_id = int(result.lastrowid)
+    await _consume_quota(db, current.id, service_id)
     await _notify(db, request.matchmaker_id, "matchmaker_service_request", "收到新的牵线申请", "有用户向你提交了牵线申请", service_id)
     await db.commit()
     created = await db.execute(text(f"{SERVICE_SELECT} WHERE id = :id"), {"id": service_id})
@@ -210,6 +245,8 @@ async def update_service_request(
     await db.execute(text(f"""UPDATE matchmaker_service SET status = :status,
         feedback = :feedback, {start_at} {end_at} updated_at = UTC_TIMESTAMP()
         WHERE id = :id"""), {"status": request.status, "feedback": request.feedback, "id": service_id})
+    if request.status == 3:
+        await _refund_quota(db, int(row["user_id"]), service_id)
     await _notify(db, row["user_id"], "matchmaker_service_updated", "牵线服务状态更新", "你的牵线申请状态已更新", service_id)
     await db.commit()
     updated = await db.execute(text(f"{SERVICE_SELECT} WHERE id = :id"), {"id": service_id})
@@ -256,6 +293,8 @@ async def admin_update_service_request(db: AsyncSession, admin_id: int, service_
         params["feedback"] = request.feedback
     updates.extend(["updated_at = UTC_TIMESTAMP()"])
     await db.execute(text(f"UPDATE matchmaker_service SET {', '.join(updates)} WHERE id = :id"), params)
+    if request.status == 3:
+        await _refund_quota(db, int(row["user_id"]), service_id)
     await _notify(db, request.matchmaker_id or row["matchmaker_id"] or row["user_id"], "matchmaker_service_admin_updated", "牵线申请已更新", "管理员更新了牵线申请", service_id)
     await db.commit()
     updated = await db.execute(text(f"{SERVICE_SELECT} WHERE id = :id"), {"id": service_id})

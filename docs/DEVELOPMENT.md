@@ -58,6 +58,7 @@ code .env
 | 配置项 | 用途 | 本地默认值 |
 | --- | --- | --- |
 | `DATABASE_URL` | MySQL 异步连接地址 | `mysql+aiomysql://root:YOUR_MYSQL_PASSWORD@127.0.0.1:3306/xuanshiai` |
+| `AUTO_INIT_DB` | 启动时自动创建数据库和表 | 开发/测试环境 `true`，staging/production 必须为 `false` |
 | `REDIS_URL` | Redis 连接地址 | `redis://127.0.0.1:6379/0` |
 | `SECRET_KEY` | JWT 签名密钥 | 仅开发占位值，部署前必须替换 |
 | `CORS_ORIGINS_RAW` | 允许跨域的前端地址 | `http://localhost:3000,http://localhost:5173` |
@@ -116,7 +117,21 @@ Test-NetConnection 127.0.0.1 -Port 3306
 & 'H:\mysql\bin\mysql.exe' --protocol=TCP --host=127.0.0.1 --port=3306 --user=root --password --database=xuanshiai --execute="SELECT 1 AS connection_ok;"
 ```
 
-当前项目已预留数据库连接配置，但尚未自动执行建表迁移；后续接入 ORM 模型后，再增加 Alembic 迁移命令。
+当前项目使用 `database_setup_marriage.py` 初始化基础表和一期商业化表。开发/测试环境启动 `uv run uvicorn app.main:app --reload` 时会自动执行幂等初始化；也可以手动运行：
+
+```powershell
+python database_setup_marriage.py
+```
+
+该脚本使用 `CREATE TABLE IF NOT EXISTS`，但生产环境仍应先备份并在发布窗口执行；真实支付、提现和第三方回调配置不能使用开发环境 Mock。
+
+生产或预发布环境必须配置：
+
+```env
+AUTO_INIT_DB=false
+```
+
+生产环境禁止在应用启动时自动创建数据库和执行结构变更。数据库账号、密码、主机、端口和库名仍需填写在 `DATABASE_URL` 中，应用不会自动推断或生成这些敏感配置。
 
 ## 四、启动服务
 

@@ -455,6 +455,7 @@ class DatabaseManager:
     def init_all_tables(self, cursor):
         """初始化数据库表结构"""
         logger.info("初始化数据库表结构")
+        from app.db.business_schema import BUSINESS_TABLES
 
         tables = {
             # ============================================
@@ -1900,6 +1901,9 @@ class DatabaseManager:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户置顶曝光购买记录'
             """,
         }
+
+        # 本次一期商业化领域表与基础用户表保持同一初始化入口。
+        tables.update(BUSINESS_TABLES)
 
         # 创建所有表
         for table_name, sql in tables.items():
