@@ -14,6 +14,7 @@ from app.schemas.meeting import (
     MeetingFeedbackCreate,
     MeetingRecordResponse,
     MeetingRequestCreate,
+    MatchmakerMeetingRequestCreate,
     MeetingRequestResponse,
     MeetingScheduleCreate,
     MeetingStatusUpdate,
@@ -33,40 +34,57 @@ def _record_response(row: Any) -> MeetingRecordResponse:
 
 
 async def create_meeting_request(db: AsyncSession, current: CurrentUser, request: MeetingRequestCreate) -> MeetingRequestResponse:
-    if request.target_user_id == current.id:
-        raise HTTPException(422, detail="不能向自己提交约见申请")
+    raise HTTPException(403, detail="普通用户不能直接发起约见，请通过已购买的红娘服务联系红娘")
+
+
+async def create_matchmaker_meeting_request(
+    db: AsyncSession, current: CurrentUser, request: MatchmakerMeetingRequestCreate
+) -> MeetingRequestResponse:
+    service_result = await db.execute(text("""SELECT id, user_id, status FROM matchmaker_service
+        WHERE id = :service_id AND matchmaker_id = :matchmaker_id FOR UPDATE"""), {
+        "service_id": request.service_id, "matchmaker_id": current.id,
+    })
+    service = service_result.mappings().first()
+    if not service:
+        raise HTTPException(404, detail="服务单不存在或不属于当前红娘")
+    if service["status"] not in (1,):
+        raise HTTPException(409, detail="只有服务中的红娘服务才能发起约见")
+    if request.target_user_id == service["user_id"]:
+        raise HTTPException(422, detail="不能将服务用户作为约见对象")
     target = await db.execute(text("SELECT id FROM users WHERE id = :id AND status = 1"), {"id": request.target_user_id})
     if not target.scalar():
         raise HTTPException(404, detail="约见对象不存在或不可用")
     duplicate = await db.execute(text("""SELECT id FROM meeting_request
         WHERE user_id = :user_id AND target_user_id = :target_id
           AND status IN ('SUBMITTED', 'CONTACTED', 'ACCEPTED') LIMIT 1"""), {
-        "user_id": current.id, "target_id": request.target_user_id,
+        "user_id": service["user_id"], "target_id": request.target_user_id,
     })
     if duplicate.scalar():
         raise HTTPException(409, detail="已有处理中约见申请")
-    result = await db.execute(text("""INSERT INTO meeting_request (user_id, target_user_id, note)
-        VALUES (:user_id, :target_id, :note)"""), {
-        "user_id": current.id, "target_id": request.target_user_id, "note": request.note,
+    result = await db.execute(text("""INSERT INTO meeting_request
+        (user_id, target_user_id, matchmaker_id, service_id, note)
+        VALUES (:user_id, :target_id, :matchmaker_id, :service_id, :note)"""), {
+        "user_id": service["user_id"], "target_id": request.target_user_id,
+        "matchmaker_id": current.id, "service_id": request.service_id, "note": request.note,
     })
     request_id = int(result.lastrowid)
     await db.commit()
     result = await db.execute(text("""SELECT id, user_id, target_user_id, matchmaker_id,
-        organization_id, status, note, created_at, updated_at
+        service_id, organization_id, status, note, created_at, updated_at
         FROM meeting_request WHERE id = :id"""), {"id": request_id})
     return _request_response(result.mappings().one())
 
 
 async def list_my_meeting_requests(db: AsyncSession, current: CurrentUser) -> list[MeetingRequestResponse]:
     result = await db.execute(text("""SELECT id, user_id, target_user_id, matchmaker_id,
-        organization_id, status, note, created_at, updated_at FROM meeting_request
+        service_id, organization_id, status, note, created_at, updated_at FROM meeting_request
         WHERE user_id = :user_id OR target_user_id = :user_id ORDER BY created_at DESC, id DESC"""), {"user_id": current.id})
     return [_request_response(row) for row in result.mappings().all()]
 
 
 async def update_meeting_request(db: AsyncSession, current: CurrentUser, request_id: int, request: MeetingStatusUpdate) -> MeetingRequestResponse:
     result = await db.execute(text("""SELECT id, user_id, target_user_id, matchmaker_id,
-        organization_id, status, note, created_at, updated_at FROM meeting_request
+        service_id, organization_id, status, note, created_at, updated_at FROM meeting_request
         WHERE id = :id FOR UPDATE"""), {"id": request_id})
     row = result.mappings().first()
     if not row:
@@ -82,7 +100,7 @@ async def update_meeting_request(db: AsyncSession, current: CurrentUser, request
     })
     await db.commit()
     result = await db.execute(text("""SELECT id, user_id, target_user_id, matchmaker_id,
-        organization_id, status, note, created_at, updated_at FROM meeting_request WHERE id = :id"""), {"id": request_id})
+        service_id, organization_id, status, note, created_at, updated_at FROM meeting_request WHERE id = :id"""), {"id": request_id})
     return _request_response(result.mappings().one())
 
 

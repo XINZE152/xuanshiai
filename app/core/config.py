@@ -57,7 +57,8 @@ class Settings(BaseSettings):
     browse_high_match_bonus: int = 5
     apply_daily_free_limit: int = 3
     apply_daily_vip_limit: int = 10
-    matchmaker_service_default_quota: int = 3
+    # 红娘服务只能通过现金订单获得，不为新用户自动发放免费次数。
+    matchmaker_service_default_quota: int = 0
     superlike_daily_free_limit: int = 1
     superlike_daily_vip_limit: int = 3
     log_level: str = "INFO"

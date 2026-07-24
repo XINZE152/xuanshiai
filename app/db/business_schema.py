@@ -132,6 +132,36 @@ BUSINESS_TABLES = {
             KEY `idx_business_audit_actor` (`actor_user_id`, `created_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='商业化业务审计日志'
     """,
+    "matchmaker_service_product": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_service_product` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `code` varchar(32) NOT NULL,
+            `name` varchar(128) NOT NULL,
+            `service_type` tinyint unsigned NOT NULL COMMENT '1付费牵线 3私人定制',
+            `price` decimal(12,2) NOT NULL,
+            `description` varchar(2000) NOT NULL,
+            `status` tinyint NOT NULL DEFAULT '1' COMMENT '1上架 2下架',
+            `created_by` bigint unsigned DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_matchmaker_product_code` (`code`),
+            KEY `idx_matchmaker_product_status` (`status`, `service_type`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='付费红娘服务商品'
+    """,
+    "matchmaker_service_contact": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_service_contact` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `service_id` bigint unsigned NOT NULL,
+            `matchmaker_id` bigint unsigned NOT NULL,
+            `wechat_contact` varchar(128) NOT NULL COMMENT '受控展示的红娘微信号',
+            `delivered_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_matchmaker_service_contact` (`service_id`),
+            KEY `idx_matchmaker_contact_matchmaker` (`matchmaker_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘服务联系方式交付记录'
+    """,
     "matchmaker_service_quota": """
         CREATE TABLE IF NOT EXISTS `matchmaker_service_quota` (
             `id` bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -164,6 +194,7 @@ BUSINESS_TABLES = {
             `user_id` bigint unsigned NOT NULL,
             `target_user_id` bigint unsigned NOT NULL,
             `matchmaker_id` bigint unsigned DEFAULT NULL,
+            `service_id` bigint unsigned DEFAULT NULL COMMENT '关联红娘服务单',
             `organization_id` bigint unsigned DEFAULT NULL,
             `status` varchar(32) NOT NULL DEFAULT 'SUBMITTED' COMMENT 'SUBMITTED/CONTACTED/ACCEPTED/DECLINED/CLOSED',
             `note` varchar(2000) NOT NULL,
@@ -172,6 +203,7 @@ BUSINESS_TABLES = {
             PRIMARY KEY (`id`),
             KEY `idx_meeting_request_user` (`user_id`, `created_at`),
             KEY `idx_meeting_request_target` (`target_user_id`, `status`)
+            ,KEY `idx_meeting_request_service` (`service_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='线下约见意向'
     """,
     "meeting_record": """

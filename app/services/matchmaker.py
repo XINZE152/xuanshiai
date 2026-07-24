@@ -1,20 +1,29 @@
-"""First-phase matchmaker listings and free service requests."""
+"""Paid matchmaker products, orders, service delivery and requests."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
+import secrets
 from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser
-from app.core.config import settings
 from app.schemas.matchmaker import (
     MatchmakerAdminServiceRequestUpdate,
     MatchmakerCard,
     MatchmakerPage,
+    MatchmakerContactResponse,
+    MatchmakerContactUpdate,
+    MatchmakerServiceOrderCreate,
+    MatchmakerServiceOrderResponse,
+    MatchmakerServiceProductCreate,
+    MatchmakerServiceProductResponse,
+    MatchmakerServiceProductUpdate,
     MatchmakerServiceRequestCreate,
     MatchmakerServiceRequestPage,
     MatchmakerServiceRequestResponse,
@@ -26,20 +35,6 @@ def _datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(str(value))
-
-
-def _json_images(value: Any) -> list[str]:
-    if not value:
-        return []
-    if isinstance(value, list):
-        return [str(item) for item in value]
-    import json
-
-    try:
-        parsed = json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return []
-    return parsed if isinstance(parsed, list) else []
 
 
 def _card(row: Any) -> MatchmakerCard:
@@ -122,6 +117,8 @@ def _service_response(row: Any) -> MatchmakerServiceRequestResponse:
         matchmaker_id=int(row["matchmaker_id"]) if row["matchmaker_id"] is not None else None,
         service_type=int(row["service_type"]),
         status=int(row["status"]),
+        order_id=int(row["order_id"] or 0),
+        product_id=int(row["product_id"] or 0),
         requirement=row["requirement"] or "",
         feedback=row["feedback"],
         created_at=_datetime(row["created_at"]),
@@ -132,7 +129,7 @@ def _service_response(row: Any) -> MatchmakerServiceRequestResponse:
 
 
 SERVICE_SELECT = """SELECT id, user_id, matchmaker_id, service_type, status, requirement,
-    feedback, created_at, updated_at, start_at, end_at FROM matchmaker_service"""
+    order_id, product_id, feedback, created_at, updated_at, start_at, end_at FROM matchmaker_service"""
 
 
 async def _notify(db: AsyncSession, user_id: int, notification_type: str, title: str, content: str, related_id: int) -> None:
@@ -144,42 +141,81 @@ async def _notify(db: AsyncSession, user_id: int, notification_type: str, title:
     })
 
 
-async def _consume_quota(db: AsyncSession, user_id: int, service_id: int) -> None:
-    """在当前事务中扣减一次牵线服务次数，并写入幂等流水。"""
-    await db.execute(text("""INSERT INTO matchmaker_service_quota (user_id, available_count)
-        VALUES (:user_id, :initial_count)
-        ON DUPLICATE KEY UPDATE user_id = user_id"""), {
-        "user_id": user_id, "initial_count": settings.matchmaker_service_default_quota,
+def _product_response(row: Any) -> MatchmakerServiceProductResponse:
+    return MatchmakerServiceProductResponse(
+        id=int(row["id"]), code=row["code"], name=row["name"],
+        service_type=int(row["service_type"]), price=Decimal(str(row["price"])),
+        description=row["description"], active=bool(row["status"] == 1),
+        created_at=_datetime(row["created_at"]), updated_at=_datetime(row["updated_at"]),
+    )
+
+
+def _order_response(row: Any) -> MatchmakerServiceOrderResponse:
+    return MatchmakerServiceOrderResponse(
+        id=int(row["id"]), order_no=row["order_no"], user_id=int(row["user_id"]),
+        matchmaker_id=int(row["matchmaker_id"]), product_id=int(row["service_product_id"]),
+        service_type=int(row["service_type"]), product_name=row["product_name"],
+        amount=Decimal(str(row["amount"])), status=int(row["status"]),
+        service_request_id=int(row["service_request_id"]) if row["service_request_id"] else None,
+        created_at=_datetime(row["created_at"]),
+        pay_time=_datetime(row["pay_time"]) if row["pay_time"] else None,
+    )
+
+
+async def list_service_products(db: AsyncSession) -> list[MatchmakerServiceProductResponse]:
+    result = await db.execute(text("""SELECT id, code, name, service_type, price, description,
+        status, created_at, updated_at FROM matchmaker_service_product
+        WHERE status = 1 AND service_type IN (1, 3) ORDER BY id"""))
+    return [_product_response(row) for row in result.mappings().all()]
+
+
+async def admin_create_service_product(
+    db: AsyncSession, admin_id: int, request: MatchmakerServiceProductCreate
+) -> MatchmakerServiceProductResponse:
+    exists = await db.execute(text("SELECT id FROM matchmaker_service_product WHERE code = :code"), {"code": request.code})
+    if exists.scalar():
+        raise HTTPException(409, detail="红娘服务商品编码已存在")
+    result = await db.execute(text("""INSERT INTO matchmaker_service_product
+        (code, name, service_type, price, description, status, created_by)
+        VALUES (:code, :name, :service_type, :price, :description, :status, :admin_id)"""), {
+        "code": request.code, "name": request.name, "service_type": request.service_type,
+        "price": request.price, "description": request.description,
+        "status": 1 if request.active else 2, "admin_id": admin_id,
     })
-    quota = await db.execute(text("""SELECT available_count FROM matchmaker_service_quota
-        WHERE user_id = :user_id FOR UPDATE"""), {"user_id": user_id})
-    available = int(quota.scalar() or 0)
-    if available <= 0:
-        raise HTTPException(409, detail="牵线服务次数不足")
-    await db.execute(text("""INSERT INTO matchmaker_quota_entry
-        (user_id, service_id, entry_type, quantity, idempotency_key)
-        VALUES (:user_id, :service_id, 'consume', 1, :key)"""), {
-        "user_id": user_id, "service_id": service_id, "key": f"quota:consume:{service_id}",
+    await db.commit()
+    row = (await db.execute(text("""SELECT id, code, name, service_type, price, description,
+        status, created_at, updated_at FROM matchmaker_service_product WHERE id = :id"""), {"id": result.lastrowid})).mappings().one()
+    return _product_response(row)
+
+
+async def admin_update_service_product(
+    db: AsyncSession, product_id: int, request: MatchmakerServiceProductUpdate
+) -> MatchmakerServiceProductResponse:
+    current = await db.execute(text("""SELECT id FROM matchmaker_service_product
+        WHERE id = :id FOR UPDATE"""), {"id": product_id})
+    if not current.scalar():
+        raise HTTPException(404, detail="红娘服务商品不存在")
+    await db.execute(text("""UPDATE matchmaker_service_product SET
+        name = COALESCE(:name, name),
+        service_type = COALESCE(:service_type, service_type),
+        price = COALESCE(:price, price),
+        description = COALESCE(:description, description),
+        status = COALESCE(:status, status),
+        updated_at = UTC_TIMESTAMP()
+        WHERE id = :id"""), {
+        "id": product_id, "name": request.name, "service_type": request.service_type,
+        "price": request.price, "description": request.description,
+        "status": None if request.active is None else (1 if request.active else 2),
     })
-    await db.execute(text("""UPDATE matchmaker_service_quota SET available_count = available_count - 1,
-        used_count = used_count + 1 WHERE user_id = :user_id"""), {"user_id": user_id})
+    await db.commit()
+    row = (await db.execute(text("""SELECT id, code, name, service_type, price, description,
+        status, created_at, updated_at FROM matchmaker_service_product WHERE id = :id"""), {"id": product_id})).mappings().one()
+    return _product_response(row)
 
 
-async def _refund_quota(db: AsyncSession, user_id: int, service_id: int) -> None:
-    """为失败/取消的牵线申请最多返还一次服务次数。"""
-    result = await db.execute(text("""INSERT IGNORE INTO matchmaker_quota_entry
-        (user_id, service_id, entry_type, quantity, idempotency_key)
-        VALUES (:user_id, :service_id, 'refund', 1, :key)"""), {
-        "user_id": user_id, "service_id": service_id, "key": f"quota:refund:{service_id}",
-    })
-    if result.rowcount:
-        await db.execute(text("""UPDATE matchmaker_service_quota SET available_count = available_count + 1,
-            refunded_count = refunded_count + 1 WHERE user_id = :user_id"""), {"user_id": user_id})
-
-
-async def create_service_request(
-    db: AsyncSession, current: CurrentUser, request: MatchmakerServiceRequestCreate
-) -> MatchmakerServiceRequestResponse:
+async def create_service_order(
+    db: AsyncSession, current: CurrentUser, request: MatchmakerServiceOrderCreate, idempotency_key: str
+) -> MatchmakerServiceOrderResponse:
     if current.realname_status != 2:
         raise HTTPException(403, detail="提交牵线申请前必须完成实名认证")
     if request.matchmaker_id == current.id:
@@ -192,23 +228,169 @@ async def create_service_request(
           AND app.status = 1"""), {"matchmaker_id": request.matchmaker_id})
     if not target.scalar():
         raise HTTPException(404, detail="服务红娘不存在或暂不可用")
-    existing = await db.execute(text("""SELECT id FROM matchmaker_service
-        WHERE user_id = :user_id AND matchmaker_id = :matchmaker_id AND status IN (0, 1)
-        LIMIT 1 FOR UPDATE"""), {"user_id": current.id, "matchmaker_id": request.matchmaker_id})
-    if existing.scalar():
-        raise HTTPException(409, detail="已有处理中牵线申请，不能重复提交")
+    product = await db.execute(text("""SELECT id, name, service_type, price FROM matchmaker_service_product
+        WHERE id = :id AND status = 1 AND service_type IN (1, 3)"""), {"id": request.product_id})
+    product_row = product.mappings().first()
+    if not product_row:
+        raise HTTPException(404, detail="红娘服务商品不存在或已下架")
+    existing = await db.execute(text("""SELECT id, order_no, user_id, matchmaker_id,
+        service_product_id, service_type, product_name, amount, status, service_request_id,
+        created_at, pay_time FROM payment_order
+        WHERE user_id = :user_id AND type = 3 AND idempotency_key = :key LIMIT 1"""), {
+        "user_id": current.id, "key": idempotency_key,
+    })
+    existing_row = existing.mappings().first()
+    if existing_row:
+        return _order_response(existing_row)
+    order_no = f"XM{datetime.utcnow():%Y%m%d%H%M%S}{current.id:08d}{secrets.token_hex(4)}"
+    try:
+        result = await db.execute(text("""INSERT INTO payment_order
+            (user_id, order_no, type, product_id, product_type, product_name, amount,
+             service_product_id, matchmaker_id, service_requirement, idempotency_key, status, expire_at)
+            VALUES (:user_id, :order_no, 3, :product_id, 3, :product_name, :amount,
+             :service_product_id, :matchmaker_id, :requirement, :idempotency_key, 0,
+             DATE_ADD(UTC_TIMESTAMP(), INTERVAL 30 MINUTE))"""), {
+            "user_id": current.id, "order_no": order_no, "product_id": request.product_id,
+            "product_name": product_row["name"], "amount": product_row["price"],
+            "service_product_id": request.product_id, "matchmaker_id": request.matchmaker_id,
+            "requirement": request.requirement, "idempotency_key": idempotency_key,
+        })
+    except IntegrityError:
+        await db.rollback()
+        existing = await db.execute(text("""SELECT id, order_no, user_id, matchmaker_id,
+            service_product_id, sp.service_type, po.product_name, po.amount, po.status,
+            po.service_request_id, po.created_at, po.pay_time
+            FROM payment_order po JOIN matchmaker_service_product sp ON sp.id = po.service_product_id
+            WHERE po.user_id = :user_id AND po.type = 3 AND po.idempotency_key = :key LIMIT 1"""), {
+            "user_id": current.id, "key": idempotency_key,
+        })
+        existing_row = existing.mappings().first()
+        if not existing_row:
+            raise
+        return _order_response(existing_row)
+    await db.commit()
+    created = await db.execute(text("""SELECT po.id, po.order_no, po.user_id, po.matchmaker_id,
+        po.service_product_id, sp.service_type, po.product_name, po.amount, po.status,
+        po.service_request_id, po.created_at, po.pay_time
+        FROM payment_order po JOIN matchmaker_service_product sp ON sp.id = po.service_product_id
+        WHERE po.id = :id"""), {"id": result.lastrowid})
+    return _order_response(created.mappings().one())
+
+
+async def get_service_order(db: AsyncSession, current: CurrentUser, order_no: str) -> MatchmakerServiceOrderResponse:
+    result = await db.execute(text("""SELECT po.id, po.order_no, po.user_id, po.matchmaker_id,
+        po.service_product_id, sp.service_type, po.product_name, po.amount, po.status,
+        po.service_request_id, po.created_at, po.pay_time
+        FROM payment_order po JOIN matchmaker_service_product sp ON sp.id = po.service_product_id
+        WHERE po.order_no = :order_no AND po.user_id = :user_id"""), {"order_no": order_no, "user_id": current.id})
+    row = result.mappings().first()
+    if not row:
+        raise HTTPException(404, detail="红娘服务订单不存在")
+    return _order_response(row)
+
+
+async def activate_paid_service_order(db: AsyncSession, order_id: int) -> int:
+    order_result = await db.execute(text("""SELECT po.id, po.user_id, po.matchmaker_id,
+        po.service_product_id, po.service_request_id, po.service_requirement,
+        po.status, sp.service_type FROM payment_order po
+        JOIN matchmaker_service_product sp ON sp.id = po.service_product_id
+        WHERE po.id = :id FOR UPDATE"""), {"id": order_id})
+    order = order_result.mappings().first()
+    if not order or order["service_product_id"] is None:
+        raise HTTPException(422, detail="订单不是红娘服务订单")
+    if order["status"] != 1:
+        raise HTTPException(409, detail="支付成功后才能开通红娘服务")
+    if order["service_request_id"]:
+        return int(order["service_request_id"])
+    target = await db.execute(text("""SELECT 1 FROM user_matchmaker_apply app
+        JOIN users u ON u.id = app.user_id AND u.status = 1
+        JOIN user_role role ON role.user_id = app.user_id
+          AND role.role_code = 'service_matchmaker' AND role.status = 1
+        WHERE app.user_id = :matchmaker_id AND app.application_type = 'service_matchmaker'
+          AND app.status = 1"""), {"matchmaker_id": order["matchmaker_id"]})
+    if not target.scalar():
+        raise HTTPException(409, detail="支付订单对应的服务红娘已不可用")
     result = await db.execute(text("""INSERT INTO matchmaker_service
-        (user_id, matchmaker_id, service_type, status, requirement)
-        VALUES (:user_id, :matchmaker_id, 2, 0, :requirement)"""), {
-        "user_id": current.id, "matchmaker_id": request.matchmaker_id,
-        "requirement": request.requirement,
+        (user_id, matchmaker_id, service_type, status, order_id, product_id, requirement)
+        VALUES (:user_id, :matchmaker_id, :service_type, 0, :order_id, :product_id, :requirement)"""), {
+        "user_id": order["user_id"], "matchmaker_id": order["matchmaker_id"],
+        "service_type": order["service_type"], "order_id": order["id"],
+        "product_id": order["service_product_id"], "requirement": order["service_requirement"] or "",
     })
     service_id = int(result.lastrowid)
-    await _consume_quota(db, current.id, service_id)
-    await _notify(db, request.matchmaker_id, "matchmaker_service_request", "收到新的牵线申请", "有用户向你提交了牵线申请", service_id)
+    await db.execute(text("UPDATE payment_order SET service_request_id = :service_id WHERE id = :id"), {"service_id": service_id, "id": order_id})
+    await _notify(db, int(order["matchmaker_id"]), "matchmaker_service_request", "收到新的付费红娘服务", "有用户购买了你的红娘服务", service_id)
+    return service_id
+
+
+async def create_service_request(
+    db: AsyncSession, current: CurrentUser, request: MatchmakerServiceRequestCreate
+) -> MatchmakerServiceRequestResponse:
+    order_result = await db.execute(text("SELECT id, user_id, status, service_request_id FROM payment_order WHERE order_no = :order_no FOR UPDATE"), {"order_no": request.order_no})
+    order = order_result.mappings().first()
+    if not order or int(order["user_id"]) != current.id:
+        raise HTTPException(404, detail="红娘服务订单不存在")
+    if order["status"] != 1:
+        raise HTTPException(409, detail="红娘服务订单尚未支付成功")
+    await activate_paid_service_order(db, int(order["id"]))
     await db.commit()
-    created = await db.execute(text(f"{SERVICE_SELECT} WHERE id = :id"), {"id": service_id})
+    created = await db.execute(text(f"{SERVICE_SELECT} WHERE order_id = :order_id"), {"order_id": order["id"]})
     return _service_response(created.mappings().one())
+
+
+async def set_matchmaker_contact(
+    db: AsyncSession, current: CurrentUser, service_id: int, request: MatchmakerContactUpdate
+) -> MatchmakerContactResponse:
+    service = await db.execute(text("""SELECT id, matchmaker_id, status FROM matchmaker_service
+        WHERE id = :id FOR UPDATE"""), {"id": service_id})
+    row = service.mappings().first()
+    if not row:
+        raise HTTPException(404, detail="红娘服务不存在")
+    if row["matchmaker_id"] != current.id:
+        raise HTTPException(403, detail="只有被分配的服务红娘可以提交微信")
+    if row["status"] == 3:
+        raise HTTPException(409, detail="已取消或退款的服务不能交付联系方式")
+    await db.execute(text("""INSERT INTO matchmaker_service_contact
+        (service_id, matchmaker_id, wechat_contact)
+        VALUES (:service_id, :matchmaker_id, :wechat_contact)
+        ON DUPLICATE KEY UPDATE wechat_contact = VALUES(wechat_contact),
+            delivered_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP()"""), {
+        "service_id": service_id, "matchmaker_id": current.id,
+        "wechat_contact": request.wechat_contact,
+    })
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id, reason)
+        VALUES (:actor_id, 'matchmaker_contact.deliver', 'matchmaker_service', :service_id, '红娘提交服务微信')"""), {
+        "actor_id": current.id, "service_id": service_id,
+    })
+    await db.commit()
+    result = await db.execute(text("""SELECT service_id, matchmaker_id, wechat_contact, delivered_at
+        FROM matchmaker_service_contact WHERE service_id = :service_id"""), {"service_id": service_id})
+    return MatchmakerContactResponse(**dict(result.mappings().one()))
+
+
+async def get_matchmaker_contact(
+    db: AsyncSession, current: CurrentUser, service_id: int
+) -> MatchmakerContactResponse:
+    service = await db.execute(text("""SELECT id, user_id, status FROM matchmaker_service
+        WHERE id = :id"""), {"id": service_id})
+    row = service.mappings().first()
+    if not row or row["user_id"] != current.id:
+        raise HTTPException(404, detail="红娘服务不存在")
+    if row["status"] == 3:
+        raise HTTPException(409, detail="已取消或退款的服务不能查看红娘微信")
+    result = await db.execute(text("""SELECT service_id, matchmaker_id, wechat_contact, delivered_at
+        FROM matchmaker_service_contact WHERE service_id = :service_id"""), {"service_id": service_id})
+    contact = result.mappings().first()
+    if not contact:
+        raise HTTPException(409, detail="红娘尚未提交微信联系方式")
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id, reason)
+        VALUES (:actor_id, 'matchmaker_contact.view', 'matchmaker_service', :service_id, '用户查看红娘服务微信')"""), {
+        "actor_id": current.id, "service_id": service_id,
+    })
+    await db.commit()
+    return MatchmakerContactResponse(**dict(contact))
 
 
 async def list_service_requests(
@@ -245,8 +427,6 @@ async def update_service_request(
     await db.execute(text(f"""UPDATE matchmaker_service SET status = :status,
         feedback = :feedback, {start_at} {end_at} updated_at = UTC_TIMESTAMP()
         WHERE id = :id"""), {"status": request.status, "feedback": request.feedback, "id": service_id})
-    if request.status == 3:
-        await _refund_quota(db, int(row["user_id"]), service_id)
     await _notify(db, row["user_id"], "matchmaker_service_updated", "牵线服务状态更新", "你的牵线申请状态已更新", service_id)
     await db.commit()
     updated = await db.execute(text(f"{SERVICE_SELECT} WHERE id = :id"), {"id": service_id})
@@ -293,8 +473,6 @@ async def admin_update_service_request(db: AsyncSession, admin_id: int, service_
         params["feedback"] = request.feedback
     updates.extend(["updated_at = UTC_TIMESTAMP()"])
     await db.execute(text(f"UPDATE matchmaker_service SET {', '.join(updates)} WHERE id = :id"), params)
-    if request.status == 3:
-        await _refund_quota(db, int(row["user_id"]), service_id)
     await _notify(db, request.matchmaker_id or row["matchmaker_id"] or row["user_id"], "matchmaker_service_admin_updated", "牵线申请已更新", "管理员更新了牵线申请", service_id)
     await db.commit()
     updated = await db.execute(text(f"{SERVICE_SELECT} WHERE id = :id"), {"id": service_id})

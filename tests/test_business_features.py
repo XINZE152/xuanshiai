@@ -16,6 +16,7 @@ def test_business_routes_are_registered_and_protected() -> None:
     assert "/api/v1/organizations/stores" in paths
     assert "/api/v1/promotions/attributions" in paths
     assert "/api/v1/matchmaker/meetings/requests" in paths
+    assert "/api/v1/matchmaker/meetings/requests/from-service" in paths
     assert "/api/v1/finance/orders" in paths
     assert "/api/v1/finance/commission-entries" in paths
     assert "/api/v1/admin/finance/commission-rules" in paths
