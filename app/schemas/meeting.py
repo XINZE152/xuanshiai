@@ -11,10 +11,17 @@ class MeetingRequestCreate(BaseModel):
     note: str = Field(min_length=1, max_length=2000)
 
 
+class MatchmakerMeetingRequestCreate(BaseModel):
+    service_id: int = Field(ge=1)
+    target_user_id: int = Field(ge=1)
+    note: str = Field(min_length=1, max_length=2000)
+
+
 class MeetingRequestResponse(BaseModel):
     id: int
     user_id: int
     target_user_id: int
+    service_id: int | None
     matchmaker_id: int | None
     organization_id: int | None
     status: Literal["SUBMITTED", "CONTACTED", "ACCEPTED", "DECLINED", "CLOSED"]

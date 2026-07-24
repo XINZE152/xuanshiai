@@ -3,20 +3,44 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.main import app
-from app.schemas.matchmaker import MatchmakerServiceRequestCreate, MatchmakerServiceRequestUpdate
+from app.schemas.matchmaker import (
+    MatchmakerServiceOrderCreate,
+    MatchmakerServiceProductCreate,
+    MatchmakerServiceProductUpdate,
+    MatchmakerServiceRequestCreate,
+    MatchmakerServiceRequestUpdate,
+)
 
 
 client = TestClient(app)
 
 
 def test_matchmaker_service_request_schema_validates_business_rules() -> None:
-    request = MatchmakerServiceRequestCreate(matchmaker_id=1, requirement="希望寻找认真稳定的婚恋关系")
-    assert request.matchmaker_id == 1
+    request = MatchmakerServiceRequestCreate(order_no="XM202607240001", requirement="希望寻找认真稳定的婚恋关系")
+    assert request.order_no == "XM202607240001"
     with pytest.raises(ValidationError):
         MatchmakerServiceRequestCreate(matchmaker_id=1, requirement="太短")
     with pytest.raises(ValidationError):
         MatchmakerServiceRequestUpdate(status=2)
     assert MatchmakerServiceRequestUpdate(status=1).status == 1
+
+
+def test_matchmaker_paid_service_contracts() -> None:
+    product = MatchmakerServiceProductCreate(
+        code="paid_matchmaking", name="付费牵线", service_type=1,
+        price="99.00", description="支付后获得红娘微信服务",
+    )
+    assert product.service_type == 1
+    order = MatchmakerServiceOrderCreate(
+        product_id=1, matchmaker_id=2, requirement="希望寻找认真稳定的婚恋关系"
+    )
+    assert order.product_id == 1
+    assert MatchmakerServiceProductUpdate(active=False).active is False
+    with pytest.raises(ValidationError):
+        MatchmakerServiceProductCreate(
+            code="free_matchmaking", name="免费牵线", service_type=2,
+            price="99.00", description="不应开放免费红娘服务",
+        )
 
 
 def test_matchmaker_routes_are_registered_and_require_authentication() -> None:
@@ -26,6 +50,10 @@ def test_matchmaker_routes_are_registered_and_require_authentication() -> None:
     assert "/api/v1/matchmaker/service-requests" in paths
     assert "/api/v1/matchmaker/service-requests/mine" in paths
     assert "/api/v1/matchmaker/service-requests/assigned" in paths
+    assert "/api/v1/matchmaker/service-products" in paths
+    assert "/api/v1/matchmaker/service-products/{product_id}" in paths
+    assert "/api/v1/matchmaker/service-requests/orders" in paths
+    assert "/api/v1/matchmaker/service-requests/{service_id}/contact" in paths
     assert "/api/v1/admin/matchmaker/service-requests" in paths
     assert client.post(
         "/api/v1/matchmaker/service-requests",

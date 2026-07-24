@@ -227,6 +227,17 @@ class DatabaseManager:
             },
             'payment_order': {
                 'idempotency_key': "`idempotency_key` varchar(128) DEFAULT NULL COMMENT '客户端幂等键'",
+                'service_product_id': "`service_product_id` bigint unsigned DEFAULT NULL COMMENT '红娘服务商品ID'",
+                'matchmaker_id': "`matchmaker_id` bigint unsigned DEFAULT NULL COMMENT '红娘服务对象ID'",
+                'service_request_id': "`service_request_id` bigint unsigned DEFAULT NULL COMMENT '关联红娘服务申请ID'",
+                'service_requirement': "`service_requirement` varchar(2000) DEFAULT NULL COMMENT '红娘服务需求'",
+            },
+            'meeting_request': {
+                'service_id': "`service_id` bigint unsigned DEFAULT NULL COMMENT '关联红娘服务单'",
+            },
+            'matchmaker_service': {
+                'order_id': "`order_id` bigint unsigned DEFAULT NULL COMMENT '关联支付订单ID'",
+                'product_id': "`product_id` bigint unsigned DEFAULT NULL COMMENT '红娘服务商品ID'",
             },
             'user_boost': {
                 'start_at': "`start_at` datetime DEFAULT CURRENT_TIMESTAMP",
@@ -238,6 +249,35 @@ class DatabaseManager:
         for table_name, columns in required_columns.items():
             self._ensure_table_columns(cursor, f'`{table_name}`', columns)
         self._ensure_matchmaker_application_index(cursor)
+        self._ensure_payment_order_idempotency_index(cursor)
+
+    def _ensure_payment_order_idempotency_index(self, cursor):
+        """Prevent duplicate paid-service orders when clients retry concurrently."""
+        try:
+            cursor.execute("""
+                SELECT INDEX_NAME FROM information_schema.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'payment_order'
+                  AND INDEX_NAME = 'uk_payment_order_type_idempotency'
+            """)
+            if cursor.fetchone():
+                return
+            cursor.execute("""
+                SELECT user_id, idempotency_key, COUNT(*) AS duplicate_count
+                FROM payment_order
+                WHERE idempotency_key IS NOT NULL
+                GROUP BY user_id, idempotency_key
+                HAVING COUNT(*) > 1
+                LIMIT 1
+            """)
+            if cursor.fetchone():
+                logger.warning("payment_order 存在重复幂等键，跳过唯一索引迁移，请先清理历史数据")
+                return
+            cursor.execute("""
+                ALTER TABLE `payment_order`
+                ADD UNIQUE KEY `uk_payment_order_type_idempotency` (`user_id`, `type`, `idempotency_key`)
+            """)
+        except pymysql.MySQLError as exc:
+            logger.warning(f"payment_order 幂等键唯一索引迁移失败: {exc}")
 
     def _ensure_matchmaker_application_index(self, cursor):
         """将旧版红娘申请的单用户唯一索引升级为单用户单申请类型唯一索引。"""
@@ -1293,8 +1333,10 @@ class DatabaseManager:
                     `id` bigint unsigned NOT NULL AUTO_INCREMENT,
                     `user_id` bigint unsigned NOT NULL COMMENT '用户',
                     `matchmaker_id` bigint unsigned DEFAULT NULL COMMENT '红娘ID（users表）',
-                    `service_type` tinyint DEFAULT '1' COMMENT '1付费服务红娘 2免费热心红娘 3私人定制（含形象指导/安排见面）',
-                    `status` tinyint DEFAULT '0' COMMENT '0待接单 1服务中 2已完成 3已取消',
+                    `service_type` tinyint DEFAULT '1' COMMENT '1付费牵线 3私人定制',
+                    `status` tinyint DEFAULT '0' COMMENT '0已通过待开始 1服务中 2服务完成 3已取消/退款',
+                    `order_id` bigint unsigned DEFAULT NULL COMMENT '关联支付订单ID',
+                    `product_id` bigint unsigned DEFAULT NULL COMMENT '红娘服务商品ID',
                     `requirement` text COMMENT '用户需求描述',
                     `feedback` text COMMENT '红娘反馈',
                     `start_at` datetime DEFAULT NULL,
@@ -1303,7 +1345,8 @@ class DatabaseManager:
                     `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     PRIMARY KEY (`id`),
                     KEY `idx_user` (`user_id`),
-                    KEY `idx_matchmaker` (`matchmaker_id`)
+                    KEY `idx_matchmaker` (`matchmaker_id`),
+                    KEY `idx_matchmaker_service_order` (`order_id`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘服务订单'
             """,
 
@@ -1399,7 +1442,8 @@ class DatabaseManager:
                     PRIMARY KEY (`id`),
                     UNIQUE KEY `uk_order_no` (`order_no`),
                     KEY `idx_user` (`user_id`),
-                    KEY `idx_status` (`status`)
+                    KEY `idx_status` (`status`),
+                    UNIQUE KEY `uk_payment_order_type_idempotency` (`user_id`,`type`,`idempotency_key`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='支付订单'
             """,
 

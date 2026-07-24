@@ -4,7 +4,8 @@
 
 | 方法 | 路径 | 权限 | 用途 |
 | --- | --- | --- | --- |
-| `POST` | `/matchmaker/meetings/requests` | 已登录用户 | 提交约见申请 |
+| `POST` | `/matchmaker/meetings/requests` | 已登录用户 | 已废弃，普通用户不能直接发起约见 |
+| `POST` | `/matchmaker/meetings/requests/from-service` | 已认证服务红娘 | 基于红娘服务单发起约见 |
 | `GET` | `/matchmaker/meetings/requests/mine` | 已登录用户 | 查询自己发出或收到的申请 |
 | `PATCH` | `/matchmaker/meetings/requests/{request_id}` | 申请参与方 | 接受、拒绝、联系或关闭申请 |
 | `POST` | `/admin/matchmaker/meetings/requests/{request_id}/schedule` | 超级管理员 | 安排具体约会 |

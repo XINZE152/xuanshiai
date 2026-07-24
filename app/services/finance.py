@@ -25,6 +25,7 @@ from app.schemas.finance import (
     WithdrawalResponse,
     WithdrawalReview,
 )
+from app.services.matchmaker import activate_paid_service_order
 
 
 CENT = Decimal("0.01")
@@ -90,7 +91,8 @@ async def list_rules(db: AsyncSession) -> list[CommissionRuleResponse]:
 async def mark_order_paid_and_settle(db: AsyncSession, admin: CurrentUser, order_id: int) -> list[CommissionEntryResponse]:
     if not settings.is_test_mode:
         raise HTTPException(503, detail="支付成功状态必须由真实支付回调确认")
-    result = await db.execute(text("""SELECT id, user_id, amount, status FROM payment_order
+    result = await db.execute(text("""SELECT id, user_id, amount, status, service_product_id,
+        matchmaker_id FROM payment_order
         WHERE id = :id FOR UPDATE"""), {"id": order_id})
     order = result.mappings().first()
     if not order:
@@ -100,6 +102,9 @@ async def mark_order_paid_and_settle(db: AsyncSession, admin: CurrentUser, order
     if order["status"] == 0:
         await db.execute(text("""UPDATE payment_order SET status = 1, pay_time = UTC_TIMESTAMP(),
             transaction_id = CONCAT('sandbox-', order_no) WHERE id = :id"""), {"id": order_id})
+        order = {**dict(order), "status": 1}
+    if order.get("service_product_id"):
+        await activate_paid_service_order(db, order_id)
     base = Decimal(str(order["amount"])).quantize(CENT)
     beneficiaries: list[tuple[str, int]] = []
     assignment = await db.execute(text("""SELECT organization_id, matchmaker_id FROM resource_assignment
@@ -107,7 +112,9 @@ async def mark_order_paid_and_settle(db: AsyncSession, admin: CurrentUser, order
     assigned = assignment.mappings().first()
     if assigned and assigned["organization_id"]:
         beneficiaries.append(("store", int(assigned["organization_id"])))
-    if assigned and assigned["matchmaker_id"]:
+    if order.get("matchmaker_id"):
+        beneficiaries.append(("service_matchmaker", int(order["matchmaker_id"])))
+    elif assigned and assigned["matchmaker_id"]:
         beneficiaries.append(("service_matchmaker", int(assigned["matchmaker_id"])))
     promotion = await db.execute(text("""SELECT promoter_id FROM promotion_attribution
         WHERE user_id = :user_id AND status = 1 LIMIT 1"""), {"user_id": order["user_id"]})

@@ -9,6 +9,7 @@ from app.schemas.meeting import (
     MeetingFeedbackCreate,
     MeetingRecordResponse,
     MeetingRequestCreate,
+    MatchmakerMeetingRequestCreate,
     MeetingRequestResponse,
     MeetingScheduleCreate,
     MeetingStatusUpdate,
@@ -16,6 +17,7 @@ from app.schemas.meeting import (
 from app.services.meeting import (
     create_feedback,
     create_meeting_request,
+    create_matchmaker_meeting_request,
     list_my_meeting_requests,
     schedule_meeting,
     update_meeting_request,
@@ -28,6 +30,15 @@ admin_router = APIRouter(prefix="/admin/matchmaker/meetings")
 @router.post("/requests", response_model=MeetingRequestResponse, status_code=201, summary="提交约见申请")
 async def create_request(body: MeetingRequestCreate = Body(...), current: CurrentUser = Depends(get_verified_user), db: AsyncSession = Depends(get_db)) -> MeetingRequestResponse:
     return await create_meeting_request(db, current, body)
+
+
+@router.post("/requests/from-service", response_model=MeetingRequestResponse, status_code=201, summary="红娘基于服务单发起约见")
+async def create_request_from_service(
+    body: MatchmakerMeetingRequestCreate = Body(...),
+    current: CurrentUser = Depends(get_verified_user),
+    db: AsyncSession = Depends(get_db),
+) -> MeetingRequestResponse:
+    return await create_matchmaker_meeting_request(db, current, body)
 
 
 @router.get("/requests/mine", response_model=list[MeetingRequestResponse], summary="查询我的约见申请")
