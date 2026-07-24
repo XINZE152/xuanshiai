@@ -4,6 +4,7 @@ from pydantic import ValidationError
 
 from app.main import app
 from app.schemas.discovery import ApplicationCreateRequest, DiscoveryFilters, DiscoverySearch
+from app.services.discovery import _card
 
 
 client = TestClient(app)
@@ -71,3 +72,39 @@ def test_record_lists_expose_scroll_pagination_contract() -> None:
         "/api/v1/discovery/applications/outgoing",
     ):
         assert "page" in str(paths[path]["get"])
+
+
+def test_discovery_card_respects_privacy_and_detail_lock() -> None:
+    row = {
+        "user_id": 1,
+        "nickname": "用户",
+        "birthday": None,
+        "height": 175,
+        "education_level": 3,
+        "occupation": "工程师",
+        "residence_city_code": "310100",
+        "income": 20000,
+        "same_city": True,
+        "is_married": 1,
+        "online_status": 1,
+        "mbti": "INTJ",
+        "interest_tags": '["旅行"]',
+        "realname_status": 0,
+        "hide_school": 1,
+        "hide_company": 1,
+        "hide_distance": 1,
+        "hide_online_status": 0,
+        "is_favorite": 0,
+        "is_vip": 0,
+        "is_boosted": 0,
+    }
+
+    card = _card(row, 50, "资料匹配")
+    assert card.education_level is None
+    assert card.occupation is None
+    assert card.distance_km is None
+
+    locked = _card({**row, "hide_school": 0, "hide_company": 0, "hide_distance": 0}, 50, "资料匹配", detail_locked=True)
+    assert locked.education_level is None
+    assert locked.occupation is None
+    assert locked.interest_tags == []

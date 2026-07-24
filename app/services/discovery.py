@@ -50,6 +50,9 @@ CARD_SELECT = """
            p.last_active_at, COALESCE(c.score, 0) AS completion_score,
            COALESCE(ua.realname_status, 0) AS realname_status,
            COALESCE(pr.only_vip_can_see_detail, 0) AS only_vip_can_see_detail,
+           COALESCE(pr.hide_school, 0) AS hide_school,
+           COALESCE(pr.hide_company, 0) AS hide_company,
+           COALESCE(pr.hide_distance, 0) AS hide_distance,
            COALESCE(pr.hide_online_status, 0) AS hide_online_status,
            COALESCE(pr.show_profile, 1) AS show_profile,
            COALESCE(pr.who_can_see_me, 1) AS who_can_see_me,
@@ -182,11 +185,11 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         avatar=row.get("avatar"),
         age=_calculate_age(row["birthday"]) if row.get("birthday") else None,
         height=row.get("height") if not detail_locked else None,
-        education_level=row.get("education_level") if not detail_locked else None,
-        occupation=row.get("occupation") if not detail_locked else None,
+        education_level=row.get("education_level") if not detail_locked and not row.get("hide_school") else None,
+        occupation=row.get("occupation") if not detail_locked and not row.get("hide_company") else None,
         city_code=row.get("residence_city_code") if not detail_locked else None,
         income=float(row["income"]) if row.get("income") is not None and not detail_locked else None,
-        distance_km=(0.0 if row.get("same_city") else None) if not detail_locked else None,
+        distance_km=(0.0 if row.get("same_city") else None) if not detail_locked and not row.get("hide_distance") else None,
         is_married=row.get("is_married") if not detail_locked else None,
         online_status=0 if row.get("hide_online_status") else int(row.get("online_status") or 0),
         mbti=row.get("mbti") if not detail_locked else None,
@@ -314,7 +317,11 @@ async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: Discover
     scored.sort(key=lambda item: (bool(item[1].get("is_boosted")), item[0][0], item[1].get("last_active_at") or datetime.min), reverse=True)
     start = (filters.page - 1) * filters.page_size
     selected = scored[start:start + filters.page_size]
-    items = [_card(row, score, reason) for (score, reason), row in selected]
+    viewer_is_vip = await _is_vip(db, viewer_id)
+    items = [
+        _card(row, score, reason, detail_locked=bool(row.get("only_vip_can_see_detail")) and not viewer_is_vip)
+        for (score, reason), row in selected
+    ]
     return DiscoveryPage(items=items, page=filters.page, page_size=filters.page_size, total=len(scored), has_more=start + filters.page_size < len(scored))
 
 
@@ -336,7 +343,11 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
     scored.sort(key=lambda item: (item[0][0], item[1].get("last_active_at") or datetime.min), reverse=True)
     start = (query.page - 1) * query.page_size
     selected = scored[start:start + query.page_size]
-    items = [_card(row, score, reason) for (score, reason), row in selected]
+    viewer_is_vip = await _is_vip(db, viewer_id)
+    items = [
+        _card(row, score, reason, detail_locked=bool(row.get("only_vip_can_see_detail")) and not viewer_is_vip)
+        for (score, reason), row in selected
+    ]
     return DiscoveryPage(
         items=items,
         page=query.page,
@@ -406,7 +417,6 @@ async def _record_browse(db: AsyncSession, viewer_id: int, target_id: int) -> No
     if anonymous.scalar():
         return
     await db.execute(text("INSERT INTO user_browse_history (user_id, target_user_id) VALUES (:user_id, :target_id)"), {"user_id": viewer_id, "target_id": target_id})
-    await db.commit()
 
 
 async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> PublicProfileResponse:
@@ -428,6 +438,15 @@ async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> Publ
     await _record_browse(db, viewer_id, target_id)
     card = _card(row, score, reason, detail_locked=not full)
     profile = await get_profile(db, target_id, public=True) if full else None
+    if profile is not None:
+        privacy = (await db.execute(text("SELECT hide_school, hide_company FROM user_privacy WHERE user_id = :user_id"), {"user_id": target_id})).mappings().first()
+        if privacy:
+            if privacy["hide_school"]:
+                profile["education_level"] = None
+            if privacy["hide_company"]:
+                profile["occupation"] = None
+                profile["industry"] = None
+    await db.commit()
     return PublicProfileResponse(user_id=target_id, card=card, profile=profile, is_vip_viewer=vip, browse_quota_remaining=quota, can_apply=viewer["completion_score"] >= 100)
 
 
@@ -456,31 +475,80 @@ async def _target_rows(db: AsyncSession, viewer_id: int, target_ids: list[int]) 
 async def browse_history(db: AsyncSession, viewer_id: int, page: int, page_size: int) -> BrowseHistoryPage:
     vip = await _is_vip(db, viewer_id)
     offset = (page - 1) * page_size
-    visibility = "" if vip else " AND created_at >= CURDATE()"
-    params = {"user_id": viewer_id, "limit": page_size, "offset": offset}
-    result = await db.execute(text(f"SELECT target_user_id, MAX(created_at) AS viewed_at FROM user_browse_history WHERE user_id = :user_id{visibility} GROUP BY target_user_id ORDER BY viewed_at DESC LIMIT :limit OFFSET :offset"), params)
+    visibility = "" if vip else " AND h.created_at >= CURDATE()"
+    visible = """ AND u.status = 1
+        AND COALESCE(pr.show_profile, 1) = 1
+        AND COALESCE(pr.who_can_see_me, 1) <> 4
+        AND COALESCE(pr.match_status, 1) = 1
+        AND (:viewer_is_vip = 1 OR COALESCE(pr.who_can_see_me, 1) <> 3)
+        AND NOT EXISTS (SELECT 1 FROM user_media pending_media
+                        WHERE pending_media.user_id = u.id AND pending_media.deleted_at IS NULL
+                          AND pending_media.review_status IN (0, 2, 3))
+        AND NOT EXISTS (SELECT 1 FROM user_block bl
+                        WHERE (bl.user_id = :user_id AND bl.target_user_id = u.id)
+                           OR (bl.user_id = u.id AND bl.target_user_id = :user_id))"""
+    params = {"user_id": viewer_id, "viewer_is_vip": int(vip), "limit": page_size, "offset": offset}
+    result = await db.execute(text(f"""SELECT h.target_user_id, MAX(h.created_at) AS viewed_at
+        FROM user_browse_history h JOIN users u ON u.id = h.target_user_id
+        LEFT JOIN user_privacy pr ON pr.user_id = u.id
+        WHERE h.user_id = :user_id{visibility}{visible}
+        GROUP BY h.target_user_id ORDER BY viewed_at DESC LIMIT :limit OFFSET :offset"""), params)
     rows = list(result.mappings().all())
     targets = await _target_rows(db, viewer_id, [int(row["target_user_id"]) for row in rows])
+    viewer = await _viewer_context(db, viewer_id)
     items = []
     for row in rows:
         target = targets.get(int(row["target_user_id"]))
         if target:
-            score, reason = _candidate_score(await _viewer_context(db, viewer_id), target)
-            items.append(BrowseHistoryItem(target=_card(target, score, reason), viewed_at=row["viewed_at"]))
-    count = await db.execute(text(f"SELECT COUNT(DISTINCT target_user_id) FROM user_browse_history WHERE user_id = :user_id{visibility}"), {"user_id": viewer_id})
+            score, reason = _candidate_score(viewer, target)
+            items.append(BrowseHistoryItem(target=_card(target, score, reason, detail_locked=bool(target.get("only_vip_can_see_detail")) and not vip), viewed_at=row["viewed_at"]))
+    count = await db.execute(text(f"""SELECT COUNT(DISTINCT h.target_user_id)
+        FROM user_browse_history h JOIN users u ON u.id = h.target_user_id
+        LEFT JOIN user_privacy pr ON pr.user_id = u.id
+        WHERE h.user_id = :user_id{visibility}{visible}"""), {"user_id": viewer_id, "viewer_is_vip": int(vip)})
     return BrowseHistoryPage(items=items, page=page, page_size=page_size, total=int(count.scalar() or 0))
 
 
 async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) -> VisitorPage:
-    result = await db.execute(text("SELECT COUNT(DISTINCT user_id) FROM user_browse_history WHERE target_user_id = :user_id"), {"user_id": viewer_id})
-    count = int(result.scalar() or 0)
-    if not await _is_vip(db, viewer_id):
+    vip = await _is_vip(db, viewer_id)
+    visible = """ AND u.status = 1
+        AND COALESCE(pr.show_profile, 1) = 1
+        AND COALESCE(pr.who_can_see_me, 1) <> 4
+        AND COALESCE(pr.match_status, 1) = 1
+        AND (:viewer_is_vip = 1 OR COALESCE(pr.who_can_see_me, 1) <> 3)
+        AND NOT EXISTS (SELECT 1 FROM user_media pending_media
+                        WHERE pending_media.user_id = u.id AND pending_media.deleted_at IS NULL
+                          AND pending_media.review_status IN (0, 2, 3))
+        AND NOT EXISTS (SELECT 1 FROM user_block bl
+                        WHERE (bl.user_id = :viewer_id AND bl.target_user_id = u.id)
+                           OR (bl.user_id = u.id AND bl.target_user_id = :viewer_id))"""
+    count_result = await db.execute(text(f"""SELECT COUNT(DISTINCT h.user_id)
+        FROM user_browse_history h JOIN users u ON u.id = h.user_id
+        LEFT JOIN user_privacy pr ON pr.user_id = u.id
+        WHERE h.target_user_id = :viewer_id{visible}"""), {"viewer_id": viewer_id, "user_id": viewer_id, "viewer_is_vip": int(vip)})
+    count = int(count_result.scalar() or 0)
+    if not vip:
         return VisitorPage(can_view_details=False, count=count, items=[], page=page, page_size=page_size, has_more=False)
-    result = await db.execute(text("SELECT user_id, MAX(created_at) AS viewed_at FROM user_browse_history WHERE target_user_id = :user_id GROUP BY user_id ORDER BY viewed_at DESC LIMIT :limit OFFSET :offset"), {"user_id": viewer_id, "limit": page_size, "offset": (page - 1) * page_size})
+    result = await db.execute(text(f"""SELECT h.user_id, MAX(h.created_at) AS viewed_at
+        FROM user_browse_history h JOIN users u ON u.id = h.user_id
+        LEFT JOIN user_privacy pr ON pr.user_id = u.id
+        WHERE h.target_user_id = :viewer_id{visible}
+        GROUP BY h.user_id ORDER BY viewed_at DESC LIMIT :limit OFFSET :offset"""), {"viewer_id": viewer_id, "user_id": viewer_id, "viewer_is_vip": 1, "limit": page_size, "offset": (page - 1) * page_size})
     rows = list(result.mappings().all())
     targets = await _target_rows(db, viewer_id, [int(row["user_id"]) for row in rows])
     viewer = await _viewer_context(db, viewer_id)
-    items = [BrowseHistoryItem(target=_card(targets[int(row["user_id"])], *_candidate_score(viewer, targets[int(row["user_id"])])), viewed_at=row["viewed_at"]) for row in rows if int(row["user_id"]) in targets]
+    items = [
+        BrowseHistoryItem(
+            target=_card(
+                targets[int(row["user_id"])],
+                *_candidate_score(viewer, targets[int(row["user_id"])]),
+                detail_locked=bool(targets[int(row["user_id"])].get("only_vip_can_see_detail")) and not vip,
+            ),
+            viewed_at=row["viewed_at"],
+        )
+        for row in rows
+        if int(row["user_id"]) in targets
+    ]
     return VisitorPage(can_view_details=True, count=count, items=items, page=page, page_size=page_size, has_more=page * page_size < count)
 
 
@@ -502,6 +570,15 @@ async def _ensure_target(db: AsyncSession, viewer_id: int, target_id: int) -> No
         raise HTTPException(403, detail="当前用户关系不可操作")
 
 
+async def _lock_user_pair(db: AsyncSession, first_id: int, second_id: int) -> None:
+    """Serialize writes involving the same two users without a schema migration."""
+    left, right = sorted((first_id, second_id))
+    await db.execute(
+        text("SELECT id FROM users WHERE id IN (:left, :right) ORDER BY id FOR UPDATE"),
+        {"left": left, "right": right},
+    )
+
+
 async def set_favorite(db: AsyncSession, viewer_id: int, target_id: int, enabled: bool) -> FavoriteResponse:
     await _ensure_target(db, viewer_id, target_id)
     if enabled:
@@ -513,11 +590,38 @@ async def set_favorite(db: AsyncSession, viewer_id: int, target_id: int, enabled
 
 
 async def list_favorites(db: AsyncSession, viewer_id: int, page: int, page_size: int) -> FavoritePage:
-    total = int((await db.execute(text("SELECT COUNT(*) FROM user_favorite WHERE user_id = :user_id AND type = 2"), {"user_id": viewer_id})).scalar() or 0)
-    result = await db.execute(text("SELECT target_user_id FROM user_favorite WHERE user_id = :user_id AND type = 2 ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"), {"user_id": viewer_id, "limit": page_size, "offset": (page - 1) * page_size})
+    vip = await _is_vip(db, viewer_id)
+    visible = """ AND u.status = 1
+        AND COALESCE(pr.show_profile, 1) = 1
+        AND COALESCE(pr.who_can_see_me, 1) <> 4
+        AND COALESCE(pr.match_status, 1) = 1
+        AND (:viewer_is_vip = 1 OR COALESCE(pr.who_can_see_me, 1) <> 3)
+        AND NOT EXISTS (SELECT 1 FROM user_media pending_media
+                        WHERE pending_media.user_id = u.id AND pending_media.deleted_at IS NULL
+                          AND pending_media.review_status IN (0, 2, 3))
+        AND NOT EXISTS (SELECT 1 FROM user_block bl
+                        WHERE (bl.user_id = :user_id AND bl.target_user_id = u.id)
+                           OR (bl.user_id = u.id AND bl.target_user_id = :user_id))"""
+    params = {"user_id": viewer_id, "viewer_is_vip": int(vip), "limit": page_size, "offset": (page - 1) * page_size}
+    total = int((await db.execute(text(f"""SELECT COUNT(*)
+        FROM user_favorite f JOIN users u ON u.id = f.target_user_id
+        LEFT JOIN user_privacy pr ON pr.user_id = u.id
+        WHERE f.user_id = :user_id AND f.type = 2{visible}"""), params)).scalar() or 0)
+    result = await db.execute(text(f"""SELECT f.target_user_id
+        FROM user_favorite f JOIN users u ON u.id = f.target_user_id
+        LEFT JOIN user_privacy pr ON pr.user_id = u.id
+        WHERE f.user_id = :user_id AND f.type = 2{visible}
+        ORDER BY f.created_at DESC, f.id DESC LIMIT :limit OFFSET :offset"""), params)
     targets = await _target_rows(db, viewer_id, [int(row[0]) for row in result])
     viewer = await _viewer_context(db, viewer_id)
-    items = [_card(targets[target_id], *_candidate_score(viewer, targets[target_id])) for target_id in targets]
+    items = [
+        _card(
+            targets[target_id],
+            *_candidate_score(viewer, targets[target_id]),
+            detail_locked=bool(targets[target_id].get("only_vip_can_see_detail")) and not vip,
+        )
+        for target_id in targets
+    ]
     return FavoritePage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
@@ -538,6 +642,7 @@ async def _consume_apply_quota(viewer_id: int, vip: bool) -> None:
 
 
 async def create_application(db: AsyncSession, viewer_id: int, target_id: int, request: ApplicationCreateRequest) -> ApplicationResponse:
+    await _lock_user_pair(db, viewer_id, target_id)
     await _ensure_target(db, viewer_id, target_id)
     await _expire_pending_applications(db)
     viewer = await _viewer_context(db, viewer_id)
@@ -595,7 +700,9 @@ async def respond_application(db: AsyncSession, viewer_id: int, application_id: 
         await _notify(db, row["from_user_id"], "match_application_accepted", "认识申请已通过", "对方接受了你的认识申请", viewer_id, application_id)
     else:
         await _notify(db, row["from_user_id"], "match_application_rejected", "认识申请未通过", (request.reason if request else None) or "对方暂时婉拒了你的申请", viewer_id, application_id)
-        await refund_daily(await _quota_key("apply", row["from_user_id"]))
+        created_at = row["created_at"]
+        if created_at is not None and created_at.date() == datetime.now(UTC).date():
+            await refund_daily(await _quota_key("apply", row["from_user_id"]))
     await db.commit()
     updated = await db.execute(text("SELECT id, from_user_id, to_user_id, message, status, expire_at, created_at FROM match_apply WHERE id = :id"), {"id": application_id})
     return ApplicationResponse(**updated.mappings().one())
@@ -608,6 +715,7 @@ async def _expire_pending_applications(db: AsyncSession) -> None:
 
 
 async def create_superlike(db: AsyncSession, viewer_id: int, target_id: int, idempotency_key: str) -> SuperLikeResponse:
+    await _lock_user_pair(db, viewer_id, target_id)
     await _ensure_target(db, viewer_id, target_id)
     viewer_result = await db.execute(text("""SELECT u.phone, COALESCE(c.score, 0) AS completion_score,
         COALESCE(ua.realname_status, 0) AS realname_status
