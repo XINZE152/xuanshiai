@@ -66,6 +66,17 @@ class Settings(BaseSettings):
     superlike_daily_vip_limit: int = 3
     paper_plane_daily_limit: int = 3
 
+    # AI avatar calls an OpenAI-compatible chat-completions service from the
+    # backend only. API keys must never be exposed to the mini-program.
+    ai_provider: Literal["disabled", "openai_compatible"] = "disabled"
+    ai_base_url: str | None = None
+    ai_api_key: SecretStr | None = None
+    ai_model: str | None = None
+    ai_timeout_seconds: float = Field(default=20, gt=0, le=60)
+    ai_max_output_tokens: int = Field(default=500, ge=64, le=2000)
+    ai_max_context_messages: int = Field(default=12, ge=2, le=30)
+    ai_daily_limit: int = Field(default=20, ge=1, le=200)
+
     # Optional second-layer text moderation. The provider is disabled until
     # the purchased marketplace API path and AppCode are configured.
     aliyun_content_moderation_enabled: bool = False
@@ -178,6 +189,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "生产环境启用阿里云敏感词服务时必须配置 AppCode"
             )
+        if self.ai_provider != "disabled":
+            if not self.ai_base_url or not self.ai_model:
+                raise ValueError("启用 AI 分身时必须配置 AI_BASE_URL 和 AI_MODEL")
+            if self.environment in {"staging", "production"} and not self.ai_base_url.startswith(
+                "https://"
+            ):
+                raise ValueError("staging/production 的 AI_BASE_URL 必须使用 HTTPS")
         return self
 
 

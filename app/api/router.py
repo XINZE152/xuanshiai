@@ -2,42 +2,42 @@
 
 from fastapi import APIRouter
 
-from app.api.routes import location
-
 from app.api.routes import (
-    admin,
-    matchmaker_admin,
-    matchmaker_admin_account,
-    matchmaker_member_admin,
-    organization_admin,
-    matchmaker_crm_admin,
-    customer_leads_admin,
-    matchmaker_dashboard_admin,
-    member_vip_admin,
     activity_admin,
-    member_follow_up_admin,
-    reward_rule_admin,
+    admin,
     admin_home,
+    ai_avatar,
     auth,
     ai,
     certifications,
     community,
     community_admin,
     message_admin,
+    customer_leads_admin,
     discovery,
     finance,
     health,
     identity,
+    location,
     matchmaker,
+    matchmaker_admin,
+    matchmaker_admin_account,
+    matchmaker_crm_admin,
+    matchmaker_dashboard_admin,
+    matchmaker_member_admin,
     media,
     meeting,
+    member_follow_up_admin,
+    member_vip_admin,
     membership,
     organization,
+    organization_admin,
     payments,
     points,
     presence,
     profile,
     regions,
+    reward_rule_admin,
     social,
     users,
 )
@@ -48,7 +48,8 @@ api_router.include_router(location.router, tags=["位置服务"])
 api_router.include_router(location.users_router, tags=["位置服务"])
 api_router.include_router(health.router, tags=["系统"])
 api_router.include_router(auth.router, tags=["账号与认证"])
-api_router.include_router(ai.router, tags=["AI能力"])
+api_router.include_router(ai.router, tags=["AI鑳藉姏"])
+api_router.include_router(ai_avatar.router, tags=["AI 分身"])
 api_router.include_router(users.router, tags=["账号与认证"])
 api_router.include_router(certifications.router, tags=["认证审核"])
 api_router.include_router(membership.router, tags=["会员"])
@@ -107,4 +108,5 @@ OPENAPI_TAGS = [
     {"name": "积分", "description": "积分账户和积分流水相关能力。"},
     {"name": "地区", "description": "省市区等地区数据查询。"},
     {"name": "系统", "description": "健康检查和系统发现信息。"},
+    {"name": "AI 分身", "description": "基于目标用户公开资料的独立 AI 对话能力。"},
 ]
