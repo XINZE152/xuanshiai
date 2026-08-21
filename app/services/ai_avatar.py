@@ -282,30 +282,30 @@ async def call_ai_provider(
     history: list[dict[str, str]],
     question: str,
 ) -> str:
-    if settings.ai_provider == "disabled":
+    if settings.ai_avatar_provider == "disabled":
         raise HTTPException(503, detail="真实 AI 服务尚未配置")
-    if not settings.ai_base_url or not settings.ai_model:
+    if not settings.ai_avatar_base_url or not settings.ai_avatar_model:
         raise HTTPException(503, detail="真实 AI 服务配置不完整")
 
     messages: list[dict[str, str]] = [
         {"role": "system", "content": _build_system_prompt(context)}
     ]
-    messages.extend(history[-settings.ai_max_context_messages :])
+    messages.extend(history[-settings.ai_avatar_max_context_messages :])
     messages.append({"role": "user", "content": question})
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    if settings.ai_api_key:
-        headers["Authorization"] = "Bearer " + settings.ai_api_key.get_secret_value()
-    url = settings.ai_base_url.rstrip("/") + "/chat/completions"
+    if settings.ai_avatar_api_key:
+        headers["Authorization"] = "Bearer " + settings.ai_avatar_api_key.get_secret_value()
+    url = settings.ai_avatar_base_url.rstrip("/") + "/chat/completions"
     payload = {
-        "model": settings.ai_model,
+        "model": settings.ai_avatar_model,
         "messages": messages,
         "temperature": 0.3,
-        "max_tokens": settings.ai_max_output_tokens,
+        "max_tokens": settings.ai_avatar_max_output_tokens,
         "stream": False,
     }
     try:
         async with httpx.AsyncClient(
-            timeout=settings.ai_timeout_seconds,
+            timeout=settings.ai_avatar_timeout_seconds,
             trust_env=False,
         ) as client:
             response = await client.post(url, headers=headers, json=payload)
@@ -414,11 +414,11 @@ async def send_ai_message(
     rows = await _history_rows(db, conversation_id)
     provider_history = [
         {"role": "user" if row["role"] == "user" else "assistant", "content": str(row["content"])}
-        for row in rows[-settings.ai_max_context_messages :]
+        for row in rows[-settings.ai_avatar_max_context_messages :]
     ]
     quota_key = daily_quota_key("ai-avatar", viewer_id)
-    if not await consume_daily(quota_key, settings.ai_daily_limit):
-        raise HTTPException(429, detail=f"今日 AI 分身提问已达 {settings.ai_daily_limit} 次上限")
+    if not await consume_daily(quota_key, settings.ai_avatar_daily_limit):
+        raise HTTPException(429, detail=f"今日 AI 分身提问已达 {settings.ai_avatar_daily_limit} 次上限")
     try:
         reply = await call_ai_provider(context, provider_history, question)
         decision = await decide_text(db, reply)

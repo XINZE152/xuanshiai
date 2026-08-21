@@ -31,10 +31,24 @@ def test_production_ai_provider_requires_https() -> None:
             sms_provider="disabled",
             wechat_provider="wechat",
             wechat_payment_mode="real",
-            ai_provider="openai_compatible",
-            ai_base_url="http://127.0.0.1:11434/v1",
-            ai_model="local-model",
+            ai_avatar_provider="openai_compatible",
+            ai_avatar_base_url="http://127.0.0.1:11434/v1",
+            ai_avatar_model="local-model",
         )
+
+
+def test_ai_avatar_defaults_do_not_inherit_general_ai_provider() -> None:
+    settings = Settings(
+        _env_file=None,
+        environment="testing",
+        ai_provider="openai_compatible",
+        ai_base_url="https://legacy.example/v1",
+        ai_model="legacy-model",
+    )
+
+    assert settings.ai_avatar_provider == "disabled"
+    assert settings.ai_avatar_base_url is None
+    assert settings.ai_avatar_model is None
 
 
 def test_provider_reply_parser_rejects_unknown_payload() -> None:
@@ -82,10 +96,10 @@ async def test_provider_receives_only_server_built_public_context(
         return original_client(transport=transport, timeout=kwargs.get("timeout"))
 
     monkeypatch.setattr(ai_avatar.httpx, "AsyncClient", client_factory)
-    monkeypatch.setattr(ai_avatar.settings, "ai_provider", "openai_compatible")
-    monkeypatch.setattr(ai_avatar.settings, "ai_base_url", "https://provider.example/v1")
-    monkeypatch.setattr(ai_avatar.settings, "ai_model", "test-model")
-    monkeypatch.setattr(ai_avatar.settings, "ai_api_key", None)
+    monkeypatch.setattr(ai_avatar.settings, "ai_avatar_provider", "openai_compatible")
+    monkeypatch.setattr(ai_avatar.settings, "ai_avatar_base_url", "https://provider.example/v1")
+    monkeypatch.setattr(ai_avatar.settings, "ai_avatar_model", "test-model")
+    monkeypatch.setattr(ai_avatar.settings, "ai_avatar_api_key", None)
     context = ai_avatar.AiAvatarContext(
         profile=AiAvatarProfileResponse(
             id=2,
@@ -111,7 +125,7 @@ async def test_provider_receives_only_server_built_public_context(
 
 @pytest.mark.asyncio
 async def test_disabled_provider_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ai_avatar.settings, "ai_provider", "disabled")
+    monkeypatch.setattr(ai_avatar.settings, "ai_avatar_provider", "disabled")
     context = ai_avatar.AiAvatarContext(
         profile=AiAvatarProfileResponse(id=2, name="测试用户"),
         public_posts=(),

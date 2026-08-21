@@ -198,14 +198,14 @@ Authorization: Bearer <access-token>
 在未提交的 `.env` 中配置：
 
 ```env
-AI_PROVIDER=openai_compatible
-AI_BASE_URL=https://供应商地址/v1
-AI_API_KEY=实际密钥
-AI_MODEL=实际模型名
-AI_TIMEOUT_SECONDS=20
-AI_MAX_OUTPUT_TOKENS=500
-AI_MAX_CONTEXT_MESSAGES=12
-AI_DAILY_LIMIT=20
+AI_AVATAR_PROVIDER=openai_compatible
+AI_AVATAR_BASE_URL=https://provider.example/v1
+AI_AVATAR_API_KEY=YOUR_AI_AVATAR_API_KEY
+AI_AVATAR_MODEL=YOUR_AI_AVATAR_MODEL
+AI_AVATAR_TIMEOUT_SECONDS=20
+AI_AVATAR_MAX_OUTPUT_TOKENS=500
+AI_AVATAR_MAX_CONTEXT_MESSAGES=12
+AI_AVATAR_DAILY_LIMIT=20
 ```
 
-本地无密钥的兼容服务可不设置 `AI_API_KEY`。staging/production 强制 `AI_BASE_URL` 使用 HTTPS。修改配置后需要重启 FastAPI。
+本地无密钥的兼容服务可不设置 `AI_AVATAR_API_KEY`。staging/production 强制 `AI_AVATAR_BASE_URL` 使用 HTTPS。修改配置后需要重启 FastAPI。
