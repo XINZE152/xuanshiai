@@ -439,11 +439,11 @@ class CommunityBannerAdminCreate(BaseModel):
     @model_validator(mode="after")
     def validate_window(self):
         if self.start_at and self.end_at and self.end_at <= self.start_at:
-            raise ValueError("????????????")
+            raise ValueError("Banner \u7ed3\u675f\u65f6\u95f4\u5fc5\u987b\u665a\u4e8e\u5f00\u59cb\u65f6\u95f4")
         if self.link_type == "none" and self.link_value:
-            raise ValueError("??? Banner ???????")
+            raise ValueError("\u65e0\u8df3\u8f6c Banner \u4e0d\u5e94\u63d0\u4f9b link_value")
         if self.link_type != "none" and not self.link_value:
-            raise ValueError("????????????")
+            raise ValueError("\u5b58\u5728\u8df3\u8f6c\u7c7b\u578b\u65f6\u5fc5\u987b\u63d0\u4f9b link_value")
         return self
 
 
