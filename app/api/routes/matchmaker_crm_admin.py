@@ -18,12 +18,21 @@ async def _member_query(db: AsyncSession, where: str, params: dict, page: int, p
         LEFT JOIN (SELECT user_id, matchmaker_id FROM resource_assignment WHERE status = 1) a ON a.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(created_at) last_follow_at, MAX(next_follow_at) next_follow_at FROM member_follow_up GROUP BY user_id) f ON f.user_id = u.id"""
     params = {**params, "limit": page_size, "offset": (page - 1) * page_size}
+    sort_by = str(params.pop("sort_by", "created_at"))
+    # Keep sort fields server-side whitelisted; never interpolate user input.
+    sort_sql = {
+        "created_at": "u.created_at DESC, u.id DESC",
+        "last_login_at": "COALESCE(u.last_login_at, '1970-01-01') DESC, u.id DESC",
+        "last_follow_at": "COALESCE(f.last_follow_at, '1970-01-01') DESC, u.id DESC",
+        "next_follow_at": "COALESCE(f.next_follow_at, '9999-12-31') ASC, u.id DESC",
+        "id": "u.id DESC",
+    }.get(sort_by, "u.created_at DESC, u.id DESC")
     rows = await db.execute(text(f"""SELECT u.id, u.nickname, u.phone, u.gender, u.status, u.created_at,
         COALESCE(u.avatar, JSON_UNQUOTE(JSON_EXTRACT(p.photos, '$[0]'))) AS avatar,
         u.birthday, u.is_married, p.height, p.income, p.hometown, p.residence,
         ua.education, ua.job, ua.auth_status, f.last_follow_at, f.next_follow_at,
         v.vip_end_at, a.matchmaker_id, CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()) THEN 0 ELSE 1 END AS is_vip
-        {base} WHERE {where} ORDER BY u.id DESC LIMIT :limit OFFSET :offset"""), params)
+        {base} WHERE {where} ORDER BY {sort_sql} LIMIT :limit OFFSET :offset"""), params)
     count = await db.execute(text(f"SELECT COUNT(*) {base} WHERE {where}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})
     total = int(count.scalar() or 0)
     items = [MemberListItem(**dict(row)) for row in rows.mappings().all()]
@@ -31,7 +40,7 @@ async def _member_query(db: AsyncSession, where: str, params: dict, page: int, p
 
 
 @router.get("/members", response_model=MemberPage, summary="查询会员 CRM 列表")
-async def members(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=100), gender: int | None = Query(None, ge=1, le=2), status: int | None = Query(None, ge=1, le=3), vip: bool | None = Query(None), auth_status: int | None = Query(None, ge=0, le=3), assigned: bool | None = Query(None), follow_state: str | None = Query(None, pattern="^(never|due_today|overdue)$"), search: str | None = Query(None, max_length=64), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberPage:
+async def members(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=100), gender: int | None = Query(None, ge=1, le=2), status: int | None = Query(None, ge=1, le=3), vip: bool | None = Query(None), auth_status: int | None = Query(None, ge=0, le=3), assigned: bool | None = Query(None), follow_state: str | None = Query(None, pattern="^(never|due_today|overdue)$"), search: str | None = Query(None, max_length=64), sort_by: str = Query("created_at", pattern="^(created_at|last_login_at|last_follow_at|next_follow_at|id)$"), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberPage:
     where = "1=1"
     params: dict = {}
     if gender is not None:
@@ -60,6 +69,7 @@ async def members(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20
         where += " AND f.next_follow_at >= CURDATE() AND f.next_follow_at < DATE_ADD(CURDATE(), INTERVAL 1 DAY)"
     if follow_state == "overdue":
         where += " AND f.next_follow_at < CURDATE()"
+    params["sort_by"] = sort_by
     return await _member_query(db, where, params, page, page_size)
 
 

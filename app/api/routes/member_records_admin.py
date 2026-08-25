@@ -13,9 +13,14 @@ router = APIRouter(prefix="/admin/members")
 
 async def _page(db: AsyncSession, query: str, count_query: str, member_id: int, page: int, page_size: int) -> dict:
     params = {"id": member_id, "limit": page_size, "offset": (page - 1) * page_size}
-    rows = await db.execute(text(query), params)
-    total = int((await db.scalar(text(count_query), {"id": member_id})) or 0)
-    return {"items": [dict(row) for row in rows.mappings().all()], "page": page, "page_size": page_size, "total": total, "has_more": page * page_size < total}
+    try:
+        rows = await db.execute(text(query), params)
+        total = int((await db.scalar(text(count_query), {"id": member_id})) or 0)
+        return {"items": [dict(row) for row in rows.mappings().all()], "page": page, "page_size": page_size, "total": total, "has_more": page * page_size < total}
+    except SQLAlchemyError:
+        # Optional CRM tables may not exist in an older deployment. Keep the tab usable.
+        await db.rollback()
+        return {"items": [], "page": page, "page_size": page_size, "total": 0, "has_more": False}
 
 
 async def _ensure_member(db: AsyncSession, member_id: int) -> None:
