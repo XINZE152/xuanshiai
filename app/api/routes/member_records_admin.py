@@ -37,6 +37,16 @@ async def match_records(member_id: int = Path(..., ge=1), page: int = _paging()[
         "SELECT COUNT(*) FROM match_apply WHERE from_user_id = :id OR to_user_id = :id", member_id, page, page_size)
 
 
+@router.get("/{member_id}/recommendations")
+async def recommendations(member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    await _ensure_member(db, member_id)
+    return await _page(db, """SELECT r.id, r.recommend_date, r.match_score, r.match_reason, r.recommend_source,
+        r.is_viewed, r.is_liked, r.is_passed, r.created_at, u.id AS target_user_id, u.nickname AS target_nickname
+        FROM user_match_recommend r LEFT JOIN users u ON u.id = r.recommend_user_id
+        WHERE r.user_id = :id ORDER BY r.recommend_date DESC, r.id DESC LIMIT :limit OFFSET :offset""",
+        "SELECT COUNT(*) FROM user_match_recommend WHERE user_id = :id", member_id, page, page_size)
+
+
 @router.get("/{member_id}/dating-records")
 async def dating_records(member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
     await _ensure_member(db, member_id)
@@ -54,6 +64,45 @@ async def media(member_id: int = Path(..., ge=1), page: int = _paging()[0], page
     return await _page(db, """SELECT id, media_type, file_url, thumbnail_url, mime_type, duration_seconds, sort_order, is_primary, review_status, created_at
         FROM user_media WHERE user_id = :id AND deleted_at IS NULL ORDER BY sort_order ASC, id DESC LIMIT :limit OFFSET :offset""",
         "SELECT COUNT(*) FROM user_media WHERE user_id = :id AND deleted_at IS NULL", member_id, page, page_size)
+
+
+@router.get("/{member_id}/activity-signups")
+async def activity_signups(member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    await _ensure_member(db, member_id)
+    return await _page(db, """SELECT s.id, s.activity_id, a.title AS activity_title, a.start_time, a.end_time,
+        s.real_name, s.phone, s.remark, s.status, s.cancel_reason, s.created_at, s.updated_at
+        FROM activity_signup s LEFT JOIN offline_activity a ON a.id = s.activity_id
+        WHERE s.user_id = :id ORDER BY s.created_at DESC, s.id DESC LIMIT :limit OFFSET :offset""",
+        "SELECT COUNT(*) FROM activity_signup WHERE user_id = :id", member_id, page, page_size)
+
+
+@router.get("/{member_id}/private-info")
+async def private_info(member_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    await _ensure_member(db, member_id)
+    row = (await db.execute(text("""SELECT u.id, u.phone, ua.real_name, ua.id_card, ua.company,
+        p.family_background, p.single_reason, p.online_status, p.last_active_at
+        FROM users u LEFT JOIN user_auth ua ON ua.user_id = u.id LEFT JOIN user_profile p ON p.user_id = u.id
+        WHERE u.id = :id"""), {"id": member_id})).mappings().first()
+    return {"items": [dict(row)] if row else [], "page": 1, "page_size": 1, "total": 1 if row else 0, "has_more": False}
+
+
+@router.get("/{member_id}/super-info")
+async def super_info(member_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    await _ensure_member(db, member_id)
+    row = (await db.execute(text("""SELECT u.id, u.status, u.created_at, u.updated_at,
+        CASE WHEN v.user_id IS NOT NULL AND (v.end_at IS NULL OR v.end_at > UTC_TIMESTAMP()) THEN 1 ELSE 0 END AS is_vip,
+        v.end_at AS vip_end_at, a.matchmaker_id, a.organization_id
+        FROM users u LEFT JOIN (SELECT user_id, MAX(end_at) end_at FROM user_membership WHERE status = 1 GROUP BY user_id) v ON v.user_id = u.id
+        LEFT JOIN (SELECT user_id, MAX(id) id, MAX(matchmaker_id) matchmaker_id, MAX(organization_id) organization_id FROM resource_assignment WHERE status = 1 GROUP BY user_id) a ON a.user_id = u.id
+        WHERE u.id = :id"""), {"id": member_id})).mappings().first()
+    return {"items": [dict(row)] if row else [], "page": 1, "page_size": 1, "total": 1 if row else 0, "has_more": False}
+
+
+@router.get("/{member_id}/call-records")
+async def call_records(member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    await _ensure_member(db, member_id)
+    # A dedicated member outbound-call table is not present in the current schema.
+    return {"items": [], "page": page, "page_size": page_size, "total": 0, "has_more": False}
 
 
 @router.get("/{member_id}/source-records")
