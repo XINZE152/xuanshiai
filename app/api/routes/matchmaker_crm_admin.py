@@ -162,6 +162,7 @@ async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchm
         v.vip_end_at, a.matchmaker_id,
         CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()) THEN 0 ELSE 1 END AS is_vip
         FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
+        LEFT JOIN user_auth ua ON ua.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(end_at) vip_end_at FROM user_membership WHERE status = 1 GROUP BY user_id) v ON v.user_id = u.id
         LEFT JOIN (SELECT user_id, matchmaker_id FROM resource_assignment WHERE status = 1) a ON a.user_id = u.id WHERE u.id = :id"""), {"id": member_id})).mappings().first()
     if not row:
