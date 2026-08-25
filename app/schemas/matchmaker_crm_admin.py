@@ -47,6 +47,10 @@ class MemberDetail(MemberListItem):
     job: str | None = None
     tags: dict[str, list[str]] | list[str] | None = None
     self_intro: str | None = None
+    ideal_partner: str | None = None
+    wechat: str | None = None
+    last_login_at: datetime | None = None
+    ip_location: str | None = None
 
 
 class MemberStatusUpdate(BaseModel):

@@ -1030,6 +1030,7 @@ class DatabaseManager:
                     `self_intro` text COMMENT '自我介绍',
                     `love_view` text COMMENT '爱情观',
                     `ideal_partner` text COMMENT '理想另一半',
+                    `wechat` varchar(128) DEFAULT NULL COMMENT '会员微信号（后台受控展示）',
                     `single_reason` varchar(255) DEFAULT NULL COMMENT '单身原因',
                     `family_background` text COMMENT '家庭背景',
                     `hobbies` text COMMENT '兴趣爱好',

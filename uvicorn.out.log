@@ -1,0 +1,102 @@
+2026-08-25T15:19:58+0800 INFO app.main request_id=- main.py:47 application_starting environment=development version=0.1.0
+2026-08-25T15:19:58+0800 INFO app.main request_id=- main.py:34 正在执行数据库自动初始化...
+2026-08-25T15:19:58+0800 INFO database_setup_marriage request_id=- database_setup_marriage.py:2773 正在检查数据库表结构...
+2026-08-25T15:19:58+0800 INFO database_setup_marriage request_id=- database_setup_marriage.py:2768 ✅ 数据库创建完成（若不存在）
+2026-08-25T15:19:59+0800 INFO database_setup_marriage request_id=- database_setup_marriage.py:754 初始化数据库表结构
+2026-08-25T15:20:00+0800 INFO database_setup_marriage request_id=- database_setup_marriage.py:2699 话题参与回填完成（新增/忽略行数 rowcount=0）
+2026-08-25T15:20:00+0800 INFO database_setup_marriage request_id=- database_setup_marriage.py:2649 ✅ 数据库表结构初始化完成（128张表）
+2026-08-25T15:20:00+0800 INFO database_setup_marriage request_id=- database_setup_marriage.py:2786 ✅ 数据库表结构初始化完成。
+2026-08-25T15:20:00+0800 INFO app.main request_id=- main.py:42 数据库自动初始化完成
+2026-08-25T15:20:27+0800 INFO app.main request_id=1628fd05775644dbaba4d30d633d95e9 main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/members client=127.0.0.1
+2026-08-25T15:20:27+0800 INFO app.main request_id=1628fd05775644dbaba4d30d633d95e9 main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/members status=200 duration_ms=2.15 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:57013 - "OPTIONS /api/v1/admin/matchmaker/members?page=1&page_size=20&sort_by=created_at&whetherAbandon=false HTTP/1.1" 200 OK
+2026-08-25T15:20:27+0800 INFO app.main request_id=7de70cbbba314919b875b6a1d158a45c main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/members/statistics client=127.0.0.1
+2026-08-25T15:20:27+0800 INFO app.main request_id=7de70cbbba314919b875b6a1d158a45c main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/members/statistics status=200 duration_ms=1.76 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:58729 - "OPTIONS /api/v1/admin/matchmaker/members/statistics HTTP/1.1" 200 OK
+2026-08-25T15:20:27+0800 INFO app.main request_id=c5b82ea02b84496eae6a0315d1797bee main.py:93 request_started method=GET path=/api/v1/admin/matchmaker/members client=127.0.0.1
+2026-08-25T15:20:28+0800 INFO app.main request_id=2c3bd30e008b4dbaa4cd67cf770537bf main.py:93 request_started method=GET path=/api/v1/admin/matchmaker/members/statistics client=127.0.0.1
+2026-08-25T15:20:28+0800 INFO app.main request_id=e4dc67a9643c46a5b294045f3ac10695 main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/members client=127.0.0.1
+2026-08-25T15:20:28+0800 WARNING app.main request_id=c5b82ea02b84496eae6a0315d1797bee main.py:121 request_completed method=GET path=/api/v1/admin/matchmaker/members status=401 duration_ms=918.72 client=127.0.0.1 content_length=58
+INFO:     127.0.0.1:58729 - "GET /api/v1/admin/matchmaker/members?page=1&page_size=20&sort_by=created_at&whetherAbandon=false HTTP/1.1" 401 Unauthorized
+2026-08-25T15:20:28+0800 INFO app.main request_id=93244515679941fba875474cd33cf407 main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/members/statistics client=127.0.0.1
+2026-08-25T15:20:28+0800 WARNING app.main request_id=2c3bd30e008b4dbaa4cd67cf770537bf main.py:121 request_completed method=GET path=/api/v1/admin/matchmaker/members/statistics status=401 duration_ms=13.23 client=127.0.0.1 content_length=58
+INFO:     127.0.0.1:57013 - "GET /api/v1/admin/matchmaker/members/statistics HTTP/1.1" 401 Unauthorized
+2026-08-25T15:20:28+0800 INFO app.main request_id=e4dc67a9643c46a5b294045f3ac10695 main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/members status=200 duration_ms=6.63 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:50995 - "OPTIONS /api/v1/admin/matchmaker/members?page=1&page_size=20&sort_by=created_at&whetherAbandon=false HTTP/1.1" 200 OK
+2026-08-25T15:20:28+0800 INFO app.main request_id=93244515679941fba875474cd33cf407 main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/members/statistics status=200 duration_ms=6.33 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:59087 - "OPTIONS /api/v1/admin/matchmaker/members/statistics HTTP/1.1" 200 OK
+2026-08-25T15:20:28+0800 INFO app.main request_id=35c5d7ba255e4999b6c77043e4aeba74 main.py:93 request_started method=GET path=/api/v1/admin/matchmaker/members client=127.0.0.1
+2026-08-25T15:20:28+0800 INFO app.main request_id=b0346a164b83413d9c7c7023a84140bf main.py:93 request_started method=GET path=/api/v1/admin/matchmaker/members/statistics client=127.0.0.1
+2026-08-25T15:20:28+0800 WARNING app.main request_id=35c5d7ba255e4999b6c77043e4aeba74 main.py:121 request_completed method=GET path=/api/v1/admin/matchmaker/members status=401 duration_ms=10.61 client=127.0.0.1 content_length=58
+INFO:     127.0.0.1:59087 - "GET /api/v1/admin/matchmaker/members?page=1&page_size=20&sort_by=created_at&whetherAbandon=false HTTP/1.1" 401 Unauthorized
+2026-08-25T15:20:28+0800 WARNING app.main request_id=b0346a164b83413d9c7c7023a84140bf main.py:121 request_completed method=GET path=/api/v1/admin/matchmaker/members/statistics status=401 duration_ms=7.99 client=127.0.0.1 content_length=58
+INFO:     127.0.0.1:50995 - "GET /api/v1/admin/matchmaker/members/statistics HTTP/1.1" 401 Unauthorized
+2026-08-25T15:20:47+0800 INFO app.main request_id=b1bcfb2a209b4eb3aeaadb418bc9e29e main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/me client=127.0.0.1
+2026-08-25T15:20:47+0800 INFO app.main request_id=b1bcfb2a209b4eb3aeaadb418bc9e29e main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/me status=200 duration_ms=2.35 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:55665 - "OPTIONS /api/v1/admin/matchmaker/auth/me HTTP/1.1" 200 OK
+2026-08-25T15:20:47+0800 INFO app.main request_id=164080ad005d4a4eb9ca88197076a001 main.py:93 request_started method=GET path=/api/v1/admin/matchmaker/auth/me client=127.0.0.1
+2026-08-25T15:20:47+0800 WARNING app.main request_id=164080ad005d4a4eb9ca88197076a001 main.py:121 request_completed method=GET path=/api/v1/admin/matchmaker/auth/me status=401 duration_ms=9.82 client=127.0.0.1 content_length=58
+INFO:     127.0.0.1:55665 - "GET /api/v1/admin/matchmaker/auth/me HTTP/1.1" 401 Unauthorized
+2026-08-25T15:21:44+0800 INFO app.main request_id=9fe7ff0110ef4d67a1dc1f6c21ba4bb0 main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:21:44+0800 INFO app.main request_id=9fe7ff0110ef4d67a1dc1f6c21ba4bb0 main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/login status=200 duration_ms=2.84 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:59926 - "OPTIONS /api/v1/admin/matchmaker/auth/login HTTP/1.1" 200 OK
+2026-08-25T15:21:44+0800 INFO app.main request_id=44294055c3a44362ad18ffa919a25f3e main.py:93 request_started method=POST path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:21:44+0800 WARNING app.main request_id=44294055c3a44362ad18ffa919a25f3e main.py:121 request_completed method=POST path=/api/v1/admin/matchmaker/auth/login status=401 duration_ms=45.44 client=127.0.0.1 content_length=34
+INFO:     127.0.0.1:59926 - "POST /api/v1/admin/matchmaker/auth/login HTTP/1.1" 401 Unauthorized
+2026-08-25T15:22:49+0800 INFO app.main request_id=f65757b189b74acfbe80a43e487b56a2 main.py:93 request_started method=GET path=/api/v1/health client=127.0.0.1
+2026-08-25T15:22:49+0800 INFO app.main request_id=f65757b189b74acfbe80a43e487b56a2 main.py:121 request_completed method=GET path=/api/v1/health status=200 duration_ms=5.21 client=127.0.0.1 content_length=70
+INFO:     127.0.0.1:51436 - "GET /api/v1/health HTTP/1.1" 200 OK
+2026-08-25T15:23:27+0800 INFO app.main request_id=70b51b59d0bb4cd4b9e5fec4f70ebd57 main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:23:27+0800 INFO app.main request_id=70b51b59d0bb4cd4b9e5fec4f70ebd57 main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/login status=200 duration_ms=2.76 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:54234 - "OPTIONS /api/v1/admin/matchmaker/auth/login HTTP/1.1" 200 OK
+2026-08-25T15:23:27+0800 INFO app.main request_id=86081c82cefc4b50b9c6b26ed206c9eb main.py:93 request_started method=POST path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:23:27+0800 WARNING app.main request_id=86081c82cefc4b50b9c6b26ed206c9eb main.py:121 request_completed method=POST path=/api/v1/admin/matchmaker/auth/login status=401 duration_ms=22.36 client=127.0.0.1 content_length=34
+INFO:     127.0.0.1:54234 - "POST /api/v1/admin/matchmaker/auth/login HTTP/1.1" 401 Unauthorized
+2026-08-25T15:26:07+0800 INFO app.main request_id=9ff45a158cb0425e88b010b689fa07e9 main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:26:07+0800 INFO app.main request_id=9ff45a158cb0425e88b010b689fa07e9 main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/login status=200 duration_ms=2.99 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:54565 - "OPTIONS /api/v1/admin/matchmaker/auth/login HTTP/1.1" 200 OK
+2026-08-25T15:26:07+0800 INFO app.main request_id=5621fcf68d5749ccaa26b7d3bed924ee main.py:93 request_started method=POST path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:26:07+0800 WARNING app.main request_id=5621fcf68d5749ccaa26b7d3bed924ee main.py:121 request_completed method=POST path=/api/v1/admin/matchmaker/auth/login status=401 duration_ms=16.01 client=127.0.0.1 content_length=34
+INFO:     127.0.0.1:54565 - "POST /api/v1/admin/matchmaker/auth/login HTTP/1.1" 401 Unauthorized
+2026-08-25T15:26:12+0800 INFO app.main request_id=4dc3bcf90685428dab6685161b531058 main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:26:12+0800 INFO app.main request_id=4dc3bcf90685428dab6685161b531058 main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/login status=200 duration_ms=2.01 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:54565 - "OPTIONS /api/v1/admin/matchmaker/auth/login HTTP/1.1" 200 OK
+2026-08-25T15:26:12+0800 INFO app.main request_id=d4474328349740b69ef18b4644611e1d main.py:93 request_started method=POST path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:26:12+0800 WARNING app.main request_id=d4474328349740b69ef18b4644611e1d main.py:121 request_completed method=POST path=/api/v1/admin/matchmaker/auth/login status=401 duration_ms=20.16 client=127.0.0.1 content_length=34
+INFO:     127.0.0.1:54565 - "POST /api/v1/admin/matchmaker/auth/login HTTP/1.1" 401 Unauthorized
+2026-08-25T15:27:37+0800 INFO app.main request_id=0ee25410339a408596b9bf9b04ece38c main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:27:37+0800 INFO app.main request_id=0ee25410339a408596b9bf9b04ece38c main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/login status=200 duration_ms=3.08 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:50396 - "OPTIONS /api/v1/admin/matchmaker/auth/login HTTP/1.1" 200 OK
+2026-08-25T15:27:37+0800 INFO app.main request_id=92f9b9f7b95f460693df4bd8495a9048 main.py:93 request_started method=POST path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:27:37+0800 WARNING app.main request_id=92f9b9f7b95f460693df4bd8495a9048 main.py:121 request_completed method=POST path=/api/v1/admin/matchmaker/auth/login status=401 duration_ms=20.90 client=127.0.0.1 content_length=34
+INFO:     127.0.0.1:50396 - "POST /api/v1/admin/matchmaker/auth/login HTTP/1.1" 401 Unauthorized
+2026-08-25T15:30:44+0800 INFO app.main request_id=3b1bbfbab8ac4eabbaa21fc0425edc05 main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:30:44+0800 INFO app.main request_id=3b1bbfbab8ac4eabbaa21fc0425edc05 main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/login status=200 duration_ms=1.50 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:62126 - "OPTIONS /api/v1/admin/matchmaker/auth/login HTTP/1.1" 200 OK
+2026-08-25T15:30:44+0800 INFO app.main request_id=f4a123afb8154431b53a1b2d0c50198a main.py:93 request_started method=POST path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:30:44+0800 WARNING app.main request_id=f4a123afb8154431b53a1b2d0c50198a main.py:121 request_completed method=POST path=/api/v1/admin/matchmaker/auth/login status=401 duration_ms=17.82 client=127.0.0.1 content_length=34
+INFO:     127.0.0.1:62126 - "POST /api/v1/admin/matchmaker/auth/login HTTP/1.1" 401 Unauthorized
+2026-08-25T15:30:45+0800 INFO app.main request_id=9c4cf6c5f297451c93e5669e724624bf main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:30:45+0800 INFO app.main request_id=9c4cf6c5f297451c93e5669e724624bf main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/login status=200 duration_ms=2.29 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:62126 - "OPTIONS /api/v1/admin/matchmaker/auth/login HTTP/1.1" 200 OK
+2026-08-25T15:30:45+0800 INFO app.main request_id=0fda476760e54ed3972dd62791483bc7 main.py:93 request_started method=POST path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:30:45+0800 WARNING app.main request_id=0fda476760e54ed3972dd62791483bc7 main.py:121 request_completed method=POST path=/api/v1/admin/matchmaker/auth/login status=401 duration_ms=16.35 client=127.0.0.1 content_length=34
+INFO:     127.0.0.1:62126 - "POST /api/v1/admin/matchmaker/auth/login HTTP/1.1" 401 Unauthorized
+2026-08-25T15:30:58+0800 INFO app.main request_id=78caee9c10fe4541b361e08527c62737 main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:30:58+0800 INFO app.main request_id=78caee9c10fe4541b361e08527c62737 main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/login status=200 duration_ms=1.36 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:54604 - "OPTIONS /api/v1/admin/matchmaker/auth/login HTTP/1.1" 200 OK
+2026-08-25T15:30:58+0800 INFO app.main request_id=3c982e27d40848dc86183e7d2f0f5473 main.py:93 request_started method=POST path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:30:58+0800 WARNING app.main request_id=3c982e27d40848dc86183e7d2f0f5473 main.py:121 request_completed method=POST path=/api/v1/admin/matchmaker/auth/login status=401 duration_ms=34.26 client=127.0.0.1 content_length=34
+INFO:     127.0.0.1:54604 - "POST /api/v1/admin/matchmaker/auth/login HTTP/1.1" 401 Unauthorized
+2026-08-25T15:31:00+0800 INFO app.main request_id=1102f486075946988aaccd74d500d8b2 main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:31:00+0800 INFO app.main request_id=1102f486075946988aaccd74d500d8b2 main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/login status=200 duration_ms=3.14 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:54604 - "OPTIONS /api/v1/admin/matchmaker/auth/login HTTP/1.1" 200 OK
+2026-08-25T15:31:00+0800 INFO app.main request_id=4c7c57d2e60147d7b72900079d81a565 main.py:93 request_started method=POST path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:31:00+0800 WARNING app.main request_id=4c7c57d2e60147d7b72900079d81a565 main.py:121 request_completed method=POST path=/api/v1/admin/matchmaker/auth/login status=401 duration_ms=16.26 client=127.0.0.1 content_length=34
+INFO:     127.0.0.1:54604 - "POST /api/v1/admin/matchmaker/auth/login HTTP/1.1" 401 Unauthorized
+2026-08-25T15:32:39+0800 INFO app.main request_id=4e5c9352024741c7ba6ad69e2450329c main.py:93 request_started method=OPTIONS path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:32:39+0800 INFO app.main request_id=4e5c9352024741c7ba6ad69e2450329c main.py:121 request_completed method=OPTIONS path=/api/v1/admin/matchmaker/auth/login status=200 duration_ms=3.37 client=127.0.0.1 content_length=2
+INFO:     127.0.0.1:64379 - "OPTIONS /api/v1/admin/matchmaker/auth/login HTTP/1.1" 200 OK
+2026-08-25T15:32:39+0800 INFO app.main request_id=3f3028636e444f9ebbea3ba67a95afba main.py:93 request_started method=POST path=/api/v1/admin/matchmaker/auth/login client=127.0.0.1
+2026-08-25T15:32:39+0800 WARNING app.main request_id=3f3028636e444f9ebbea3ba67a95afba main.py:121 request_completed method=POST path=/api/v1/admin/matchmaker/auth/login status=401 duration_ms=17.23 client=127.0.0.1 content_length=34
+INFO:     127.0.0.1:64379 - "POST /api/v1/admin/matchmaker/auth/login HTTP/1.1" 401 Unauthorized

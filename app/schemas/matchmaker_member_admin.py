@@ -42,6 +42,8 @@ class MatchmakerMemberUpdate(BaseModel):
     job: str | None = Field(default=None, max_length=128)
     tags: dict[str, list[str]] | list[str] | None = None
     self_intro: str | None = Field(default=None, max_length=500)
+    ideal_partner: str | None = Field(default=None, max_length=2000)
+    wechat: str | None = Field(default=None, max_length=128)
     remark: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")

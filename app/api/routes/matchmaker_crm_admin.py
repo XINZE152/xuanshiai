@@ -138,7 +138,7 @@ async def member_auth_list(
 @router.get("/members/{member_id}", response_model=MemberDetail, summary="查询会员详情")
 async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberDetail:
     row = (await db.execute(text("""SELECT u.id, u.nickname, u.phone, u.gender, u.status, u.avatar, u.birthday, u.is_married, u.created_at,
-        p.residence_city_code, p.height, p.income, p.hometown, p.residence, p.self_intro, p.tags,
+        u.last_login_at, u.register_ip AS ip_location, p.residence_city_code, p.height, p.income, p.hometown, p.residence, p.self_intro, p.ideal_partner, p.wechat, p.tags,
         ua.education, ua.job, ua.auth_status,
         v.vip_end_at, a.matchmaker_id,
         CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()) THEN 0 ELSE 1 END AS is_vip
