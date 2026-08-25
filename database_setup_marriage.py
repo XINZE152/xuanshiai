@@ -2667,12 +2667,27 @@ class DatabaseManager:
 
     def _ensure_member_crm_columns(self, cursor) -> None:
         """Add CRM profile fields to already-existing installations."""
-        cursor.execute("SHOW COLUMNS FROM `user_profile` LIKE 'wechat'")
-        if not cursor.fetchone():
-            cursor.execute(
-                "ALTER TABLE `user_profile` ADD COLUMN `wechat` varchar(128) DEFAULT NULL COMMENT '会员微信号（后台受控展示）' AFTER `ideal_partner`"
-            )
-            logger.info("已为 user_profile 补充会员 CRM 微信字段")
+        columns = {
+            "user_profile": {
+                "residence_city_code": "varchar(32) DEFAULT NULL",
+                "ideal_partner": "text DEFAULT NULL",
+                "wechat": "varchar(128) DEFAULT NULL COMMENT '会员微信号（后台受控展示）'",
+            },
+            "user_auth": {
+                "education": "varchar(64) DEFAULT NULL COMMENT '学历'",
+                "job": "varchar(128) DEFAULT NULL COMMENT '职业'",
+                "auth_status": "tinyint DEFAULT 0 COMMENT '整体认证状态'",
+            },
+        }
+        for table_name, required in columns.items():
+            for column_name, definition in required.items():
+                cursor.execute(f"SHOW COLUMNS FROM `{table_name}` LIKE %s", (column_name,))
+                if cursor.fetchone():
+                    continue
+                cursor.execute(
+                    f"ALTER TABLE `{table_name}` ADD COLUMN `{column_name}` {definition}"
+                )
+                logger.info("已为 %s 补充会员 CRM 字段 %s", table_name, column_name)
 
     def _backfill_comment_roots(self, cursor) -> None:
         """Resolve legacy nested replies to their top-level root, one depth at a time."""
