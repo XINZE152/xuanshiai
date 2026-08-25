@@ -1,6 +1,10 @@
+"""Contracts for message administration."""
+
 from datetime import datetime
 from typing import Literal
+
 from pydantic import BaseModel, Field
+
 
 class AdminMessageItem(BaseModel):
     id: int
@@ -14,6 +18,7 @@ class AdminMessageItem(BaseModel):
     revoked_at: datetime | None
     created_at: datetime
 
+
 class AdminMessagePage(BaseModel):
     items: list[AdminMessageItem]
     page: int
@@ -21,15 +26,18 @@ class AdminMessagePage(BaseModel):
     total: int
     has_more: bool
 
+
 class AdminMessageModerationRequest(BaseModel):
     action: Literal["recall", "restore"]
     reason: str = Field(min_length=1, max_length=255)
+
 
 class AdminAnnouncementCreate(BaseModel):
     category: str = Field(min_length=1, max_length=64)
     title: str = Field(min_length=1, max_length=255)
     link_to: str | None = Field(default=None, max_length=500)
     published_at: datetime | None = None
+
 
 class AdminAnnouncementItem(BaseModel):
     id: int
