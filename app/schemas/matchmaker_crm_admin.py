@@ -43,6 +43,10 @@ class MemberDetail(MemberListItem):
     birthday: date | None
     is_married: int | None
     residence_city_code: str | None
+    education: str | None = None
+    job: str | None = None
+    tags: dict[str, list[str]] | list[str] | None = None
+    self_intro: str | None = None
 
 
 class MemberStatusUpdate(BaseModel):

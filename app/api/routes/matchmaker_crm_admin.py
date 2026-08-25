@@ -1,6 +1,9 @@
 """Member CRM endpoints protected by the independent matchmaker admin session."""
 
+import json
+
 from fastapi import APIRouter, Depends, Path, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +12,12 @@ from app.db.session import get_db
 from app.schemas.matchmaker_crm_admin import MemberDetail, MemberListItem, MemberPage, MemberStatistics, MemberStatusResponse, MemberStatusUpdate
 
 router = APIRouter(prefix="/admin/matchmaker")
+
+
+class MemberBatchStatus(BaseModel):
+    member_ids: list[int] = Field(min_length=1, max_length=200)
+    status: int = Field(ge=1, le=3)
+    reason: str = Field(min_length=1, max_length=255)
 
 
 async def _member_query(db: AsyncSession, where: str, params: dict, page: int, page_size: int) -> MemberPage:
@@ -87,10 +96,51 @@ async def member_statistics(current: CurrentMatchmakerAdmin = Depends(get_curren
     return MemberStatistics(**{key: int(row[key] or 0) for key in ("total", "male", "female", "vip", "active", "unassigned", "never_followed", "follow_due_today")})
 
 
+@router.post("/members/batch-status")
+async def batch_member_status(
+    body: MemberBatchStatus,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    ids = list(dict.fromkeys(body.member_ids))
+    placeholders = ",".join(f":id_{index}" for index in range(len(ids)))
+    params = {f"id_{index}": value for index, value in enumerate(ids)}
+    params.update({"status": body.status, "actor": current.account.id, "reason": body.reason})
+    result = await db.execute(text(f"UPDATE users SET status=:status, updated_at=UTC_TIMESTAMP() WHERE id IN ({placeholders})"), params)
+    await db.commit()
+    return {"updated": int(result.rowcount or 0), "status": body.status}
+
+
+@router.get("/members/auth")
+async def member_auth_list(
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    auth_status: int | None = Query(None, ge=0, le=3),
+    search: str | None = Query(None, max_length=64),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    where = ["1=1"]
+    params = {"limit": page_size, "offset": (page - 1) * page_size}
+    if auth_status is not None:
+        where.append("COALESCE(ua.auth_status, 0) = :auth_status")
+        params["auth_status"] = auth_status
+    if search:
+        where.append("(u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))")
+        params["search"] = search
+    clause = " AND ".join(where)
+    base = "FROM users u LEFT JOIN user_auth ua ON ua.user_id=u.id"
+    rows = await db.execute(text(f"SELECT u.id, u.nickname, u.phone, u.gender, u.birthday, ua.real_name, ua.id_card, COALESCE(ua.auth_status,0) auth_status, ua.updated_at submitted_at {base} WHERE {clause} ORDER BY submitted_at DESC, u.id DESC LIMIT :limit OFFSET :offset"), params)
+    total = int((await db.scalar(text(f"SELECT COUNT(*) {base} WHERE {clause}"), {k: v for k, v in params.items() if k not in ('limit', 'offset')})) or 0)
+    return {"items": [dict(row) for row in rows.mappings().all()], "page": page, "page_size": page_size, "total": total, "has_more": page * page_size < total}
+
+
 @router.get("/members/{member_id}", response_model=MemberDetail, summary="查询会员详情")
 async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberDetail:
     row = (await db.execute(text("""SELECT u.id, u.nickname, u.phone, u.gender, u.status, u.avatar, u.birthday, u.is_married, u.created_at,
-        p.residence_city_code, v.vip_end_at, a.matchmaker_id,
+        p.residence_city_code, p.height, p.income, p.hometown, p.residence, p.self_intro, p.tags,
+        ua.education, ua.job, ua.auth_status,
+        v.vip_end_at, a.matchmaker_id,
         CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()) THEN 0 ELSE 1 END AS is_vip
         FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(end_at) vip_end_at FROM user_membership WHERE status = 1 GROUP BY user_id) v ON v.user_id = u.id
@@ -98,7 +148,14 @@ async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchm
     if not row:
         from fastapi import HTTPException
         raise HTTPException(404, detail="会员不存在")
-    return MemberDetail(**dict(row))
+    data = dict(row)
+    raw_tags = data.get("tags")
+    if isinstance(raw_tags, str):
+        try:
+            data["tags"] = json.loads(raw_tags)
+        except (TypeError, ValueError):
+            data["tags"] = None
+    return MemberDetail(**data)
 
 
 @router.patch("/members/{member_id}/status", response_model=MemberStatusResponse, summary="修改会员状态")

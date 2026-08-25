@@ -11,6 +11,25 @@ from app.schemas.member_follow_up_admin import MemberBehaviorItem, MemberBehavio
 router = APIRouter(prefix="/admin/members")
 
 
+@router.get("/follow-ups")
+async def all_follow_ups(
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None, max_length=64),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    params = {"limit": page_size, "offset": (page - 1) * page_size}
+    where = "1=1"
+    if search:
+        where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
+        params["search"] = search
+    base = "FROM member_follow_up f JOIN users u ON u.id = f.user_id"
+    rows = await db.execute(text(f"SELECT f.id, f.user_id, u.nickname, f.method, f.content, f.next_follow_at, f.created_by, f.created_at {base} WHERE {where} ORDER BY f.id DESC LIMIT :limit OFFSET :offset"), params)
+    total = int((await db.scalar(text(f"SELECT COUNT(*) {base} WHERE {where}"), {k: v for k, v in params.items() if k not in ('limit', 'offset')})) or 0)
+    return {"items": [dict(row) for row in rows.mappings().all()], "page": page, "page_size": page_size, "total": total, "has_more": page * page_size < total}
+
+
 async def _ensure_member(db: AsyncSession, user_id: int) -> None:
     if not await db.scalar(text("SELECT 1 FROM users WHERE id = :id"), {"id": user_id}):
         raise HTTPException(404, detail="会员不存在")
@@ -51,3 +70,28 @@ async def behavior(member_id: int = Path(..., ge=1), page: int = Query(1, ge=1, 
     total = int((await db.scalar(text("""SELECT (SELECT COUNT(*) FROM user_login_log WHERE user_id = :id) + (SELECT COUNT(*) FROM user_browse_history WHERE user_id = :id) + (SELECT COUNT(*) FROM user_favorite WHERE user_id = :id) + (SELECT COUNT(*) FROM user_swipe_record WHERE user_id = :id) + (SELECT COUNT(*) FROM match_apply WHERE from_user_id = :id)"""), {"id": member_id})) or 0)
     return MemberBehaviorPage(items=[MemberBehaviorItem(**dict(row)) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
+
+@router.get("/behavior/all")
+async def all_behavior(
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None, max_length=64),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    # Keep the same event sources as the member detail feed, adding the member for the CRM table.
+    where = ""
+    params = {"limit": page_size, "offset": (page - 1) * page_size}
+    if search:
+        where = "WHERE nickname LIKE CONCAT('%', :search, '%')"
+        params["search"] = search
+    event_sql = """SELECT event_type, event_id, user_id, nickname, target_user_id, target_nickname, detail, occurred_at FROM (
+      SELECT 'login' event_type, l.id event_id, l.user_id, u.nickname, NULL target_user_id, NULL target_nickname, IF(l.login_status = 1, '登录成功', CONCAT('登录失败：', COALESCE(l.failure_reason, '未知原因'))) detail, l.created_at occurred_at FROM user_login_log l JOIN users u ON u.id=l.user_id
+      UNION ALL SELECT 'browse', h.id, h.user_id, u.nickname, h.target_user_id, t.nickname, '浏览资料', h.created_at FROM user_browse_history h JOIN users u ON u.id=h.user_id LEFT JOIN users t ON t.id=h.target_user_id
+      UNION ALL SELECT 'favorite', f.id, f.user_id, u.nickname, f.target_user_id, t.nickname, '收藏用户', f.created_at FROM user_favorite f JOIN users u ON u.id=f.user_id LEFT JOIN users t ON t.id=f.target_user_id
+      UNION ALL SELECT 'swipe', s.id, s.user_id, u.nickname, s.target_user_id, t.nickname, s.action, s.created_at FROM user_swipe_record s JOIN users u ON u.id=s.user_id LEFT JOIN users t ON t.id=s.target_user_id
+      UNION ALL SELECT 'apply', a.id, a.from_user_id, u.nickname, a.to_user_id, t.nickname, '提交认识申请', a.created_at FROM match_apply a JOIN users u ON u.id=a.from_user_id LEFT JOIN users t ON t.id=a.to_user_id
+    ) events"""
+    rows = await db.execute(text(f"SELECT * FROM ({event_sql}) e {where} ORDER BY occurred_at DESC, event_id DESC LIMIT :limit OFFSET :offset"), params)
+    total = int((await db.scalar(text(f"SELECT COUNT(*) FROM ({event_sql}) e {where}"), {k: v for k, v in params.items() if k not in ('limit', 'offset')})) or 0)
+    return {"items": [dict(row) for row in rows.mappings().all()], "page": page, "page_size": page_size, "total": total, "has_more": page * page_size < total}
