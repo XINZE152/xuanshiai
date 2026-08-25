@@ -1,5 +1,7 @@
 """Member administration services backed by existing user tables."""
 
+import json
+
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -76,6 +78,12 @@ async def update_member(db: AsyncSession, member_id: int, body: MatchmakerMember
     values = body.model_dump(exclude_unset=True)
     remark = values.pop("remark", None)
     user_values = {key: values.pop(key) for key in ("nickname", "gender", "birthday", "is_married", "avatar") if key in values}
+    auth_values = {key: values.pop(key) for key in ("education", "job") if key in values}
+    if "tags" in values and isinstance(values["tags"], list):
+        # Profile tags are stored as a category map; preserve a simple list as custom tags.
+        values["tags"] = {"custom": values["tags"]}
+    if "tags" in values:
+        values["tags"] = json.dumps(values["tags"], ensure_ascii=False) if values["tags"] is not None else None
     if user_values:
         assignments = ", ".join(f"{key} = :{key}" for key in user_values)
         await db.execute(text(f"UPDATE users SET {assignments}, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {
@@ -87,6 +95,11 @@ async def update_member(db: AsyncSession, member_id: int, body: MatchmakerMember
         await db.execute(text(f"""INSERT INTO user_profile ({', '.join(columns)})
             VALUES ({', '.join(':' + key for key in columns)})
             ON DUPLICATE KEY UPDATE {updates}"""), {"user_id": member_id, **values})
+    if auth_values:
+        await db.execute(text(f"""INSERT INTO user_auth (user_id, {', '.join(auth_values)})
+            VALUES (:user_id, {', '.join(':' + key for key in auth_values)})
+            ON DUPLICATE KEY UPDATE {', '.join(f'{key} = VALUES({key})' for key in auth_values)}"""),
+            {"user_id": member_id, **auth_values})
     if remark is not None:
         await db.execute(text("""INSERT INTO matchmaker_admin_member_note (user_id, note, updated_by)
             VALUES (:user_id, :note, :updated_by)

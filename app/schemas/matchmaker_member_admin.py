@@ -35,6 +35,12 @@ class MatchmakerMemberUpdate(BaseModel):
     is_married: Literal[1, 2, 3] | None = None
     avatar: str | None = Field(default=None, max_length=255)
     income: float | None = Field(default=None, ge=0, le=1_000_000)
+    height: int | None = Field(default=None, ge=80, le=250)
+    hometown: str | None = Field(default=None, max_length=128)
+    residence: str | None = Field(default=None, max_length=128)
+    education: str | None = Field(default=None, max_length=64)
+    job: str | None = Field(default=None, max_length=128)
+    tags: dict[str, list[str]] | list[str] | None = None
     self_intro: str | None = Field(default=None, max_length=500)
     remark: str | None = Field(default=None, max_length=2000)
 
