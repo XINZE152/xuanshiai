@@ -79,6 +79,39 @@ async def update_member(db: AsyncSession, member_id: int, body: MatchmakerMember
     remark = values.pop("remark", None)
     user_values = {key: values.pop(key) for key in ("nickname", "gender", "birthday", "is_married", "avatar") if key in values}
     auth_values = {key: values.pop(key) for key in ("education", "job") if key in values}
+    profile_columns: set[str] = set()
+    if values:
+        profile_columns = {
+            str(row[0])
+            for row in (
+                await db.execute(
+                    text("""SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user_profile'""")
+                )
+            ).all()
+        }
+        missing_profile_values = set(values) - profile_columns
+        if missing_profile_values:
+            raise HTTPException(
+                status_code=503,
+                detail="数据库缺少会员资料字段，请先重启服务完成数据库结构迁移",
+            )
+    if auth_values:
+        auth_columns = {
+            str(row[0])
+            for row in (
+                await db.execute(
+                    text("""SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user_auth'""")
+                )
+            ).all()
+        }
+        missing_auth_values = set(auth_values) - auth_columns
+        if missing_auth_values:
+            raise HTTPException(
+                status_code=503,
+                detail="数据库缺少会员认证字段，请先重启服务完成数据库结构迁移",
+            )
     if "tags" in values and isinstance(values["tags"], list):
         # Profile tags are stored as a category map; preserve a simple list as custom tags.
         values["tags"] = {"custom": values["tags"]}

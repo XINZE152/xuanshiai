@@ -21,6 +21,13 @@ class MemberBatchStatus(BaseModel):
 
 
 async def _member_query(db: AsyncSession, where: str, params: dict, page: int, page_size: int) -> MemberPage:
+    column_rows = await db.execute(text("""SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('user_profile', 'user_auth')"""))
+    available = {(row[0], row[1]) for row in column_rows.all()}
+
+    def auth_expr(name: str) -> str:
+        return f"ua.{name}" if ("user_auth", name) in available else "NULL"
+
     base = """FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
         LEFT JOIN user_auth ua ON ua.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(end_at) AS vip_end_at FROM user_membership WHERE status = 1 GROUP BY user_id) v ON v.user_id = u.id
@@ -39,7 +46,8 @@ async def _member_query(db: AsyncSession, where: str, params: dict, page: int, p
     rows = await db.execute(text(f"""SELECT u.id, u.nickname, u.phone, u.gender, u.status, u.created_at,
         COALESCE(u.avatar, JSON_UNQUOTE(JSON_EXTRACT(p.photos, '$[0]'))) AS avatar,
         u.birthday, u.is_married, p.height, p.income, p.hometown, p.residence,
-        ua.education, ua.job, ua.auth_status, f.last_follow_at, f.next_follow_at,
+        {auth_expr('education')} AS education, {auth_expr('job')} AS job,
+        COALESCE({auth_expr('auth_status')}, 0) AS auth_status, f.last_follow_at, f.next_follow_at,
         v.vip_end_at, a.matchmaker_id, CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()) THEN 0 ELSE 1 END AS is_vip
         {base} WHERE {where} ORDER BY {sort_sql} LIMIT :limit OFFSET :offset"""), params)
     count = await db.execute(text(f"SELECT COUNT(*) {base} WHERE {where}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})
@@ -137,9 +145,20 @@ async def member_auth_list(
 
 @router.get("/members/{member_id}", response_model=MemberDetail, summary="查询会员详情")
 async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberDetail:
-    row = (await db.execute(text("""SELECT u.id, u.nickname, u.phone, u.gender, u.status, u.avatar, u.birthday, u.is_married, u.created_at,
-        u.last_login_at, u.register_ip AS ip_location, p.residence_city_code, p.height, p.income, p.hometown, p.residence, p.self_intro, p.ideal_partner, p.wechat, p.tags,
-        ua.education, ua.job, ua.auth_status,
+    column_rows = await db.execute(text("""SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('user_profile', 'user_auth')"""))
+    available = {(row[0], row[1]) for row in column_rows.all()}
+    def profile_expr(name: str) -> str:
+        return f"p.{name}" if ("user_profile", name) in available else "NULL"
+
+    def auth_expr(name: str) -> str:
+        return f"ua.{name}" if ("user_auth", name) in available else "NULL"
+    row = (await db.execute(text(f"""SELECT u.id, u.nickname, u.phone, u.gender, u.status, u.avatar, u.birthday, u.is_married, u.created_at,
+        u.last_login_at, u.register_ip AS ip_location, {profile_expr('residence_city_code')} AS residence_city_code,
+        {profile_expr('height')} AS height, {profile_expr('income')} AS income, {profile_expr('hometown')} AS hometown,
+        {profile_expr('residence')} AS residence, {profile_expr('self_intro')} AS self_intro,
+        {profile_expr('ideal_partner')} AS ideal_partner, {profile_expr('wechat')} AS wechat, {profile_expr('tags')} AS tags,
+        {auth_expr('education')} AS education, {auth_expr('job')} AS job, {auth_expr('auth_status')} AS auth_status,
         v.vip_end_at, a.matchmaker_id,
         CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()) THEN 0 ELSE 1 END AS is_vip
         FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
