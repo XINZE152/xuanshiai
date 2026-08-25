@@ -2638,6 +2638,7 @@ class DatabaseManager:
         # 兼容已存在的旧库：CREATE TABLE IF NOT EXISTS 不会补齐新增字段。
         self._ensure_required_columns(cursor)
         self._ensure_admin_home_columns(cursor)
+        self._ensure_member_crm_columns(cursor)
 
         self._backfill_comment_roots(cursor)
 
@@ -2663,6 +2664,15 @@ class DatabaseManager:
                 cursor.execute(
                     f"ALTER TABLE `{table_name}` ADD COLUMN `tenant_id` bigint unsigned NOT NULL DEFAULT 1 AFTER `id`"
                 )
+
+    def _ensure_member_crm_columns(self, cursor) -> None:
+        """Add CRM profile fields to already-existing installations."""
+        cursor.execute("SHOW COLUMNS FROM `user_profile` LIKE 'wechat'")
+        if not cursor.fetchone():
+            cursor.execute(
+                "ALTER TABLE `user_profile` ADD COLUMN `wechat` varchar(128) DEFAULT NULL COMMENT '会员微信号（后台受控展示）' AFTER `ideal_partner`"
+            )
+            logger.info("已为 user_profile 补充会员 CRM 微信字段")
 
     def _backfill_comment_roots(self, cursor) -> None:
         """Resolve legacy nested replies to their top-level root, one depth at a time."""
