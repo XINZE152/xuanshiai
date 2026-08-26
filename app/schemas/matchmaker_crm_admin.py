@@ -20,12 +20,29 @@ class MemberListItem(BaseModel):
     birthday: date | None = None
     is_married: int | None = None
     height: int | None = None
+    weight: int | None = None
+    zodiac: str | None = None
+    household: str | None = None
+    ethnicity: str | None = None
+    house: str | None = None
+    car: str | None = None
+    smoking: str | None = None
+    hometown_province_code: str | None = None
+    hometown_city_code: str | None = None
+    hometown_district_code: str | None = None
+    residence_province_code: str | None = None
+    residence_city_code: str | None = None
+    residence_district_code: str | None = None
+    household_province_code: str | None = None
+    household_city_code: str | None = None
+    household_district_code: str | None = None
     income: float | None = None
     hometown: str | None = None
     residence: str | None = None
     education: str | None = None
     job: str | None = None
     auth_status: int | None = None
+    intention_level: int | None = None
     last_follow_at: datetime | None = None
     next_follow_at: datetime | None = None
 
@@ -73,3 +90,12 @@ class MemberStatistics(BaseModel):
     unassigned: int = 0
     never_followed: int = 0
     follow_due_today: int = 0
+
+
+class MemberAssignmentUpdate(BaseModel):
+    matchmaker_id: int | None = Field(default=None, ge=1, description="服务红娘用户 ID；传 null 表示取消分派")
+
+
+class MemberAssignmentResponse(BaseModel):
+    user_id: int
+    matchmaker_id: int | None

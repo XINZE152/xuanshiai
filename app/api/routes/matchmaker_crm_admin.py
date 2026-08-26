@@ -2,14 +2,14 @@
 
 import json
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
 from app.db.session import get_db
-from app.schemas.matchmaker_crm_admin import MemberDetail, MemberListItem, MemberPage, MemberStatistics, MemberStatusResponse, MemberStatusUpdate
+from app.schemas.matchmaker_crm_admin import MemberAssignmentResponse, MemberAssignmentUpdate, MemberDetail, MemberListItem, MemberPage, MemberStatistics, MemberStatusResponse, MemberStatusUpdate
 
 router = APIRouter(prefix="/admin/matchmaker")
 
@@ -27,6 +27,9 @@ async def _member_query(db: AsyncSession, where: str, params: dict, page: int, p
 
     def auth_expr(name: str) -> str:
         return f"ua.{name}" if ("user_auth", name) in available else "NULL"
+
+    def profile_expr(name: str) -> str:
+        return f"p.{name}" if ("user_profile", name) in available else "NULL"
 
     base = """FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
         LEFT JOIN user_auth ua ON ua.user_id = u.id
@@ -47,7 +50,7 @@ async def _member_query(db: AsyncSession, where: str, params: dict, page: int, p
         COALESCE(u.avatar, JSON_UNQUOTE(JSON_EXTRACT(p.photos, '$[0]'))) AS avatar,
         u.birthday, u.is_married, p.height, p.income, p.hometown, p.residence,
         {auth_expr('education')} AS education, {auth_expr('job')} AS job,
-        COALESCE({auth_expr('auth_status')}, 0) AS auth_status, f.last_follow_at, f.next_follow_at,
+        COALESCE({auth_expr('auth_status')}, 0) AS auth_status, {profile_expr('intention_level')} AS intention_level, f.last_follow_at, f.next_follow_at,
         v.vip_end_at, a.matchmaker_id, CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()) THEN 0 ELSE 1 END AS is_vip
         {base} WHERE {where} ORDER BY {sort_sql} LIMIT :limit OFFSET :offset"""), params)
     count = await db.execute(text(f"SELECT COUNT(*) {base} WHERE {where}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})
@@ -155,7 +158,19 @@ async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchm
         return f"ua.{name}" if ("user_auth", name) in available else "NULL"
     row = (await db.execute(text(f"""SELECT u.id, u.nickname, u.phone, u.gender, u.status, u.avatar, u.birthday, u.is_married, u.created_at,
         u.last_login_at, u.register_ip AS ip_location, {profile_expr('residence_city_code')} AS residence_city_code,
-        {profile_expr('height')} AS height, {profile_expr('income')} AS income, {profile_expr('hometown')} AS hometown,
+        {profile_expr('height')} AS height, {profile_expr('weight')} AS weight, {profile_expr('zodiac')} AS zodiac,
+        {profile_expr('household')} AS household, {profile_expr('ethnicity')} AS ethnicity,
+        {profile_expr('house')} AS house, {profile_expr('car')} AS car, {profile_expr('smoking')} AS smoking,
+        {profile_expr('hometown_province_code')} AS hometown_province_code,
+        {profile_expr('hometown_city_code')} AS hometown_city_code,
+        {profile_expr('hometown_district_code')} AS hometown_district_code,
+        {profile_expr('residence_province_code')} AS residence_province_code,
+        {profile_expr('residence_city_code')} AS residence_city_code,
+        {profile_expr('residence_district_code')} AS residence_district_code,
+        {profile_expr('household_province_code')} AS household_province_code,
+        {profile_expr('household_city_code')} AS household_city_code,
+        {profile_expr('household_district_code')} AS household_district_code,
+        {profile_expr('income')} AS income, {profile_expr('intention_level')} AS intention_level, {profile_expr('hometown')} AS hometown,
         {profile_expr('residence')} AS residence, {profile_expr('self_intro')} AS self_intro,
         {profile_expr('ideal_partner')} AS ideal_partner, {profile_expr('wechat')} AS wechat, {profile_expr('tags')} AS tags,
         {auth_expr('education')} AS education, {auth_expr('job')} AS job, {auth_expr('auth_status')} AS auth_status,
@@ -176,6 +191,37 @@ async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchm
         except (TypeError, ValueError):
             data["tags"] = None
     return MemberDetail(**data)
+
+
+@router.patch("/members/{member_id}/assignment", response_model=MemberAssignmentResponse, summary="修改会员服务红娘")
+async def member_assignment(
+    member_id: int = Path(..., ge=1),
+    body: MemberAssignmentUpdate = ...,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MemberAssignmentResponse:
+    if not (await db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": member_id})).scalar():
+        raise HTTPException(404, detail="会员不存在")
+    if body.matchmaker_id is not None and not (await db.execute(text("""SELECT 1 FROM user_role
+        WHERE user_id = :id AND role_code = 'service_matchmaker' AND status = 1 LIMIT 1"""), {"id": body.matchmaker_id})).scalar():
+        raise HTTPException(422, detail="指定用户不是有效的服务红娘")
+    await db.execute(text("""UPDATE resource_assignment SET status = 2,
+        ended_at = UTC_TIMESTAMP(), end_reason = 'reassigned'
+        WHERE user_id = :user_id AND status = 1"""), {"user_id": member_id})
+    if body.matchmaker_id is not None:
+        await db.execute(text("""INSERT INTO resource_assignment
+            (user_id, matchmaker_id, source, assigned_by)
+            VALUES (:user_id, :matchmaker_id, 'manual', :assigned_by)"""), {
+            "user_id": member_id, "matchmaker_id": body.matchmaker_id, "assigned_by": current.account.id,
+        })
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id, reason)
+        VALUES (:actor, 'member.assignment.update', 'user', :user_id, :reason)"""), {
+        "actor": current.account.id, "user_id": member_id,
+        "reason": f"matchmaker_id={body.matchmaker_id}",
+    })
+    await db.commit()
+    return MemberAssignmentResponse(user_id=member_id, matchmaker_id=body.matchmaker_id)
 
 
 @router.patch("/members/{member_id}/status", response_model=MemberStatusResponse, summary="修改会员状态")

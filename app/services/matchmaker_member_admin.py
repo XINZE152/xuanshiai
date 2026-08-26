@@ -78,7 +78,7 @@ async def update_member(db: AsyncSession, member_id: int, body: MatchmakerMember
     values = body.model_dump(exclude_unset=True)
     remark = values.pop("remark", None)
     user_values = {key: values.pop(key) for key in ("nickname", "gender", "birthday", "is_married", "avatar") if key in values}
-    auth_values = {key: values.pop(key) for key in ("education", "job") if key in values}
+    auth_values = {key: values.pop(key) for key in ("education", "job", "auth_status") if key in values}
     profile_columns: set[str] = set()
     if values:
         profile_columns = {
