@@ -320,3 +320,13 @@ AI_ADVISOR_KNOWLEDGE_VERSION=seed-v1
 ## 变更记录
 
 - 2026-08-23：新增 AI 情感军师后端框架、五个接口、数据库表、Mock、风险校验、额度退款和基础测试。
+
+## 2026-08-27 契约补充
+
+### `Idempotency-Key`
+
+建议接口 `POST /api/v1/ai/advisor/sessions/{session_id}/advice` 支持可选请求头 `Idempotency-Key`，长度不超过 128 个字符。相同用户、相同军师会话和相同幂等键在已有成功结果时直接返回原建议，不再次调用模型或扣减每日额度。不同用户的幂等键不共享。未提供该请求头时，每次请求均视为新的生成请求。
+
+### 调用审计
+
+后端在 `ai_advisor_call_log` 保存调用状态、风险等级、模型名、Prompt 版本、知识版本、耗时、额度扣减/退款状态和错误摘要。审计状态包括 `success`、`blocked`、`failed`。审计表仅供服务治理和问题排查，不向前端直接返回。
