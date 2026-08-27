@@ -1,4 +1,4 @@
-"""Relationship advisor MVP service."""
+﻿"""Relationship advisor MVP service."""
 
 from __future__ import annotations
 
@@ -107,6 +107,8 @@ def _risk_level(content: str) -> str:
         return "high"
     if any(term.casefold() in value for term in _ABSOLUTE_TERMS):
         return "medium"
+    if any(term in value for term in ("让他后悔", "故意冷落", "测试他", "拿捏", "逼他", "操控")):
+        return "medium"
     return "none"
 
 
@@ -214,24 +216,120 @@ async def delete_session(db: AsyncSession, user_id: int, session_id: int) -> Non
     await db.commit()
 
 
-async def get_advice(db: AsyncSession, user_id: int, session_id: int, request: AdvisorAdviceRequest) -> AdvisorAdviceResponse:
+
+async def _write_call_log(
+    db: AsyncSession,
+    *,
+    request_id: str,
+    user_id: int,
+    session_id: int,
+    scenario: str,
+    status: str,
+    risk_level: str = "none",
+    latency_ms: int | None = None,
+    quota_consumed: bool = False,
+    quota_refunded: bool = False,
+    error_detail: str | None = None,
+) -> None:
+    await db.execute(text("""INSERT INTO ai_advisor_call_log
+        (request_id, user_id, session_id, scenario, status, risk_level, model_name,
+         prompt_version, knowledge_version, latency_ms, quota_consumed, quota_refunded, error_detail)
+        VALUES (:request_id, :user_id, :session_id, :scenario, :status, :risk_level, :model_name,
+                :prompt_version, :knowledge_version, :latency_ms, :quota_consumed, :quota_refunded, :error_detail)"""), {
+        "request_id": request_id,
+        "user_id": user_id,
+        "session_id": session_id,
+        "scenario": scenario,
+        "status": status,
+        "risk_level": risk_level,
+        "model_name": settings.ai_model,
+        "prompt_version": settings.ai_advisor_prompt_version,
+        "knowledge_version": settings.ai_advisor_knowledge_version,
+        "latency_ms": latency_ms,
+        "quota_consumed": int(quota_consumed),
+        "quota_refunded": int(quota_refunded),
+        "error_detail": error_detail[:500] if error_detail else None,
+    })
+
+
+def _response_from_stored(row: Any) -> AdvisorAdviceResponse:
+    data = json.loads(row["output_json"])
+    return AdvisorAdviceResponse(
+        id=int(row["id"]),
+        session_id=int(row["session_id"]),
+        scenario=row["scenario"],
+        analysis=data["analysis"],
+        suggestions=[AdvisorSuggestion(**item) for item in data["suggestions"]],
+        risk_level=data["risk_level"],
+        risk_notice=data.get("risk_notice"),
+        next_step=data.get("next_step"),
+        disclaimer=_DISCLAIMER,
+        created_at=row["created_at"],
+    )
+
+
+async def get_advice(
+    db: AsyncSession,
+    user_id: int,
+    session_id: int,
+    request: AdvisorAdviceRequest,
+    *,
+    idempotency_key: str | None = None,
+) -> AdvisorAdviceResponse:
     await _require_vip(db, user_id)
     session = (await db.execute(text("""SELECT id, chat_session_id FROM ai_advisor_session
-        WHERE id=:session_id AND user_id=:user_id AND status=1"""), {"session_id": session_id, "user_id": user_id})).mappings().first()
+        WHERE id=:session_id AND user_id=:user_id AND status=1"""), {
+        "session_id": session_id,
+        "user_id": user_id,
+    })).mappings().first()
     if not session:
-        raise HTTPException(404, detail="AI advisor message not found")
+        raise HTTPException(404, detail="AI advisor session not found")
+
+    if idempotency_key:
+        existing = (await db.execute(text("""SELECT id, session_id, scenario, output_json, created_at
+            FROM ai_advisor_message
+            WHERE session_id=:session_id AND user_id=:user_id
+              AND idempotency_key=:idempotency_key AND status='success'
+            LIMIT 1"""), {
+            "session_id": session_id,
+            "user_id": user_id,
+            "idempotency_key": idempotency_key,
+        })).mappings().first()
+        if existing:
+            return _response_from_stored(existing)
+
+    request_id = uuid4().hex
+    started = time.monotonic()
     chat_session_id = request.chat_session_id or session.get("chat_session_id")
     if request.include_history and chat_session_id is None:
         raise HTTPException(422, detail="chat_session_id is required when include_history is true")
-    await assert_text_allowed(db, request.incoming_message, field="Incoming message")
-    input_risk = _risk_level(request.incoming_message)
-    if input_risk == "high":
-        raise HTTPException(422, detail="该内容涉及高风险情境，暂不生成情感话术建议")
-    context = await _load_context(db, user_id, chat_session_id) if request.include_history else ""
-    knowledge = await _load_knowledge(db, request.scenario, request.tone)
+
+    try:
+        await assert_text_allowed(db, request.incoming_message, field="Incoming message")
+        input_risk = _risk_level(request.incoming_message)
+        if input_risk == "high":
+            await _write_call_log(
+                db,
+                request_id=request_id,
+                user_id=user_id,
+                session_id=session_id,
+                scenario=request.scenario,
+                status="blocked",
+                risk_level=input_risk,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                error_detail="High-risk input blocked before quota consumption",
+            )
+            await db.commit()
+            raise HTTPException(422, detail="该内容涉及高风险情境，暂不生成情感话术建议")
+        context = await _load_context(db, user_id, chat_session_id) if request.include_history else ""
+        knowledge = await _load_knowledge(db, request.scenario, request.tone)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(503, detail="AI军师服务暂时不可用") from exc
+
     quota_key = await _consume_quota(user_id)
-    request_id = uuid4().hex
-    started = time.monotonic()
     prompt = _build_prompt(request, context, knowledge, input_risk)
     try:
         raw = await complete([
@@ -243,9 +341,9 @@ async def get_advice(db: AsyncSession, user_id: int, session_id: int, request: A
             raise HTTPException(422, detail="AI建议命中高风险规则，暂不返回")
         result = await db.execute(text("""INSERT INTO ai_advisor_message
             (session_id, user_id, role, scenario, input_text, output_json, risk_level, status,
-             model_name, prompt_version, knowledge_version, request_id, latency_ms, quota_consumed)
+             model_name, prompt_version, knowledge_version, request_id, idempotency_key, latency_ms, quota_consumed)
             VALUES (:session_id, :user_id, 'assistant', :scenario, :input_text, :output_json, :risk_level, 'success',
-             :model_name, :prompt_version, :knowledge_version, :request_id, :latency_ms, 1)"""), {
+             :model_name, :prompt_version, :knowledge_version, :request_id, :idempotency_key, :latency_ms, 1)"""), {
             "session_id": session_id,
             "user_id": user_id,
             "scenario": request.scenario,
@@ -256,25 +354,64 @@ async def get_advice(db: AsyncSession, user_id: int, session_id: int, request: A
             "prompt_version": settings.ai_advisor_prompt_version,
             "knowledge_version": settings.ai_advisor_knowledge_version,
             "request_id": request_id,
+            "idempotency_key": idempotency_key,
             "latency_ms": int((time.monotonic() - started) * 1000),
         })
         await db.execute(text("UPDATE ai_advisor_session SET updated_at=UTC_TIMESTAMP() WHERE id=:id"), {"id": session_id})
+        await _write_call_log(
+            db,
+            request_id=request_id,
+            user_id=user_id,
+            session_id=session_id,
+            scenario=request.scenario,
+            status="success",
+            risk_level=data["risk_level"],
+            latency_ms=int((time.monotonic() - started) * 1000),
+            quota_consumed=True,
+        )
         await db.commit()
-    except HTTPException:
+    except HTTPException as exc:
+        await db.rollback()
         await refund_daily(quota_key)
+        await _write_call_log(
+            db,
+            request_id=request_id,
+            user_id=user_id,
+            session_id=session_id,
+            scenario=request.scenario,
+            status="blocked",
+            risk_level="high",
+            latency_ms=int((time.monotonic() - started) * 1000),
+            quota_consumed=True,
+            quota_refunded=True,
+            error_detail=str(exc.detail),
+        )
+        await db.commit()
         raise
     except Exception as exc:
         await db.rollback()
         await refund_daily(quota_key)
+        try:
+            await _write_call_log(
+                db,
+                request_id=request_id,
+                user_id=user_id,
+                session_id=session_id,
+                scenario=request.scenario,
+                status="failed",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                quota_consumed=True,
+                quota_refunded=True,
+                error_detail=str(exc),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
         raise HTTPException(503, detail="AI军师服务暂时不可用") from exc
-    row = (await db.execute(text("""SELECT id, created_at FROM ai_advisor_message WHERE id=:id"""), {"id": result.lastrowid})).mappings().one()
-    return AdvisorAdviceResponse(
-        id=int(row["id"]), session_id=session_id, scenario=request.scenario,
-        analysis=data["analysis"], suggestions=[AdvisorSuggestion(**item) for item in data["suggestions"]],
-        risk_level=data["risk_level"], risk_notice=data["risk_notice"], next_step=data["next_step"],
-        disclaimer=_DISCLAIMER, created_at=row["created_at"],
-    )
 
+    row = (await db.execute(text("""SELECT id, session_id, scenario, output_json, created_at
+        FROM ai_advisor_message WHERE id=:id"""), {"id": result.lastrowid})).mappings().one()
+    return _response_from_stored(row)
 
 async def record_feedback(db: AsyncSession, user_id: int, message_id: int, request: AdvisorFeedbackRequest) -> AdvisorFeedbackResponse:
     exists = (await db.execute(text("""SELECT id FROM ai_advisor_message

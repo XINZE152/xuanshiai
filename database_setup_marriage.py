@@ -1629,6 +1629,7 @@ class DatabaseManager:
                     `prompt_version` varchar(64) DEFAULT NULL,
                     `knowledge_version` varchar(64) DEFAULT NULL,
                     `request_id` varchar(64) DEFAULT NULL,
+                    `idempotency_key` varchar(128) DEFAULT NULL,
                     `latency_ms` int DEFAULT NULL,
                     `quota_consumed` tinyint NOT NULL DEFAULT '0',
                     `quota_refunded` tinyint NOT NULL DEFAULT '0',
@@ -1636,8 +1637,32 @@ class DatabaseManager:
                     PRIMARY KEY (`id`),
                     KEY `idx_ai_advisor_message_session` (`session_id`,`created_at`),
                     KEY `idx_ai_advisor_message_user` (`user_id`,`created_at`),
-                    KEY `idx_ai_advisor_message_request` (`request_id`)
+                    KEY `idx_ai_advisor_message_request` (`request_id`),
+                    UNIQUE KEY `uk_ai_advisor_message_idempotency` (`user_id`,`session_id`,`idempotency_key`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI relationship advisor message'
+            """,
+            'ai_advisor_call_log': """
+                CREATE TABLE IF NOT EXISTS `ai_advisor_call_log` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `request_id` varchar(64) NOT NULL,
+                    `user_id` bigint unsigned NOT NULL,
+                    `session_id` bigint unsigned DEFAULT NULL,
+                    `scenario` varchar(32) DEFAULT NULL,
+                    `status` varchar(16) NOT NULL,
+                    `risk_level` varchar(16) NOT NULL DEFAULT 'none',
+                    `model_name` varchar(128) DEFAULT NULL,
+                    `prompt_version` varchar(64) DEFAULT NULL,
+                    `knowledge_version` varchar(64) DEFAULT NULL,
+                    `latency_ms` int DEFAULT NULL,
+                    `quota_consumed` tinyint NOT NULL DEFAULT '0',
+                    `quota_refunded` tinyint NOT NULL DEFAULT '0',
+                    `error_detail` varchar(500) DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_ai_advisor_call_request` (`request_id`),
+                    KEY `idx_ai_advisor_call_user` (`user_id`,`created_at`),
+                    KEY `idx_ai_advisor_call_status` (`status`,`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI relationship advisor call audit'
             """,
             'ai_advisor_knowledge': """
                 CREATE TABLE IF NOT EXISTS `ai_advisor_knowledge` (

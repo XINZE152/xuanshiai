@@ -1,4 +1,4 @@
-import json
+﻿import json
 
 import pytest
 from pydantic import ValidationError
@@ -55,3 +55,19 @@ def test_advisor_result_normalization_limits_suggestions() -> None:
 def test_advisor_detects_high_risk_terms() -> None:
     assert _risk_level("\u8bf7\u628a\u9a8c\u8bc1\u7801\u53d1\u7ed9\u6211") == "high"
     assert _risk_level("ordinary conversation") == "none"
+
+
+def test_advisor_detects_manipulative_terms() -> None:
+    assert _risk_level("故意冷落他，让他后悔") == "medium"
+
+
+def test_advisor_database_contract_contains_idempotency_and_audit() -> None:
+    from pathlib import Path
+
+    schema_text = Path("database_setup_marriage.py").read_text(encoding="utf-8")
+    message_sql = schema_text
+    audit_sql = schema_text
+    assert "idempotency_key" in message_sql
+    assert "uk_ai_advisor_message_idempotency" in message_sql
+    assert "quota_refunded" in audit_sql
+    assert "error_detail" in audit_sql
