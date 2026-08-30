@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pymysql
+from sqlalchemy.engine import make_url
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -32,12 +33,17 @@ _TONES = ("natural", "warm", "humorous", "mature")
 def main() -> None:
     if settings.environment not in {"development", "testing"} and os.getenv("ALLOW_AI_ADVISOR_SEED") != "1":
         raise SystemExit("Refusing to seed outside development/testing; set ALLOW_AI_ADVISOR_SEED=1 for an explicit deployment.")
+    database_url = make_url(settings.database_url)
+    if database_url.drivername not in {"mysql", "mysql+pymysql", "mysql+aiomysql"}:
+        raise SystemExit(f"Unsupported database URL for seed script: {database_url.drivername}")
+    if not database_url.host or not database_url.username or not database_url.database:
+        raise SystemExit("DATABASE_URL must include host, username, and database name")
     connection = pymysql.connect(
-        host=settings.database_host,
-        port=settings.database_port,
-        user=settings.database_user,
-        password=settings.database_password.get_secret_value(),
-        database=settings.database_name,
+        host=database_url.host,
+        port=database_url.port or 3306,
+        user=database_url.username,
+        password=database_url.password or "",
+        database=database_url.database,
         charset="utf8mb4",
         autocommit=False,
     )
@@ -60,4 +66,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
 

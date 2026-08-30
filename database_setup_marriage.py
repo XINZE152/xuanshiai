@@ -1,4 +1,4 @@
-# database_setup_marriage.py - 婚恋交友小程序数据库表结构初始化
+﻿# database_setup_marriage.py - 婚恋交友小程序数据库表结构初始化
 # 注意：此文件主要用于数据库表结构定义和初始化
 # 日常数据库操作请使用 core.database.get_conn()
 # 已移除 SQLAlchemy ORM，完全使用 pymysql
@@ -350,6 +350,16 @@ class DatabaseManager:
                 'suspended_at': "`suspended_at` datetime DEFAULT NULL",
                 'suspension_reason': "`suspension_reason` varchar(255) DEFAULT NULL",
             },
+            'ai_advisor_message': {
+                'model_name': "`model_name` varchar(128) DEFAULT NULL",
+                'prompt_version': "`prompt_version` varchar(64) DEFAULT NULL",
+                'knowledge_version': "`knowledge_version` varchar(64) DEFAULT NULL",
+                'request_id': "`request_id` varchar(64) DEFAULT NULL",
+                'idempotency_key': "`idempotency_key` varchar(128) DEFAULT NULL COMMENT '客户端幂等键'",
+                'latency_ms': "`latency_ms` int DEFAULT NULL",
+                'quota_consumed': "`quota_consumed` tinyint NOT NULL DEFAULT '0'",
+                'quota_refunded': "`quota_refunded` tinyint NOT NULL DEFAULT '0'",
+            },
             'payment_order': {
                 'idempotency_key': "`idempotency_key` varchar(128) DEFAULT NULL COMMENT '客户端幂等键'",
                 'service_product_id': "`service_product_id` bigint unsigned DEFAULT NULL COMMENT '红娘服务商品ID'",
@@ -379,7 +389,21 @@ class DatabaseManager:
         self._ensure_payment_order_idempotency_index(cursor)
         self._ensure_community_post_feed_indexes(cursor)
         self._ensure_idempotency_contract(cursor)
+        self._ensure_ai_advisor_indexes(cursor)
 
+    def _ensure_ai_advisor_indexes(self, cursor):
+        """补齐 AI 军师旧表的幂等索引，避免重复请求重复扣额度。"""
+        try:
+            cursor.execute("SHOW INDEX FROM `ai_advisor_message` WHERE Key_name = 'uk_ai_advisor_message_idempotency'")
+            if cursor.fetchone():
+                return
+            cursor.execute(
+                "ALTER TABLE `ai_advisor_message` "
+                "ADD UNIQUE KEY `uk_ai_advisor_message_idempotency` (`user_id`,`session_id`,`idempotency_key`)"
+            )
+            logger.info("✅ 已补齐 AI 军师消息幂等唯一索引")
+        except Exception as exc:
+            logger.warning(f"⚠️ AI 军师消息幂等索引迁移失败: {exc}")
     def _ensure_payment_order_product_type(self, cursor):
         """Keep package codes such as ``monthly`` lossless in payment orders."""
         try:
@@ -2878,3 +2902,6 @@ if __name__ == "__main__":
         create_test_data()
     else:
         initialize_database()
+
+
+
