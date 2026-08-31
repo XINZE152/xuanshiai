@@ -17,6 +17,10 @@ class AdminVipItem(BaseModel):
     start_at: datetime | None
     end_at: datetime | None
     status: int
+    open_method: str | None = None
+    open_nature: str | None = None
+    line_total: int = 0
+    line_remaining: int = 0
 
 
 class AdminVipPage(BaseModel):

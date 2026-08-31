@@ -1,4 +1,30 @@
-INFO:     Started server process [1708]
+INFO:     Will watch for changes in these directories: ['E:\\houduan\\xuanshiai']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [29540] using WatchFiles
+INFO:     Started server process [28828]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+WARNING:  WatchFiles detected changes in 'app\schemas\member_vip_admin.py', 'app\api\routes\member_vip_admin.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [28828]
+WARNING:  WatchFiles detected changes in 'app\api\routes\member_vip_admin.py'. Reloading...
+Process SpawnProcess-2:
+Traceback (most recent call last):
+  File "C:\Users\21612\AppData\Roaming\uv\python\cpython-3.11-windows-x86_64-none\Lib\multiprocessing\process.py", line 314, in _bootstrap
+    self.run()
+  File "C:\Users\21612\AppData\Roaming\uv\python\cpython-3.11-windows-x86_64-none\Lib\multiprocessing\process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "E:\houduan\xuanshiai\.venv\Lib\site-packages\uvicorn\_subprocess.py", line 76, in subprocess_started
+    config.configure_logging()
+  File "E:\houduan\xuanshiai\.venv\Lib\site-packages\uvicorn\config.py", line 384, in configure_logging
+    if isinstance(self.log_config, os.PathLike):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen abc>", line 119, in __instancecheck__
+  File "<frozen abc>", line 123, in __subclasscheck__
+  File "<frozen os>", line 1081, in __subclasshook__
+KeyboardInterrupt
+INFO:     Started server process [28336]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.

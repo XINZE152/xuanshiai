@@ -19,5 +19,5 @@ async def cities(province_code: str = Query(..., min_length=2, max_length=2, pat
 
 
 @router.get("/districts", response_model=RegionListResponse, summary="按城市查询区县")
-async def districts(city_code: str = Query(..., min_length=4, max_length=4, pattern=r"^\d{4}$")) -> RegionListResponse:
+async def districts(city_code: str = Query(..., min_length=4, max_length=6, pattern=r"^\d{4,6}$")) -> RegionListResponse:
     return list_districts(city_code)

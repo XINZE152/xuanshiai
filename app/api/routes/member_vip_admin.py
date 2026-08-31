@@ -18,16 +18,24 @@ async def update_member_vip(member_id: int = Path(..., ge=1), body: AdminVipUpda
 
 
 @router.get("/vip", response_model=AdminVipPage, summary="查询 VIP 会员")
-async def vip_members(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=100), expiring_within_days: int | None = Query(None, ge=1, le=3650), search: str | None = Query(None, max_length=64), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> AdminVipPage:
-    where = ["m.status = 1", "(m.end_at IS NULL OR m.end_at > UTC_TIMESTAMP())"]
+async def vip_members(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=100), expiring_within_days: int | None = Query(None, ge=1, le=3650), search: str | None = Query(None, max_length=64), vip_level: str | None = Query(None, max_length=64), open_method: str | None = Query(None, pattern="^(admin|self)$"), open_nature: str | None = Query(None, pattern="^(first|renew|upgrade|again)$"), vip_status: str | None = Query(None, pattern="^(active|expired)$"), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> AdminVipPage:
+    where = ["m.status <> 3"]
     params: dict = {"limit": page_size, "offset": (page - 1) * page_size}
-    if expiring_within_days is not None:
-        where.append("m.end_at IS NOT NULL AND m.end_at <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL :days DAY)"); params["days"] = expiring_within_days
     if search:
         where.append("(u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"); params["search"] = search
+    if vip_level: where.append("m.package_type = :vip_level"); params["vip_level"] = vip_level
+    if vip_status == "active": where.append("(m.end_at IS NULL OR m.end_at > UTC_TIMESTAMP())")
+    if vip_status == "expired": where.append("m.end_at IS NOT NULL AND m.end_at <= UTC_TIMESTAMP()")
+    if expiring_within_days is not None:
+        where.append("m.end_at IS NOT NULL AND m.end_at <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL :days DAY)"); params["days"] = expiring_within_days
     clause = " AND ".join(where)
     base = "FROM user_membership m JOIN users u ON u.id = m.user_id"
-    rows = await db.execute(text(f"SELECT m.id membership_id, m.user_id, u.nickname, u.phone, m.package_type, m.amount, m.order_no, m.start_at, m.end_at, m.status {base} WHERE {clause} ORDER BY m.end_at IS NULL, m.end_at ASC, m.id DESC LIMIT :limit OFFSET :offset"), params)
+    nature = "CASE WHEN (SELECT COUNT(*) FROM user_membership prev WHERE prev.user_id=m.user_id AND prev.id<m.id)>1 THEN 'again' WHEN (SELECT COUNT(*) FROM user_membership prev WHERE prev.user_id=m.user_id AND prev.id<m.id)=1 THEN 'renew' ELSE 'first' END"
+    method = "CASE WHEN EXISTS (SELECT 1 FROM payment_order po WHERE po.order_no=m.order_no AND po.user_id=m.user_id AND po.status=1) THEN 'self' ELSE 'admin' END"
+    if open_method: where.append(f"({method}) = :open_method"); params["open_method"] = open_method
+    if open_nature: where.append(f"({nature}) = :open_nature"); params["open_nature"] = open_nature
+    clause = " AND ".join(where)
+    rows = await db.execute(text(f"SELECT m.id membership_id, m.user_id, u.nickname, u.phone, m.package_type, m.amount, m.order_no, m.start_at, m.end_at, m.status, {method} open_method, {nature} open_nature, 0 line_total, 0 line_remaining {base} WHERE {clause} ORDER BY m.end_at IS NULL, m.end_at ASC, m.id DESC LIMIT :limit OFFSET :offset"), params)
     count = await db.execute(text(f"SELECT COUNT(*) {base} WHERE {clause}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})
     total = int(count.scalar() or 0)
     return AdminVipPage(items=[AdminVipItem(**dict(row)) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)

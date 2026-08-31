@@ -44,3 +44,5 @@ docs/待完成事项.md
 restar.md
 outputs
 *.log
+uvicorn.err.log
+uvicorn.out.log
