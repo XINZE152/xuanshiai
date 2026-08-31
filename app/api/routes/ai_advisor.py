@@ -1,6 +1,6 @@
-"""Relationship advisor routes."""
+﻿"""Relationship advisor routes."""
 
-from fastapi import APIRouter, Body, Depends, Path, Query, Response, status
+from fastapi import APIRouter, Body, Depends, Header, Path, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user
@@ -60,8 +60,9 @@ async def advisor_advice(
     body: AdvisorAdviceRequest = Body(...),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
 ) -> AdvisorAdviceResponse:
-    return await get_advice(db, current.id, session_id, body)
+    return await get_advice(db, current.id, session_id, body, idempotency_key=idempotency_key)
 
 
 @router.post("/messages/{message_id}/feedback", response_model=AdvisorFeedbackResponse, summary="反馈情感军师建议")
