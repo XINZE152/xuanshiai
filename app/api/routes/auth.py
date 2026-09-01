@@ -101,7 +101,8 @@ async def me(current: CurrentUser = Depends(get_current_user), db: AsyncSession 
     return {"id": current.id, "phone_masked": f"{phone[:3]}****{phone[-4:]}" if phone else None,
             "nickname": row["nickname"] if row else None, "avatar": row["avatar"] if row else None,
             "status": row["status"] if row else current.status, "phone_verified": bool(row and row["phone_verified_at"]),
-            "realname_status": current.realname_status, "need_bind_phone": not bool(phone)}
+            "realname_status": current.realname_status, "face_verified": current.face_verified or 0,
+            "need_bind_phone": not bool(phone)}
 
 
 @router.post("/agreements/accept", status_code=status.HTTP_204_NO_CONTENT, summary="签署用户协议")

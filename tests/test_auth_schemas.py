@@ -26,6 +26,13 @@ def test_test_login_route_is_registered() -> None:
     assert "/api/v1/auth/test-login" in app.openapi()["paths"]
 
 
+def test_auth_me_contract_includes_face_verification_status() -> None:
+    schema = app.openapi()["components"]["schemas"]["UserResponse"]
+
+    assert schema["properties"]["face_verified"]["type"] == "integer"
+    assert "face_verified" in schema["required"]
+
+
 def test_password_hash_round_trip() -> None:
     password_hash = hash_password("password123")
     assert password_hash.startswith("$2")

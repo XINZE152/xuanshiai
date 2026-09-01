@@ -180,6 +180,10 @@ class UserResponse(BaseModel):
     status: int
     phone_verified: bool
     realname_status: int
+    face_verified: int = Field(
+        description="人脸认证状态：0未认证、1通过、2失败",
+        examples=[1],
+    )
     need_bind_phone: bool
 
 
