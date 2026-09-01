@@ -56,7 +56,11 @@ from app.schemas.social import (
     ReportAppealResponse,
     ReportPage,
 )
-from app.services.community_media import delete_community_media, upload_community_media
+from app.services.community_media import (
+    delete_community_media,
+    get_community_media,
+    upload_community_media,
+)
 from app.services.community import (
     collect_post,
     create_comment,
@@ -165,6 +169,19 @@ async def upload_media(
     db: AsyncSession = Depends(get_db),
 ) -> CommunityMediaResponse:
     return await upload_community_media(db, current.id, file, purpose)
+
+
+@router.get(
+    "/community/media/{media_id}",
+    response_model=CommunityMediaResponse,
+    summary="查询本人社区媒体状态",
+)
+async def get_media(
+    media_id: int,
+    current: CurrentUser = Depends(get_realname_verified_user),
+    db: AsyncSession = Depends(get_db),
+) -> CommunityMediaResponse:
+    return await get_community_media(db, current.id, media_id)
 
 
 @router.delete(

@@ -129,6 +129,7 @@ def _row_response(row: Any) -> CommunityMediaResponse:
         file_size=row.get("file_size"),
         duration_seconds=row.get("duration_seconds"),
         status=row["status"],
+        moderation_status=row.get("moderation_status") or "pending",
     )
 
 
@@ -160,6 +161,7 @@ async def upload_community_media(
 
     directory = _dir(user_id)
     expire_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=UNBOUND_TTL_HOURS)
+    moderation_status = "approved" if settings.environment in {"development", "testing"} else "pending"
 
     if looks_video:
         temp_path = directory / f"video-{uuid.uuid4().hex}.upload"
@@ -183,11 +185,11 @@ async def upload_community_media(
             result = await db.execute(
                 text(
                     """INSERT INTO community_media
-                    (user_id, purpose, media_type, file_url, storage_key, thumbnail_url,
-                     mime_type, file_size, duration_seconds, status, expire_at)
+                     (user_id, purpose, media_type, file_url, storage_key, thumbnail_url,
+                      mime_type, file_size, duration_seconds, status, moderation_status, expire_at)
                     VALUES
                     (:user_id, :purpose, 'video', :url, :storage_key, NULL,
-                     'video/mp4', :file_size, :duration, 'ready', :expire_at)"""
+                      'video/mp4', :file_size, :duration, 'ready', :moderation_status, :expire_at)"""
                 ),
                 {
                     "user_id": user_id,
@@ -196,6 +198,7 @@ async def upload_community_media(
                     "storage_key": str(final_path),
                     "file_size": total,
                     "duration": duration,
+                    "moderation_status": moderation_status,
                     "expire_at": expire_at,
                 },
             )
@@ -205,11 +208,12 @@ async def upload_community_media(
                 {"id": result.lastrowid},
             )
             response = _row_response(row.mappings().one())
-            try:
-                await _record_media_moderation_task(db, user_id, int(result.lastrowid), url)
-                await db.commit()
-            except (StopAsyncIteration, AttributeError):
-                pass
+            if moderation_status == "pending":
+                try:
+                    await _record_media_moderation_task(db, user_id, int(result.lastrowid), url)
+                    await db.commit()
+                except (StopAsyncIteration, AttributeError):
+                    pass
             return response
         finally:
             if temp_path.exists():
@@ -233,10 +237,10 @@ async def upload_community_media(
         text(
             """INSERT INTO community_media
             (user_id, purpose, media_type, file_url, storage_key, thumbnail_url,
-             mime_type, file_size, duration_seconds, status, expire_at)
+              mime_type, file_size, duration_seconds, status, moderation_status, expire_at)
             VALUES
             (:user_id, :purpose, 'image', :url, :storage_key, :thumb,
-             'image/webp', :file_size, NULL, 'ready', :expire_at)"""
+              'image/webp', :file_size, NULL, 'ready', :moderation_status, :expire_at)"""
         ),
         {
             "user_id": user_id,
@@ -245,6 +249,7 @@ async def upload_community_media(
             "storage_key": str(image_path),
             "thumb": thumb_url,
             "file_size": len(image_data),
+            "moderation_status": moderation_status,
             "expire_at": expire_at,
         },
     )
@@ -254,11 +259,12 @@ async def upload_community_media(
         {"id": result.lastrowid},
     )
     response = _row_response(row.mappings().one())
-    try:
-        await _record_media_moderation_task(db, user_id, int(result.lastrowid), url)
-        await db.commit()
-    except (StopAsyncIteration, AttributeError):
-        pass
+    if moderation_status == "pending":
+        try:
+            await _record_media_moderation_task(db, user_id, int(result.lastrowid), url)
+            await db.commit()
+        except (StopAsyncIteration, AttributeError):
+            pass
     return response
 
 
@@ -310,6 +316,20 @@ async def delete_community_media(db: AsyncSession, user_id: int, media_id: int) 
             thumb_path.unlink()
         except OSError:
             pass
+
+
+async def get_community_media(db: AsyncSession, user_id: int, media_id: int) -> CommunityMediaResponse:
+    result = await db.execute(
+        text(
+            """SELECT * FROM community_media
+            WHERE id = :id AND user_id = :user_id AND deleted_at IS NULL"""
+        ),
+        {"id": media_id, "user_id": user_id},
+    )
+    row = result.mappings().first()
+    if not row:
+        raise HTTPException(404, detail="媒体不存在")
+    return _row_response(row)
 
 
 FORBIDDEN_URL_PREFIXES = (

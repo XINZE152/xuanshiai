@@ -412,6 +412,7 @@ class CommunityMediaResponse(BaseModel):
     file_size: int | None = None
     duration_seconds: int | None = None
     status: Literal["ready", "bound", "deleted"]
+    moderation_status: Literal["pending", "approved", "rejected", "hidden"]
 
 
 class CommunityTopicAdminCreate(BaseModel):

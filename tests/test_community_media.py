@@ -75,9 +75,11 @@ def test_community_media_response_shape() -> None:
         file_size=123,
         duration_seconds=None,
         status="ready",
+        moderation_status="approved",
     )
     assert item.purpose == "post"
     assert item.status == "ready"
+    assert item.moderation_status == "approved"
 
 
 def test_community_post_create_accepts_media_ids_and_media_only() -> None:
@@ -126,7 +128,12 @@ def test_image_outputs_rejects_non_image() -> None:
     assert exc.value.status_code == 415
 
 
-def _media_db_for_image_insert(*, media_id: int = 42, purpose: str = "post") -> AsyncMock:
+def _media_db_for_image_insert(
+    *,
+    media_id: int = 42,
+    purpose: str = "post",
+    moderation_status: str = "approved",
+) -> AsyncMock:
     insert_result = SimpleNamespace(lastrowid=media_id)
     select_mappings = MagicMock()
     select_mappings.one.return_value = {
@@ -138,6 +145,7 @@ def _media_db_for_image_insert(*, media_id: int = 42, purpose: str = "post") -> 
         "file_size": 100,
         "duration_seconds": None,
         "status": "ready",
+        "moderation_status": moderation_status,
     }
     select_result = MagicMock()
     select_result.mappings.return_value = select_mappings
@@ -208,11 +216,44 @@ async def test_upload_small_png_succeeds(monkeypatch) -> None:
     resp = await media_svc.upload_community_media(db, user_id=7, file=upload, purpose="post")
     assert resp.id == 42
     assert resp.status == "ready"
+    assert resp.moderation_status == "approved"
     assert resp.media_type == "image"
+    insert_params = db.execute.await_args_list[0].args[1]
+    assert insert_params["moderation_status"] == "approved"
     assert db.commit.await_count == 1
     written = list((upload_root / "7" / "community").glob("*.webp"))
     assert len(written) == 2
     shutil.rmtree(upload_root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_get_community_media_returns_only_owned_active_media() -> None:
+    from app.services import community_media as media_svc
+
+    mappings = MagicMock()
+    mappings.first.return_value = {
+        "id": 42,
+        "purpose": "post",
+        "media_type": "image",
+        "file_url": "/storage/uploads/7/community/a.webp",
+        "thumbnail_url": None,
+        "file_size": 100,
+        "duration_seconds": None,
+        "status": "ready",
+        "moderation_status": "pending",
+    }
+    result = MagicMock()
+    result.mappings.return_value = mappings
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=result)
+
+    response = await media_svc.get_community_media(db, user_id=7, media_id=42)
+
+    assert response.id == 42
+    assert response.moderation_status == "pending"
+    sql = str(db.execute.await_args.args[0])
+    assert "user_id = :user_id" in sql
+    assert "deleted_at IS NULL" in sql
 
 
 @pytest.mark.asyncio
