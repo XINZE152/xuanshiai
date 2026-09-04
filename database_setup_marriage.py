@@ -245,6 +245,11 @@ class DatabaseManager:
                 'completion_algorithm_version': "`completion_algorithm_version` varchar(32) DEFAULT NULL",
                 'completion_calculated_at': "`completion_calculated_at` datetime DEFAULT NULL",
             },
+            'user_partner_preference': {
+                'dating_goal': "`dating_goal` varchar(32) DEFAULT NULL COMMENT '交友目标：倾向恋爱/倾向结婚'",
+                'meeting_pace': "`meeting_pace` varchar(64) DEFAULT NULL COMMENT '见面节奏'",
+                'children_intention': "`children_intention` varchar(64) DEFAULT NULL COMMENT '生育意愿'",
+            },
             'user_profile_completion': {
                 'weight_completed': "`weight_completed` tinyint NOT NULL DEFAULT '0'",
                 'hometown_completed': "`hometown_completed` tinyint NOT NULL DEFAULT '0'",
@@ -252,6 +257,8 @@ class DatabaseManager:
                 'single_pledge_completed': "`single_pledge_completed` tinyint NOT NULL DEFAULT '0'",
             },
             'user_privacy': {
+                'profile_visibility': "`profile_visibility` varchar(16) NOT NULL DEFAULT 'all' COMMENT '资料可见性：all/friends/only_me'",
+                'message_privacy': "`message_privacy` varchar(16) NOT NULL DEFAULT 'all' COMMENT '消息权限：all/friends/certified'",
                 'anonymous_browse_enabled': "`anonymous_browse_enabled` tinyint NOT NULL DEFAULT '0' COMMENT 'VIP无痕浏览'",
                 'notify_message': "`notify_message` tinyint NOT NULL DEFAULT '1' COMMENT '新消息通知'",
                 'notify_follow': "`notify_follow` tinyint NOT NULL DEFAULT '1' COMMENT '关注通知'",
@@ -418,6 +425,12 @@ class DatabaseManager:
         """Migrate pre-merge string states on posts/comments to numeric states."""
         for table_name in ("community_post", "community_comment"):
             try:
+                cursor.execute(
+                    f"SHOW COLUMNS FROM `{table_name}` LIKE 'moderation_status'"
+                )
+                row = cursor.fetchone()
+                if row and "int" in str(row["Type"]).lower():
+                    continue
                 cursor.execute(
                     f"""UPDATE `{table_name}`
                     SET moderation_status = CASE moderation_status
@@ -941,6 +954,9 @@ class DatabaseManager:
                     `housing_requirement` tinyint DEFAULT NULL COMMENT '0不限 1有房 2无房',
                     `smoking_requirement` tinyint DEFAULT NULL COMMENT '0不限 1不抽烟 2可接受',
                     `drinking_requirement` tinyint DEFAULT NULL COMMENT '0不限 1不饮酒 2可接受',
+                    `dating_goal` varchar(32) DEFAULT NULL COMMENT '交友目标：倾向恋爱/倾向结婚',
+                    `meeting_pace` varchar(64) DEFAULT NULL COMMENT '见面节奏',
+                    `children_intention` varchar(64) DEFAULT NULL COMMENT '生育意愿',
                     `extra_requirement` varchar(1000) DEFAULT NULL,
                     `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
                     `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -1093,6 +1109,8 @@ class DatabaseManager:
                     `hide_company` tinyint DEFAULT '0' COMMENT '隐藏公司',
                     `hide_distance` tinyint DEFAULT '0' COMMENT '隐藏距离',
                     `hide_online_status` tinyint DEFAULT '0' COMMENT '隐藏在线状态',
+                    `profile_visibility` varchar(16) NOT NULL DEFAULT 'all' COMMENT '资料可见性：all/friends/only_me',
+                    `message_privacy` varchar(16) NOT NULL DEFAULT 'all' COMMENT '消息权限：all/friends/certified',
                     `show_profile` tinyint NOT NULL DEFAULT '1' COMMENT '是否展示个人资料',
                     `show_likes` tinyint NOT NULL DEFAULT '1' COMMENT '是否展示喜欢列表',
                     `show_posts` tinyint NOT NULL DEFAULT '1' COMMENT '是否展示个人动态',
@@ -1114,6 +1132,22 @@ class DatabaseManager:
                     PRIMARY KEY (`id`),
                     UNIQUE KEY `uk_user_id` (`user_id`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户隐私设置表'
+            """,
+
+            'app_release_version': """
+                CREATE TABLE IF NOT EXISTS `app_release_version` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `platform` varchar(32) NOT NULL,
+                    `version` varchar(32) NOT NULL,
+                    `is_force_update` tinyint NOT NULL DEFAULT '0',
+                    `download_url` varchar(512) DEFAULT NULL,
+                    `update_log` json DEFAULT NULL,
+                    `is_active` tinyint NOT NULL DEFAULT '1',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`), UNIQUE KEY `uk_platform_version` (`platform`,`version`),
+                    KEY `idx_platform_active` (`platform`,`is_active`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='应用版本发布信息'
             """,
 
             # ============================================

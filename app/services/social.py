@@ -243,6 +243,7 @@ async def list_messages(db: AsyncSession, user_id: int, session_id: int, page: i
 async def send_message(db: AsyncSession, user_id: int, session_id: int, request: ChatMessageCreate) -> ChatMessageResponse:
     await ensure_user_allowed(db, user_id, "MESSAGE_RESTRICTED")
     session, target_id = await _session(db, user_id, session_id)
+    await _ensure_message_privacy(db, user_id, target_id)
     result = await db.execute(text("""INSERT INTO chat_message (session_id, from_user_id, to_user_id, type, content, media_url)
         VALUES (:session_id, :from_id, :to_id, :type, :content, :media_url)"""), {"session_id": session_id, "from_id": user_id, "to_id": target_id, **request.model_dump()})
     preview = request.content if request.type == 1 else "[媒体消息]"
@@ -347,9 +348,10 @@ async def get_privacy(db: AsyncSession, user_id: int) -> PrivacyResponse:
     result = await db.execute(text("SELECT * FROM user_privacy WHERE user_id = :user_id"), {"user_id": user_id})
     row = result.mappings().first()
     values = dict(row) if row else {"user_id": user_id}
-    defaults = {"hide_phone": 0, "hide_school": 0, "hide_company": 0, "hide_distance": 0, "hide_online_status": 0, "only_auth_can_contact": 0, "only_vip_can_see_detail": 0, "who_can_see_me": 1, "match_status": 1, "anonymous_browse_enabled": 0, "show_profile": 1, "show_likes": 1, "show_posts": 1, "notify_like": 1, "notify_comment": 1, "notify_follow": 1, "notify_message": 1, "notify_match": 1, "notify_apply": 1, "notify_system": 1, "notify_activity": 1}
+    defaults = {"profile_visibility": "all", "message_privacy": "all", "hide_phone": 0, "hide_school": 0, "hide_company": 0, "hide_distance": 0, "hide_online_status": 0, "only_auth_can_contact": 0, "only_vip_can_see_detail": 0, "who_can_see_me": 1, "match_status": 1, "anonymous_browse_enabled": 0, "show_profile": 1, "show_likes": 1, "show_posts": 1, "notify_like": 1, "notify_comment": 1, "notify_follow": 1, "notify_message": 1, "notify_match": 1, "notify_apply": 1, "notify_system": 1, "notify_activity": 1}
     values = {**defaults, **values, "user_id": user_id}
-    return PrivacyResponse(**{key: bool(value) if key not in ("user_id", "who_can_see_me", "match_status") else value for key, value in values.items() if key in PrivacyResponse.model_fields})
+    boolean_fields = set(PrivacyResponse.model_fields) - {"user_id", "profile_visibility", "message_privacy", "who_can_see_me", "match_status", "updated_at"}
+    return PrivacyResponse(**{key: bool(value) if key in boolean_fields else value for key, value in values.items() if key in PrivacyResponse.model_fields})
 
 
 async def update_privacy(db: AsyncSession, user_id: int, request: PrivacyUpdateRequest) -> PrivacyResponse:
@@ -362,6 +364,26 @@ async def update_privacy(db: AsyncSession, user_id: int, request: PrivacyUpdateR
         await db.execute(text(f"INSERT INTO user_privacy ({', '.join(columns)}) VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {updates}, updated_at = UTC_TIMESTAMP()"), {"user_id": user_id, **values})
         await db.commit()
     return await get_privacy(db, user_id)
+
+
+async def _ensure_message_privacy(db: AsyncSession, sender_id: int, recipient_id: int) -> None:
+    """Enforce the recipient's inbound-message policy after session authorization."""
+    result = await db.execute(
+        text("""SELECT COALESCE(pr.message_privacy, 'all') AS message_privacy,
+                      COALESCE(pr.only_auth_can_contact, 0) AS only_auth_can_contact,
+                      COALESCE(sender_auth.realname_status, 0) AS sender_realname_status
+               FROM users recipient
+               LEFT JOIN user_privacy pr ON pr.user_id = recipient.id
+               LEFT JOIN user_auth sender_auth ON sender_auth.user_id = :sender_id
+               WHERE recipient.id = :recipient_id"""),
+        {"sender_id": sender_id, "recipient_id": recipient_id},
+    )
+    row = result.mappings().first()
+    if not row:
+        raise HTTPException(404, detail="接收用户不存在")
+    requires_certification = row["message_privacy"] == "certified" or bool(row["only_auth_can_contact"])
+    if requires_certification and int(row["sender_realname_status"] or 0) != 2:
+        raise HTTPException(403, detail="对方仅接收认证用户的消息")
 
 
 async def list_blocks(db: AsyncSession, user_id: int) -> list[SocialUser]:

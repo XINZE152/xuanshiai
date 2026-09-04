@@ -141,6 +141,8 @@ class NotificationPage(BaseModel):
 
 
 class PrivacyUpdateRequest(BaseModel):
+    profile_visibility: Literal["all", "friends", "only_me"] | None = None
+    message_privacy: Literal["all", "friends", "certified"] | None = None
     hide_phone: bool | None = None
     hide_school: bool | None = None
     hide_company: bool | None = None
@@ -166,6 +168,8 @@ class PrivacyUpdateRequest(BaseModel):
 
 class PrivacyResponse(BaseModel):
     user_id: int
+    profile_visibility: Literal["all", "friends", "only_me"] = "all"
+    message_privacy: Literal["all", "friends", "certified"] = "all"
     hide_phone: bool
     hide_school: bool
     hide_company: bool
@@ -187,6 +191,7 @@ class PrivacyResponse(BaseModel):
     notify_apply: bool
     notify_system: bool
     notify_activity: bool
+    updated_at: datetime | None = None
 
 
 class BlockRequest(BaseModel):

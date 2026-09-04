@@ -287,6 +287,8 @@ async def _fetch_rows(
         "NOT EXISTS (SELECT 1 FROM user_restriction ban WHERE ban.user_id = u.id AND ban.restriction_type = 'TOTAL_BAN' AND ban.status = 1 AND ban.starts_at <= UTC_TIMESTAMP() AND (ban.ends_at IS NULL OR ban.ends_at > UTC_TIMESTAMP()))",
         "COALESCE(pr.show_profile, 1) = 1",
         "COALESCE(pr.who_can_see_me, 1) <> 4", "COALESCE(pr.match_status, 1) = 1",
+        "COALESCE(pr.profile_visibility, 'all') <> 'only_me'",
+        "(COALESCE(pr.profile_visibility, 'all') <> 'friends' OR EXISTS (SELECT 1 FROM user_match pm WHERE ((pm.user_id = :viewer_id AND pm.target_user_id = u.id) OR (pm.user_id = u.id AND pm.target_user_id = :viewer_id)) AND pm.status IN (1, 2)))",
         "(:viewer_is_vip = 1 OR COALESCE(pr.who_can_see_me, 1) <> 3)",
         "NOT EXISTS (SELECT 1 FROM user_block bl WHERE (bl.user_id = :viewer_id AND bl.target_user_id = u.id) OR (bl.user_id = u.id AND bl.target_user_id = :viewer_id))",
     ]
@@ -312,6 +314,9 @@ async def _fetch_rows(
             "(vp.education_min IS NULL OR p.education_level >= vp.education_min)",
             "(vp.income_min IS NULL OR p.income >= vp.income_min)",
             "(vp.marriage_status IS NULL OR vp.marriage_status = 0 OR u.is_married = vp.marriage_status)",
+            "(vp.dating_goal IS NULL OR vp.dating_goal = '' OR cp.dating_goal = vp.dating_goal)",
+            "(vp.meeting_pace IS NULL OR vp.meeting_pace = '' OR cp.meeting_pace = vp.meeting_pace)",
+            "(vp.children_intention IS NULL OR vp.children_intention = '' OR cp.children_intention = vp.children_intention)",
             "(vp.preferred_province_code IS NULL OR p.residence_province_code = vp.preferred_province_code)",
             "(vp.preferred_city_codes IS NULL OR JSON_LENGTH(vp.preferred_city_codes) = 0 OR JSON_CONTAINS(vp.preferred_city_codes, JSON_QUOTE(p.residence_city_code)))",
         ])
@@ -514,6 +519,8 @@ async def _target_rows(db: AsyncSession, viewer_id: int, target_ids: list[int]) 
                  AND COALESCE(pr.who_can_see_me, 1) <> 4
                  AND NOT EXISTS (SELECT 1 FROM user_restriction ban WHERE ban.user_id = u.id AND ban.restriction_type = 'TOTAL_BAN' AND ban.status = 1 AND ban.starts_at <= UTC_TIMESTAMP() AND (ban.ends_at IS NULL OR ban.ends_at > UTC_TIMESTAMP()))
                  AND COALESCE(pr.match_status, 1) = 1
+                 AND COALESCE(pr.profile_visibility, 'all') <> 'only_me'
+                 AND (COALESCE(pr.profile_visibility, 'all') <> 'friends' OR EXISTS (SELECT 1 FROM user_match pm WHERE ((pm.user_id = :viewer_id AND pm.target_user_id = u.id) OR (pm.user_id = u.id AND pm.target_user_id = :viewer_id)) AND pm.status IN (1, 2)))
                  AND (:viewer_is_vip = 1 OR COALESCE(pr.who_can_see_me, 1) <> 3)"""),
         params,
     )
@@ -609,6 +616,7 @@ async def _ensure_target(db: AsyncSession, viewer_id: int, target_id: int) -> No
         raise HTTPException(422, detail="不能对自己执行此操作")
     result = await db.execute(text("""SELECT u.id, COALESCE(pr.who_can_see_me, 1) AS who_can_see_me,
                 COALESCE(pr.match_status, 1) AS match_status,
+                COALESCE(pr.profile_visibility, 'all') AS profile_visibility,
                 COALESCE(pr.show_profile, 1) AS show_profile
                 FROM users u LEFT JOIN user_privacy pr ON pr.user_id = u.id
                 WHERE u.id = :id AND u.status = 1 FOR UPDATE"""), {"id": target_id})
@@ -617,6 +625,15 @@ async def _ensure_target(db: AsyncSession, viewer_id: int, target_id: int) -> No
         raise HTTPException(404, detail="目标用户不存在")
     if row["who_can_see_me"] == 3 and not await _is_vip(db, viewer_id):
         raise HTTPException(404, detail="目标用户不存在")
+    if row["profile_visibility"] == "only_me":
+        raise HTTPException(404, detail="目标用户不存在")
+    if row["profile_visibility"] == "friends":
+        matched = await db.execute(text("""SELECT 1 FROM user_match
+            WHERE ((user_id = :viewer_id AND target_user_id = :target_id)
+                OR (user_id = :target_id AND target_user_id = :viewer_id))
+              AND status IN (1, 2)"""), {"viewer_id": viewer_id, "target_id": target_id})
+        if not matched.scalar():
+            raise HTTPException(404, detail="目标用户不存在")
     blocked = await db.execute(text("SELECT 1 FROM user_block WHERE (user_id = :viewer_id AND target_user_id = :target_id) OR (user_id = :target_id AND target_user_id = :viewer_id)"), {"viewer_id": viewer_id, "target_id": target_id})
     if blocked.scalar():
         raise HTTPException(403, detail="当前用户关系不可操作")

@@ -208,6 +208,11 @@ async def update_privacy_settings(body: PrivacyUpdateRequest, current: CurrentUs
     return await update_privacy(db, current.id, body)
 
 
+@router.patch("/users/me/privacy", response_model=PrivacyResponse, summary="部分更新隐私设置")
+async def patch_privacy_settings(body: PrivacyUpdateRequest, current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> PrivacyResponse:
+    return await update_privacy(db, current.id, body)
+
+
 @router.get("/security/blocks", response_model=list[SocialUser], summary="查看黑名单")
 async def blocks(current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> list[SocialUser]:
     return await list_blocks(db, current.id)

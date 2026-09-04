@@ -22,6 +22,7 @@ from app.api.routes import (
     auth,
     ai,
     ai_advisor,
+    app_version,
     certifications,
     community,
     community_admin,
@@ -49,6 +50,7 @@ api_router = APIRouter()
 api_router.include_router(location.router, tags=["位置服务"])
 api_router.include_router(location.users_router, tags=["位置服务"])
 api_router.include_router(health.router, tags=["系统"])
+api_router.include_router(app_version.router, tags=["系统"])
 api_router.include_router(auth.router, tags=["账号与认证"])
 api_router.include_router(ai.router, tags=["AI能力"])
 api_router.include_router(ai_advisor.router, tags=["AIAdvisor"])

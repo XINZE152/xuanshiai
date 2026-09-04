@@ -521,7 +521,8 @@ async def get_preferences(db: AsyncSession, user_id: int) -> dict[str, Any]:
             "marriage_status": None, "preferred_province_code": None, "preferred_city_codes": [],
             "accept_long_distance": False, "accept_cross_province": False,
             "housing_requirement": None, "smoking_requirement": None,
-            "drinking_requirement": None, "extra_requirement": None,
+            "drinking_requirement": None, "dating_goal": None,
+            "meeting_pace": None, "children_intention": None, "extra_requirement": None,
         }
     data = dict(row)
     data["preferred_city_codes"] = _json_list(data["preferred_city_codes"])
