@@ -645,6 +645,8 @@ class DatabaseManager:
             ('chat_session', 'user2_id'),
             ('chat_message', 'from_user_id'),
             ('chat_message', 'to_user_id'),
+            ('ai_avatar_conversation', 'viewer_user_id'),
+            ('ai_avatar_conversation', 'target_user_id'),
             ('community_post', 'user_id'),
             ('community_comment', 'user_id'),
             ('community_like', 'user_id'),
@@ -783,6 +785,24 @@ class DatabaseManager:
                 logger.debug("✅ 外键 fk_chat_message_session_id 已添加")
         except Exception as e:
             logger.debug(f"ℹ️ 聊天消息外键处理: {e}")
+
+        try:
+            cursor.execute("""
+                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ai_avatar_message'
+                AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+                AND CONSTRAINT_NAME = 'fk_ai_avatar_message_conversation_id'
+            """)
+            if not cursor.fetchone():
+                cursor.execute("""
+                    ALTER TABLE `ai_avatar_message`
+                    ADD CONSTRAINT `fk_ai_avatar_message_conversation_id`
+                    FOREIGN KEY (`conversation_id`) REFERENCES `ai_avatar_conversation`(`id`)
+                    ON DELETE CASCADE
+                """)
+                logger.debug("✅ 外键 fk_ai_avatar_message_conversation_id 已添加")
+        except pymysql.MySQLError as e:
+            logger.debug(f"ℹ️ AI 分身消息外键处理: {e}")
 
     def init_all_tables(self, cursor):
         """初始化数据库表结构"""
@@ -1592,6 +1612,35 @@ class DatabaseManager:
                     KEY `idx_from_to` (`from_user_id`,`to_user_id`),
                     KEY `idx_created_at` (`created_at`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='聊天消息'
+            """,
+
+            # AI 分身会话与真人聊天完全隔离，不参与消息列表和未读计数。
+            'ai_avatar_conversation': """
+                CREATE TABLE IF NOT EXISTS `ai_avatar_conversation` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `viewer_user_id` bigint unsigned NOT NULL COMMENT '发起 AI 对话的用户',
+                    `target_user_id` bigint unsigned NOT NULL COMMENT 'AI 分身所属用户',
+                    `status` tinyint NOT NULL DEFAULT '1' COMMENT '1有效',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_ai_avatar_pair` (`viewer_user_id`,`target_user_id`),
+                    KEY `idx_ai_avatar_target` (`target_user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 分身独立会话'
+            """,
+
+            'ai_avatar_message': """
+                CREATE TABLE IF NOT EXISTS `ai_avatar_message` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `conversation_id` bigint unsigned NOT NULL,
+                    `role` varchar(16) NOT NULL COMMENT 'user/assistant',
+                    `content` varchar(2000) NOT NULL,
+                    `category` varchar(32) NOT NULL DEFAULT 'general',
+                    `source` varchar(32) NOT NULL COMMENT 'user/real-ai',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_ai_avatar_message_conversation` (`conversation_id`,`id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 分身独立消息'
             """,
 
             # ============================================
