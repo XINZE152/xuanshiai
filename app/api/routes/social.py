@@ -31,6 +31,7 @@ from app.schemas.social import (
 )
 from app.services.social import (
     create_report,
+    create_content_report,
     get_privacy,
     list_blocks,
     list_chat_sessions,
@@ -231,3 +232,14 @@ async def unblock(target_id: int = Path(..., ge=1), current: CurrentUser = Depen
 @router.post("/security/reports/{target_id}", response_model=ReportResponse, status_code=201, summary="举报用户")
 async def report(target_id: int = Path(..., ge=1), body: ReportRequest = Body(...), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> ReportResponse:
     return await create_report(db, current.id, target_id, body)
+
+
+@router.post("/security/reports", response_model=ReportResponse, status_code=201, summary="举报文字、图片、视频或聊天消息")
+async def report_content(body: ReportRequest = Body(...), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> ReportResponse:
+    if body.target_type == "user":
+        if body.target_id is None:
+            raise HTTPException(422, detail="举报用户必须提供 target_id")
+        return await create_report(db, current.id, body.target_id, body)
+    if body.target_id is None:
+        raise HTTPException(422, detail="内容举报必须提供 target_id")
+    return await create_content_report(db, current.id, target_type=body.target_type, target_id=body.target_id, reason_id=body.type, description=body.description, images=body.images)

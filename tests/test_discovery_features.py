@@ -153,6 +153,11 @@ def test_recommendations_can_repeat_viewed_users() -> None:
     assert "user_swipe_record sw" in source
 
 
+def test_recommendations_keep_users_with_submitted_applications_visible() -> None:
+    source = inspect.getsource(discovery._fetch_rows)
+    assert "match_apply ma" not in source
+
+
 @pytest.mark.asyncio
 async def test_visitor_count_returns_only_a_deduplicated_number(monkeypatch: pytest.MonkeyPatch) -> None:
     class Result:

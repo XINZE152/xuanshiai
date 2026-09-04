@@ -135,7 +135,7 @@ async def list_reports(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status: int | None = Query(default=None, ge=0, le=2),
-    target_type: Literal["user", "post", "comment", "paper_plane"] | None = Query(default=None),
+    target_type: Literal["user", "post", "comment", "paper_plane", "message", "user_media", "community_media"] | None = Query(default=None),
     admin: CurrentUser = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ) -> AdminReportPage:

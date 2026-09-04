@@ -202,12 +202,14 @@ class ReportRequest(BaseModel):
     type: str = Field(min_length=1, max_length=64)
     description: str | None = Field(default=None, max_length=1000)
     images: list[str] = Field(default_factory=list, max_length=6)
+    target_type: Literal["user", "post", "comment", "paper_plane", "message", "user_media", "community_media"] = "user"
+    target_id: int | None = Field(default=None, ge=1)
 
 
 class ReportResponse(BaseModel):
     id: int
     target_user_id: int
-    target_type: Literal["user", "post", "comment", "paper_plane"] = "user"
+    target_type: Literal["user", "post", "comment", "paper_plane", "message", "user_media", "community_media"] = "user"
     target_id: int | None = None
     type: str
     status: Literal[0, 1, 2]
@@ -217,14 +219,14 @@ class ReportResponse(BaseModel):
 class ReportDetailResponse(BaseModel):
     id: int
     target_user_id: int
-    target_type: Literal["user", "post", "comment", "paper_plane"]
+    target_type: Literal["user", "post", "comment", "paper_plane", "message", "user_media", "community_media"]
     target_id: int | None
     viewer_role: Literal["reporter", "subject"]
     type: str | None
     description: str | None
     status: Literal[0, 1, 2]
     result: str | None
-    action: Literal["none", "hide_content", "restore_content", "restrict_user", "dismiss"] = "none"
+    action: Literal["none", "hide_content", "restore_content", "restrict_user", "restrict_user_content", "dismiss"] = "none"
     reviewed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime | None = None

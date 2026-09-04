@@ -69,3 +69,11 @@ def test_report_restriction_action_requires_explicit_penalty_fields() -> None:
         restriction_reason_code="HARASSMENT",
     )
     assert request.restriction_type == "MESSAGE_RESTRICTED"
+    bulk = ReportReviewRequest(
+        status=1,
+        result="confirmed",
+        action="restrict_user_content",
+        restriction_type="TOTAL_BAN",
+        restriction_reason_code="SERIOUS_VIOLATION",
+    )
+    assert bulk.action == "restrict_user_content"

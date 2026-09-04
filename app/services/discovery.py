@@ -322,7 +322,6 @@ async def _fetch_rows(
     if not plaza:
         clauses.extend([
             "NOT EXISTS (SELECT 1 FROM user_swipe_record sw WHERE sw.user_id = :viewer_id AND sw.target_user_id = u.id AND sw.action = 2)",
-            "NOT EXISTS (SELECT 1 FROM match_apply ma WHERE ((ma.from_user_id = :viewer_id AND ma.to_user_id = u.id) OR (ma.from_user_id = u.id AND ma.to_user_id = :viewer_id)) AND ma.status IN (0, 1))",
         ])
     clauses.extend(_filter_sql(filters, params))
     sql = CARD_SELECT + " WHERE " + " AND ".join(clauses) + " LIMIT " + str(params.pop("candidate_limit"))
