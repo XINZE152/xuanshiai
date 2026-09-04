@@ -55,6 +55,19 @@ def test_preference_ranges_must_be_ordered() -> None:
         PreferenceUpdateRequest(height_min=180, height_max=160)
 
 
+def test_preference_relationship_options_are_restricted() -> None:
+    request = PreferenceUpdateRequest(
+        dating_goal="倾向结婚",
+        meeting_pace="真诚高效",
+        children_intention="看情况决定是否要孩子",
+    )
+    assert request.dating_goal == "倾向结婚"
+    with pytest.raises(ValidationError):
+        PreferenceUpdateRequest(dating_goal="随缘")
+    with pytest.raises(ValidationError):
+        PreferenceUpdateRequest(children_intention="不确定")
+
+
 def test_photo_order_rejects_duplicate_ids() -> None:
     with pytest.raises(ValidationError):
         PhotoOrderRequest(media_ids=[1, 1])
