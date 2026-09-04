@@ -18,6 +18,7 @@ from app.core.profile_tags import TAG_OPTIONS_BY_CATEGORY
 from app.core.redis import consume_daily, get_daily_used, refund_daily, redis_client
 from app.schemas.discovery import (
     ApplicationCreateRequest,
+    ApplicationPage,
     ApplicationRejectRequest,
     ApplicationResponse,
     BrowseHistoryItem,
@@ -26,18 +27,17 @@ from app.schemas.discovery import (
     DiscoveryFilters,
     DiscoveryPage,
     DiscoverySearch,
-    FavoriteResponse,
-    FilterOptionsResponse,
-    ApplicationPage,
     FavoritePage,
     FavoriteReceivedItem,
     FavoriteReceivedPage,
-    RelationUserSummary,
+    FavoriteResponse,
+    FilterOptionsResponse,
     PublicProfileResponse,
+    RelationUserSummary,
     SavedFilterResponse,
-    SuperLikeResponse,
     SuperLikeItem,
     SuperLikePage,
+    SuperLikeResponse,
     VisitorPage,
 )
 from app.services.notifications import emit_notification
@@ -892,7 +892,7 @@ async def create_superlike(db: AsyncSession, viewer_id: int, target_id: int, ide
     if existing_row:
         vip = await _is_vip(db, viewer_id)
         limit = settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit
-        used = int(await redis_client.get(await _quota_key("superlike", viewer_id)) or 0)
+        used = await get_daily_used(await _quota_key("superlike", viewer_id))
         return SuperLikeResponse(target_user_id=target_id, remaining_today=max(0, limit - used), created_at=existing_row["created_at"])
     vip = await _is_vip(db, viewer_id)
     limit = settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit
@@ -919,7 +919,7 @@ async def create_superlike(db: AsyncSession, viewer_id: int, target_id: int, ide
             logger.exception("Failed to roll back superlike create transaction")
         await _refund_quota_after_database_failure(key)
         raise
-    used = int(await redis_client.get(key) or 0)
+    used = await get_daily_used(key)
     return SuperLikeResponse(target_user_id=target_id, remaining_today=max(0, limit - used), created_at=created_at)
 
 

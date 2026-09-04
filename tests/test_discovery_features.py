@@ -6,11 +6,39 @@ from pydantic import ValidationError
 
 from app.main import app
 from app.schemas.discovery import ApplicationCreateRequest, DiscoveryFilters, DiscoverySearch
-from app.services import discovery
+from app.services import discovery as discovery_service
 from app.services.discovery import _card, _consume_browse
-
+discovery = discovery_service
 
 client = TestClient(app)
+
+
+@pytest.mark.asyncio
+async def test_profile_browse_quota_uses_redis_fallback_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def quota_limit(*_args, **_kwargs) -> int:
+        return 8
+
+    async def consume(*_args, **_kwargs) -> bool:
+        return True
+
+    async def daily_used(*_args, **_kwargs) -> int:
+        return 1
+
+    async def record(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(discovery_service, "_quota_limit", quota_limit)
+    monkeypatch.setattr(discovery_service, "consume_daily", consume)
+    monkeypatch.setattr(discovery_service, "get_daily_used", daily_used)
+    monkeypatch.setattr(discovery_service, "_record_quota_usage", record)
+
+    remaining = await discovery_service._consume_browse(
+        object(), user_id=10, match_score=50, is_vip=False, target_user_id=11
+    )
+
+    assert remaining == 7
 
 
 def test_discovery_filters_validate_ranges_and_page_size() -> None:
