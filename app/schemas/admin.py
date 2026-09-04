@@ -58,6 +58,7 @@ class AdminReportItem(BaseModel):
     description: str | None
     status: Literal[0, 1, 2]
     result: str | None
+    images: list[str] = Field(default_factory=list)
     action: Literal["none", "hide_content", "restore_content", "restrict_user", "restrict_user_content", "dismiss"] = "none"
     reviewed_by: int | None = None
     reviewed_at: datetime | None = None

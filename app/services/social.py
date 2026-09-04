@@ -600,7 +600,7 @@ async def list_admin_reports(
     result = await db.execute(
         text(
             f"""SELECT id, user_id AS reporter_user_id, target_user_id, target_type, target_id,
-            type, `desc` AS description, status, result, COALESCE(action, 'none') AS action,
+            type, `desc` AS description, images, status, result, COALESCE(action, 'none') AS action,
             reviewed_by, reviewed_at, created_at, updated_at
             FROM user_report
             WHERE {where_sql}
@@ -621,6 +621,13 @@ async def list_admin_reports(
                 target_id=int(data["target_id"]) if data.get("target_id") is not None else None,
                 type=data.get("type"),
                 description=data.get("description"),
+                images=(
+                    data.get("images")
+                    if isinstance(data.get("images"), list)
+                    else json.loads(data["images"])
+                    if isinstance(data.get("images"), str)
+                    else []
+                ),
                 status=int(data["status"]),
                 result=data.get("result"),
                 action=data.get("action") or "none",
@@ -677,7 +684,7 @@ async def list_my_reports(
     result = await db.execute(
         text(
             f"""SELECT r.id, r.user_id AS reporter_user_id, r.target_user_id,
-            r.target_type, r.target_id, r.type, r.`desc` AS description, r.status,
+            r.target_type, r.target_id, r.type, r.`desc` AS description, r.images, r.status,
             r.result, COALESCE(r.action, 'none') AS action, r.reviewed_by,
             r.reviewed_at, r.created_at, r.updated_at,
             EXISTS (SELECT 1 FROM report_appeal a WHERE a.report_id = r.id) AS has_appeal
@@ -710,7 +717,15 @@ async def get_admin_report(db: AsyncSession, report_id: int) -> AdminReportItem:
     row = result.mappings().first()
     if not row:
         raise HTTPException(404, detail="举报记录不存在")
-    return AdminReportItem(**dict(row))
+    data = dict(row)
+    data["images"] = (
+        data.get("images")
+        if isinstance(data.get("images"), list)
+        else json.loads(data["images"])
+        if isinstance(data.get("images"), str)
+        else []
+    )
+    return AdminReportItem(**data)
 
 
 def _appeal_response(row: dict[str, Any]) -> ReportAppealResponse:

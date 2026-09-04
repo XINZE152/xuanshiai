@@ -17,7 +17,7 @@ from app.schemas.certifications import (
 from app.schemas.admin import CertificationReviewRequest, CertificationReviewResponse
 
 
-async def list_certification_reviews(db: AsyncSession, *, page: int, page_size: int, kind: str | None = None, status: int = 1) -> CertificationReviewPage:
+async def list_certification_reviews(db: AsyncSession, *, page: int, page_size: int, kind: str | None = None, status: int | None = None, search: str | None = None) -> CertificationReviewPage:
     fields = {
         "education": ("education_verified", "education_cert", "education_submitted_at", "education_reviewed_at", "education_fail_reason"),
         "house": ("house_verified", "house_cert", "house_submitted_at", "house_reviewed_at", "house_fail_reason"),
@@ -29,11 +29,19 @@ async def list_certification_reviews(db: AsyncSession, *, page: int, page_size: 
     items: list[CertificationReviewItem] = []
     for current_kind in kinds:
         status_field, material_field, submitted_field, reviewed_field, reason_field = fields[current_kind]
+        where = f"ua.{material_field} IS NOT NULL"
+        params: dict[str, object] = {}
+        if status is not None:
+            where += f" AND ua.{status_field} = :status"
+            params["status"] = status
+        if search:
+            where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
+            params["search"] = search
         rows = (await db.execute(text(f"""SELECT ua.user_id, u.nickname, ua.{status_field} AS status, ua.{material_field} AS material,
             ua.{submitted_field} AS submitted_at, ua.{reviewed_field} AS reviewed_at, ua.{reason_field} AS fail_reason
             FROM user_auth ua JOIN users u ON u.id = ua.user_id
-            WHERE ua.{status_field} = :status ORDER BY ua.{submitted_field} ASC, ua.user_id ASC"""), {"status": status})).mappings().all()
-        items.extend(CertificationReviewItem(user_id=int(row["user_id"]), nickname=row["nickname"], kind=current_kind, status=int(row["status"]), material_submitted=bool(row["material"]), submitted_at=row["submitted_at"], reviewed_at=row["reviewed_at"], fail_reason=row["fail_reason"]) for row in rows)
+            WHERE {where} ORDER BY ua.{submitted_field} ASC, ua.user_id ASC"""), params)).mappings().all()
+        items.extend(CertificationReviewItem(user_id=int(row["user_id"]), nickname=row["nickname"], kind=current_kind, status=int(row["status"]), material_submitted=bool(row["material"]), material=row["material"], submitted_at=row["submitted_at"], reviewed_at=row["reviewed_at"], fail_reason=row["fail_reason"]) for row in rows)
     items.sort(key=lambda item: (item.submitted_at is None, item.submitted_at, item.user_id))
     total = len(items)
     offset = (page - 1) * page_size

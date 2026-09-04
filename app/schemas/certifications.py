@@ -11,6 +11,7 @@ class CertificationItem(BaseModel):
     kind: str
     status: int
     material_submitted: bool
+    material: str | None
     submitted_at: datetime | None
     reviewed_at: datetime | None
     fail_reason: str | None
@@ -29,6 +30,7 @@ class CertificationReviewItem(BaseModel):
     kind: Literal["education", "house", "marriage"]
     status: int
     material_submitted: bool
+    material: str | None = None
     submitted_at: datetime | None
     reviewed_at: datetime | None
     fail_reason: str | None

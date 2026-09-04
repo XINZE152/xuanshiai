@@ -323,12 +323,20 @@ async def submit_realname(db: AsyncSession, user_id: int, request: RealNameReque
     return {"status": 1, "id_card_masked": mask_id_card(request.id_card)}
 
 
-async def list_realname_reviews(db: AsyncSession, *, page: int, page_size: int, status: int = 1):
+async def list_realname_reviews(db: AsyncSession, *, page: int, page_size: int, status: int | None = None, search: str | None = None):
     from app.schemas.admin import RealnameReviewItem, RealnameReviewPage
-    rows = (await db.execute(text("""SELECT ua.user_id, u.nickname, ua.real_name, ua.id_card_masked,
+    where = "1=1"
+    params: dict[str, object] = {}
+    if status is not None:
+        where += " AND ua.realname_status = :status"
+        params["status"] = status
+    if search:
+        where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
+        params["search"] = search
+    rows = (await db.execute(text(f"""SELECT ua.user_id, u.nickname, ua.real_name, ua.id_card_masked,
         ua.realname_status, ua.submitted_at, ua.reviewed_at, ua.fail_reason
         FROM user_auth ua JOIN users u ON u.id = ua.user_id
-        WHERE ua.realname_status = :status ORDER BY ua.submitted_at ASC, ua.user_id ASC"""), {"status": status})).mappings().all()
+        WHERE {where} ORDER BY ua.submitted_at ASC, ua.user_id ASC"""), params)).mappings().all()
     total = len(rows)
     offset = (page - 1) * page_size
     return RealnameReviewPage(items=[RealnameReviewItem(**dict(row)) for row in rows[offset:offset + page_size]], page=page, page_size=page_size, total=total, has_more=page * page_size < total)

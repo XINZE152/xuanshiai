@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
 from app.db.session import get_db
 from app.schemas.matchmaker_crm_admin import MemberAssignmentResponse, MemberAssignmentUpdate, MemberDetail, MemberListItem, MemberPage, MemberStatistics, MemberStatusResponse, MemberStatusUpdate
+from app.schemas.admin import CertificationReviewRequest, RealnameReviewRequest
+from app.services.auth import list_realname_reviews, review_realname
+from app.services.certifications import list_certification_reviews, review_certification
 
 router = APIRouter(prefix="/admin/matchmaker")
 
@@ -144,6 +147,54 @@ async def member_auth_list(
     rows = await db.execute(text(f"SELECT u.id, u.nickname, u.phone, u.gender, u.birthday, ua.real_name, ua.id_card, COALESCE(ua.auth_status,0) auth_status, ua.updated_at submitted_at {base} WHERE {clause} ORDER BY submitted_at DESC, u.id DESC LIMIT :limit OFFSET :offset"), params)
     total = int((await db.scalar(text(f"SELECT COUNT(*) {base} WHERE {clause}"), {k: v for k, v in params.items() if k not in ('limit', 'offset')})) or 0)
     return {"items": [dict(row) for row in rows.mappings().all()], "page": page, "page_size": page_size, "total": total, "has_more": page * page_size < total}
+
+
+@router.get("/members/realname-reviews")
+async def member_realname_reviews(
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    status: int | None = Query(None, ge=0, le=4),
+    search: str | None = Query(None, max_length=64),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    if status is not None and status not in (1, 4):
+        raise HTTPException(422, detail="实名认证状态只支持审核中或人工复核")
+    return (await list_realname_reviews(db, page=page, page_size=page_size, status=status, search=search)).model_dump()
+
+
+@router.patch("/members/{member_id}/realname/review")
+async def review_member_realname(
+    member_id: int,
+    body: RealnameReviewRequest,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return (await review_realname(db, member_id, body.status, body.reason, current.account.id)).model_dump()
+
+
+@router.get("/members/certification-reviews")
+async def member_certification_reviews(
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    kind: str | None = Query(None, pattern="^(education|house|marriage)$"),
+    status: int | None = Query(None, ge=0, le=3),
+    search: str | None = Query(None, max_length=64),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return (await list_certification_reviews(db, page=page, page_size=page_size, kind=kind, status=status, search=search)).model_dump()
+
+
+@router.patch("/members/{member_id}/certifications/{kind}/review")
+async def review_member_certification(
+    member_id: int,
+    kind: str = Path(..., pattern="^(education|house|marriage)$"),
+    body: CertificationReviewRequest = ...,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return (await review_certification(db, member_id, kind, body)).model_dump()
 
 
 @router.get("/members/{member_id}", response_model=MemberDetail, summary="查询会员详情")
