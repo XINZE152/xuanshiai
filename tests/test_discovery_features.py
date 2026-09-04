@@ -154,6 +154,43 @@ def test_recommendations_can_repeat_viewed_users() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recommendations_fall_back_to_random_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    viewer = {"completion_score": 100, "birthday": None, "gender": None}
+    candidate = {
+        "user_id": 2, "nickname": "候选", "birthday": None, "realname_status": 0,
+        "is_single_pledge": 0, "is_boosted": False, "only_vip_can_see_detail": False,
+        "is_vip": False, "hide_school": 0, "hide_company": 0, "hide_distance": 0,
+        "hide_online_status": 0, "same_city": False, "online_status": 0,
+        "interest_tags": [], "is_favorite": False,
+    }
+    calls: list[bool] = []
+
+    async def fake_context(*_args: object, **_kwargs: object) -> dict:
+        return viewer
+
+    async def fake_fetch(*_args: object, **kwargs: object) -> list[dict]:
+        respect = bool(kwargs.get("respect_preferences", True))
+        calls.append(respect)
+        return [] if respect else [candidate]
+
+    monkeypatch.setattr(discovery, "_viewer_context", fake_context)
+    monkeypatch.setattr(discovery, "_fetch_rows", fake_fetch)
+    monkeypatch.setattr(discovery, "_is_vip", lambda *_args, **_kwargs: _async_false())
+
+    result = await discovery.get_discovery_page(object(), 1, DiscoveryFilters(page_size=1), plaza=False)
+
+    assert calls == [True, False]
+    assert result.total == 1
+    assert result.items[0].user_id == 2
+    assert result.items[0].match_score == 0
+    assert result.items[0].match_reason == "随机推荐"
+
+
+async def _async_false() -> bool:
+    return False
+
+
+@pytest.mark.asyncio
 async def test_visitor_count_returns_only_a_deduplicated_number(monkeypatch: pytest.MonkeyPatch) -> None:
     class Result:
         def scalar(self) -> int:

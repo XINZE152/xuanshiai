@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -331,14 +332,20 @@ async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: Discover
         raise HTTPException(403, detail="请先完善资料后再进入推荐")
     rows = await _fetch_rows(db, viewer_id, filters, plaza=plaza)
     scored = [(_candidate_score(viewer, row), row) for row in rows]
-    scored.sort(key=lambda item: (bool(item[1].get("is_boosted")), item[0][0], item[1].get("last_active_at") or datetime.min), reverse=True)
+    if not scored and not plaza:
+        # Keep visibility and relationship safety filters, but relax preference matching
+        # so a small user pool can still produce recommendations.
+        rows = await _fetch_rows(db, viewer_id, filters, plaza=plaza, respect_preferences=False)
+        random.shuffle(rows)
+        scored = [((0.0, "随机推荐"), row) for row in rows]
+        # The fallback is intentionally random rather than score ordered.
+    else:
+        scored.sort(key=lambda item: (bool(item[1].get("is_boosted")), item[0][0], item[1].get("last_active_at") or datetime.min), reverse=True)
     start = (filters.page - 1) * filters.page_size
     selected = scored[start:start + filters.page_size]
     viewer_is_vip = await _is_vip(db, viewer_id)
-    items = [
-        _card(row, score, reason, detail_locked=bool(row.get("only_vip_can_see_detail")) and not viewer_is_vip)
-        for (score, reason), row in selected
-    ]
+    items = [_card(row, score, reason, detail_locked=bool(row.get("only_vip_can_see_detail")) and not viewer_is_vip)
+             for (score, reason), row in selected]
     return DiscoveryPage(items=items, page=filters.page, page_size=filters.page_size, total=len(scored), has_more=start + filters.page_size < len(scored))
 
 
