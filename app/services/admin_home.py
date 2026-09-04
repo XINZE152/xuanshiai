@@ -97,6 +97,7 @@ async def dashboard(db: AsyncSession, admin: CurrentMatchmakerAdmin, from_date: 
     if to_date < from_date or (to_date - from_date).days > 365:
         raise HTTPException(422, detail="统计日期范围必须为 1 至 366 天")
     user_scope, scope_params = _scope_condition(admin, "users.id")
+    lead_scope, lead_scope_params = _lead_scope_condition(admin)
     membership_scope, _ = _scope_condition(admin, "user_membership.user_id")
     membership_scope_alias = membership_scope.replace("user_membership.user_id", "membership.user_id")
     order_scope, _ = _scope_condition(admin, "payment_order.user_id")
@@ -157,6 +158,45 @@ async def dashboard(db: AsyncSession, admin: CurrentMatchmakerAdmin, from_date: 
         current += timedelta(days=1)
     return AdminDashboard(from_date=from_date, to_date=to_date, metrics=metrics, pending=pending,
         member_gender=gender, income_rank=income_rank, trends=trends)
+
+
+async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, from_date: date, to_date: date) -> dict:
+    """Aggregate only persisted CRM data for the member-report visualizations."""
+    if to_date < from_date or (to_date - from_date).days > 365:
+        raise HTTPException(422, detail="统计日期范围必须为 1 至 366 天")
+    user_scope, scope_params = _scope_condition(admin, "users.id")
+    start = datetime.combine(from_date, time.min)
+    end = datetime.combine(to_date + timedelta(days=1), time.min)
+
+    async def grouped(sql: str, params: dict[str, object] | None = None) -> list[dict]:
+        result = await db.execute(text(sql), {**scope_params, **lead_scope_params, **(params or {})})
+        return [{"label": str(row["label"]), "value": int(row["value"] or 0)} for row in result.mappings().all()]
+
+    gender = await grouped(f"""SELECT CASE users.gender WHEN 1 THEN '男' WHEN 2 THEN '女' ELSE '未填写' END label, COUNT(*) value
+        FROM users WHERE users.status = 1 AND {user_scope} GROUP BY users.gender ORDER BY users.gender""")
+    intention = await grouped(f"""SELECT CASE profile.intention_level WHEN 3 THEN '高意向' WHEN 2 THEN '中意向' WHEN 1 THEN '低意向' ELSE '未填写' END label, COUNT(*) value
+        FROM users LEFT JOIN user_profile profile ON profile.user_id = users.id WHERE users.status = 1 AND {user_scope}
+        GROUP BY profile.intention_level ORDER BY profile.intention_level DESC""")
+    follow = await grouped(f"""SELECT CASE lead.status WHEN 1 THEN '跟进中' WHEN 2 THEN '已转化' WHEN 3 THEN '已放弃' ELSE '待跟进' END label, COUNT(*) value
+        FROM customer_lead lead WHERE lead.created_at >= :start AND lead.created_at < :end AND {lead_scope.replace('customer_lead.', 'lead.')}
+        GROUP BY lead.status ORDER BY lead.status""", {"start": start, "end": end})
+    requirement = await grouped(f"""SELECT COALESCE(NULLIF(preference.dating_goal, ''), '未填写') label, COUNT(*) value
+        FROM users LEFT JOIN user_partner_preference preference ON preference.user_id = users.id
+        WHERE users.status = 1 AND {user_scope} GROUP BY COALESCE(NULLIF(preference.dating_goal, ''), '未填写') ORDER BY value DESC, label""")
+    browse = await grouped(f"""SELECT CASE WHEN history.user_id = history.target_user_id THEN '查看自己' ELSE '查看会员资料' END label, COUNT(*) value
+        FROM user_browse_history history JOIN users ON users.id = history.user_id
+        WHERE history.created_at >= :start AND history.created_at < :end AND users.status = 1 AND {user_scope}
+        GROUP BY CASE WHEN history.user_id = history.target_user_id THEN '查看自己' ELSE '查看会员资料' END ORDER BY value DESC""", {"start": start, "end": end})
+    popularity = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
+        FROM user_browse_history history JOIN users viewer ON viewer.id = history.user_id JOIN users target ON target.id = history.target_user_id
+        WHERE history.created_at >= :start AND history.created_at < :end AND viewer.status = 1 AND {user_scope.replace('users.id', 'viewer.id')}
+        GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 8""", {"start": start, "end": end})
+    total_browse = sum(item["value"] for item in browse)
+    return {
+        "from_date": str(from_date), "to_date": str(to_date),
+        "groups": {"follow": follow, "intention": intention, "basic": gender, "requirement": requirement, "browse": browse, "popularity": popularity},
+        "totals": {"follow": sum(item["value"] for item in follow), "intention": sum(item["value"] for item in intention), "basic": sum(item["value"] for item in gender), "requirement": sum(item["value"] for item in requirement), "browse": total_browse, "popularity": sum(item["value"] for item in popularity)},
+    }
 
 
 async def announcements(db: AsyncSession, admin: CurrentMatchmakerAdmin, page: int, page_size: int, category: str | None, keyword: str | None) -> AnnouncementPage:

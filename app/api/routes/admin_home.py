@@ -27,6 +27,13 @@ async def get_dashboard(from_date: date | None = Query(None, alias="from"), to_d
     return await admin_home.dashboard(db, admin, from_date or end - timedelta(days=14), end)
 
 
+@router.get("/member-statistics", summary="查询会员 CRM 数据报表")
+async def get_member_statistics(from_date: date | None = Query(None, alias="from"), to_date: date | None = Query(None, alias="to"), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    admin.require("dashboard.read")
+    end = to_date or date.today()
+    return await admin_home.member_statistics(db, admin, from_date or end - timedelta(days=14), end)
+
+
 @router.get("/announcements", response_model=AnnouncementPage, summary="分页查询更新公告")
 async def get_announcements(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), category: str | None = Query(None, max_length=64), keyword: str | None = Query(None, max_length=100), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> AnnouncementPage:
     return await admin_home.announcements(db, admin, page, page_size, category, keyword)
