@@ -419,6 +419,12 @@ class DatabaseManager:
         for table_name in ("community_post", "community_comment"):
             try:
                 cursor.execute(
+                    f"SHOW COLUMNS FROM `{table_name}` LIKE 'moderation_status'"
+                )
+                row = cursor.fetchone()
+                if row and "int" in str(row["Type"]).lower():
+                    continue
+                cursor.execute(
                     f"""UPDATE `{table_name}`
                     SET moderation_status = CASE moderation_status
                         WHEN 'pending' THEN 0
