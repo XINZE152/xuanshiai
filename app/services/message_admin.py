@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin
+from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser
 from app.schemas.message_admin import (
     AdminAnnouncementCreate,
     AdminAnnouncementItem,
@@ -47,7 +47,7 @@ def _message_item(row: dict) -> AdminMessageItem:
 
 async def list_admin_messages(
     db: AsyncSession,
-    admin: CurrentMatchmakerAdmin,
+    admin: CurrentUser,
     page: int,
     page_size: int,
     user_id: int | None = None,
@@ -88,12 +88,11 @@ async def moderate_admin_message(
     reason: str,
 ) -> AdminMessageItem:
     params: dict[str, object] = {"id": message_id}
-    scope = _message_scope(admin, params)
-    row = (await db.execute(text(f"""SELECT id, session_id, from_user_id, to_user_id, type,
+    row = (await db.execute(text("""SELECT id, session_id, from_user_id, to_user_id, type,
         content, media_url, is_read, revoked_at, created_at FROM chat_message
-        WHERE id=:id AND {scope} FOR UPDATE"""), params)).mappings().first()
+        WHERE id=:id FOR UPDATE"""), params)).mappings().first()
     if not row:
-        raise HTTPException(404, detail="\u6d88\u606f\u4e0d\u5b58\u5728\u6216\u8d85\u51fa\u5f53\u524d\u7ba1\u7406\u5458\u6570\u636e\u8303\u56f4")
+        raise HTTPException(404, detail="\u6d88\u606f\u4e0d\u5b58\u5728")
     before = dict(row)
     if action == "recall":
         await db.execute(text("UPDATE chat_message SET revoked_at=COALESCE(revoked_at, UTC_TIMESTAMP()) WHERE id=:id"), {"id": message_id})
@@ -106,7 +105,7 @@ async def moderate_admin_message(
     await db.execute(text("""INSERT INTO business_audit_log
         (actor_user_id, action, resource_type, resource_id, before_json, after_json, reason)
         VALUES (:actor, :action, 'chat_message', :id, :before_json, :after_json, :reason)"""), {
-        "actor": admin.account.id,
+        "actor": admin.id,
         "action": f"message.{action}",
         "id": message_id,
         "before_json": json.dumps({**before, "content": _redact_content(before.get("content"))}, ensure_ascii=False, default=str),

@@ -318,7 +318,35 @@ async def submit_realname(db: AsyncSession, user_id: int, request: RealNameReque
         await db.execute(text("""INSERT INTO user_auth (user_id, real_name, id_card, id_card_hash, id_card_masked, realname_status, auth_status, auth_step, submitted_at, retry_count)
              VALUES (:uid, :name, :card, :hash, :masked, 1, 1, 3, UTC_TIMESTAMP(), 1)
              ON DUPLICATE KEY UPDATE real_name = VALUES(real_name), id_card = VALUES(id_card), id_card_hash = VALUES(id_card_hash), id_card_masked = VALUES(id_card_masked), realname_status = 1, auth_status = 1, auth_step = 3, submitted_at = UTC_TIMESTAMP(), retry_count = retry_count + 1, fail_reason = NULL"""), {"uid": user_id, "name": request.real_name, "card": encrypt_sensitive(request.id_card), "hash": card_hash, "masked": mask_id_card(request.id_card)})
+        await db.execute(text("UPDATE user_auth SET reviewed_by = NULL, reviewed_at = NULL WHERE user_id = :uid"), {"uid": user_id})
         await db.execute(text("UPDATE users SET birthday = COALESCE(birthday, :birthday) WHERE id = :uid"), {"uid": user_id, "birthday": birth})
     return {"status": 1, "id_card_masked": mask_id_card(request.id_card)}
+
+
+async def list_realname_reviews(db: AsyncSession, *, page: int, page_size: int, status: int = 1):
+    from app.schemas.admin import RealnameReviewItem, RealnameReviewPage
+    rows = (await db.execute(text("""SELECT ua.user_id, u.nickname, ua.real_name, ua.id_card_masked,
+        ua.realname_status, ua.submitted_at, ua.reviewed_at, ua.fail_reason
+        FROM user_auth ua JOIN users u ON u.id = ua.user_id
+        WHERE ua.realname_status = :status ORDER BY ua.submitted_at ASC, ua.user_id ASC"""), {"status": status})).mappings().all()
+    total = len(rows)
+    offset = (page - 1) * page_size
+    return RealnameReviewPage(items=[RealnameReviewItem(**dict(row)) for row in rows[offset:offset + page_size]], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
+
+
+async def review_realname(db: AsyncSession, user_id: int, status: int, reason: str | None, admin_id: int):
+    from app.schemas.admin import RealnameReviewResponse
+    if status not in (2, 3, 4):
+        raise HTTPException(422, detail="不支持的实名认证审核状态")
+    row = (await db.execute(text("SELECT realname_status FROM user_auth WHERE user_id=:user_id FOR UPDATE"), {"user_id": user_id})).mappings().first()
+    if not row:
+        raise HTTPException(404, detail="实名认证记录不存在")
+    if int(row["realname_status"]) != 1:
+        raise HTTPException(409, detail="当前实名认证不在审核中")
+    await db.execute(text("""UPDATE user_auth SET realname_status=:status, auth_status=:status,
+        auth_step=:auth_step, fail_reason=:reason, reviewed_by=:admin_id, reviewed_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP()
+        WHERE user_id=:user_id"""), {"status": status, "auth_step": 4 if status == 2 else 5 if status == 3 else 3, "reason": reason, "admin_id": admin_id, "user_id": user_id})
+    await db.commit()
+    return RealnameReviewResponse(user_id=user_id, realname_status=status, reason=reason)
 
 

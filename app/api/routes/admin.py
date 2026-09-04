@@ -23,8 +23,10 @@ from app.schemas.admin import (
     AdminGrantRequest, AdminGrantResponse, ModerationItemPage, ModerationReviewRequest, ModerationReviewResponse,
     ReportAppealReviewRequest,
     ReportAppealReviewResponse,
+    RealnameReviewRequest, RealnameReviewPage, RealnameReviewResponse,
 )
 from app.schemas.restrictions import RestrictionCreate, RestrictionPage, RestrictionResponse
+from app.schemas.certifications import CertificationReviewPage
 from app.services.profile import review_media
 from app.services.social import (
     get_admin_report,
@@ -34,11 +36,39 @@ from app.services.social import (
     review_report,
     review_report_appeal,
 )
-from app.services.certifications import review_certification
+from app.services.certifications import list_certification_reviews, review_certification
+from app.services.auth import list_realname_reviews, review_realname
 from app.services.moderation import grant_admin, list_moderation_items, review_moderation_item
 from app.services.restrictions import create_restriction, end_restriction, list_restrictions
 
 router = APIRouter(prefix="/admin")
+
+
+@router.get("/realname-reviews", response_model=RealnameReviewPage, summary="查看实名认证待审核列表")
+async def realname_reviews(
+    page: int = Query(1, ge=1, le=10000), page_size: int = Query(20, ge=1, le=100),
+    status: Literal[1, 4] = Query(1), admin: CurrentUser = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> RealnameReviewPage:
+    return await list_realname_reviews(db, page=page, page_size=page_size, status=status)
+
+
+@router.patch("/users/{user_id}/realname/review", response_model=RealnameReviewResponse, summary="审核实名认证")
+async def review_user_realname(
+    user_id: int = Path(..., ge=1), body: RealnameReviewRequest = Body(...),
+    admin: CurrentUser = Depends(get_current_admin), db: AsyncSession = Depends(get_db),
+) -> RealnameReviewResponse:
+    return await review_realname(db, user_id, body.status, body.reason, admin.id)
+
+
+@router.get("/certification-reviews", response_model=CertificationReviewPage, summary="查看学历房产婚姻认证待审核列表")
+async def certification_reviews(
+    page: int = Query(1, ge=1, le=10000), page_size: int = Query(20, ge=1, le=100),
+    kind: Literal["education", "house", "marriage"] | None = Query(None),
+    status: Literal[1, 2, 3] = Query(1), admin: CurrentUser = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CertificationReviewPage:
+    return await list_certification_reviews(db, page=page, page_size=page_size, kind=kind, status=status)
 
 
 @router.get("/users/{user_id}/restrictions", response_model=RestrictionPage, summary="查询用户限制记录")

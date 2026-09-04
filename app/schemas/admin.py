@@ -134,6 +134,36 @@ class CertificationReviewResponse(BaseModel):
     reason: str | None
 
 
+class RealnameReviewRequest(BaseModel):
+    status: Literal[2, 3, 4]
+    reason: str | None = Field(default=None, max_length=255)
+
+
+class RealnameReviewItem(BaseModel):
+    user_id: int
+    nickname: str | None
+    real_name: str | None
+    id_card_masked: str | None
+    realname_status: int
+    submitted_at: datetime | None
+    reviewed_at: datetime | None
+    fail_reason: str | None
+
+
+class RealnameReviewPage(BaseModel):
+    items: list[RealnameReviewItem]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
+
+
+class RealnameReviewResponse(BaseModel):
+    user_id: int
+    realname_status: Literal[2, 3, 4]
+    reason: str | None
+
+
 class ModerationItem(BaseModel):
     id: int
     target_type: Literal["post", "comment", "paper_plane", "paper_plane_reply", "paper_plane_message", "media"]
