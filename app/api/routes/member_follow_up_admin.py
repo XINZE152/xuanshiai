@@ -76,22 +76,52 @@ async def all_behavior(
     page: int = Query(1, ge=1, le=1000),
     page_size: int = Query(20, ge=1, le=100),
     search: str | None = Query(None, max_length=64),
+    category: str = Query("browse", pattern="^(browse|favorite|superlike|gift|report)$"),
+    min_times: int | None = Query(None, ge=1, le=1000),
+    status: int | None = Query(None, ge=0, le=2),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    # Keep the same event sources as the member detail feed, adding the member for the CRM table.
-    where = ""
-    params = {"limit": page_size, "offset": (page - 1) * page_size}
+    params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
     if search:
-        where = "WHERE nickname LIKE CONCAT('%', :search, '%')"
         params["search"] = search
-    event_sql = """SELECT event_type, event_id, user_id, nickname, target_user_id, target_nickname, detail, occurred_at FROM (
-      SELECT 'login' event_type, l.id event_id, l.user_id, u.nickname, NULL target_user_id, NULL target_nickname, IF(l.login_status = 1, '登录成功', CONCAT('登录失败：', COALESCE(l.failure_reason, '未知原因'))) detail, l.created_at occurred_at FROM user_login_log l JOIN users u ON u.id=l.user_id
-      UNION ALL SELECT 'browse', h.id, h.user_id, u.nickname, h.target_user_id, t.nickname, '浏览资料', h.created_at FROM user_browse_history h JOIN users u ON u.id=h.user_id LEFT JOIN users t ON t.id=h.target_user_id
-      UNION ALL SELECT 'favorite', f.id, f.user_id, u.nickname, f.target_user_id, t.nickname, '收藏用户', f.created_at FROM user_favorite f JOIN users u ON u.id=f.user_id LEFT JOIN users t ON t.id=f.target_user_id
-      UNION ALL SELECT 'swipe', s.id, s.user_id, u.nickname, s.target_user_id, t.nickname, s.action, s.created_at FROM user_swipe_record s JOIN users u ON u.id=s.user_id LEFT JOIN users t ON t.id=s.target_user_id
-      UNION ALL SELECT 'apply', a.id, a.from_user_id, u.nickname, a.to_user_id, t.nickname, '提交认识申请', a.created_at FROM match_apply a JOIN users u ON u.id=a.from_user_id LEFT JOIN users t ON t.id=a.to_user_id
-    ) events"""
-    rows = await db.execute(text(f"SELECT * FROM ({event_sql}) e {where} ORDER BY occurred_at DESC, event_id DESC LIMIT :limit OFFSET :offset"), params)
-    total = int((await db.scalar(text(f"SELECT COUNT(*) FROM ({event_sql}) e {where}"), {k: v for k, v in params.items() if k not in ('limit', 'offset')})) or 0)
+    if category == "browse":
+        where = "1=1"
+        if search:
+            where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
+        having = ""
+        if min_times:
+            having = " HAVING browse_times >= :min_times"
+            params["min_times"] = min_times
+        base = f"""FROM user_browse_history h JOIN users u ON u.id = h.user_id
+            LEFT JOIN users t ON t.id = h.target_user_id WHERE {where}
+            GROUP BY h.user_id, h.target_user_id, u.nickname, t.nickname{having}"""
+        data_sql = f"""SELECT MIN(h.id) AS event_id, h.user_id, u.nickname, h.target_user_id, t.nickname AS target_nickname,
+            COUNT(*) AS browse_times, MAX(h.created_at) AS occurred_at {base}
+            ORDER BY occurred_at DESC, event_id DESC LIMIT :limit OFFSET :offset"""
+    elif category == "favorite":
+        where = "f.type = 2"
+        if search:
+            where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
+        base = f"FROM user_favorite f JOIN users u ON u.id = f.user_id LEFT JOIN users t ON t.id = f.target_user_id WHERE {where}"
+        data_sql = f"SELECT f.id AS event_id, f.user_id, u.nickname, f.target_user_id, t.nickname AS target_nickname, f.created_at AS occurred_at {base} ORDER BY occurred_at DESC, event_id DESC LIMIT :limit OFFSET :offset"
+    elif category == "superlike":
+        where = "1=1"
+        if search:
+            where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
+        base = f"FROM user_boost b JOIN users u ON u.id = b.user_id LEFT JOIN users t ON t.id = b.target_user_id WHERE {where}"
+        data_sql = f"SELECT b.id AS event_id, b.user_id, u.nickname, b.target_user_id, t.nickname AS target_nickname, b.created_at AS occurred_at {base} ORDER BY occurred_at DESC, event_id DESC LIMIT :limit OFFSET :offset"
+    elif category == "report":
+        where = "1=1"
+        if search:
+            where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
+        if status is not None:
+            where += " AND r.status = :status"
+            params["status"] = status
+        base = f"FROM user_report r JOIN users u ON u.id = r.user_id LEFT JOIN users t ON t.id = r.target_user_id WHERE {where}"
+        data_sql = f"SELECT r.id AS event_id, r.user_id, u.nickname, r.target_user_id, t.nickname AS target_nickname, r.target_type, r.type, r.`desc` AS detail, r.status, r.created_at AS occurred_at {base} ORDER BY occurred_at DESC, event_id DESC LIMIT :limit OFFSET :offset"
+    else:
+        return {"items": [], "page": page, "page_size": page_size, "total": 0, "has_more": False}
+    rows = await db.execute(text(data_sql), params)
+    total = int((await db.scalar(text(f"SELECT COUNT(*) FROM ({data_sql.rsplit(' ORDER BY ', 1)[0]}) records"), {k: v for k, v in params.items() if k not in ("limit", "offset")})) or 0)
     return {"items": [dict(row) for row in rows.mappings().all()], "page": page, "page_size": page_size, "total": total, "has_more": page * page_size < total}
