@@ -10,7 +10,12 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.core.config import Settings
-from app.schemas.ai_avatar import AiAvatarMessageRequest, AiAvatarProfileResponse
+from app.schemas.ai_avatar import (
+    AiAvatarMessageRequest,
+    AiAvatarOwnerAnswerCreateRequest,
+    AiAvatarOwnerAnswerRequest,
+    AiAvatarProfileResponse,
+)
 from app.services import ai_avatar
 
 
@@ -20,6 +25,16 @@ def test_message_request_trims_and_limits_content() -> None:
         AiAvatarMessageRequest(content="   ")
     with pytest.raises(ValidationError):
         AiAvatarMessageRequest(content="问" * 301)
+
+
+def test_owner_answer_requests_reject_blank_text() -> None:
+    with pytest.raises(ValidationError):
+        AiAvatarOwnerAnswerRequest(answer="   ")
+    with pytest.raises(ValidationError):
+        AiAvatarOwnerAnswerCreateRequest(question="   ", answer="有效回答")
+    payload = AiAvatarOwnerAnswerCreateRequest(question="  你的兴趣？ ", answer="  阅读和散步 ")
+    assert payload.question == "你的兴趣？"
+    assert payload.answer == "阅读和散步"
 
 
 def test_production_ai_provider_requires_https() -> None:
@@ -62,6 +77,45 @@ def test_provider_reply_parser_rejects_unknown_payload() -> None:
 def test_naive_database_timestamp_is_treated_as_utc() -> None:
     assert ai_avatar._timestamp_ms(datetime(1970, 1, 1)) == 0  # noqa: DTZ001
     assert ai_avatar._timestamp_ms(datetime(1970, 1, 1, tzinfo=UTC)) == 0
+
+
+def test_owner_answers_are_explicit_and_sorted_into_conversation() -> None:
+    profile = AiAvatarProfileResponse(id=2, name="娴嬭瘯鐢ㄦ埛", avatar="avatar")
+    rows = [
+        {
+            "id": 1,
+            "role": "user",
+            "content": "闂",
+            "category": "general",
+            "created_at": datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        },
+        {
+            "id": 2,
+            "role": "assistant",
+            "content": "AI 鍥炵瓟",
+            "category": "general",
+            "created_at": datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+        },
+    ]
+    messages = ai_avatar._map_rows(
+        rows,
+        profile,
+        [
+            {
+                "id": 7,
+                "answer": "本人补充",
+                "category": "general",
+                "answered_at": datetime(2026, 1, 1, 0, 2, tzinfo=UTC),
+            }
+        ],
+    )
+    assert [message.source for message in messages] == [
+        "system",
+        "user",
+        "real-ai",
+        "owner-answer",
+    ]
+    assert messages[-1].id == -7
 
 
 @pytest.mark.asyncio
@@ -139,6 +193,11 @@ def test_ai_avatar_routes_and_tables_are_declared() -> None:
     from app.api.routes.ai_avatar import router
 
     paths = {route.path for route in router.routes}
+    assert "/ai-avatars/me/dashboard" in paths
+    assert "/ai-avatars/me/questions" in paths
+    assert "/ai-avatars/me/questions/{question_id}/answer" in paths
+    assert "/ai-avatars/me/questions/{question_id}" in paths
+    assert "/ai-avatars/me/answers/{answer_id}" in paths
     assert "/ai-avatars/{target_user_id}/profile" in paths
     assert "/ai-avatars/{target_user_id}/messages" in paths
     assert "/ai-avatars/{target_user_id}/conversations" in paths
@@ -146,4 +205,29 @@ def test_ai_avatar_routes_and_tables_are_declared() -> None:
     setup = Path("database_setup_marriage.py").read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS `ai_avatar_conversation`" in setup
     assert "CREATE TABLE IF NOT EXISTS `ai_avatar_message`" in setup
+    assert "CREATE TABLE IF NOT EXISTS `ai_avatar_owner_qa`" in setup
+    assert "uk_ai_avatar_owner_question" in setup
     assert "fk_ai_avatar_message_conversation_id" in setup
+    assert (
+        "            'conversation_id',\n"
+        "            ref_table='ai_avatar_conversation',\n"
+        "            on_delete='SET NULL',"
+    ) in setup
+
+
+def test_ai_avatar_message_exposes_optional_bounded_idempotency_key() -> None:
+    from app.main import app
+
+    operation = app.openapi()["paths"]["/api/v1/ai-avatars/{target_user_id}/messages"]["post"]
+    header = next(
+        item for item in operation["parameters"] if item["name"] == "Idempotency-Key"
+    )
+    assert header["in"] == "header"
+    assert header["required"] is False
+    schema = next(
+        item
+        for item in header["schema"].get("anyOf", [header["schema"]])
+        if item.get("type") == "string"
+    )
+    assert schema["minLength"] == 1
+    assert schema["maxLength"] == 128

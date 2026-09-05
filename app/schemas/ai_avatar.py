@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -52,7 +53,7 @@ class AiAvatarMessageResponse(BaseModel):
     showTime: bool = False
     isMine: bool
     avatar: str | None = None
-    source: Literal["user", "real-ai", "system"]
+    source: Literal["user", "real-ai", "owner-answer", "system"]
     category: Literal["basic", "interest", "expectation", "platform", "general"] = "general"
     handoffRequired: bool = False
     handoffStatus: Literal["not_requested", "pending", "answered"] = "not_requested"
@@ -87,3 +88,49 @@ class AiAvatarClearResponse(BaseModel):
 
     targetUserId: int
     deleted: bool = True
+
+
+class AiAvatarOwnerAnswerRequest(BaseModel):
+    """An owner's reusable answer for one visitor question."""
+
+    answer: str = Field(min_length=1, max_length=500)
+
+    @field_validator("answer")
+    @classmethod
+    def normalize_answer(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("鍥炵瓟涓嶈兘涓虹┖")
+        return normalized
+
+
+class AiAvatarOwnerAnswerCreateRequest(AiAvatarOwnerAnswerRequest):
+    """Create or update a reusable owner answer."""
+
+    question: str = Field(min_length=1, max_length=300)
+
+    @field_validator("question")
+    @classmethod
+    def normalize_question(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("闂涓嶈兘涓虹┖")
+        return normalized
+
+
+class AiAvatarOwnerQuestionResponse(BaseModel):
+    """Question or reusable answer shown in the owner's AI-avatar dashboard."""
+
+    id: int
+    question: str
+    answer: str | None = None
+    status: Literal["pending", "answered"]
+    created_at: datetime
+    answered_at: datetime | None = None
+
+
+class AiAvatarOwnerDashboardResponse(BaseModel):
+    """Owner-only AI-avatar questions and answers."""
+
+    pending_questions: list[AiAvatarOwnerQuestionResponse]
+    answers: list[AiAvatarOwnerQuestionResponse]

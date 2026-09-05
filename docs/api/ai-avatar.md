@@ -8,8 +8,8 @@
 - 隐私：公开资料上下文由后端按目标用户当前隐私设置生成。客户端不得提交或覆盖资料上下文。
 - 隔离：会话保存在 `ai_avatar_conversation`、`ai_avatar_message`，不进入真人消息列表、未读数或通知。
 - 模型：后端调用 OpenAI 兼容的 `/chat/completions`，不会向客户端返回供应商密钥。
-- 限额：发送消息默认每位用户每日 20 次，以 UTC 自然日重置，实际值由 `AI_DAILY_LIMIT` 配置。
-- 转交：当前真实接口不转交真人，`handoffRequired=false`、`handoffStatus=not_requested`。
+- 限额：发送消息默认每位用户每日 20 次，以 UTC 自然日重置，实际值由 `AI_AVATAR_DAILY_LIMIT` 配置。
+- 主人补充：每个访客问题都会进入分身所属用户的待回答列表。主人补充回答后，原访客下次读取会话可看到来源为 `owner-answer` 的消息；这不是真人聊天，不产生通知或开放联系方式。
 
 ### 1.1 公共消息字段
 
@@ -22,7 +22,7 @@
 | `showTime` | boolean | 是 | 否 | 前端是否显示独立时间标签 | `false` |
 | `isMine` | boolean | 是 | 否 | 是否为当前访问者发送 | `false` |
 | `avatar` | string/null | 是 | 可空 | AI 消息头像；用户消息可空 | `/storage/uploads/a.webp` |
-| `source` | string | 是 | 否 | `user`、`real-ai` 或 `system` | `real-ai` |
+| `source` | string | 是 | 否 | `user`、`real-ai`、`owner-answer` 或 `system` | `real-ai` |
 | `category` | string | 是 | 否 | `basic`、`interest`、`expectation`、`platform`、`general` | `interest` |
 | `handoffRequired` | boolean | 是 | 否 | 当前固定 `false` | `false` |
 | `handoffStatus` | string | 是 | 否 | 当前固定 `not_requested` | `not_requested` |
@@ -128,6 +128,7 @@ Authorization: Bearer <access-token>
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `target_user_id` | path | integer | 是 | 无 | `>=1`，不能为本人 | 分身所属用户 ID | `2` / `0` |
 | `Authorization` | header | string | 是 | 无 | Bearer Token | 当前访问者身份 | `Bearer ey...` / 缺失 |
+| `Idempotency-Key` | header | string | 否 | 无 | 1-128 字符 | 同一用户重试同一发送请求的幂等键 | `ai-avatar-...` / 超过 128 字符 |
 | `content` | body | string | 是 | 无 | 去首尾和重复空白后 1-300 字符 | 用户问题 | `Ta 喜欢什么？` / 301 字符 |
 
 **请求体示例**：
@@ -136,6 +137,7 @@ Authorization: Bearer <access-token>
 POST /api/v1/ai-avatars/2/messages HTTP/1.1
 Authorization: Bearer <access-token>
 Content-Type: application/json
+Idempotency-Key: ai-avatar-20260905-001
 
 {"content":"Ta 喜欢什么？"}
 ```
@@ -159,15 +161,27 @@ Content-Type: application/json
 {"messages":[{"id":0,"type":"text","content":"欢迎语","time":1786675200000,"showTime":false,"isMine":false,"avatar":null,"source":"system","category":"general","handoffRequired":false,"handoffStatus":"not_requested"},{"id":11,"type":"text","content":"Ta 喜欢什么？","time":1786675201000,"showTime":false,"isMine":true,"avatar":null,"source":"user","category":"interest","handoffRequired":false,"handoffStatus":"not_requested"},{"id":12,"type":"text","content":"Ta 的公开资料提到喜欢徒步，这是 AI 回答。","time":1786675202000,"showTime":false,"isMine":false,"avatar":null,"source":"real-ai","category":"interest","handoffRequired":false,"handoffStatus":"not_requested"}],"result":{"reply":"Ta 的公开资料提到喜欢徒步，这是 AI 回答。","category":"interest","source":"real-ai","handoffRequired":false,"handoffStatus":"not_requested"}}
 ```
 
-**使用方法与业务规则**：先调用资料和历史接口。服务端重新检查隐私，读取最近 `AI_MAX_CONTEXT_MESSAGES` 条历史，调用供应商，过滤输出后再一次性保存用户问题和 AI 回答。供应商或数据库失败时不保存本轮消息并返还本次额度。不要自动重试 POST；由用户主动重试，避免产生两次回答。
+**使用方法与业务规则**：先调用资料和历史接口。服务端重新检查隐私，读取最近 `AI_MAX_CONTEXT_MESSAGES` 条历史，调用供应商，过滤输出后再一次性保存用户问题和 AI 回答，同时向主人待回答列表记录问题。供应商或数据库失败时不保存本轮消息并返还本次额度。客户端应为一次用户发送生成一个 `Idempotency-Key`；同一用户、相同请求键和相同请求体会复用首次成功响应。相同键对应不同请求体返回 `409`，处理中再次发送相同键也返回 `409`。
 
-**频率与并发**：每位访问者共享每日额度，不按目标分别计算。并发请求分别计数；数据库会话按访问者与目标唯一。当前无 `Idempotency-Key`，客户端发送期间必须禁用重复提交。
+**频率与并发**：每位访问者共享每日额度，不按目标分别计算。数据库会话按访问者与目标唯一。客户端发送期间仍应禁用重复提交；网络重试必须复用同一个 `Idempotency-Key`，而新的用户发送必须生成新键。
 
-**错误**：除 1.2 外，AI 未配置返回 `503`；超时返回 `504`；额度不足返回 `429`。错误响应不会包含供应商响应体、密钥或内部 Prompt。
+**错误**：除 1.2 外，AI 未配置返回 `503`；超时返回 `504`；额度不足返回 `429`；幂等键与请求体不一致或同键请求仍在处理中返回 `409`。错误响应不会包含供应商响应体、密钥或内部 Prompt。
 
 **兼容性**：新增接口。当前为非流式响应，未来增加流式接口时保留本接口。
 
-## 5. 清空 AI 分身聊天记录
+## 5. 管理我的 AI 分身问答
+
+**基本信息**：读取和维护当前登录用户的 AI 分身待回答问题及可复用回答。所有接口均只操作当前用户自己的数据，URL 分别为 `GET /api/v1/ai-avatars/me/dashboard`、`POST /api/v1/ai-avatars/me/questions`、`POST /api/v1/ai-avatars/me/questions/{question_id}/answer`、`DELETE /api/v1/ai-avatars/me/questions/{question_id}` 与 `DELETE /api/v1/ai-avatars/me/answers/{answer_id}`。
+
+**读取返回**：`pending_questions` 与 `answers` 都是数组；单项含 `id`、`question`、`answer`、`status`、`created_at`、`answered_at`。待回答项的 `answer` 和 `answered_at` 为 `null`，状态为 `pending`；已回答项状态为 `answered`。
+
+**新增可复用回答**：`POST /me/questions` 请求体为 `{"question":"Ta 喜欢什么？","answer":"喜欢徒步和阅读。"}`。问题长度为 1-300，回答长度为 1-500；相同归一化问题会更新为最新回答。
+
+**回答或删除待回答项**：回答接口请求体为 `{"answer":"..."}`，回答长度为 1-500。删除只影响待回答项；删除已回答的可复用项使用 `/me/answers/{answer_id}`。不存在、已删除或不属于当前用户的记录均返回 `404`。
+
+**隐私与会话**：主人回答仅用作 AI 分身公开问答的补充，不会创建真人聊天、通知或联系方式交换。访客重新读取自己的 AI 分身会话时，才会看到来源为 `owner-answer` 的补充消息。
+
+## 6. 清空 AI 分身聊天记录
 
 **基本信息**：删除当前访问者与目标分身的独立会话。URL `DELETE /api/v1/ai-avatars/{target_user_id}/conversations`；需登录；成功状态 `200`。
 
@@ -193,7 +207,7 @@ Authorization: Bearer <access-token>
 
 **兼容性**：新增接口，无旧数据迁移；原前端本地 Mock 历史保留在独立命名空间，不会上传到后端。
 
-## 6. 本地与部署配置
+## 7. 本地与部署配置
 
 在未提交的 `.env` 中配置：
 
