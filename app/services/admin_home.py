@@ -25,12 +25,16 @@ def _scope_condition(admin: CurrentMatchmakerAdmin, user_column: str) -> tuple[s
     if account.data_scope == "ALL":
         return "1 = 1", {}
     if account.data_scope == "SELF":
+        # An unbound account is still used for CRM setup/testing. Keep it
+        # consistent with the member list (which includes unassigned users)
+        # until a concrete matchmaker owner is configured.
         if account.matchmaker_user_id is None:
-            return "1 = 0", {}
+            return "1 = 1", {}
+        matchmaker_id = account.matchmaker_user_id
         return ("EXISTS (SELECT 1 FROM resource_assignment scope_assignment "
                 f"WHERE scope_assignment.user_id = {user_column} "
                 "AND scope_assignment.matchmaker_id = :scope_matchmaker_id "
-                "AND scope_assignment.status = 1)"), {"scope_matchmaker_id": account.matchmaker_user_id}
+                "AND scope_assignment.status = 1)"), {"scope_matchmaker_id": matchmaker_id}
     if account.organization_id is None:
         return "1 = 0", {}
     return ("EXISTS (SELECT 1 FROM resource_assignment scope_assignment "
@@ -47,8 +51,9 @@ def _lead_scope_condition(admin: CurrentMatchmakerAdmin) -> tuple[str, dict[str,
         return "1 = 1", {}
     if account.data_scope == "SELF":
         if account.matchmaker_user_id is None:
-            return "1 = 0", {}
-        return "customer_lead.matchmaker_id = :scope_matchmaker_id", {"scope_matchmaker_id": account.matchmaker_user_id}
+            return "1 = 1", {}
+        matchmaker_id = account.matchmaker_user_id
+        return "customer_lead.matchmaker_id = :scope_matchmaker_id", {"scope_matchmaker_id": matchmaker_id}
     if account.organization_id is None:
         return "1 = 0", {}
     return ("customer_lead.organization_id IN (SELECT id FROM organization WHERE id = :scope_organization_id "
@@ -97,7 +102,6 @@ async def dashboard(db: AsyncSession, admin: CurrentMatchmakerAdmin, from_date: 
     if to_date < from_date or (to_date - from_date).days > 365:
         raise HTTPException(422, detail="统计日期范围必须为 1 至 366 天")
     user_scope, scope_params = _scope_condition(admin, "users.id")
-    lead_scope, lead_scope_params = _lead_scope_condition(admin)
     membership_scope, _ = _scope_condition(admin, "user_membership.user_id")
     membership_scope_alias = membership_scope.replace("user_membership.user_id", "membership.user_id")
     order_scope, _ = _scope_condition(admin, "payment_order.user_id")
@@ -165,6 +169,7 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
     if to_date < from_date or (to_date - from_date).days > 365:
         raise HTTPException(422, detail="统计日期范围必须为 1 至 366 天")
     user_scope, scope_params = _scope_condition(admin, "users.id")
+    lead_scope, lead_scope_params = _lead_scope_condition(admin)
     start = datetime.combine(from_date, time.min)
     end = datetime.combine(to_date + timedelta(days=1), time.min)
 
@@ -172,24 +177,27 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
         result = await db.execute(text(sql), {**scope_params, **lead_scope_params, **(params or {})})
         return [{"label": str(row["label"]), "value": int(row["value"] or 0)} for row in result.mappings().all()]
 
+    ordinary_user = "EXISTS (SELECT 1 FROM user_role ordinary_role WHERE ordinary_role.user_id = {column} AND ordinary_role.role_code = 'user' AND ordinary_role.status = 1)"
+    ordinary_users = ordinary_user.format(column="users.id")
     gender = await grouped(f"""SELECT CASE users.gender WHEN 1 THEN '男' WHEN 2 THEN '女' ELSE '未填写' END label, COUNT(*) value
-        FROM users WHERE users.status = 1 AND {user_scope} GROUP BY users.gender ORDER BY users.gender""")
+        FROM users WHERE users.status = 1 AND {ordinary_users} AND {user_scope}
+        GROUP BY users.gender ORDER BY users.gender""")
     intention = await grouped(f"""SELECT CASE profile.intention_level WHEN 3 THEN '高意向' WHEN 2 THEN '中意向' WHEN 1 THEN '低意向' ELSE '未填写' END label, COUNT(*) value
-        FROM users LEFT JOIN user_profile profile ON profile.user_id = users.id WHERE users.status = 1 AND {user_scope}
+        FROM users LEFT JOIN user_profile profile ON profile.user_id = users.id WHERE users.status = 1 AND {ordinary_users} AND {user_scope}
         GROUP BY profile.intention_level ORDER BY profile.intention_level DESC""")
-    follow = await grouped(f"""SELECT CASE lead.status WHEN 1 THEN '跟进中' WHEN 2 THEN '已转化' WHEN 3 THEN '已放弃' ELSE '待跟进' END label, COUNT(*) value
-        FROM customer_lead lead WHERE lead.created_at >= :start AND lead.created_at < :end AND {lead_scope.replace('customer_lead.', 'lead.')}
-        GROUP BY lead.status ORDER BY lead.status""", {"start": start, "end": end})
+    follow = await grouped(f"""SELECT CASE cl.status WHEN 1 THEN '跟进中' WHEN 2 THEN '已转化' WHEN 3 THEN '已放弃' ELSE '待跟进' END label, COUNT(*) value
+        FROM customer_lead AS cl WHERE cl.created_at >= :start AND cl.created_at < :end AND {lead_scope.replace('customer_lead.', 'cl.')}
+        GROUP BY cl.status ORDER BY cl.status""", {"start": start, "end": end})
     requirement = await grouped(f"""SELECT COALESCE(NULLIF(preference.dating_goal, ''), '未填写') label, COUNT(*) value
         FROM users LEFT JOIN user_partner_preference preference ON preference.user_id = users.id
-        WHERE users.status = 1 AND {user_scope} GROUP BY COALESCE(NULLIF(preference.dating_goal, ''), '未填写') ORDER BY value DESC, label""")
+        WHERE users.status = 1 AND {ordinary_users} AND {user_scope} GROUP BY COALESCE(NULLIF(preference.dating_goal, ''), '未填写') ORDER BY value DESC, label""")
     browse = await grouped(f"""SELECT CASE WHEN history.user_id = history.target_user_id THEN '查看自己' ELSE '查看会员资料' END label, COUNT(*) value
         FROM user_browse_history history JOIN users ON users.id = history.user_id
-        WHERE history.created_at >= :start AND history.created_at < :end AND users.status = 1 AND {user_scope}
+        WHERE history.created_at >= :start AND history.created_at < :end AND users.status = 1 AND {ordinary_user.format(column='users.id')} AND {user_scope}
         GROUP BY CASE WHEN history.user_id = history.target_user_id THEN '查看自己' ELSE '查看会员资料' END ORDER BY value DESC""", {"start": start, "end": end})
     popularity = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
         FROM user_browse_history history JOIN users viewer ON viewer.id = history.user_id JOIN users target ON target.id = history.target_user_id
-        WHERE history.created_at >= :start AND history.created_at < :end AND viewer.status = 1 AND {user_scope.replace('users.id', 'viewer.id')}
+        WHERE history.created_at >= :start AND history.created_at < :end AND viewer.status = 1 AND {ordinary_user.format(column='viewer.id')} AND target.status = 1 AND {ordinary_user.format(column='target.id')} AND {user_scope.replace('users.id', 'viewer.id')}
         GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 8""", {"start": start, "end": end})
     total_browse = sum(item["value"] for item in browse)
     return {
