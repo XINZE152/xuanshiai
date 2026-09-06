@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Literal
@@ -19,11 +20,18 @@ from app.schemas.ai_avatar import (
     AiAvatarClearResponse,
     AiAvatarConversationResponse,
     AiAvatarMessageResponse,
+    AiAvatarOwnerAnswerCreateRequest,
+    AiAvatarOwnerAnswerRequest,
+    AiAvatarOwnerDashboardResponse,
+    AiAvatarOwnerQuestionResponse,
     AiAvatarProfileResponse,
     AiAvatarReplyResult,
     AiAvatarSendResponse,
 )
 from app.services.content_filter import assert_text_allowed, decide_text
+from app.services.idempotency import abort as abort_idempotency
+from app.services.idempotency import complete as complete_idempotency
+from app.services.idempotency import reserve_or_replay
 from app.services.profile import _calculate_age, _json_dict, _json_list
 
 logger = logging.getLogger(__name__)
@@ -55,6 +63,7 @@ class AiProviderError(RuntimeError):
 class AiAvatarContext:
     profile: AiAvatarProfileResponse
     public_posts: tuple[str, ...]
+    owner_answers: tuple[tuple[str, str], ...] = ()
 
 
 def _trim(value: Any, limit: int = 500) -> str | None:
@@ -64,6 +73,15 @@ def _trim(value: Any, limit: int = 500) -> str | None:
 
 def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(item for item in values if item))
+
+
+def _normalize_owner_question(value: str) -> str:
+    """Build a stable key for reusable owner answers without storing raw secrets."""
+    return "".join(
+        char
+        for char in re.sub(r"\s+", "", value.casefold())
+        if char.isalnum() or "\u4e00" <= char <= "\u9fff"
+    )[:300]
 
 
 def _classify_question(content: str) -> Category:
@@ -227,11 +245,34 @@ async def get_public_ai_context(
         public_posts = tuple(
             value for value in (_trim(item[0], 180) for item in post_result.all()) if value
         )
-    return AiAvatarContext(profile=profile, public_posts=public_posts)
+    owner_answers: tuple[tuple[str, str], ...] = ()
+    if not restricted:
+        owner_answer_result = await db.execute(
+            text(
+                """SELECT question, answer FROM ai_avatar_owner_qa
+                   WHERE owner_user_id = :target_id AND status = 'answered'
+                     AND answer IS NOT NULL AND answer <> ''
+                   ORDER BY updated_at DESC LIMIT 20"""
+            ),
+            {"target_id": target_id},
+        )
+        owner_answers = tuple(
+            (str(item["question"]), str(item["answer"]))
+            for item in owner_answer_result.mappings().all()
+        )
+    return AiAvatarContext(
+        profile=profile,
+        public_posts=public_posts,
+        owner_answers=owner_answers,
+    )
 
 
 def _build_system_prompt(context: AiAvatarContext) -> str:
     profile = context.profile
+    owner_answers_data = [
+        {"question": question, "answer": answer}
+        for question, answer in context.owner_answers
+    ]
     public_data = {
         "昵称": profile.name,
         "年龄": profile.age,
@@ -252,6 +293,7 @@ def _build_system_prompt(context: AiAvatarContext) -> str:
         "不要承诺关系结果，不要引导绕过申请认识和双方同意流程。涉及平台规则时仅使用 PLATFORM_RULES。\n"
         "使用简洁自然的中文回答，通常不超过 180 个汉字，并提醒用户这是 AI 回答。\n"
         f"PUBLIC_PROFILE={json.dumps(public_data, ensure_ascii=False)}\n"
+        f"OWNER_ANSWERS={json.dumps(owner_answers_data, ensure_ascii=False)}\n"
         f"PLATFORM_RULES={PLATFORM_RULES}"
     )
 
@@ -369,21 +411,253 @@ async def _history_rows(db: AsyncSession, conversation_id: int | None) -> list[A
     return list(result.mappings().all())
 
 
-def _map_rows(rows: list[Any], profile: AiAvatarProfileResponse) -> list[AiAvatarMessageResponse]:
+async def _owner_answer_rows(db: AsyncSession, conversation_id: int | None) -> list[Any]:
+    """Load answered owner handoffs that belong to this visitor conversation."""
+    if conversation_id is None:
+        return []
+    result = await db.execute(
+        text(
+            """SELECT id, answer, category, answered_at
+               FROM ai_avatar_owner_qa
+               WHERE conversation_id = :conversation_id AND status = 'answered'
+                 AND answer IS NOT NULL AND answer <> ''
+               ORDER BY answered_at ASC, id ASC"""
+        ),
+        {"conversation_id": conversation_id},
+    )
+    return list(result.mappings().all())
+
+
+def _owner_qa_response(row: Any) -> AiAvatarOwnerQuestionResponse:
+    return AiAvatarOwnerQuestionResponse(
+        id=int(row["id"]),
+        question=str(row["question"]),
+        answer=str(row["answer"]) if row.get("answer") is not None else None,
+        status=str(row["status"]),
+        created_at=row["created_at"],
+        answered_at=row.get("answered_at"),
+    )
+
+
+async def _create_pending_owner_question(
+    db: AsyncSession,
+    owner_id: int,
+    viewer_id: int,
+    conversation_id: int,
+    question: str,
+    category: Category,
+) -> None:
+    normalized = _normalize_owner_question(question)
+    if not normalized:
+        return
+    await db.execute(
+        text(
+            """INSERT INTO ai_avatar_owner_qa
+                   (owner_user_id, viewer_user_id, conversation_id, question,
+                    normalized_question, category, status)
+               VALUES (:owner_id, :viewer_id, :conversation_id, :question,
+                       :normalized_question, :category, 'pending')
+               ON DUPLICATE KEY UPDATE
+                   question = VALUES(question), category = VALUES(category),
+                   viewer_user_id = VALUES(viewer_user_id),
+                   conversation_id = VALUES(conversation_id),
+                   status = IF(status = 'answered', 'answered', 'pending'),
+                   updated_at = UTC_TIMESTAMP()"""
+        ),
+        {
+            "owner_id": owner_id,
+            "viewer_id": viewer_id,
+            "conversation_id": conversation_id,
+            "question": question,
+            "normalized_question": normalized,
+            "category": category,
+        },
+    )
+
+
+async def get_owner_dashboard(
+    db: AsyncSession,
+    owner_id: int,
+) -> AiAvatarOwnerDashboardResponse:
+    result = await db.execute(
+        text(
+            """SELECT id, question, answer, status, created_at, answered_at
+               FROM ai_avatar_owner_qa
+               WHERE owner_user_id = :owner_id AND status = 'pending'
+               ORDER BY created_at DESC LIMIT 100"""
+        ),
+        {"owner_id": owner_id},
+    )
+    pending = [_owner_qa_response(row) for row in result.mappings().all()]
+    result = await db.execute(
+        text(
+            """SELECT id, question, answer, status, created_at, answered_at
+               FROM ai_avatar_owner_qa
+               WHERE owner_user_id = :owner_id AND status = 'answered'
+               ORDER BY updated_at DESC LIMIT 100"""
+        ),
+        {"owner_id": owner_id},
+    )
+    answers = [_owner_qa_response(row) for row in result.mappings().all()]
+    return AiAvatarOwnerDashboardResponse(
+        pending_questions=pending,
+        answers=answers,
+    )
+
+
+async def add_owner_answer(
+    db: AsyncSession,
+    owner_id: int,
+    body: AiAvatarOwnerAnswerCreateRequest,
+) -> AiAvatarOwnerDashboardResponse:
+    await assert_text_allowed(db, body.question, field="问题")
+    await assert_text_allowed(db, body.answer, field="回答")
+    normalized = _normalize_owner_question(body.question)
+    if not normalized:
+        raise HTTPException(422, detail="问题不能为空")
+    await db.execute(
+        text(
+            """INSERT INTO ai_avatar_owner_qa
+                   (owner_user_id, question, normalized_question, answer,
+                    status, answered_at)
+               VALUES (:owner_id, :question, :normalized_question, :answer,
+                       'answered', UTC_TIMESTAMP())
+               ON DUPLICATE KEY UPDATE
+                   question = VALUES(question), answer = VALUES(answer),
+                   status = 'answered', answered_at = UTC_TIMESTAMP(),
+                   updated_at = UTC_TIMESTAMP()"""
+        ),
+        {
+            "owner_id": owner_id,
+            "question": body.question,
+            "normalized_question": normalized,
+            "answer": body.answer,
+        },
+    )
+    await db.commit()
+    return await get_owner_dashboard(db, owner_id)
+
+
+async def answer_owner_question(
+    db: AsyncSession,
+    owner_id: int,
+    question_id: int,
+    body: AiAvatarOwnerAnswerRequest,
+) -> AiAvatarOwnerDashboardResponse:
+    await assert_text_allowed(db, body.answer, field="回答")
+    result = await db.execute(
+        text(
+            """SELECT id FROM ai_avatar_owner_qa
+               WHERE id = :question_id AND owner_user_id = :owner_id
+                 AND status = 'pending'"""
+        ),
+        {"question_id": question_id, "owner_id": owner_id},
+    )
+    if result.scalar() is None:
+        raise HTTPException(404, detail="待回答问题不存在")
+    await db.execute(
+        text(
+            """UPDATE ai_avatar_owner_qa
+               SET answer = :answer, status = 'answered',
+                   answered_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP()
+               WHERE id = :question_id AND owner_user_id = :owner_id"""
+        ),
+        {"answer": body.answer, "question_id": question_id, "owner_id": owner_id},
+    )
+    await db.commit()
+    return await get_owner_dashboard(db, owner_id)
+
+
+async def delete_owner_question(
+    db: AsyncSession,
+    owner_id: int,
+    question_id: int,
+) -> AiAvatarOwnerDashboardResponse:
+    result = await db.execute(
+        text(
+            """UPDATE ai_avatar_owner_qa
+               SET status = 'deleted', answer = NULL, answered_at = NULL,
+                   updated_at = UTC_TIMESTAMP()
+               WHERE id = :question_id AND owner_user_id = :owner_id
+                 AND status = 'pending'"""
+        ),
+        {"question_id": question_id, "owner_id": owner_id},
+    )
+    if result.rowcount == 0:
+        raise HTTPException(404, detail="待回答问题不存在")
+    await db.commit()
+    return await get_owner_dashboard(db, owner_id)
+
+
+async def delete_owner_answer(
+    db: AsyncSession,
+    owner_id: int,
+    answer_id: int,
+) -> AiAvatarOwnerDashboardResponse:
+    result = await db.execute(
+        text(
+            """UPDATE ai_avatar_owner_qa
+               SET status = 'deleted', answer = NULL, answered_at = NULL,
+                   updated_at = UTC_TIMESTAMP()
+               WHERE id = :answer_id AND owner_user_id = :owner_id
+                 AND status = 'answered'"""
+        ),
+        {"answer_id": answer_id, "owner_id": owner_id},
+    )
+    if result.rowcount == 0:
+        raise HTTPException(404, detail="回答不存在")
+    await db.commit()
+    return await get_owner_dashboard(db, owner_id)
+
+
+def _map_rows(
+    rows: list[Any],
+    profile: AiAvatarProfileResponse,
+    owner_answer_rows: list[Any] | None = None,
+) -> list[AiAvatarMessageResponse]:
     messages = [_system_message(profile)]
+    timeline: list[tuple[int, int, AiAvatarMessageResponse]] = []
     for row in rows:
         is_mine = row["role"] == "user"
-        messages.append(
-            AiAvatarMessageResponse(
-                id=int(row["id"]),
-                content=str(row["content"]),
-                time=_timestamp_ms(row["created_at"]),
-                isMine=is_mine,
-                avatar=None if is_mine else profile.avatar,
-                source="user" if is_mine else "real-ai",
-                category=row["category"] or "general",
+        timestamp = _timestamp_ms(row["created_at"])
+        timeline.append(
+            (
+                timestamp,
+                int(row["id"]),
+                AiAvatarMessageResponse(
+                    id=int(row["id"]),
+                    content=str(row["content"]),
+                    time=timestamp,
+                    isMine=is_mine,
+                    avatar=None if is_mine else profile.avatar,
+                    source="user" if is_mine else "real-ai",
+                    category=row["category"] or "general",
+                ),
             )
         )
+    for row in owner_answer_rows or []:
+        answered_at = row.get("answered_at")
+        if answered_at is None:
+            continue
+        timestamp = _timestamp_ms(answered_at)
+        timeline.append(
+            (
+                timestamp,
+                -int(row["id"]),
+                AiAvatarMessageResponse(
+                    id=-int(row["id"]),
+                    content=str(row["answer"]),
+                    time=timestamp,
+                    isMine=False,
+                    avatar=profile.avatar,
+                    source="owner-answer",
+                    category=row["category"] or "general",
+                    handoffStatus="answered",
+                ),
+            )
+        )
+    timeline.sort(key=lambda item: (item[0], item[1]))
+    messages.extend(item[2] for item in timeline)
     return messages
 
 
@@ -394,10 +668,12 @@ async def get_ai_conversation(
     target_id: int,
 ) -> AiAvatarConversationResponse:
     context = await get_public_ai_context(db, viewer_id, viewer_realname_status, target_id)
-    rows = await _history_rows(db, await _conversation_id(db, viewer_id, target_id))
+    conversation_id = await _conversation_id(db, viewer_id, target_id)
+    rows = await _history_rows(db, conversation_id)
+    owner_answer_rows = await _owner_answer_rows(db, conversation_id)
     return AiAvatarConversationResponse(
         targetUserId=target_id,
-        messages=_map_rows(rows, context.profile),
+        messages=_map_rows(rows, context.profile, owner_answer_rows),
     )
 
 
@@ -407,9 +683,22 @@ async def send_ai_message(
     viewer_realname_status: int,
     target_id: int,
     question: str,
+    *,
+    idempotency_key: str | None = None,
 ) -> AiAvatarSendResponse:
     await assert_text_allowed(db, question, field="问题")
     context = await get_public_ai_context(db, viewer_id, viewer_realname_status, target_id)
+    reservation = None
+    if idempotency_key:
+        reservation = await reserve_or_replay(
+            db,
+            viewer_id,
+            "ai-avatar-message",
+            idempotency_key,
+            {"target_user_id": target_id, "content": question},
+        )
+        if reservation.response is not None:
+            return AiAvatarSendResponse.model_validate(reservation.response)
     conversation_id = await _conversation_id(db, viewer_id, target_id)
     rows = await _history_rows(db, conversation_id)
     provider_history = [
@@ -418,6 +707,8 @@ async def send_ai_message(
     ]
     quota_key = daily_quota_key("ai-avatar", viewer_id)
     if not await consume_daily(quota_key, settings.ai_avatar_daily_limit):
+        if reservation is not None:
+            await abort_idempotency(db, reservation)
         raise HTTPException(429, detail=f"今日 AI 分身提问已达 {settings.ai_avatar_daily_limit} 次上限")
     try:
         reply = await call_ai_provider(context, provider_history, question)
@@ -455,17 +746,31 @@ async def send_ai_message(
                 "category": category,
             },
         )
+        await _create_pending_owner_question(
+            db,
+            owner_id=target_id,
+            viewer_id=viewer_id,
+            conversation_id=conversation_id,
+            question=question,
+            category=category,
+        )
         await db.commit()
     except Exception:
         await db.rollback()
         await _refund_quota_safely(quota_key)
+        if reservation is not None:
+            await abort_idempotency(db, reservation)
         raise
 
     updated_rows = await _history_rows(db, conversation_id)
-    return AiAvatarSendResponse(
-        messages=_map_rows(updated_rows, context.profile),
+    owner_answer_rows = await _owner_answer_rows(db, conversation_id)
+    response = AiAvatarSendResponse(
+        messages=_map_rows(updated_rows, context.profile, owner_answer_rows),
         result=AiAvatarReplyResult(reply=reply, category=category),
     )
+    if reservation is not None:
+        await complete_idempotency(db, reservation, response.model_dump(mode="json"))
+    return response
 
 
 async def clear_ai_conversation(

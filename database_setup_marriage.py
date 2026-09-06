@@ -662,6 +662,7 @@ class DatabaseManager:
             ('chat_message', 'to_user_id'),
             ('ai_avatar_conversation', 'viewer_user_id'),
             ('ai_avatar_conversation', 'target_user_id'),
+            ('ai_avatar_owner_qa', 'owner_user_id'),
             ('community_post', 'user_id'),
             ('community_comment', 'user_id'),
             ('community_like', 'user_id'),
@@ -818,6 +819,17 @@ class DatabaseManager:
                 logger.debug("✅ 外键 fk_ai_avatar_message_conversation_id 已添加")
         except pymysql.MySQLError as e:
             logger.debug(f"ℹ️ AI 分身消息外键处理: {e}")
+
+        self._add_foreign_key(
+            cursor, 'ai_avatar_owner_qa', 'viewer_user_id', on_delete='SET NULL'
+        )
+        self._add_foreign_key(
+            cursor,
+            'ai_avatar_owner_qa',
+            'conversation_id',
+            ref_table='ai_avatar_conversation',
+            on_delete='SET NULL',
+        )
 
     def init_all_tables(self, cursor):
         """初始化数据库表结构"""
@@ -1679,6 +1691,27 @@ class DatabaseManager:
                     PRIMARY KEY (`id`),
                     KEY `idx_ai_avatar_message_conversation` (`conversation_id`,`id`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 分身独立消息'
+            """,
+
+            'ai_avatar_owner_qa': """
+                CREATE TABLE IF NOT EXISTS `ai_avatar_owner_qa` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `owner_user_id` bigint unsigned NOT NULL COMMENT 'AI 分身所属用户',
+                    `viewer_user_id` bigint unsigned DEFAULT NULL COMMENT '最近一次提问的访客',
+                    `conversation_id` bigint unsigned DEFAULT NULL COMMENT '来源 AI 会话',
+                    `question` varchar(300) NOT NULL,
+                    `normalized_question` varchar(300) NOT NULL,
+                    `answer` varchar(500) DEFAULT NULL,
+                    `category` varchar(32) NOT NULL DEFAULT 'general',
+                    `status` varchar(16) NOT NULL DEFAULT 'pending' COMMENT 'pending/answered/deleted',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    `answered_at` datetime DEFAULT NULL,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_ai_avatar_owner_question` (`owner_user_id`,`normalized_question`),
+                    KEY `idx_ai_avatar_owner_status` (`owner_user_id`,`status`,`updated_at`),
+                    KEY `idx_ai_avatar_owner_viewer` (`viewer_user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 分身主人问答'
             """,
 
             # ============================================
