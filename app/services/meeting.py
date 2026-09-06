@@ -154,17 +154,37 @@ async def create_feedback(db: AsyncSession, current: CurrentUser, meeting_id: in
     await db.commit()
 
 
-async def admin_list_requests(db: AsyncSession, page: int, page_size: int, status: str | None = None) -> MeetingRequestAdminPage:
+async def admin_list_requests(db: AsyncSession, page: int, page_size: int, status: str | None = None, search: str | None = None, matchmaker_id: int | None = None, from_date: str | None = None, to_date: str | None = None) -> MeetingRequestAdminPage:
     where = ["1 = 1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
     if status:
-        where.append("status = :status")
+        where.append("r.status = :status")
         params["status"] = status
+    if search:
+        where.append("(u.nickname LIKE CONCAT('%', :search, '%') OR t.nickname LIKE CONCAT('%', :search, '%') OR r.user_id = :search_id OR r.target_user_id = :search_id)")
+        params["search"] = search
+        params["search_id"] = int(search) if search.isdigit() else 0
+    if matchmaker_id:
+        where.append("r.matchmaker_id = :matchmaker_id")
+        params["matchmaker_id"] = matchmaker_id
+    if from_date:
+        where.append("r.created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        where.append("r.created_at < DATE_ADD(:to_date, INTERVAL 1 DAY)")
+        params["to_date"] = to_date
     clause = " AND ".join(where)
-    rows = await db.execute(text(f"""SELECT id, user_id, target_user_id, matchmaker_id,
-        service_id, organization_id, status, note, created_at, updated_at
-        FROM meeting_request WHERE {clause} ORDER BY id DESC LIMIT :limit OFFSET :offset"""), params)
-    total = int((await db.execute(text(f"SELECT COUNT(*) FROM meeting_request WHERE {clause}"),
+    rows = await db.execute(text(f"""SELECT r.id, r.user_id, r.target_user_id, r.matchmaker_id,
+        r.service_id, r.organization_id, r.status, r.note, r.created_at, r.updated_at,
+        u.nickname AS user_nickname, CAST(r.user_id AS CHAR) AS user_member_code,
+        t.nickname AS target_nickname, CAST(r.target_user_id AS CHAR) AS target_member_code,
+        m.nickname AS matchmaker_name
+        FROM meeting_request r
+        LEFT JOIN users u ON u.id = r.user_id
+        LEFT JOIN users t ON t.id = r.target_user_id
+        LEFT JOIN users m ON m.id = r.matchmaker_id
+        WHERE {clause} ORDER BY r.id DESC LIMIT :limit OFFSET :offset"""), params)
+    total = int((await db.execute(text(f"SELECT COUNT(*) FROM meeting_request r LEFT JOIN users u ON u.id = r.user_id LEFT JOIN users t ON t.id = r.target_user_id WHERE {clause}"),
         {key: value for key, value in params.items() if key not in ("limit", "offset")})).scalar() or 0)
     return MeetingRequestAdminPage(items=[_request_response(row) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 

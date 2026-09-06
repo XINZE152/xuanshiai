@@ -28,6 +28,11 @@ class MeetingRequestResponse(BaseModel):
     note: str
     created_at: datetime
     updated_at: datetime
+    user_nickname: str | None = None
+    user_member_code: str | None = None
+    target_nickname: str | None = None
+    target_member_code: str | None = None
+    matchmaker_name: str | None = None
 
 
 class MeetingScheduleCreate(BaseModel):

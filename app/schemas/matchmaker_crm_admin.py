@@ -113,9 +113,9 @@ class MatchRecordResponse(BaseModel):
     id: int
     from_user_id: int
     to_user_id: int
-    status: Literal[1, 2]
+    status: Literal[0, 1, 2, 3]
     created_at: datetime
-    responded_at: datetime
+    responded_at: datetime | None
 
 
 class MatchRecordItem(MatchRecordResponse):
