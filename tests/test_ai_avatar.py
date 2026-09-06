@@ -79,6 +79,11 @@ def test_naive_database_timestamp_is_treated_as_utc() -> None:
     assert ai_avatar._timestamp_ms(datetime(1970, 1, 1, tzinfo=UTC)) == 0
 
 
+def test_conversation_schema_compatibility_uses_existing_status_contract() -> None:
+    assert ai_avatar._conversation_status_value({"status": "tinyint"}) == 1
+    assert ai_avatar._conversation_status_value({"status": "varchar(16)"}) == "active"
+
+
 def test_owner_answers_are_explicit_and_sorted_into_conversation() -> None:
     profile = AiAvatarProfileResponse(id=2, name="娴嬭瘯鐢ㄦ埛", avatar="avatar")
     rows = [

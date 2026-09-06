@@ -389,12 +389,27 @@ async def _conversation_id(db: AsyncSession, viewer_id: int, target_id: int) -> 
         text(
             """SELECT id FROM ai_avatar_conversation
                WHERE viewer_user_id = :viewer_id AND target_user_id = :target_id
-                 AND status = 1"""
+                 AND (status = 1 OR status = 'active')"""
         ),
         {"viewer_id": viewer_id, "target_id": target_id},
     )
     value = result.scalar()
     return int(value) if value is not None else None
+
+
+async def _conversation_column_types(db: AsyncSession) -> dict[str, str]:
+    """Read the small schema variation kept by older local databases."""
+    result = await db.execute(text("SHOW COLUMNS FROM ai_avatar_conversation"))
+    return {
+        str(row["Field"]): str(row["Type"]).lower()
+        for row in result.mappings().all()
+    }
+
+
+def _conversation_status_value(column_types: dict[str, str]) -> int | str:
+    """Use the status representation of the database already in use."""
+    status_type = column_types.get("status", "")
+    return "active" if any(kind in status_type for kind in ("char", "text", "enum")) else 1
 
 
 async def _history_rows(db: AsyncSession, conversation_id: int | None) -> list[Any]:
@@ -718,15 +733,31 @@ async def send_ai_message(
         elif decision.action == "replace":
             reply = decision.display_content
         category = _classify_question(question)
+        conversation_columns = await _conversation_column_types(db)
+        conversation_status = _conversation_status_value(conversation_columns)
+        insert_columns = ["viewer_user_id", "target_user_id", "status"]
+        insert_values = [":viewer_id", ":target_id", ":conversation_status"]
+        parameters: dict[str, Any] = {
+            "viewer_id": viewer_id,
+            "target_id": target_id,
+            "conversation_status": conversation_status,
+        }
+        # Some local databases were created by the privacy-first schema, which
+        # additionally requires owner/visitor fields for every conversation.
+        if {"owner_user_id", "visitor_user_id"}.issubset(conversation_columns):
+            insert_columns = ["owner_user_id", "visitor_user_id", *insert_columns]
+            insert_values = [":owner_id", ":visitor_id", *insert_values]
+            parameters["owner_id"] = target_id
         await db.execute(
             text(
-                """INSERT INTO ai_avatar_conversation
-                       (viewer_user_id, target_user_id, status)
-                   VALUES (:viewer_id, :target_id, 1)
-                   ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id), status = 1,
+                f"""INSERT INTO ai_avatar_conversation
+                       ({', '.join(insert_columns)})
+                   VALUES ({', '.join(insert_values)})
+                   ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id),
+                       status = :conversation_status,
                        updated_at = UTC_TIMESTAMP()"""
             ),
-            {"viewer_id": viewer_id, "target_id": target_id},
+            parameters,
         )
         if conversation_id is None:
             conversation_id = int(
