@@ -170,6 +170,8 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
         return "matchmaker.account.manage"
     if "/members" in path:
         return "matchmaker.member.manage" if method != "GET" else "matchmaker.member.read"
+    if "/match-records" in path:
+        return "matchmaker.service.manage" if method != "GET" else "matchmaker.service.read"
     if "/matchmakers" in path:
         return "matchmaker.manage" if method != "GET" else "matchmaker.read"
     if "/service-products" in path:

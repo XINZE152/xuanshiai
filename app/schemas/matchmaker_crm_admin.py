@@ -99,3 +99,34 @@ class MemberAssignmentUpdate(BaseModel):
 class MemberAssignmentResponse(BaseModel):
     user_id: int
     matchmaker_id: int | None
+
+
+class MatchRecordCreate(BaseModel):
+    from_love_user_id: int = Field(ge=1)
+    to_love_user_id: int = Field(ge=1)
+    create_time: datetime
+    complete_time: datetime
+    line_status: Literal[1, 2] = Field(description="1 成功，2 失败")
+
+
+class MatchRecordResponse(BaseModel):
+    id: int
+    from_user_id: int
+    to_user_id: int
+    status: Literal[1, 2]
+    created_at: datetime
+    responded_at: datetime
+
+
+class MatchRecordItem(MatchRecordResponse):
+    from_nickname: str | None = None
+    to_nickname: str | None = None
+    matchmaker_id: int | None = None
+
+
+class MatchRecordPage(BaseModel):
+    items: list[MatchRecordItem]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool

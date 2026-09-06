@@ -179,6 +179,10 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
 
     ordinary_user = "EXISTS (SELECT 1 FROM user_role ordinary_role WHERE ordinary_role.user_id = {column} AND ordinary_role.role_code = 'user' AND ordinary_role.status = 1)"
     ordinary_users = ordinary_user.format(column="users.id")
+    async def users_group(expression: str, joins: str = "", order: str = "value DESC, label") -> list[dict]:
+        return await grouped(f"""SELECT COALESCE(NULLIF(CAST({expression} AS CHAR), ''), '未填写') label, COUNT(*) value
+            FROM users {joins} WHERE users.status = 1 AND {ordinary_users} AND {user_scope}
+            GROUP BY label ORDER BY {order}""")
     gender = await grouped(f"""SELECT CASE users.gender WHEN 1 THEN '男' WHEN 2 THEN '女' ELSE '未填写' END label, COUNT(*) value
         FROM users WHERE users.status = 1 AND {ordinary_users} AND {user_scope}
         GROUP BY users.gender ORDER BY users.gender""")
@@ -191,6 +195,20 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
     requirement = await grouped(f"""SELECT COALESCE(NULLIF(preference.dating_goal, ''), '未填写') label, COUNT(*) value
         FROM users LEFT JOIN user_partner_preference preference ON preference.user_id = users.id
         WHERE users.status = 1 AND {ordinary_users} AND {user_scope} GROUP BY COALESCE(NULLIF(preference.dating_goal, ''), '未填写') ORDER BY value DESC, label""")
+    basic_groups = {
+        "gender": gender,
+        "marriage": await users_group("CASE users.is_married WHEN 0 THEN '未婚' WHEN 1 THEN '已婚' WHEN 2 THEN '离异' WHEN 3 THEN '丧偶' ELSE '未填写' END"),
+        "age": await users_group("CASE WHEN users.birthday IS NULL THEN '未填写' WHEN TIMESTAMPDIFF(YEAR, users.birthday, CURDATE()) < 26 THEN '25岁以下' WHEN TIMESTAMPDIFF(YEAR, users.birthday, CURDATE()) <= 30 THEN '26岁-30岁' WHEN TIMESTAMPDIFF(YEAR, users.birthday, CURDATE()) <= 35 THEN '31岁-35岁' WHEN TIMESTAMPDIFF(YEAR, users.birthday, CURDATE()) <= 40 THEN '36岁-40岁' WHEN TIMESTAMPDIFF(YEAR, users.birthday, CURDATE()) <= 45 THEN '41岁-45岁' ELSE '46岁以上' END"),
+        "education": await users_group("CASE profile.education_level WHEN 1 THEN '初中' WHEN 2 THEN '技校' WHEN 3 THEN '高中' WHEN 4 THEN '大专' WHEN 5 THEN '本科' WHEN 6 THEN '硕士' WHEN 7 THEN '博士' ELSE '不限' END", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
+        "house": await users_group("COALESCE(NULLIF(profile.house, ''), '未填写')", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
+        "car": await users_group("COALESCE(NULLIF(profile.car, ''), '未填写')", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
+        "income": await users_group("CASE WHEN profile.income IS NULL THEN '不限' WHEN profile.income < 3000 THEN '3千元以下' WHEN profile.income < 5000 THEN '3-5千元' WHEN profile.income < 8000 THEN '5-8千元' WHEN profile.income < 10000 THEN '8千-1万元' ELSE '1万元以上' END", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
+        "realname": await users_group("CASE WHEN users.is_real_name = 1 OR auth.realname_status = 1 THEN '已实名' ELSE '未实名' END", "LEFT JOIN user_auth auth ON auth.user_id = users.id"),
+        "occupation": await users_group("COALESCE(NULLIF(profile.occupation, ''), '不限')", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
+        "hometown": await users_group("COALESCE(NULLIF(profile.hometown, ''), '未填写')", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
+        "residence": await users_group("COALESCE(NULLIF(profile.residence, ''), '未填写')", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
+        "dating_status": await users_group("CASE users.status WHEN 1 THEN '公开相亲' ELSE '停止相亲' END"),
+    }
     browse = await grouped(f"""SELECT CASE WHEN history.user_id = history.target_user_id THEN '查看自己' ELSE '查看会员资料' END label, COUNT(*) value
         FROM user_browse_history history JOIN users ON users.id = history.user_id
         WHERE history.created_at >= :start AND history.created_at < :end AND users.status = 1 AND {ordinary_user.format(column='users.id')} AND {user_scope}
@@ -200,10 +218,149 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
         WHERE history.created_at >= :start AND history.created_at < :end AND viewer.status = 1 AND {ordinary_user.format(column='viewer.id')} AND target.status = 1 AND {ordinary_user.format(column='target.id')} AND {user_scope.replace('users.id', 'viewer.id')}
         GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 8""", {"start": start, "end": end})
     total_browse = sum(item["value"] for item in browse)
+    browse_daily = await grouped(f"""SELECT DATE(history.created_at) label, COUNT(*) value
+        FROM user_browse_history history JOIN users ON users.id = history.user_id
+        WHERE history.created_at >= :start AND history.created_at < :end AND users.status = 1
+          AND {ordinary_user.format(column='users.id')} AND {user_scope}
+        GROUP BY DATE(history.created_at) ORDER BY DATE(history.created_at) DESC""", {"start": start, "end": end})
+    popular_female = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
+        FROM user_browse_history history JOIN users viewer ON viewer.id = history.user_id JOIN users target ON target.id = history.target_user_id
+        WHERE history.created_at >= :start AND history.created_at < :end AND target.gender = 2 AND target.status = 1
+          AND {ordinary_user.format(column='target.id')} AND {ordinary_user.format(column='viewer.id')} AND {user_scope.replace('users.id', 'viewer.id')}
+        GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 10""", {"start": start, "end": end})
+    popular_male = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
+        FROM user_browse_history history JOIN users viewer ON viewer.id = history.user_id JOIN users target ON target.id = history.target_user_id
+        WHERE history.created_at >= :start AND history.created_at < :end AND target.gender = 1 AND target.status = 1
+          AND {ordinary_user.format(column='target.id')} AND {ordinary_user.format(column='viewer.id')} AND {user_scope.replace('users.id', 'viewer.id')}
+        GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 10""", {"start": start, "end": end})
+    apply_female = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
+        FROM match_apply application JOIN users target ON target.id = application.to_user_id
+        WHERE application.created_at >= :start AND application.created_at < :end AND target.gender = 2 AND target.status = 1
+          AND application.status IN (0, 1) AND {ordinary_user.format(column='target.id')}
+        GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 10""", {"start": start, "end": end})
+    apply_male = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
+        FROM match_apply application JOIN users target ON target.id = application.to_user_id
+        WHERE application.created_at >= :start AND application.created_at < :end AND target.gender = 1 AND target.status = 1
+          AND application.status IN (0, 1) AND {ordinary_user.format(column='target.id')}
+        GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 10""", {"start": start, "end": end})
+
+    # The source tables do not store a separate "home page view" event.  The
+    # profile-view column below is therefore the complete persisted browse total.
+    browse_rows = (await db.execute(text(f"""SELECT DATE(history.created_at) date,
+            COUNT(*) profile_views,
+            COALESCE(MAX(popular.nickname), '') popular_member
+        FROM user_browse_history history
+        JOIN users viewer ON viewer.id = history.user_id
+        LEFT JOIN users popular ON popular.id = history.target_user_id
+        WHERE history.created_at >= :start AND history.created_at < :end
+          AND viewer.status = 1 AND {ordinary_user.format(column='viewer.id')}
+          AND {user_scope.replace('users.id', 'viewer.id')}
+        GROUP BY DATE(history.created_at) ORDER BY DATE(history.created_at) DESC"""), {
+            **scope_params, **lead_scope_params, "start": start, "end": end,
+        })).mappings().all()
+    browse_report = [{
+        "date": str(row["date"]), "home_views": 0,
+        "profile_views": int(row["profile_views"] or 0),
+        "popular_member": str(row["popular_member"] or "-"),
+    } for row in browse_rows]
+
+    growth_rows = (await db.execute(text(f"""SELECT calendar.date,
+        COALESCE(registered.member_count, 0) member_count,
+        COALESCE(vip.vip_count, 0) vip_count,
+        COALESCE(applied.apply_count, 0) apply_count,
+        COALESCE(applied.failed_count, 0) failed_count,
+        COALESCE(applied.success_count, 0) success_count
+        FROM (
+          SELECT DATE(created_at) date FROM users WHERE created_at >= :start AND created_at < :end
+          UNION SELECT DATE(start_at) date FROM user_membership WHERE start_at >= :start AND start_at < :end
+          UNION SELECT DATE(created_at) date FROM match_apply WHERE created_at >= :start AND created_at < :end
+        ) calendar
+        LEFT JOIN (
+          SELECT DATE(users.created_at) date, COUNT(*) member_count FROM users
+          WHERE users.created_at >= :start AND users.created_at < :end AND users.status = 1
+            AND {ordinary_users} AND {user_scope} GROUP BY DATE(users.created_at)
+        ) registered ON registered.date = calendar.date
+        LEFT JOIN (
+          SELECT DATE(membership.start_at) date, COUNT(DISTINCT membership.user_id) vip_count
+          FROM user_membership membership JOIN users ON users.id = membership.user_id
+          WHERE membership.start_at >= :start AND membership.start_at < :end AND membership.status = 1
+            AND {ordinary_users} AND {user_scope} GROUP BY DATE(membership.start_at)
+        ) vip ON vip.date = calendar.date
+        LEFT JOIN (
+          SELECT DATE(application.created_at) date, COUNT(*) apply_count,
+            SUM(application.status IN (2, 3)) failed_count,
+            SUM(application.status = 1) success_count
+          FROM match_apply application JOIN users ON users.id = application.from_user_id
+          WHERE application.created_at >= :start AND application.created_at < :end AND users.status = 1
+            AND {ordinary_users} AND {user_scope} GROUP BY DATE(application.created_at)
+        ) applied ON applied.date = calendar.date
+        ORDER BY calendar.date DESC"""), {**scope_params, "start": start, "end": end})).mappings().all()
+    growth = [{
+        "date": str(row["date"]), "member_count": int(row["member_count"] or 0),
+        "vip_count": int(row["vip_count"] or 0), "apply_count": int(row["apply_count"] or 0),
+        "failed_count": int(row["failed_count"] or 0), "success_count": int(row["success_count"] or 0),
+    } for row in growth_rows]
+
+    follow_rows = (await db.execute(text(f"""SELECT
+        COALESCE(NULLIF(matchmaker.nickname, ''), CONCAT('红娘', assignment.matchmaker_id), '未分配') matchmaker,
+        COUNT(DISTINCT users.id) member_count,
+        SUM(followup.last_follow_at IS NULL) never_followed,
+        SUM(followup.last_follow_at < UTC_TIMESTAMP() - INTERVAL 3 DAY) over_3_days,
+        SUM(followup.last_follow_at < UTC_TIMESTAMP() - INTERVAL 7 DAY) over_7_days,
+        SUM(followup.last_follow_at < UTC_TIMESTAMP() - INTERVAL 15 DAY) over_15_days,
+        SUM(followup.last_follow_at < UTC_TIMESTAMP() - INTERVAL 30 DAY) over_30_days,
+        COALESCE(SUM(followup.follow_count), 0) follow_count,
+        COALESCE(SUM(followup.month_follow_count), 0) month_follow_count
+        FROM users
+        LEFT JOIN resource_assignment assignment ON assignment.user_id = users.id AND assignment.status = 1
+        LEFT JOIN users matchmaker ON matchmaker.id = assignment.matchmaker_id
+        LEFT JOIN (
+          SELECT user_id, MAX(created_at) last_follow_at, COUNT(*) follow_count,
+            SUM(created_at >= DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-01')) month_follow_count
+          FROM member_follow_up GROUP BY user_id
+        ) followup ON followup.user_id = users.id
+        WHERE users.status = 1 AND {ordinary_users} AND {user_scope}
+        GROUP BY assignment.matchmaker_id, matchmaker.nickname
+        ORDER BY member_count DESC, matchmaker"""), scope_params)).mappings().all()
+    follow_report = [{key: int(row[key] or 0) if key != "matchmaker" else str(row[key]) for key in row.keys()} for row in follow_rows]
+
+    preference_labels = {
+        "age": "年龄", "marriage": "婚况", "height": "身高", "education": "学历",
+        "housing": "住房", "smoking": "抽烟", "drinking": "喝酒", "goal": "结婚要求",
+    }
+    async def preference_report(gender_value: int) -> dict[str, list[dict]]:
+        conditions = f"users.status = 1 AND users.gender = {gender_value} AND {ordinary_users} AND {user_scope}"
+        expressions = {
+            "age": "CASE WHEN preference.age_min IS NULL AND preference.age_max IS NULL THEN '不限' WHEN preference.age_max IS NULL THEN CONCAT(preference.age_min, '岁以上') WHEN preference.age_min IS NULL THEN CONCAT(preference.age_max, '岁以下') ELSE CONCAT(preference.age_min, '-', preference.age_max, '岁') END",
+            "marriage": "CASE preference.marriage_status WHEN 1 THEN '未婚' WHEN 2 THEN '离异' WHEN 3 THEN '丧偶' ELSE '不限' END",
+            "height": "CASE WHEN preference.height_min IS NULL AND preference.height_max IS NULL THEN '不限' WHEN preference.height_max IS NULL THEN CONCAT(preference.height_min, 'cm以上') WHEN preference.height_min IS NULL THEN CONCAT(preference.height_max, 'cm以下') ELSE CONCAT(preference.height_min, '-', preference.height_max, 'cm') END",
+            "education": "CASE preference.education_min WHEN 1 THEN '初中' WHEN 2 THEN '技校' WHEN 3 THEN '高中' WHEN 4 THEN '大专' WHEN 5 THEN '本科' WHEN 6 THEN '硕士' WHEN 7 THEN '博士' ELSE '不限' END",
+            "housing": "CASE preference.housing_requirement WHEN 1 THEN '有房' WHEN 2 THEN '无房可接受' ELSE '不限' END",
+            "smoking": "CASE preference.smoking_requirement WHEN 1 THEN '不抽烟' WHEN 2 THEN '可接受' ELSE '不限' END",
+            "drinking": "CASE preference.drinking_requirement WHEN 1 THEN '不喝酒' WHEN 2 THEN '可接受' ELSE '不限' END",
+            "goal": "COALESCE(NULLIF(preference.dating_goal, ''), '不限')",
+        }
+        return {key: await grouped(f"""SELECT {expression} label, COUNT(*) value
+            FROM users LEFT JOIN user_partner_preference preference ON preference.user_id = users.id
+            WHERE {conditions} GROUP BY {expression} ORDER BY value DESC, label""") for key, expression in expressions.items()}
+
+    requirements = {"male": await preference_report(1), "female": await preference_report(2)}
+    top_metrics = (await db.execute(text(f"""SELECT COUNT(*) total_members,
+        COALESCE(SUM(DATE(users.created_at) = :to_date), 0) today_members
+        FROM users WHERE users.status = 1 AND {ordinary_users} AND {user_scope}"""), {
+            **scope_params, "to_date": to_date,
+        })).mappings().one()
     return {
         "from_date": str(from_date), "to_date": str(to_date),
-        "groups": {"follow": follow, "intention": intention, "basic": gender, "requirement": requirement, "browse": browse, "popularity": popularity},
+        "groups": {"follow": follow, "intention": intention, "basic": gender, "requirement": requirement, "browse": browse, "popularity": popularity,
+                    "basic_groups": basic_groups, "browse_daily": browse_daily,
+                    "popularity_female": popular_female, "popularity_male": popular_male,
+                    "apply_female": apply_female, "apply_male": apply_male,
+                    "growth": growth, "follow_report": follow_report,
+                    "browse_report": browse_report, "requirements": requirements,
+                    "preference_labels": preference_labels},
         "totals": {"follow": sum(item["value"] for item in follow), "intention": sum(item["value"] for item in intention), "basic": sum(item["value"] for item in gender), "requirement": sum(item["value"] for item in requirement), "browse": total_browse, "popularity": sum(item["value"] for item in popularity)},
+        "metrics": {"total_members": int(top_metrics["total_members"] or 0), "today_members": int(top_metrics["today_members"] or 0)},
     }
 
 
