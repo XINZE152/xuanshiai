@@ -44,6 +44,10 @@ API Key 只能放在环境变量或配置中心，不能提交到 Git。`AI_ENAB
 
 请求体：`content` 1~2000 字符；`style` 为 `natural/warm/humorous/mature/concise`；`max_length` 50~2000，默认 300。返回 `original/polished/style/changed_points`。用户确认后由原资料接口保存。
 
+## `GET|POST /api/v1/ai/profile/thoughtfulness`
+
+AI 用心度评审（完整契约见 `docs/api/AI用心度.md`）。GET 返回最新评审（未评审返回 404，前端按「未评审」态处理）；POST 触发（重）分析，后端自行读库取资料。**不设会员墙**：作为编辑页全员工具及未来「浏览他人资料」门槛指标（score > 70 放行，本期未启用）。每日额度独立计算（默认 10 次）。
+
 ## `POST /api/v1/ai/search`
 
 请求体：`query` 2~500 字符，`page` 1~1000，`page_size` 1~20。AI 将自然语言转换为现有发现筛选条件，再复用发现服务的隐私、拉黑、关系和推荐规则。AI 不直接生成用户列表，不确定的条件放入 `unresolved`。返回 `query/normalized_query/filters/unresolved/results`，`results` 与 `DiscoveryPage` 结构兼容。
@@ -63,5 +67,6 @@ API Key 只能放在环境变量或配置中心，不能提交到 Git。`AI_ENAB
 
 ### 变更记录
 
+- 2026-09-07：新增 AI 资料用心度评审接口（GET/POST `/ai/profile/thoughtfulness`），不设会员墙，额度独立（默认 10 次/天）。
 - 2026-08-19：新增阶段一 AI 助手、文字资料润色、自然语言搜索和四类匹配解释接口。
 - 2026-08-19：图片美化、海报图片增强、向量检索和非会员收费暂不实现。

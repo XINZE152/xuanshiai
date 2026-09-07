@@ -20,6 +20,9 @@ from app.schemas.ai import (
     AIMatchPage,
     AIProfilePolishRequest,
     AIProfilePolishResponse,
+    AIProfileThoughtfulnessRequest,
+    AIProfileThoughtfulnessResponse,
+    AIProfileThoughtfulnessTodo,
     AISearchRequest,
     AISearchResponse,
 )
@@ -93,6 +96,155 @@ async def polish_profile(db: AsyncSession, user_id: int, request: AIProfilePolis
     polished = str(data.get("polished") or request.content).strip()[:request.max_length]
     points = data.get("changed_points") if isinstance(data.get("changed_points"), list) else []
     return AIProfilePolishResponse(original=request.content, polished=polished, style=request.style, changed_points=[str(x) for x in points[:5]])
+
+
+THOUGHTFULNESS_KEY_LABELS: dict[str, str] = {
+    "basic_info": "基础信息",
+    "self_intro": "自我介绍",
+    "qa_answers": "关于我问答",
+    "interest_tags": "兴趣标签",
+    "personality_tags": "性格标签",
+    "mbti": "MBTI",
+    "avatar": "头像",
+    "photos": "我的相册",
+}
+THOUGHTFULNESS_SYSTEM_PROMPT = (
+    "你是认真婚恋平台的资料评审助手，评估用户填写资料的用心程度并给出具体可执行的改进建议。"
+    "只基于提供的资料判断，不编造事实，不评价用户本人，只评价资料质量。"
+    "文案不得承诺交友或婚恋结果，不得制造焦虑、催促或施压。"
+    "输出JSON：score(int 0-100 整数), summary(string, 1-2句中文总结), "
+    "todos(array of {key,label,advice,priority})。"
+    "key只能取 basic_info/self_intro/qa_answers/interest_tags/personality_tags/mbti/avatar/photos 之一；"
+    "label用中文展示名；advice是一句具体的修改建议(不超过80字)；"
+    "todos按priority从高到低排序，最多5条，资料已经很好时返回空数组。priority取 high/medium/low。"
+)
+
+
+def _thoughtfulness_row_to_response(row: Any) -> AIProfileThoughtfulnessResponse:
+    raw_todos = row["todos"]
+    if isinstance(raw_todos, str):
+        try:
+            raw_todos = json.loads(raw_todos)
+        except Exception:
+            raw_todos = []
+    todo_items = raw_todos if isinstance(raw_todos, list) else []
+    todos: list[AIProfileThoughtfulnessTodo] = []
+    for item in todo_items:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "")
+        if key not in THOUGHTFULNESS_KEY_LABELS:
+            continue
+        label = str(item.get("label") or "").strip()[:40] or THOUGHTFULNESS_KEY_LABELS[key]
+        advice = str(item.get("advice") or "").strip()[:300]
+        if not advice:
+            continue
+        priority = str(item.get("priority") or "medium")
+        if priority not in ("high", "medium", "low"):
+            priority = "medium"
+        todos.append(AIProfileThoughtfulnessTodo(key=key, label=label, advice=advice, priority=priority))
+    return AIProfileThoughtfulnessResponse(
+        score=max(0, min(100, int(row["score"] or 0))),
+        summary=str(row["summary"] or "").strip()[:500],
+        todos=todos,
+        generated_at=row["updated_at"] or row["created_at"],
+    )
+
+
+async def get_thoughtfulness(db: AsyncSession, user_id: int) -> AIProfileThoughtfulnessResponse:
+    """返回当前用户最新一次用心度评审；从未评审过时返回 404（前端按「未评审」态处理）。"""
+    row = (await db.execute(text("""SELECT score, summary, todos, created_at, updated_at
+        FROM ai_profile_thoughtfulness WHERE user_id=:user_id"""), {"user_id": user_id})).mappings().first()
+    if row is None:
+        raise HTTPException(404, detail="尚未进行 AI 用心度评审")
+    return _thoughtfulness_row_to_response(row)
+
+
+async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProfileThoughtfulnessRequest) -> AIProfileThoughtfulnessResponse:
+    # 编辑页基础工具，不设 VIP 门槛：用心度是面向全员的资料改进指标（未来作为浏览他人资料的门槛）。
+    await _consume_ai_quota(db, user_id, "thoughtfulness", settings.ai_daily_thoughtfulness_limit)
+    profile_row = (await db.execute(text("""SELECT u.nickname, u.gender, u.birthday, u.is_married, u.avatar,
+                       p.height, p.weight, p.occupation, p.industry, p.education_level, p.income,
+                       p.residence_province_code, p.residence_city_code, p.residence_district_code,
+                       p.hometown_province_code, p.hometown_city_code, p.hometown_district_code,
+                       p.self_intro, p.interest_tags, p.personality_tags, p.mbti, p.tags
+                FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.id = :user_id"""),
+            {"user_id": user_id})).mappings().first()
+    if profile_row is None:
+        raise HTTPException(404, detail="用户资料不存在")
+    photo_count = int((await db.execute(text(
+        "SELECT COUNT(*) FROM user_media WHERE user_id=:user_id AND deleted_at IS NULL AND media_type='photo'"),
+        {"user_id": user_id})).scalar() or 0)
+
+    facts: list[str] = []
+    mapping = [
+        ("性别", profile_row["gender"]), ("生日", profile_row["birthday"]), ("婚姻状况", profile_row["is_married"]),
+        ("身高", profile_row["height"]), ("体重", profile_row["weight"]), ("职业", profile_row["occupation"]),
+        ("行业", profile_row["industry"]), ("学历", profile_row["education_level"]), ("收入", profile_row["income"]),
+        ("现居地", profile_row["residence_city_code"]), ("家乡", profile_row["hometown_city_code"]),
+        ("自我介绍", profile_row["self_intro"]), ("兴趣标签", profile_row["interest_tags"]),
+        ("性格标签", profile_row["personality_tags"]), ("MBTI", profile_row["mbti"]),
+        ("标签选择", profile_row["tags"]), ("头像", "已上传" if profile_row["avatar"] else "未上传"),
+    ]
+    for label, value in mapping:
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            facts.append(f"{label}：未填写")
+        else:
+            facts.append(f"{label}：{value}")
+    facts.append(f"相册照片数：{photo_count}")
+    edited_keys = [k for k in (request.edited_keys or [])[:20] if k in THOUGHTFULNESS_KEY_LABELS]
+
+    raw = await complete(
+        [
+            {"role": "system", "content": THOUGHTFULNESS_SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                f"THOUGHTFULNESS_REVIEW trigger={request.trigger} "
+                f"edited_keys={','.join(edited_keys) if edited_keys else 'unknown'}\n"
+                + "\n".join(facts)
+            )},
+        ],
+        json_mode=True,
+    )
+    data = parse_json(raw)
+    try:
+        score = max(0, min(100, int(data.get("score"))))
+    except (TypeError, ValueError):
+        score = 0
+    summary = str(data.get("summary") or "你的资料整体填写正常，可以继续完善细节。").strip()[:500]
+
+    todo_items = data.get("todos") if isinstance(data.get("todos"), list) else []
+    todos: list[AIProfileThoughtfulnessTodo] = []
+    for item in todo_items[:8]:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "")
+        if key not in THOUGHTFULNESS_KEY_LABELS:
+            continue
+        label = str(item.get("label") or "").strip()[:40] or THOUGHTFULNESS_KEY_LABELS[key]
+        advice = str(item.get("advice") or "").strip()[:300]
+        if not advice:
+            continue
+        priority = str(item.get("priority") or "medium")
+        if priority not in ("high", "medium", "low"):
+            priority = "medium"
+        todos.append(AIProfileThoughtfulnessTodo(key=key, label=label, advice=advice, priority=priority))
+
+    await db.execute(text("""INSERT INTO ai_profile_thoughtfulness
+        (user_id, score, summary, todos, edited_keys, model_name)
+        VALUES (:user_id, :score, :summary, :todos, :edited_keys, :model_name)
+        ON DUPLICATE KEY UPDATE score=VALUES(score), summary=VALUES(summary), todos=VALUES(todos),
+            edited_keys=VALUES(edited_keys), model_name=VALUES(model_name)"""), {
+        "user_id": user_id,
+        "score": score,
+        "summary": summary,
+        "todos": json.dumps([t.model_dump() for t in todos], ensure_ascii=False),
+        "edited_keys": json.dumps(edited_keys, ensure_ascii=False),
+        "model_name": settings.ai_model,
+    })
+    await db.commit()
+    row = (await db.execute(text("""SELECT score, summary, todos, created_at, updated_at
+        FROM ai_profile_thoughtfulness WHERE user_id=:user_id"""), {"user_id": user_id})).mappings().one()
+    return _thoughtfulness_row_to_response(row)
 
 
 async def parse_search(db: AsyncSession, user_id: int, request: AISearchRequest) -> AISearchResponse:
