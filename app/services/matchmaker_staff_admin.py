@@ -183,20 +183,24 @@ async def create_staff(
     db: AsyncSession, admin: CurrentMatchmakerAdmin, body: MatchmakerStaffCreate
 ) -> MatchmakerStaffDetail:
     await _validate_refs(db, body)
-    if (
-        await db.execute(
-            text(
-                "SELECT 1 FROM users WHERE phone=:phone OR EXISTS (SELECT 1 FROM matchmaker_admin_account WHERE username=:username)"
-            ),
-            {"phone": body.phone, "username": body.username},
-        )
-    ).scalar():
-        raise HTTPException(409, detail="手机号或账号已存在")
-    result = await db.execute(
-        text("INSERT INTO users (phone,nickname,avatar,status) VALUES (:phone,:name,:avatar,1)"),
-        {"phone": body.phone, "name": body.display_name, "avatar": body.avatar},
-    )
-    user_id = int(result.lastrowid)
+    user_id = body.user_id
+    if user_id is None and body.lookup:
+        column = "nickname" if body.lookup_by == "nickname" else "phone"
+        user_id = (await db.execute(text(f"SELECT id FROM users WHERE {column}=:lookup AND status=1 ORDER BY id DESC LIMIT 1"), {"lookup": body.lookup.strip()})).scalar()
+        if user_id is None:
+            raise HTTPException(404, detail="未找到可绑定的普通用户")
+    if user_id is not None:
+        user = (await db.execute(text("SELECT id FROM users WHERE id=:id AND status=1 FOR UPDATE"), {"id": user_id})).mappings().first()
+        if not user:
+            raise HTTPException(404, detail="普通用户不存在或已停用")
+        if (await db.execute(text("SELECT 1 FROM user_matchmaker_apply WHERE user_id=:id AND application_type='service_matchmaker' AND status=1"), {"id": user_id})).scalar():
+            raise HTTPException(409, detail="该普通用户已经绑定红娘")
+        await db.execute(text("UPDATE users SET nickname=:name, avatar=COALESCE(:avatar, avatar), phone=:phone WHERE id=:id"), {"id": user_id, "name": body.display_name, "avatar": body.avatar, "phone": body.phone})
+    else:
+        if (await db.execute(text("SELECT 1 FROM users WHERE phone=:phone"), {"phone": body.phone})).scalar():
+            raise HTTPException(409, detail="该手机号已注册，请通过账号绑定选择普通用户")
+        result = await db.execute(text("INSERT INTO users (phone,nickname,avatar,status) VALUES (:phone,:name,:avatar,1)"), {"phone": body.phone, "name": body.display_name, "avatar": body.avatar})
+        user_id = int(result.lastrowid)
     await db.execute(
         text(
             "INSERT INTO user_role (user_id,role_code,status) VALUES (:id,'service_matchmaker',1)"
@@ -228,34 +232,6 @@ async def create_staff(
             "description": body.description,
         },
     )
-    await db.execute(
-        text(
-            "INSERT INTO matchmaker_admin_account (username,password_hash,matchmaker_user_id,display_name,data_scope,organization_id) VALUES (:username,:password,:id,:name,'SELF',:store)"
-        ),
-        {
-            "username": body.username,
-            "password": hash_password(body.password),
-            "id": user_id,
-            "name": body.display_name,
-            "store": body.store_id,
-        },
-    )
-    account_id = int((await db.execute(text("SELECT id FROM matchmaker_admin_account WHERE username=:username"), {"username": body.username})).scalar_one())
-    permissions = {
-        "matchmaker.read",
-        "matchmaker.manage",
-        "matchmaker.service.read",
-        "matchmaker.member.read",
-        "customer_lead.manage",
-        "dashboard.read",
-    }
-    if body.role_tag == "super":
-        permissions.add("*")
-    for permission in permissions:
-        await db.execute(
-            text("INSERT INTO matchmaker_admin_permission (account_id, permission) VALUES (:account_id, :permission)"),
-            {"account_id": account_id, "permission": permission},
-        )
     if body.store_id:
         await db.execute(
             text(

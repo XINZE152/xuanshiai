@@ -66,16 +66,17 @@ class MatchmakerStaffPage(BaseModel):
 class MatchmakerStaffCreate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    user_id: int | None = Field(default=None, ge=1)
+    lookup: str | None = Field(default=None, min_length=1, max_length=100)
+    lookup_by: Literal["nickname", "phone"] = "nickname"
     avatar: str | None = Field(default=None, max_length=500)
     display_name: str = Field(min_length=1, max_length=32)
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
     phone: str = Field(min_length=11, max_length=20)
     wechat: str | None = Field(default=None, max_length=64)
     store_id: int | None = Field(default=None, ge=1)
     commission_level_id: int | None = Field(default=None, ge=1)
     role_tag: Literal["super", "normal"] = "normal"
     description: str | None = Field(default=None, max_length=2000)
-    password: str = Field(min_length=8, max_length=128)
     visible: bool = True
 
     @field_validator("phone")
