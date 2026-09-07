@@ -52,8 +52,8 @@ async def admin_logout(current: CurrentMatchmakerAdmin = Depends(get_current_mat
 
 
 @router.get("/matchmakers", response_model=MatchmakerPage, summary="查询红娘列表")
-async def matchmakers(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=50), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MatchmakerPage:
-    return await list_matchmakers(db, page, page_size)
+async def matchmakers(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=50), keyword: str | None = Query(None, max_length=64), available: bool | None = Query(None), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MatchmakerPage:
+    return await list_matchmakers(db, page, page_size, keyword=keyword, available=available)
 
 
 @router.patch("/matchmakers/{matchmaker_id}/status", response_model=MatchmakerStatusResponse, summary="停用或恢复红娘接单")

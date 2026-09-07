@@ -20,7 +20,7 @@ class MatchmakerAdminAccount(BaseModel):
     matchmaker_user_id: int | None
     data_scope: Literal["SELF", "STORE", "ORGANIZATION", "ALL"] = "SELF"
     organization_id: int | None = None
-    status: Literal[1, 2]
+    status: Literal[1, 2, 3]
     last_login_at: datetime | None
 
 

@@ -29,6 +29,7 @@ from app.services.meeting import (
     admin_get_meeting,
     admin_list_meetings,
     admin_list_requests,
+    admin_update_request,
     admin_update_meeting,
 )
 
@@ -81,6 +82,12 @@ async def schedule(request_id: int = Path(..., ge=1), body: MeetingScheduleCreat
 async def admin_requests(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), status: str | None = Query(None, max_length=32), search_value: str | None = Query(None, max_length=64), matchmaker_id: int | None = Query(None, ge=1), from_date: str | None = Query(None, max_length=32), to_date: str | None = Query(None, max_length=32), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MeetingRequestAdminPage:
     admin.require("meeting.read")
     return await admin_list_requests(db, page, page_size, status, search_value, matchmaker_id, from_date, to_date)
+
+
+@admin_router.patch("/requests/{request_id}", response_model=MeetingRequestResponse)
+async def admin_review_request(request_id: int = Path(..., ge=1), body: MeetingStatusUpdate = Body(...), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MeetingRequestResponse:
+    current.require("meeting.write")
+    return await admin_update_request(db, request_id, body, current.account.id)
 
 
 @admin_router.get("", response_model=MeetingRecordAdminPage)

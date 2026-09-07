@@ -61,10 +61,19 @@ def _card(row: Any) -> MatchmakerCard:
 
 
 async def list_matchmakers(
-    db: AsyncSession, page: int, page_size: int, ranking: bool = False
+    db: AsyncSession, page: int, page_size: int, ranking: bool = False, keyword: str | None = None, available: bool | None = None
 ) -> MatchmakerPage:
     order = "success_count DESC, rating_score DESC, app.reviewed_at DESC, app.id DESC" if ranking else "app.reviewed_at DESC, app.id DESC"
     params = {"limit": page_size, "offset": (page - 1) * page_size}
+    filters = ["app.application_type = 'service_matchmaker'", "app.status = 1"]
+    if keyword:
+        filters.append("(u.nickname LIKE CONCAT('%', :keyword, '%') OR app.user_id = :keyword_id)")
+        params["keyword"] = keyword
+        params["keyword_id"] = int(keyword) if keyword.isdigit() else 0
+    if available is not None:
+        filters.append("role.status = :role_status")
+        params["role_status"] = 1 if available else 2
+    filter_sql = " AND ".join(filters)
     query = text(f"""SELECT app.user_id, u.nickname, u.avatar, app.intro, app.cert_images,
         COALESCE(service_stats.success_count, 0) AS success_count,
         COALESCE(rating_stats.rating_score, 0) AS rating_score,
@@ -73,7 +82,7 @@ async def list_matchmakers(
         FROM user_matchmaker_apply app
         JOIN users u ON u.id = app.user_id AND u.status = 1
         JOIN user_role role ON role.user_id = app.user_id
-          AND role.role_code = 'service_matchmaker' AND role.status = 1
+          AND role.role_code = 'service_matchmaker' AND role.status IN (1, 2)
         LEFT JOIN (SELECT ms.matchmaker_id, COUNT(*) AS success_count
           FROM matchmaker_service ms
           JOIN payment_order po ON po.id = ms.order_id AND po.type = 3 AND po.status = 1
@@ -82,15 +91,15 @@ async def list_matchmakers(
         LEFT JOIN (SELECT matchmaker_id, AVG(score) AS rating_score, COUNT(*) AS rating_count
           FROM matchmaker_rating GROUP BY matchmaker_id) rating_stats
           ON rating_stats.matchmaker_id = app.user_id
-        WHERE app.application_type = 'service_matchmaker' AND app.status = 1
+        WHERE {filter_sql}
         ORDER BY {order}
         LIMIT :limit OFFSET :offset""")
     result = await db.execute(query, params)
-    count = await db.execute(text("""SELECT COUNT(*) FROM user_matchmaker_apply app
+    count = await db.execute(text(f"""SELECT COUNT(*) FROM user_matchmaker_apply app
         JOIN users u ON u.id = app.user_id AND u.status = 1
         JOIN user_role role ON role.user_id = app.user_id
-          AND role.role_code = 'service_matchmaker' AND role.status = 1
-        WHERE app.application_type = 'service_matchmaker' AND app.status = 1"""))
+          AND role.role_code = 'service_matchmaker' AND role.status IN (1, 2)
+        WHERE {filter_sql}"""), params)
     total = int(count.scalar() or 0)
     items = [_card(row) for row in result.mappings().all()]
     return MatchmakerPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
