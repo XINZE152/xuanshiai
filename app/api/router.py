@@ -24,6 +24,7 @@ from app.api.routes import (
     matchmaker,
     matchmaker_admin,
     matchmaker_admin_account,
+    matchmaker_staff_admin,
     matchmaker_crm_admin,
     matchmaker_dashboard_admin,
     matchmaker_member_admin,
@@ -80,6 +81,7 @@ api_router.include_router(admin_home.router, tags=["管理端首页"])
 api_router.include_router(admin_home.legacy_router, tags=["管理端首页兼容"])
 api_router.include_router(matchmaker_admin.router, tags=["红娘后台"])
 api_router.include_router(matchmaker_admin_account.router, tags=["红娘后台"])
+api_router.include_router(matchmaker_staff_admin.router, tags=["红娘后台"])
 api_router.include_router(matchmaker_member_admin.router, tags=["红娘后台"])
 api_router.include_router(organization_admin.router, tags=["红娘后台"])
 api_router.include_router(matchmaker_crm_admin.router, tags=["红娘后台"])

@@ -656,4 +656,74 @@ BUSINESS_TABLES = {
             KEY `idx_chat_request_responder` (`responder_id`,`status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话结构化请求'
     """,
+    "commission_level": """
+        CREATE TABLE IF NOT EXISTS `commission_level` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `code` varchar(32) NOT NULL,
+            `name` varchar(64) NOT NULL,
+            `rate_percent` decimal(7,4) NOT NULL,
+            `sort` int NOT NULL DEFAULT 0,
+            `status` tinyint NOT NULL DEFAULT 1 COMMENT '1启用 2停用',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_commission_level_code` (`code`),
+            KEY `idx_commission_level_status` (`status`, `sort`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘分成级别'
+    """,
+    "matchmaker_profile": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_profile` (
+            `user_id` bigint unsigned NOT NULL,
+            `wechat` varchar(64) DEFAULT NULL,
+            `commission_level_id` bigint unsigned DEFAULT NULL,
+            `role_tag` varchar(16) NOT NULL DEFAULT 'normal' COMMENT 'super超级红娘 normal普通红娘',
+            `visible` tinyint NOT NULL DEFAULT 1 COMMENT '1前台展示 0隐藏',
+            `locked` tinyint NOT NULL DEFAULT 0 COMMENT '1锁定禁止登录工作台',
+            `description` varchar(2000) DEFAULT NULL,
+            `deleted_at` datetime DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`user_id`),
+            KEY `idx_matchmaker_profile_level` (`commission_level_id`, `visible`),
+            KEY `idx_matchmaker_profile_lock` (`locked`, `deleted_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘管理档案'
+    """,
+    "admin_menu": """
+        CREATE TABLE IF NOT EXISTS `admin_menu` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `parent_id` bigint unsigned DEFAULT NULL,
+            `name` varchar(64) NOT NULL,
+            `path` varchar(128) DEFAULT NULL,
+            `menu_type` varchar(16) NOT NULL DEFAULT 'menu' COMMENT 'directory/menu/button',
+            `permission_code` varchar(64) DEFAULT NULL,
+            `icon` varchar(64) DEFAULT NULL,
+            `sort` int NOT NULL DEFAULT 0,
+            `status` tinyint NOT NULL DEFAULT 1 COMMENT '1启用 2停用',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_admin_menu_parent` (`parent_id`, `status`, `sort`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘后台菜单权限树'
+    """,
+    "matchmaker_menu_permission": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_menu_permission` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `matchmaker_user_id` bigint unsigned NOT NULL,
+            `menu_id` bigint unsigned NOT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_matchmaker_menu` (`matchmaker_user_id`, `menu_id`),
+            KEY `idx_matchmaker_menu_user` (`matchmaker_user_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘已分配菜单'
+    """,
+    "matchmaker_tutorial": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_tutorial` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `title` varchar(128) NOT NULL,
+            `content` text NOT NULL,
+            `link_url` varchar(500) DEFAULT NULL,
+            `status` tinyint NOT NULL DEFAULT 1,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘使用教程'
+    """,
 }
