@@ -26,6 +26,7 @@ from app.schemas.matchmaker_staff_admin import (
     MatchmakerStaffDetail,
     MatchmakerStaffItem,
     MatchmakerStaffPage,
+    MatchmakerUserCandidate,
     MatchmakerStaffUpdate,
     MatchmakerTutorial,
     MatchmakerVisibilityUpdate,
@@ -89,6 +90,24 @@ SELECT_STAFF = """SELECT u.id, u.avatar, u.nickname, u.phone, u.created_at, u.up
     LEFT JOIN organization_member om ON om.user_id = u.id AND om.role_code = 'store_matchmaker' AND om.status = 1
     LEFT JOIN organization o ON o.id = om.organization_id AND o.org_type = 'store'
     WHERE p.deleted_at IS NULL"""
+
+
+async def search_user_candidates(db: AsyncSession, keyword: str, limit: int = 10) -> list[MatchmakerUserCandidate]:
+    rows = await db.execute(
+        text(
+            """SELECT u.id, u.nickname, u.phone, u.avatar
+            FROM users u
+            WHERE u.status=1
+              AND (u.nickname LIKE CONCAT('%', :keyword, '%') OR u.phone LIKE CONCAT('%', :keyword, '%'))
+              AND NOT EXISTS (
+                SELECT 1 FROM user_matchmaker_apply ma
+                WHERE ma.user_id=u.id AND ma.application_type='service_matchmaker' AND ma.status=1
+              )
+            ORDER BY u.id DESC LIMIT :limit"""
+        ),
+        {"keyword": keyword, "limit": limit},
+    )
+    return [MatchmakerUserCandidate(**dict(row)) for row in rows.mappings().all()]
 
 
 async def list_staff(

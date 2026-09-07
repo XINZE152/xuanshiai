@@ -63,6 +63,13 @@ class MatchmakerStaffPage(BaseModel):
     has_more: bool
 
 
+class MatchmakerUserCandidate(BaseModel):
+    id: int
+    nickname: str | None = None
+    phone: str | None = None
+    avatar: str | None = None
+
+
 class MatchmakerStaffCreate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
