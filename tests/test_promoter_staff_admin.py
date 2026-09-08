@@ -68,3 +68,25 @@ def test_update_status_enum_only_1_or_2() -> None:
 def test_update_channel_length_limit() -> None:
     with pytest.raises(ValidationError):
         PromoterStaffUpdate(channel="x" * 65)
+
+
+def test_create_matchmaker_type_enum() -> None:
+    with pytest.raises(ValidationError):
+        PromoterStaffCreate(lookup="张三", matchmaker_type="fulltime")  # type: ignore[arg-type]
+
+
+def test_create_commission_level_id_range() -> None:
+    with pytest.raises(ValidationError):
+        PromoterStaffCreate(lookup="张三", commission_level_id=5)
+
+
+def test_create_slogan_length_limit() -> None:
+    with pytest.raises(ValidationError):
+        PromoterStaffCreate(lookup="张三", slogan="x" * 129)
+
+
+def test_create_default_permissions_are_true() -> None:
+    body = PromoterStaffCreate(lookup="张三")
+    assert body.can_view_lead_follow is True
+    assert body.can_write_lead_follow is True
+    assert body.can_view_member_crm_follow is True

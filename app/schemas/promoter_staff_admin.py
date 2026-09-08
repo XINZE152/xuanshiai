@@ -2,14 +2,16 @@
 
 身份模型：推广红娘复用 `user_matchmaker_apply (application_type='promoter')` 记录，
 列表/详情以 `users.id`（user_id）为主键，展示昵称/头像/手机号取 `users` 表，
-推广渠道/简介取 `user_matchmaker_apply`，推广会员数/分享码数分别聚合
-`promotion_attribution` / `promotion_touch`。
+推广渠道/红娘类型/口号/级别/3 个权限开关取 `user_matchmaker_apply`，
+推广会员数/分享码数分别聚合 `promotion_attribution` / `promotion_touch`。
 """
 
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+MatchmakerType = Literal["part_time", "full_time"]
 
 
 class PromoterUserCandidate(BaseModel):
@@ -48,10 +50,16 @@ class PromoterStaffPage(BaseModel):
 
 
 class PromoterStaffDetail(PromoterStaffItem):
-    """详情/编辑回显：列表字段 + 审核相关信息。"""
+    """详情/编辑回显：列表字段 + 审核相关 + 业务配置（类型/口号/级别/3 权限）。"""
 
     real_name: str | None = None
     suspension_reason: str | None = Field(default=None, description="离职原因（status=2 时）")
+    matchmaker_type: MatchmakerType | None = Field(default=None, description="part_time 兼职 / full_time 全职")
+    slogan: str | None = None
+    commission_level_id: int | None = Field(default=None, description="推广红娘分成级别（1 初级 / 2 推广大师 / 3 推广大使 / 4 推广天使）")
+    can_view_lead_follow: bool = True
+    can_write_lead_follow: bool = True
+    can_view_member_crm_follow: bool = True
 
 
 class PromoterStaffCreate(BaseModel):
@@ -62,6 +70,12 @@ class PromoterStaffCreate(BaseModel):
     lookup_by: Literal["nickname", "phone"] = "nickname"
     channel: str | None = Field(default=None, max_length=64)
     intro: str | None = Field(default=None, max_length=500)
+    matchmaker_type: MatchmakerType | None = None
+    slogan: str | None = Field(default=None, max_length=128)
+    commission_level_id: int | None = Field(default=None, ge=1, le=4, description="1 初级 / 2 推广大师 / 3 推广大使 / 4 推广天使")
+    can_view_lead_follow: bool = True
+    can_write_lead_follow: bool = True
+    can_view_member_crm_follow: bool = True
 
 
 class PromoterStaffUpdate(BaseModel):
@@ -73,6 +87,12 @@ class PromoterStaffUpdate(BaseModel):
     phone: str | None = Field(default=None, max_length=20)
     status: Literal[1, 2] | None = None
     reason: str | None = Field(default=None, max_length=255, description="离职/复职原因")
+    matchmaker_type: MatchmakerType | None = None
+    slogan: str | None = Field(default=None, max_length=128)
+    commission_level_id: int | None = Field(default=None, ge=1, le=4)
+    can_view_lead_follow: bool | None = None
+    can_write_lead_follow: bool | None = None
+    can_view_member_crm_follow: bool | None = None
 
 
 class PromoterStatusUpdate(BaseModel):

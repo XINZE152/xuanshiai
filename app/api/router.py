@@ -46,6 +46,7 @@ from app.api.routes import (
     apportion_config_admin,
     commission_level_admin,
     promoter_staff_admin,
+    promoter_level_admin,
     social,
     users,
 )
@@ -101,6 +102,7 @@ api_router.include_router(reward_rule_admin.router, tags=["红娘后台"])
 api_router.include_router(apportion_config_admin.router, tags=["红娘后台"])
 api_router.include_router(commission_level_admin.router, tags=["红娘后台"])
 api_router.include_router(promoter_staff_admin.router, tags=["红娘后台"])
+api_router.include_router(promoter_level_admin.router, tags=["红娘后台"])
 api_router.include_router(matchmaker.admin_router, tags=["管理后台"])
 api_router.include_router(meeting.admin_router, tags=["管理后台"])
 api_router.include_router(finance.admin_router, tags=["管理后台"])
