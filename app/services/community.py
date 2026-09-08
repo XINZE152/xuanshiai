@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.redis import consume_daily, get_daily_used, refund_daily
+from app.services.admin_config import get_runtime_value
 from app.schemas.community import (
     ActivityPage,
     ActivityResponse,
@@ -1547,8 +1548,15 @@ async def get_community_quotas(db: AsyncSession, user_id: int) -> CommunityQuota
             )
         ).scalar()
     )
-    apply_total = settings.apply_daily_vip_limit if vip else settings.apply_daily_free_limit
-    paper_total = 3
+    apply_total = int(await get_runtime_value(
+        db,
+        "platform_permissions",
+        "vip_apply_daily_limit" if vip else "free_apply_daily_limit",
+        settings.apply_daily_vip_limit if vip else settings.apply_daily_free_limit,
+    ))
+    paper_total = int(await get_runtime_value(
+        db, "platform_permissions", "paper_plane_daily_limit", settings.paper_plane_daily_limit
+    ))
     # UTC 日键，与 discovery 申请扣次 / consume_daily 重置对齐
     from app.core.redis import daily_quota_key
 

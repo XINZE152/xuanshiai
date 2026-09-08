@@ -132,6 +132,8 @@ class CurrentMatchmakerAdmin:
             "meeting.read": {"meeting.read", "meeting.write"},
             "finance.read": {"finance.read", "finance.write"},
             "reward.read": {"reward.read", "reward.write", "matchmaker.reward.read", "matchmaker.reward.manage"},
+            "matchmaker.apportion.read": {"matchmaker.apportion.read", "matchmaker.apportion.write"},
+            "commission.read": {"commission.read", "commission.write"},
             "message.read": {"message.read", "message.manage", "message.moderate"},
         }
         allowed = aliases.get(permission, {permission})
@@ -174,6 +176,8 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
         return "matchmaker.service.manage" if method != "GET" else "matchmaker.service.read"
     if "/matchmakers" in path:
         return "matchmaker.manage" if method != "GET" else "matchmaker.read"
+    if "/promoters" in path:
+        return "matchmaker.manage" if method != "GET" else "matchmaker.read"
     if "/service-products" in path:
         return "matchmaker.product.manage" if method != "GET" else "matchmaker.product.read"
     if "/service-requests" in path:
@@ -192,6 +196,10 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
         return "community.moderate" if method != "GET" else "community.read"
     if "/reward-rules" in path:
         return "reward.write" if method != "GET" else "reward.read"
+    if "/apportion-config" in path:
+        return "matchmaker.apportion.write" if method != "GET" else "matchmaker.apportion.read"
+    if "/commission-levels" in path:
+        return "commission.write" if method != "GET" else "commission.read"
     return None
 
 

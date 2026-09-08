@@ -170,3 +170,61 @@ class WithdrawalReview(BaseModel):
 
 class FinanceRefundRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=255)
+
+
+# ============================================
+# 后台「红娘线上分成明细」页契约
+# ============================================
+
+
+class CommissionEntryDetailItem(BaseModel):
+    """详情页单条明细：含关联订单/会员/红娘/事件，金额字段以 str 序列化避免精度丢失。"""
+
+    id: int
+    created_at: datetime
+    store_name: str = Field(default="总店", description="总店红娘后台统一显示『总店』")
+    matchmaker_id: int
+    matchmaker_name: str
+    matchmaker_avatar: str | None = None
+    consumer_id: int
+    consumer_name: str
+    consumer_phone: str | None = None
+    consumer_avatar: str | None = None
+    event_name: str
+    beneficiary_type: str
+    order_id: int
+    order_no: str | None = None
+    consumer_amount: Decimal
+    commission_amount: Decimal
+    status: str
+
+
+class CommissionEntryDetailPage(BaseModel):
+    items: list[CommissionEntryDetailItem]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
+
+
+class MatchmakerOption(BaseModel):
+    """详情页筛选用的红娘下拉项。"""
+
+    id: int
+    name: str
+    avatar: str | None = None
+
+
+class EventOption(BaseModel):
+    """详情页筛选用的事件下拉项。"""
+
+    id: int = Field(description="commission_rule.id")
+    name: str
+    beneficiary_type: str
+
+
+class CommissionEntryDetailOptions(BaseModel):
+    """详情页一次性返回筛选下拉选项。"""
+
+    matchmakers: list[MatchmakerOption] = Field(default_factory=list)
+    events: list[EventOption] = Field(default_factory=list)

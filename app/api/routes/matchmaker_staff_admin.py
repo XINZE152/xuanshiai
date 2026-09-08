@@ -21,6 +21,7 @@ from app.schemas.matchmaker_staff_admin import (
     MatchmakerStaffCreate,
     MatchmakerStaffDetail,
     MatchmakerStaffPage,
+    MatchmakerUserCandidate,
     MatchmakerStaffUpdate,
     MatchmakerTutorial,
     MatchmakerVisibilityUpdate,
@@ -56,6 +57,16 @@ async def list_matchmakers(
     return await service.list_staff(
         db, current, page, page_size, keyword, store_id, commission_level_id, locked
     )
+
+
+@router.get("/matchmakers/user-candidates", response_model=list[MatchmakerUserCandidate])
+async def matchmaker_user_candidates(
+    keyword: str = Query(..., min_length=2, max_length=100),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[MatchmakerUserCandidate]:
+    _guard(current)
+    return await service.search_user_candidates(db, keyword.strip())
 
 
 @router.post("/matchmakers", response_model=MatchmakerStaffDetail, status_code=201)

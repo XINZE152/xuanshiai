@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.profile_tags import TAG_OPTIONS_BY_CATEGORY
-from app.core.redis import consume_daily, get_daily_used, refund_daily, redis_client
+from app.core.redis import consume_daily, get_daily_used, refund_daily
 from app.schemas.discovery import (
     ApplicationCreateRequest,
     ApplicationPage,
@@ -43,6 +43,7 @@ from app.schemas.discovery import (
 from app.services.notifications import emit_notification
 from app.services.profile import _calculate_age, _json_dict, _json_list, get_profile
 from app.services.quotas import consume_extra
+from app.services.admin_config import get_runtime_value
 from app.services.restrictions import ensure_user_allowed
 
 logger = logging.getLogger(__name__)
@@ -425,7 +426,7 @@ async def _quota_key(prefix: str, user_id: int) -> str:
 
 async def _quota_limit(db: AsyncSession, user_id: int, is_vip: bool) -> int:
     if not is_vip:
-        return settings.browse_daily_limit
+        return int(await get_runtime_value(db, "platform_permissions", "free_browse_daily_limit", settings.browse_daily_limit))
     result = await db.execute(text("SELECT p.rights FROM user_membership m LEFT JOIN config_membership_package p ON p.code=m.package_type WHERE m.user_id=:user_id AND m.status=1 AND (m.start_at IS NULL OR m.start_at<=UTC_TIMESTAMP()) AND (m.end_at IS NULL OR m.end_at>UTC_TIMESTAMP()) ORDER BY m.end_at DESC LIMIT 1"), {"user_id": user_id})
     row = result.first()
     value = row[0] if row else None
@@ -445,15 +446,16 @@ async def _record_quota_usage(db: AsyncSession, user_id: int, quota_code: str, s
 
 async def _consume_browse(db: AsyncSession, user_id: int, match_score: float, is_vip: bool, target_user_id: int) -> int:
     limit = await _quota_limit(db, user_id, is_vip)
+    high_match_bonus = int(await get_runtime_value(db, "platform_permissions", "high_match_browse_bonus", settings.browse_high_match_bonus))
     regular_key = await _quota_key("browse", user_id)
     if await consume_daily(regular_key, limit):
         await _record_quota_usage(db, user_id, "browse", "package" if is_vip else "free", "Daily profile view", target_user_id)
         return limit - await get_daily_used(regular_key)
     if match_score > 80:
         bonus_key = await _quota_key("browse_bonus", user_id)
-        if await consume_daily(bonus_key, settings.browse_high_match_bonus):
+        if await consume_daily(bonus_key, high_match_bonus):
             await _record_quota_usage(db, user_id, "browse", "bonus", "High-match profile bonus", target_user_id)
-            return settings.browse_high_match_bonus - await get_daily_used(bonus_key)
+            return high_match_bonus - await get_daily_used(bonus_key)
     if await consume_extra(db, user_id, "browse", "积分兑换资料查看次数", target_user_id):
         return 0
     raise HTTPException(429, detail="今日完整浏览额度已用完")
@@ -731,7 +733,9 @@ async def _notify(db: AsyncSession, user_id: int, notification_type: str, title:
 
 
 async def _consume_apply_quota(db: AsyncSession, viewer_id: int, vip: bool) -> bool:
-    limit = settings.apply_daily_vip_limit if vip else settings.apply_daily_free_limit
+    free_limit = int(await get_runtime_value(db, "platform_permissions", "free_apply_daily_limit", settings.apply_daily_free_limit))
+    vip_limit = int(await get_runtime_value(db, "platform_permissions", "vip_apply_daily_limit", settings.apply_daily_vip_limit))
+    limit = vip_limit if vip else free_limit
     if vip:
         result = await db.execute(text("SELECT p.rights FROM user_membership m LEFT JOIN config_membership_package p ON p.code=m.package_type WHERE m.user_id=:user_id AND m.status=1 AND (m.start_at IS NULL OR m.start_at<=UTC_TIMESTAMP()) AND (m.end_at IS NULL OR m.end_at>UTC_TIMESTAMP()) ORDER BY m.end_at DESC LIMIT 1"), {"user_id": viewer_id})
         value = result.first()
@@ -742,7 +746,7 @@ async def _consume_apply_quota(db: AsyncSession, viewer_id: int, vip: bool) -> b
             except json.JSONDecodeError:
                 rights = {}
         if isinstance(rights, dict):
-            limit = settings.apply_daily_free_limit + int(rights.get("apply_bonus") or 0)
+            limit = free_limit + int(rights.get("apply_bonus") or 0)
 
     if not await consume_daily(await _quota_key("apply", viewer_id), limit):
         if await consume_extra(db, viewer_id, "apply", "积分兑换申请次数"):
@@ -890,11 +894,11 @@ async def create_superlike(db: AsyncSession, viewer_id: int, target_id: int, ide
     existing_row = existing.mappings().first()
     if existing_row:
         vip = await _is_vip(db, viewer_id)
-        limit = settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit
+        limit = int(await get_runtime_value(db, "platform_permissions", "vip_superlike_daily_limit" if vip else "free_superlike_daily_limit", settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit))
         used = await get_daily_used(await _quota_key("superlike", viewer_id))
         return SuperLikeResponse(target_user_id=target_id, remaining_today=max(0, limit - used), created_at=existing_row["created_at"])
     vip = await _is_vip(db, viewer_id)
-    limit = settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit
+    limit = int(await get_runtime_value(db, "platform_permissions", "vip_superlike_daily_limit" if vip else "free_superlike_daily_limit", settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit))
     key = await _quota_key("superlike", viewer_id)
     if not await consume_daily(key, limit):
         if await consume_extra(db, viewer_id, "superlike", "积分兑换爆灯次数", target_id):

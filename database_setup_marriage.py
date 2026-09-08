@@ -367,6 +367,7 @@ class DatabaseManager:
                 "reviewed_at": "`reviewed_at` datetime DEFAULT NULL",
                 "suspended_at": "`suspended_at` datetime DEFAULT NULL",
                 "suspension_reason": "`suspension_reason` varchar(255) DEFAULT NULL",
+                "channel": "`channel` varchar(64) DEFAULT NULL COMMENT '推广渠道（推广红娘用）'",
             },
             "ai_advisor_message": {
                 "model_name": "`model_name` varchar(128) DEFAULT NULL",
@@ -568,12 +569,20 @@ class DatabaseManager:
 
     def _ensure_matchmaker_staff_defaults(self, cursor):
         """Seed commission levels, matchmaker menus and tutorial content once."""
+        # 兼容已存在的旧库：补齐 commission_level 新增字段
+        self._ensure_table_columns(cursor, "commission_level", {
+            "mode": "`mode` varchar(16) NOT NULL DEFAULT 'rate' COMMENT 'rate按比例/fixed固定金额'",
+            "fixed_amount": "`fixed_amount` decimal(12,2) DEFAULT NULL COMMENT '固定分成金额(元)，mode=fixed 时生效'",
+            "platform_extra_amount": "`platform_extra_amount` decimal(12,2) NOT NULL DEFAULT 0 COMMENT '平台额外奖励(元)'",
+            "promotion_condition": "`promotion_condition` varchar(255) DEFAULT NULL COMMENT '自动升级到此级别的条件描述'",
+        })
         cursor.execute("""
-            INSERT IGNORE INTO commission_level (id, code, name, rate_percent, sort, status)
+            INSERT IGNORE INTO commission_level (id, code, name, mode, rate_percent, fixed_amount, platform_extra_amount, promotion_condition, sort, status)
             VALUES
-                (1, 'junior', '初级分成', 10.0000, 1, 1),
-                (2, 'intermediate', '中级分成', 15.0000, 2, 1),
-                (3, 'senior', '高级分成', 20.0000, 3, 1)
+                (1, 'junior', '初级分成', 'rate', 10.0000, NULL, 5.00,  '默认', 1, 1),
+                (2, 'intermediate', '中级分成', 'rate', 15.0000, NULL, 1000.00, '牵线成功累计>=10次', 2, 1),
+                (3, 'senior', '高级分成', 'rate', 20.0000, NULL, 1000.00, '牵线成功累计>=100次', 3, 1),
+                (4, 'partner', '合伙分成', 'rate', 25.0000, NULL, 5000.00, '牵线成功累计>=300次', 4, 1)
         """)
         cursor.execute("""
             INSERT IGNORE INTO admin_menu
@@ -885,6 +894,40 @@ class DatabaseManager:
         from app.db.business_schema import BUSINESS_TABLES
 
         tables = {
+            # ============================================
+            # 0.1 统一后台配置快照与审计
+            # ============================================
+            "admin_config_snapshot": """
+                CREATE TABLE IF NOT EXISTS `admin_config_snapshot` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `namespace` varchar(64) NOT NULL,
+                    `name` varchar(128) NOT NULL,
+                    `description` varchar(255) NOT NULL,
+                    `version` bigint unsigned NOT NULL DEFAULT '1',
+                    `config_json` longtext NOT NULL,
+                    `sensitive_keys_json` text NOT NULL,
+                    `updated_by` bigint unsigned DEFAULT NULL,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_admin_config_namespace` (`namespace`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='后台配置快照'
+            """,
+            "admin_config_audit_log": """
+                CREATE TABLE IF NOT EXISTS `admin_config_audit_log` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `namespace` varchar(64) NOT NULL,
+                    `version` bigint unsigned NOT NULL,
+                    `action` varchar(32) NOT NULL,
+                    `actor_user_id` bigint unsigned NOT NULL,
+                    `change_summary` varchar(255) DEFAULT NULL,
+                    `before_config_json` longtext DEFAULT NULL,
+                    `after_config_json` longtext DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_admin_config_audit_namespace` (`namespace`,`id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='后台配置变更审计'
+            """,
             # ============================================
             # 1. 用户主表
             # ============================================
@@ -1555,6 +1598,7 @@ class DatabaseManager:
                     `application_type` varchar(32) NOT NULL DEFAULT 'service_matchmaker' COMMENT '申请类型 promoter推广红娘 partner合伙人 service_matchmaker服务红娘',
                     `real_name` varchar(64) DEFAULT NULL,
                     `phone` varchar(20) DEFAULT NULL,
+                    `channel` varchar(64) DEFAULT NULL COMMENT '推广渠道（推广红娘用）',
                     `intro` text COMMENT '自我介绍/优势',
                     `cert_images` json DEFAULT NULL COMMENT '资质证书图片',
                     `application_details` json DEFAULT NULL COMMENT '红娘审核扩展资料',
@@ -2446,6 +2490,29 @@ class DatabaseManager:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='任务奖励规则配置'
             """,
             # ============================================
+            # 42.1 总店红娘分派配置（assign/abandon × member_crm/customer_lead）
+            # ============================================
+            "matchmaker_apportion_config": """
+                CREATE TABLE IF NOT EXISTS `matchmaker_apportion_config` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `scope` varchar(32) NOT NULL COMMENT '业务域 member_crm 会员CRM / customer_lead 客源线索',
+                    `config_type` varchar(32) NOT NULL COMMENT '配置类型 assign 分配配置 / abandon 弃海配置',
+                    `strategy` varchar(32) DEFAULT NULL COMMENT '分配策略 designated|round_robin_random|by_region|by_promoter|none（仅 assign 块使用）',
+                    `target_matchmaker_id` bigint unsigned DEFAULT NULL COMMENT '指定服务红娘 user_id（仅 strategy=designated 时必填）',
+                    `auto_abandon_days` tinyint unsigned DEFAULT NULL COMMENT '0不启用;3/7/15/30/45/60/90 天（仅 abandon 块使用）',
+                    `daily_pickup_limit` int unsigned DEFAULT NULL COMMENT '每日捞取上限 0=不限（仅 abandon 块使用）',
+                    `show_admin_abandoned_in_pool` tinyint(1) NOT NULL DEFAULT '1' COMMENT '后台管理员放弃的客源是否在其它分门弃海池显示',
+                    `show_store_abandoned_in_pool` tinyint(1) NOT NULL DEFAULT '1' COMMENT '总店红娘放弃的客源是否在其它分门弃海池显示',
+                    `is_enabled` tinyint(1) NOT NULL DEFAULT '1' COMMENT '是否启用本配置',
+                    `updated_by` bigint unsigned DEFAULT NULL COMMENT '最后修改人 user_id',
+                    `remark` varchar(255) DEFAULT NULL COMMENT '备注',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_scope_type` (`scope`, `config_type`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='总店红娘分派配置（2 Tab × 2 块 = 4 行）'
+            """,
+            # ============================================
             # 43. 敏感词库
             # ============================================
             "config_sensitive_word": """
@@ -2800,6 +2867,19 @@ class DatabaseManager:
                 ('daily_login', '每日登录', 2, 1, 5, 1, 1, 1),
                 ('profile_complete', '完成资料', 1, 1, 50, 1, 1, 2),
                 ('realname_verified', '完成实名认证', 1, 1, 100, 1, 1, 3)
+        """)
+        # 总店红娘分派配置（4 行种子）
+        cursor.execute("""
+            INSERT IGNORE INTO matchmaker_apportion_config
+                (scope, config_type, strategy, target_matchmaker_id,
+                 auto_abandon_days, daily_pickup_limit,
+                 show_admin_abandoned_in_pool, show_store_abandoned_in_pool,
+                 is_enabled, remark)
+            VALUES
+                ('member_crm',   'assign',  'designated', NULL, NULL, NULL, 1, 1, 1, '会员CRM分配配置-默认统一分派'),
+                ('member_crm',   'abandon', NULL,         NULL, 0,    0,    1, 1, 1, '会员CRM弃海配置-默认不启用'),
+                ('customer_lead','assign',  'designated', NULL, NULL, NULL, 1, 1, 1, '客源线索分配配置-默认统一分派'),
+                ('customer_lead','abandon', NULL,         NULL, 0,    0,    1, 1, 1, '客源线索弃海配置-默认不启用')
         """)
         self._ensure_matchmaker_staff_defaults(cursor)
 
