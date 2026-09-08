@@ -32,7 +32,7 @@ _SELECT_COLUMNS = """SELECT id, scope, config_type, strategy, target_matchmaker_
 
 
 _SELECT_JOIN_USER = """SELECT c.id, c.scope, c.config_type, c.strategy, c.target_matchmaker_id,
-    u.display_name AS target_matchmaker_name,
+    u.nickname AS target_matchmaker_name,
     c.auto_abandon_days, c.daily_pickup_limit,
     c.show_admin_abandoned_in_pool, c.show_store_abandoned_in_pool,
     c.is_enabled, c.updated_by, c.remark, c.created_at, c.updated_at
