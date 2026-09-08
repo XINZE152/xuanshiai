@@ -367,6 +367,7 @@ class DatabaseManager:
                 "reviewed_at": "`reviewed_at` datetime DEFAULT NULL",
                 "suspended_at": "`suspended_at` datetime DEFAULT NULL",
                 "suspension_reason": "`suspension_reason` varchar(255) DEFAULT NULL",
+                "channel": "`channel` varchar(64) DEFAULT NULL COMMENT '推广渠道（推广红娘用）'",
             },
             "ai_advisor_message": {
                 "model_name": "`model_name` varchar(128) DEFAULT NULL",
@@ -568,12 +569,20 @@ class DatabaseManager:
 
     def _ensure_matchmaker_staff_defaults(self, cursor):
         """Seed commission levels, matchmaker menus and tutorial content once."""
+        # 兼容已存在的旧库：补齐 commission_level 新增字段
+        self._ensure_table_columns(cursor, "commission_level", {
+            "mode": "`mode` varchar(16) NOT NULL DEFAULT 'rate' COMMENT 'rate按比例/fixed固定金额'",
+            "fixed_amount": "`fixed_amount` decimal(12,2) DEFAULT NULL COMMENT '固定分成金额(元)，mode=fixed 时生效'",
+            "platform_extra_amount": "`platform_extra_amount` decimal(12,2) NOT NULL DEFAULT 0 COMMENT '平台额外奖励(元)'",
+            "promotion_condition": "`promotion_condition` varchar(255) DEFAULT NULL COMMENT '自动升级到此级别的条件描述'",
+        })
         cursor.execute("""
-            INSERT IGNORE INTO commission_level (id, code, name, rate_percent, sort, status)
+            INSERT IGNORE INTO commission_level (id, code, name, mode, rate_percent, fixed_amount, platform_extra_amount, promotion_condition, sort, status)
             VALUES
-                (1, 'junior', '初级分成', 10.0000, 1, 1),
-                (2, 'intermediate', '中级分成', 15.0000, 2, 1),
-                (3, 'senior', '高级分成', 20.0000, 3, 1)
+                (1, 'junior', '初级分成', 'rate', 10.0000, NULL, 5.00,  '默认', 1, 1),
+                (2, 'intermediate', '中级分成', 'rate', 15.0000, NULL, 1000.00, '牵线成功累计>=10次', 2, 1),
+                (3, 'senior', '高级分成', 'rate', 20.0000, NULL, 1000.00, '牵线成功累计>=100次', 3, 1),
+                (4, 'partner', '合伙分成', 'rate', 25.0000, NULL, 5000.00, '牵线成功累计>=300次', 4, 1)
         """)
         cursor.execute("""
             INSERT IGNORE INTO admin_menu
@@ -1589,6 +1598,7 @@ class DatabaseManager:
                     `application_type` varchar(32) NOT NULL DEFAULT 'service_matchmaker' COMMENT '申请类型 promoter推广红娘 partner合伙人 service_matchmaker服务红娘',
                     `real_name` varchar(64) DEFAULT NULL,
                     `phone` varchar(20) DEFAULT NULL,
+                    `channel` varchar(64) DEFAULT NULL COMMENT '推广渠道（推广红娘用）',
                     `intro` text COMMENT '自我介绍/优势',
                     `cert_images` json DEFAULT NULL COMMENT '资质证书图片',
                     `application_details` json DEFAULT NULL COMMENT '红娘审核扩展资料',

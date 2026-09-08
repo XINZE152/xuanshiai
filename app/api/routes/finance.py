@@ -8,6 +8,8 @@ from app.db.session import get_db
 from app.schemas.finance import (
     AccountBalanceResponse,
     CommissionEntryResponse,
+    CommissionEntryDetailOptions,
+    CommissionEntryDetailPage,
     CommissionRuleCreate,
     CommissionRuleResponse,
     FinanceOrderCreate,
@@ -30,6 +32,8 @@ from app.services.finance import (
     list_rules,
     list_user_commissions,
     admin_finance_report,
+    admin_list_commission_entries,
+    admin_list_commission_options,
     refund_order,
     release_commission,
     mark_order_paid_and_settle,
@@ -147,6 +151,32 @@ async def refund(order_id: int = Path(..., ge=1), body: FinanceRefundRequest = B
 async def release(entry_id: int = Path(..., ge=1), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> CommissionEntryResponse:
     admin.require("finance.write")
     return await release_commission(db, _finance_actor(admin), entry_id)
+
+
+@admin_router.get("/commission-entries", response_model=CommissionEntryDetailPage, summary="分页查询红娘线上分成明细")
+async def admin_commission_entries(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    matchmaker_id: int | None = Query(None, ge=1, description="按红娘 user_id 筛选"),
+    rule_id: int | None = Query(None, ge=1, description="按 commission_rule.id 筛选"),
+    start_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
+    end_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
+    admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CommissionEntryDetailPage:
+    admin.require("finance.read")
+    return await admin_list_commission_entries(
+        db, page, page_size, matchmaker_id, rule_id, start_date, end_date
+    )
+
+
+@admin_router.get("/commission-entries/options", response_model=CommissionEntryDetailOptions, summary="获取红娘线上分成明细筛选下拉选项")
+async def admin_commission_entry_options(
+    admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CommissionEntryDetailOptions:
+    admin.require("finance.read")
+    return await admin_list_commission_options(db)
 
 
 @admin_router.patch("/withdrawals/{withdrawal_id}", response_model=WithdrawalResponse, summary="审核提现")
