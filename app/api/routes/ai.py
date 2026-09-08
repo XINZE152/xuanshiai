@@ -19,7 +19,7 @@ from app.schemas.ai import (
     AISearchRequest,
     AISearchResponse,
 )
-from app.services.ai import (
+from app.services.ai_assistant import (
     assistant_message,
     create_assistant_session,
     list_assistant_sessions,

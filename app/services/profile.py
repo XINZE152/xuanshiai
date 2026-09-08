@@ -37,6 +37,7 @@ from app.schemas.auth import (
     TagCategoryResponse,
     TagOptionsResponse,
 )
+from app.services.revisions import RevisionKind, increment_revision_and_enqueue
 
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 VIDEO_MAX_BYTES = 50 * 1024 * 1024
@@ -303,6 +304,16 @@ async def update_profile(db: AsyncSession, user_id: int, request: ProfileUpdateR
             {"user_id": user_id, **values},
         )
     await recalculate_completion(db, user_id)
+    changed_fields = tuple(request.model_dump(exclude_unset=True).keys())
+    if changed_fields:
+        await increment_revision_and_enqueue(
+            db,
+            user_id,
+            RevisionKind.PROFILE,
+            changed_fields,
+            "profile_updated",
+            50,
+        )
     await db.commit()
     return await get_profile(db, user_id)
 
@@ -552,6 +563,15 @@ async def update_preferences(db: AsyncSession, user_id: int, request: Preference
             {"user_id": user_id, **values},
         )
     await recalculate_completion(db, user_id)
+    if values:
+        await increment_revision_and_enqueue(
+            db,
+            user_id,
+            RevisionKind.PREFERENCE,
+            tuple(values.keys()),
+            "preference_updated",
+            50,
+        )
     await db.commit()
     return await get_preferences(db, user_id)
 
@@ -579,6 +599,14 @@ async def upload_avatar(db: AsyncSession, user_id: int, file: UploadFile) -> dic
     )
     await db.execute(text("UPDATE users SET avatar = :avatar, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"avatar": url, "id": user_id})
     await recalculate_completion(db, user_id)
+    await increment_revision_and_enqueue(
+        db,
+        user_id,
+        RevisionKind.PROFILE,
+        ("avatar",),
+        "profile_avatar_updated",
+        50,
+    )
     await db.commit()
     media = await db.execute(text("SELECT id, media_type, file_url, thumbnail_url, sort_order, is_primary, duration_seconds FROM user_media WHERE id = :id"), {"id": result.lastrowid})
     return _media_response(media.mappings().one())
@@ -747,6 +775,14 @@ async def set_primary_photo(db: AsyncSession, user_id: int, media_id: int) -> di
     await db.execute(text("UPDATE user_media SET is_primary = 0 WHERE user_id = :user_id AND media_type = 'photo' AND deleted_at IS NULL"), {"user_id": user_id})
     await db.execute(text("UPDATE user_media SET is_primary = 1 WHERE id = :id"), {"id": media_id})
     await db.execute(text("UPDATE users SET avatar = :avatar, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"avatar": row["file_url"], "id": user_id})
+    await increment_revision_and_enqueue(
+        db,
+        user_id,
+        RevisionKind.PROFILE,
+        ("avatar",),
+        "profile_primary_photo_updated",
+        50,
+    )
     await db.commit()
     result = await db.execute(text("SELECT id, media_type, file_url, thumbnail_url, sort_order, is_primary, duration_seconds FROM user_media WHERE id = :id"), {"id": media_id})
     return _media_response(result.mappings().one())

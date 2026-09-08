@@ -450,17 +450,23 @@ class DatabaseManager:
                 if row and "int" in str(row["Type"]).lower():
                     continue
                 cursor.execute(
-                    f"""UPDATE `{table_name}`
-                    SET moderation_status = CASE moderation_status
-                        WHEN 'pending' THEN 0
-                        WHEN 'approved' THEN 1
-                        WHEN 'replaced' THEN 1
-                        WHEN 'rejected' THEN 2
-                        WHEN 'hidden' THEN 2
-                        WHEN 'deleted' THEN 2
-                        ELSE moderation_status
-                    END"""
+                    f"SHOW COLUMNS FROM `{table_name}` LIKE 'moderation_status'"
                 )
+                row = cursor.fetchone()
+                col_type = str(row["Type"]).lower() if row else ""
+                if "char" in col_type or "text" in col_type or "enum" in col_type:
+                    cursor.execute(
+                        f"""UPDATE `{table_name}`
+                        SET moderation_status = CASE moderation_status
+                            WHEN 'pending' THEN 0
+                            WHEN 'approved' THEN 1
+                            WHEN 'replaced' THEN 1
+                            WHEN 'rejected' THEN 2
+                            WHEN 'hidden' THEN 2
+                            WHEN 'deleted' THEN 2
+                            ELSE moderation_status
+                        END"""
+                    )
                 cursor.execute(
                     f"""ALTER TABLE `{table_name}`
                     MODIFY COLUMN `moderation_status` tinyint NOT NULL DEFAULT 1
@@ -2120,7 +2126,7 @@ class DatabaseManager:
                     `moderation_reason` varchar(255) DEFAULT NULL,
                     `moderated_by` bigint unsigned DEFAULT NULL,
                     `moderated_at` datetime DEFAULT NULL,
-                    `type` tinyint DEFAULT '1' COMMENT '1文本 3语音',
+                    `type` tinyint DEFAULT '1' COMMENT '1文本 2图片 3语音',
                     `media_url` varchar(500) DEFAULT NULL,
                     `voice_duration_sec` int DEFAULT NULL,
                     `reply_id` bigint unsigned DEFAULT NULL COMMENT '关联首次 paper_plane_reply',
@@ -2130,6 +2136,31 @@ class DatabaseManager:
                     KEY `idx_from_user` (`from_user_id`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='纸飞机匿名会话消息'
             """,
+            # ============================================
+            # 27d. 纸飞机联系方式交换申请
+            # ============================================
+            'paper_plane_contact_exchange': """
+                CREATE TABLE IF NOT EXISTS `paper_plane_contact_exchange` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `conversation_id` bigint unsigned NOT NULL,
+                    `kind` varchar(16) NOT NULL COMMENT 'wechat|phone',
+                    `requester_user_id` bigint unsigned NOT NULL,
+                    `target_user_id` bigint unsigned NOT NULL,
+                    `status` varchar(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/APPROVED/REJECTED/REVOKED',
+                    `requester_consented_at` datetime DEFAULT NULL,
+                    `target_consented_at` datetime DEFAULT NULL,
+                    `responded_at` datetime DEFAULT NULL,
+                    `idempotency_key` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+                    `response_idempotency_key` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+                    `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_paper_plane_exchange_request_key` (`requester_user_id`,`idempotency_key`),
+                    KEY `idx_paper_plane_exchange_conversation` (`conversation_id`,`kind`,`requester_user_id`,`status`),
+                    KEY `idx_paper_plane_exchange_target` (`target_user_id`,`status`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='纸飞机双方联系方式交换申请（只存同意状态）'
+            """,
+
             # ============================================
             # 28. API 幂等记录
             # ============================================
@@ -2800,6 +2831,32 @@ class DatabaseManager:
         # 本次一期商业化领域表与基础用户表保持同一初始化入口。
         tables.update(BUSINESS_TABLES)
 
+        # AI 派生投影（revision/outbox/消费收据）与业务表同一入口。
+        from app.db.derivation_schema import (
+            DERIVATION_TABLES,
+            ensure_derivation_task10_columns,
+        )
+
+        tables.update(DERIVATION_TABLES)
+
+        # AI-CORE/M04/M03/M06 表（ai_consent_grant、ai_task、ai_generation_audit
+        # 及 13 张画像/搜索/投影/兼容度表）只做幂等建表，不做生产自动迁移。
+        from app.db.ai_schema import (
+            AI_CONSENT_OPERATION_TABLE,
+            AI_TABLES,
+            ensure_ai_compatibility_engine_columns,
+            ensure_ai_legacy_columns,
+            ensure_ai_profile_entry_columns,
+            ensure_ai_profile_journey_columns,
+            ensure_ai_profile_session_columns,
+            ensure_ai_projection_columns,
+            ensure_ai_search_snapshot_columns,
+            ensure_ai_task_columns,
+        )
+
+        tables.update(AI_TABLES)
+        tables["ai_consent_operation"] = AI_CONSENT_OPERATION_TABLE
+
         # 创建所有表
         for table_name, sql in tables.items():
             cursor.execute(sql)
@@ -2858,6 +2915,32 @@ class DatabaseManager:
         self._ensure_required_columns(cursor)
         self._ensure_admin_home_columns(cursor)
         self._ensure_member_crm_columns(cursor)
+
+        # 旧库的 ai_feature_projection 不会由 CREATE TABLE IF NOT EXISTS 补齐
+        # Task 9 新增列（版本向量/可见性/失效原因等），与上面同模式幂等补列
+        # （SHOW COLUMNS→ALTER TABLE ADD COLUMN；表不存在时由 helper 静默跳过）。
+        ensure_ai_projection_columns(cursor)
+        # WP-S1 / F9：旧库 ai_task 幂等补 progress_percent（展示用阶段进度），
+        # 与上面同模式（SHOW COLUMNS→ALTER TABLE ADD COLUMN）。
+        ensure_ai_task_columns(cursor)
+        # WP-P1 / F4：旧库画像字段表幂等补条目 4 列（field_kind 默认
+        # 'structured'，存量行与 structured 链路零影响）。
+        ensure_ai_profile_entry_columns(cursor)
+        # WP-P4 / F5：旧库画像会话幂等补 session_kind（默认 'build'）。
+        ensure_ai_profile_session_columns(cursor)
+        # WP-S2 / F10：旧库搜索快照幂等补 partial_visible（默认 'none'）。
+        ensure_ai_search_snapshot_columns(cursor)
+        # WP-C1 / F11：旧库兼容度快照幂等补 engine/brand_label（engine 默认
+        # 'rule-v1'，存量快照语义零变化）。
+        ensure_ai_compatibility_engine_columns(cursor)
+        # Contract v1.1 / Phase 1 P1-A：旧库画像会话 + 字段表幂等补 journey_stage
+        # 与 profile_dimension；候选表 / 邀请表由 AI_TABLES 中的 CREATE TABLE IF
+        # NOT EXISTS 直接创建（与 reviewed migration 同源）。
+        ensure_ai_profile_journey_columns(cursor)
+        # Task 2 additive AI fields are safe to backfill during bootstrap;
+        # constraint/index changes remain in the reviewed migration runner.
+        ensure_ai_legacy_columns(cursor)
+        ensure_derivation_task10_columns(cursor)
 
         self._backfill_comment_roots(cursor)
 

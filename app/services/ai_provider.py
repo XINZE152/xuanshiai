@@ -123,7 +123,14 @@ def _mock_response(messages: list[dict[str, str]], *, json_mode: bool) -> str:
         scenario = _prompt_value(user, "Scenario") or "reply"
         tone = _prompt_value(user, "Tone") or "natural"
         return json.dumps(_advisor_mock_advice(scenario, tone), ensure_ascii=False)
+    if any(
+        "Use only this authorized public profile context" in str(message.get("content") or "")
+        for message in messages
+    ):
+        return json.dumps(
+            {
+                "reply": "我是 AI 分身，只能根据当前获授权的公开资料回答。未公开的信息建议在双方同意认识后再慢慢了解。"
+            },
+            ensure_ascii=False,
+        )
     return "我可以帮你梳理这段聊天，并给出更具体的沟通建议。"
-
-
-

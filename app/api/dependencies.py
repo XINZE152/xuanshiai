@@ -129,8 +129,6 @@ class CurrentMatchmakerAdmin:
             "matchmaker.member.read": {"matchmaker.member.read", "matchmaker.member.manage"},
             "community.activity.read": {"community.activity.read", "community.activity.manage"},
             "community.moderate": {"community.moderate", "admin.moderate"},
-            "meeting.read": {"meeting.read", "meeting.write"},
-            "finance.read": {"finance.read", "finance.write"},
             "reward.read": {"reward.read", "reward.write", "matchmaker.reward.read", "matchmaker.reward.manage"},
             "matchmaker.apportion.read": {"matchmaker.apportion.read", "matchmaker.apportion.write"},
             "message.read": {"message.read", "message.manage", "message.moderate"},
