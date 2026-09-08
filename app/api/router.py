@@ -6,6 +6,7 @@ from app.api.routes import (
     activity_admin,
     admin,
     admin_home,
+    admin_config,
     ai_avatar,
     auth,
     ai,
@@ -42,6 +43,7 @@ from app.api.routes import (
     profile,
     regions,
     reward_rule_admin,
+    apportion_config_admin,
     social,
     users,
 )
@@ -78,6 +80,7 @@ api_router.include_router(community_admin.router, tags=["\u7ba1\u7406\u540e\u53f
 api_router.include_router(message_admin.router, tags=["\u7ba1\u7406\u540e\u53f0"])
 api_router.include_router(admin.router, tags=["管理后台"])
 api_router.include_router(admin_home.router, tags=["管理端首页"])
+api_router.include_router(admin_config.router, tags=["管理后台配置"])
 api_router.include_router(admin_home.legacy_router, tags=["管理端首页兼容"])
 api_router.include_router(matchmaker_admin.router, tags=["红娘后台"])
 api_router.include_router(matchmaker_admin_account.router, tags=["红娘后台"])
@@ -93,6 +96,7 @@ api_router.include_router(activity_admin.router, tags=["管理后台"])
 api_router.include_router(activity_admin.signup_router, tags=["管理后台"])
 api_router.include_router(member_follow_up_admin.router, tags=["管理后台"])
 api_router.include_router(reward_rule_admin.router, tags=["红娘后台"])
+api_router.include_router(apportion_config_admin.router, tags=["红娘后台"])
 api_router.include_router(matchmaker.admin_router, tags=["管理后台"])
 api_router.include_router(meeting.admin_router, tags=["管理后台"])
 api_router.include_router(finance.admin_router, tags=["管理后台"])

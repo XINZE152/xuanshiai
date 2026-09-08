@@ -132,6 +132,7 @@ class CurrentMatchmakerAdmin:
             "meeting.read": {"meeting.read", "meeting.write"},
             "finance.read": {"finance.read", "finance.write"},
             "reward.read": {"reward.read", "reward.write", "matchmaker.reward.read", "matchmaker.reward.manage"},
+            "matchmaker.apportion.read": {"matchmaker.apportion.read", "matchmaker.apportion.write"},
             "message.read": {"message.read", "message.manage", "message.moderate"},
         }
         allowed = aliases.get(permission, {permission})
@@ -192,6 +193,8 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
         return "community.moderate" if method != "GET" else "community.read"
     if "/reward-rules" in path:
         return "reward.write" if method != "GET" else "reward.read"
+    if "/apportion-config" in path:
+        return "matchmaker.apportion.write" if method != "GET" else "matchmaker.apportion.read"
     return None
 
 

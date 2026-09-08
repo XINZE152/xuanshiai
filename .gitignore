@@ -46,3 +46,5 @@ outputs
 *.log
 uvicorn.err.log
 uvicorn.out.log
+
+.workbudddy/
