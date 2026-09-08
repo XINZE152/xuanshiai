@@ -1793,7 +1793,26 @@ class DatabaseManager:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI助手消息'
             """,
             # ============================================
-            "ai_advisor_session": """
+            # AI 资料用心度评审
+            # ============================================
+            'ai_profile_thoughtfulness': """
+                CREATE TABLE IF NOT EXISTS `ai_profile_thoughtfulness` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `score` int NOT NULL DEFAULT '0' COMMENT 'AI 评审用心度 0-100',
+                    `summary` varchar(500) NOT NULL DEFAULT '' COMMENT 'AI 总结',
+                    `todos` json DEFAULT NULL COMMENT '待优化清单 [{key,label,advice,priority}]',
+                    `edited_keys` json DEFAULT NULL COMMENT '触发评审时的编辑字段',
+                    `model_name` varchar(128) DEFAULT NULL COMMENT '评审使用的模型',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_ai_thoughtfulness_user` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 资料用心度评审结果'
+            """,
+
+            # ============================================
+            'ai_advisor_session': """
                 CREATE TABLE IF NOT EXISTS `ai_advisor_session` (
                     `id` bigint unsigned NOT NULL AUTO_INCREMENT,
                     `user_id` bigint unsigned NOT NULL,
