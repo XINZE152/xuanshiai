@@ -173,6 +173,23 @@ async def ensure_defaults(db: AsyncSession) -> None:
             "config_json": json.dumps(config, ensure_ascii=False),
             "sensitive_keys_json": json.dumps(sensitive_keys, ensure_ascii=False),
         })
+        existing = (await db.execute(
+            text("SELECT config_json FROM admin_config_snapshot WHERE namespace=:namespace"),
+            {"namespace": namespace},
+        )).mappings().first()
+        if existing:
+            try:
+                current = json.loads(existing["config_json"])
+            except (TypeError, json.JSONDecodeError):
+                current = {}
+            if isinstance(current, dict):
+                missing = {key: value for key, value in config.items() if key not in current}
+                if missing:
+                    current.update(missing)
+                    await db.execute(
+                        text("UPDATE admin_config_snapshot SET config_json=:config_json WHERE namespace=:namespace"),
+                        {"namespace": namespace, "config_json": json.dumps(current, ensure_ascii=False)},
+                    )
     await db.commit()
 
 

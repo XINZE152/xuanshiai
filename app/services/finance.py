@@ -15,11 +15,16 @@ from app.core.config import settings
 from app.schemas.finance import (
     AccountBalanceResponse,
     CommissionEntryResponse,
+    CommissionEntryDetailItem,
+    CommissionEntryDetailOptions,
+    CommissionEntryDetailPage,
     CommissionRuleCreate,
     CommissionRuleResponse,
+    EventOption,
     FinanceOrderCreate,
     FinanceReportRow,
     FinanceRefundRequest,
+    MatchmakerOption,
     PaymentOrderResponse,
     ProductCommissionConfigCreate,
     ProductCommissionConfigResponse,
@@ -410,3 +415,129 @@ async def admin_list_ledger(db: AsyncSession, page: int, page_size: int, account
         {key: value for key, value in params.items() if key not in ("limit", "offset")})
     total = int(count.scalar() or 0)
     return LedgerEntryPage(items=[LedgerEntryResponse(**dict(row)) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
+
+
+# ============================================
+# 后台「红娘线上分成明细」页 service
+# ============================================
+# 字段策略：
+# - store_name：业务上「总店红娘」统一为「总店」
+# - 红娘：用 beneficiaries 表的 beneficiary_id JOIN users.nickname
+# - 消费会员：用 payment_order.user_id JOIN users.nickname/phone/avatar
+# - 事件名：commission_rule.name 优先，无则回退 payment_order.product_name
+# - consumer_amount：commission_entry.base_amount（业务上等于订单可分成基数）
+# - 时间区间：created_at 区间，end_date < DATE_ADD(end, 1 DAY) 保证整天可达
+
+
+_DETAIL_BENEFICIARY_TYPE = "service_matchmaker"
+
+
+def _detail_item(row: dict) -> CommissionEntryDetailItem:
+    payload = dict(row)
+    payload["created_at"] = _dt(row["created_at"])
+    payload["store_name"] = "总店"
+    payload["matchmaker_id"] = int(row["beneficiary_id"])
+    payload["matchmaker_name"] = row.get("matchmaker_name") or f"红娘#{row['beneficiary_id']}"
+    payload["matchmaker_avatar"] = row.get("matchmaker_avatar")
+    payload["consumer_id"] = int(row["consumer_id"]) if row.get("consumer_id") else 0
+    payload["consumer_name"] = row.get("consumer_name") or (f"用户#{payload['consumer_id']}" if payload["consumer_id"] else "未知会员")
+    payload["consumer_phone"] = row.get("consumer_phone")
+    payload["consumer_avatar"] = row.get("consumer_avatar")
+    payload["event_name"] = row.get("event_name") or row.get("product_name") or "其他事件"
+    payload["order_id"] = int(row["order_id"])
+    payload["order_no"] = row.get("order_no")
+    payload["consumer_amount"] = Decimal(str(row["base_amount"]))
+    payload["commission_amount"] = Decimal(str(row["amount"]))
+    return CommissionEntryDetailItem(**payload)
+
+
+async def admin_list_commission_entries(
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    matchmaker_id: int | None = None,
+    rule_id: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> CommissionEntryDetailPage:
+    where = [f"ce.beneficiary_type = '{_DETAIL_BENEFICIARY_TYPE}'"]
+    params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    if matchmaker_id is not None:
+        where.append("ce.beneficiary_id = :matchmaker_id")
+        params["matchmaker_id"] = matchmaker_id
+    if rule_id is not None:
+        where.append("ce.rule_id = :rule_id")
+        params["rule_id"] = rule_id
+    if start_date:
+        where.append("ce.created_at >= :start_date")
+        params["start_date"] = f"{start_date} 00:00:00"
+    if end_date:
+        where.append("ce.created_at < DATE_ADD(:end_date, INTERVAL 1 DAY)")
+        params["end_date"] = f"{end_date} 00:00:00"
+    clause = " AND ".join(where)
+
+    list_sql = f"""SELECT ce.id, ce.created_at, ce.beneficiary_id, ce.beneficiary_type,
+        ce.order_id, ce.base_amount, ce.amount, ce.status, ce.rule_id,
+        m.nickname AS matchmaker_name, m.avatar AS matchmaker_avatar,
+        po.order_no, po.user_id AS consumer_id, po.product_name,
+        c.nickname AS consumer_name, c.phone AS consumer_phone, c.avatar AS consumer_avatar,
+        COALESCE(rule.name, po.product_name) AS event_name
+        FROM commission_entry ce
+        LEFT JOIN users m ON m.id = ce.beneficiary_id
+        LEFT JOIN payment_order po ON po.id = ce.order_id
+        LEFT JOIN users c ON c.id = po.user_id
+        LEFT JOIN commission_rule rule ON rule.id = ce.rule_id
+        WHERE {clause}
+        ORDER BY ce.created_at DESC, ce.id DESC
+        LIMIT :limit OFFSET :offset"""
+    rows = (await db.execute(text(list_sql), params)).mappings().all()
+
+    count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+    total = int(
+        (
+            await db.execute(
+                text(f"SELECT COUNT(*) FROM commission_entry ce WHERE {clause}"),
+                count_params,
+            )
+        ).scalar()
+        or 0
+    )
+
+    return CommissionEntryDetailPage(
+        items=[_detail_item(dict(row)) for row in rows],
+        page=page,
+        page_size=page_size,
+        total=total,
+        has_more=page * page_size < total,
+    )
+
+
+async def admin_list_commission_options(db: AsyncSession) -> CommissionEntryDetailOptions:
+    """一次性返回筛选下拉：当前产生过分成的总店红娘列表 + 启用的分成规则列表"""
+    matchmaker_rows = (
+        await db.execute(
+            text(
+                """SELECT DISTINCT u.id, COALESCE(u.nickname, CONCAT('红娘#', u.id)) AS name, u.avatar
+                   FROM commission_entry ce
+                   JOIN users u ON u.id = ce.beneficiary_id
+                   WHERE ce.beneficiary_type = :kind
+                   ORDER BY u.id DESC"""
+            ),
+            {"kind": _DETAIL_BENEFICIARY_TYPE},
+        )
+    ).mappings().all()
+    event_rows = (
+        await db.execute(
+            text(
+                """SELECT id, name, beneficiary_type
+                   FROM commission_rule
+                   WHERE status = 1
+                   ORDER BY beneficiary_type, priority DESC, id DESC"""
+            )
+        )
+    ).mappings().all()
+    return CommissionEntryDetailOptions(
+        matchmakers=[MatchmakerOption(**dict(row)) for row in matchmaker_rows],
+        events=[EventOption(**dict(row)) for row in event_rows],
+    )
+

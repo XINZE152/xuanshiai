@@ -367,6 +367,13 @@ class DatabaseManager:
                 "reviewed_at": "`reviewed_at` datetime DEFAULT NULL",
                 "suspended_at": "`suspended_at` datetime DEFAULT NULL",
                 "suspension_reason": "`suspension_reason` varchar(255) DEFAULT NULL",
+                "channel": "`channel` varchar(64) DEFAULT NULL COMMENT '推广渠道（推广红娘用）'",
+                "matchmaker_type": "`matchmaker_type` varchar(16) DEFAULT NULL COMMENT '兼职/全职（推广红娘用）'",
+                "slogan": "`slogan` varchar(128) DEFAULT NULL COMMENT '红娘口号（推广红娘用）'",
+                "commission_level_id": "`commission_level_id` bigint unsigned DEFAULT NULL COMMENT '推广红娘分成级别（推广红娘用）'",
+                "can_view_lead_follow": "`can_view_lead_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许查看客源线索跟进记录（推广红娘用）'",
+                "can_write_lead_follow": "`can_write_lead_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许客源线索中写跟进（推广红娘用）'",
+                "can_view_member_crm_follow": "`can_view_member_crm_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许查看会员CRM跟进记录（推广红娘用）'",
             },
             "ai_advisor_message": {
                 "model_name": "`model_name` varchar(128) DEFAULT NULL",
@@ -574,12 +581,31 @@ class DatabaseManager:
 
     def _ensure_matchmaker_staff_defaults(self, cursor):
         """Seed commission levels, matchmaker menus and tutorial content once."""
+        # 兼容已存在的旧库：补齐 commission_level 新增字段
+        self._ensure_table_columns(cursor, "commission_level", {
+            "mode": "`mode` varchar(16) NOT NULL DEFAULT 'rate' COMMENT 'rate按比例/fixed固定金额'",
+            "fixed_amount": "`fixed_amount` decimal(12,2) DEFAULT NULL COMMENT '固定分成金额(元)，mode=fixed 时生效'",
+            "platform_extra_amount": "`platform_extra_amount` decimal(12,2) NOT NULL DEFAULT 0 COMMENT '平台额外奖励(元)'",
+            "promotion_condition": "`promotion_condition` varchar(255) DEFAULT NULL COMMENT '自动升级到此级别的条件描述'",
+        })
         cursor.execute("""
-            INSERT IGNORE INTO commission_level (id, code, name, rate_percent, sort, status)
+            INSERT IGNORE INTO commission_level (id, code, name, mode, rate_percent, fixed_amount, platform_extra_amount, promotion_condition, sort, status)
             VALUES
-                (1, 'junior', '初级分成', 10.0000, 1, 1),
-                (2, 'intermediate', '中级分成', 15.0000, 2, 1),
-                (3, 'senior', '高级分成', 20.0000, 3, 1)
+                (1, 'junior', '初级分成', 'rate', 10.0000, NULL, 5.00,  '默认', 1, 1),
+                (2, 'intermediate', '中级分成', 'rate', 15.0000, NULL, 1000.00, '牵线成功累计>=10次', 2, 1),
+                (3, 'senior', '高级分成', 'rate', 20.0000, NULL, 1000.00, '牵线成功累计>=100次', 3, 1),
+                (4, 'partner', '合伙分成', 'rate', 25.0000, NULL, 5000.00, '牵线成功累计>=300次', 4, 1)
+        """)
+        # 推广红娘分成配置（固定 4 种级别：1 初级 / 2 推广大师 / 3 推广大使 / 4 推广天使）
+        cursor.execute("""
+            INSERT IGNORE INTO promoter_level_config
+            (level_id, level_name, auto_split_mode, auto_split_rate, promote_threshold,
+             register_reward_male, register_reward_female, consume_commission_mode, consume_commission_rate)
+            VALUES
+                (1, '初级',     'fixed_amount', NULL,  NULL, 0.00, 0.00, 'none',     NULL),
+                (2, '推广大师', 'auto_rate',    10.0000, 51, 0.00, 0.00, 'auto_rate', 10.0000),
+                (3, '推广大使', 'fixed_amount', NULL, 100, 0.00, 0.00, 'none',     NULL),
+                (4, '推广天使', 'fixed_amount', NULL, 500, 0.00, 0.00, 'none',     NULL)
         """)
         cursor.execute("""
             INSERT IGNORE INTO admin_menu
@@ -1595,6 +1621,13 @@ class DatabaseManager:
                     `application_type` varchar(32) NOT NULL DEFAULT 'service_matchmaker' COMMENT '申请类型 promoter推广红娘 partner合伙人 service_matchmaker服务红娘',
                     `real_name` varchar(64) DEFAULT NULL,
                     `phone` varchar(20) DEFAULT NULL,
+                    `channel` varchar(64) DEFAULT NULL COMMENT '推广渠道（推广红娘用）',
+                    `matchmaker_type` varchar(16) DEFAULT NULL COMMENT '兼职/全职（推广红娘用）',
+                    `slogan` varchar(128) DEFAULT NULL COMMENT '红娘口号（推广红娘用）',
+                    `commission_level_id` bigint unsigned DEFAULT NULL COMMENT '推广红娘分成级别（推广红娘用）',
+                    `can_view_lead_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许查看客源线索跟进记录（推广红娘用）',
+                    `can_write_lead_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许客源线索中写跟进（推广红娘用）',
+                    `can_view_member_crm_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许查看会员CRM跟进记录（推广红娘用）',
                     `intro` text COMMENT '自我介绍/优势',
                     `cert_images` json DEFAULT NULL COMMENT '资质证书图片',
                     `application_details` json DEFAULT NULL COMMENT '红娘审核扩展资料',
@@ -1789,7 +1822,26 @@ class DatabaseManager:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI助手消息'
             """,
             # ============================================
-            "ai_advisor_session": """
+            # AI 资料用心度评审
+            # ============================================
+            'ai_profile_thoughtfulness': """
+                CREATE TABLE IF NOT EXISTS `ai_profile_thoughtfulness` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `score` int NOT NULL DEFAULT '0' COMMENT 'AI 评审用心度 0-100',
+                    `summary` varchar(500) NOT NULL DEFAULT '' COMMENT 'AI 总结',
+                    `todos` json DEFAULT NULL COMMENT '待优化清单 [{key,label,advice,priority}]',
+                    `edited_keys` json DEFAULT NULL COMMENT '触发评审时的编辑字段',
+                    `model_name` varchar(128) DEFAULT NULL COMMENT '评审使用的模型',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_ai_thoughtfulness_user` (`user_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 资料用心度评审结果'
+            """,
+
+            # ============================================
+            'ai_advisor_session': """
                 CREATE TABLE IF NOT EXISTS `ai_advisor_session` (
                     `id` bigint unsigned NOT NULL AUTO_INCREMENT,
                     `user_id` bigint unsigned NOT NULL,
@@ -2909,6 +2961,8 @@ class DatabaseManager:
                 ('customer_lead','assign',  'designated', NULL, NULL, NULL, 1, 1, 1, '客源线索分配配置-默认统一分派'),
                 ('customer_lead','abandon', NULL,         NULL, 0,    0,    1, 1, 1, '客源线索弃海配置-默认不启用')
         """)
+        # 配置固定启用：后台不提供启停入口，所有配置默认启用（兜底老库曾被停用的行）
+        cursor.execute("UPDATE matchmaker_apportion_config SET is_enabled = 1")
         self._ensure_matchmaker_staff_defaults(cursor)
 
         # 兼容已存在的旧库：CREATE TABLE IF NOT EXISTS 不会补齐新增字段。

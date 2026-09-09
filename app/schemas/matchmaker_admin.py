@@ -1,6 +1,7 @@
 """Independent authentication and management contracts for the matchmaker back office."""
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -206,3 +207,48 @@ class ApportionConfigAuditLogPage(BaseModel):
     page_size: int
     total: int
     has_more: bool
+
+
+# =====================================================================
+# 服务红娘分成级别（commission_level：初级 / 中级 / 高级 / 合伙）
+# =====================================================================
+
+CommissionLevelMode = Literal["rate", "fixed"]
+
+
+class CommissionLevel(BaseModel):
+    """一条红娘分成级别配置。"""
+
+    id: int
+    code: str = Field(min_length=1, max_length=32)
+    name: str = Field(min_length=1, max_length=64)
+    mode: CommissionLevelMode = "rate"
+    rate_percent: Decimal = Field(ge=Decimal("0"), le=Decimal("100"))
+    fixed_amount: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("10000000"))
+    platform_extra_amount: Decimal = Field(default=Decimal("0"), ge=Decimal("0"), le=Decimal("10000000"))
+    promotion_condition: str | None = Field(default=None, max_length=255)
+    sort: int = 0
+    status: Literal[1, 2] = 1
+    applicable_matchmaker_count: int = 0
+    updated_by: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class CommissionLevelUpdate(BaseModel):
+    """编辑分成级别（仅业务字段可改，code/status 由 seed 锁定）。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    mode: CommissionLevelMode | None = None
+    rate_percent: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("100"))
+    fixed_amount: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("10000000"))
+    platform_extra_amount: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("10000000"))
+    promotion_condition: str | None = Field(default=None, max_length=255)
+    sort: int | None = None
+    status: Literal[1, 2] | None = None
+
+    @model_validator(mode="after")
+    def _verify_mode_amount(self) -> "CommissionLevelUpdate":
+        if self.mode == "fixed" and self.fixed_amount is None:
+            raise ValueError("mode=fixed 时必须填写 fixed_amount")
+        return self

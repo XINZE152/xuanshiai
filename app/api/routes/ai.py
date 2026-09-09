@@ -16,12 +16,16 @@ from app.schemas.ai import (
     AIMatchPage,
     AIProfilePolishRequest,
     AIProfilePolishResponse,
+    AIProfileThoughtfulnessRequest,
+    AIProfileThoughtfulnessResponse,
     AISearchRequest,
     AISearchResponse,
 )
 from app.services.ai_assistant import (
+    analyze_thoughtfulness,
     assistant_message,
     create_assistant_session,
+    get_thoughtfulness,
     list_assistant_sessions,
     match_page,
     parse_search,
@@ -49,6 +53,16 @@ async def message(session_id: int = Path(..., ge=1), body: AIAssistantMessageCre
 @router.post("/profile/polish", response_model=AIProfilePolishResponse, summary="AI 润色文字资料")
 async def polish(body: AIProfilePolishRequest = Body(...), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> AIProfilePolishResponse:
     return await polish_profile(db, current.id, body)
+
+
+@router.get("/profile/thoughtfulness", response_model=AIProfileThoughtfulnessResponse, summary="获取最新 AI 用心度评审")
+async def get_my_thoughtfulness(current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> AIProfileThoughtfulnessResponse:
+    return await get_thoughtfulness(db, current.id)
+
+
+@router.post("/profile/thoughtfulness", response_model=AIProfileThoughtfulnessResponse, summary="触发 AI 用心度评审")
+async def analyze_my_thoughtfulness(body: AIProfileThoughtfulnessRequest = Body(...), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> AIProfileThoughtfulnessResponse:
+    return await analyze_thoughtfulness(db, current.id, body)
 
 
 @router.post("/search", response_model=AISearchResponse, summary="AI 自然语言搜索")
