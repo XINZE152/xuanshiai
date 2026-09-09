@@ -68,11 +68,12 @@ Authorization: Bearer <access_token>
 | --- | --- | --- | --- | --- | --- | --- |
 | `trigger` | body | string | 是 | `save` | 枚举 `save`/`manual` | `save`=保存资料后自动触发；`manual`=用户在编辑页手动重新分析 |
 | `edited_keys` | body | string[] | 否 | `[]` | 最多 20 项，每项须为合法 key（非法项被忽略） | 本次保存发生变化的字段集合，用于 AI 聚焦分析；key 枚举同返回的 `todos[].key` |
+| `analysis_run_id` | body | string | null | 否 | `null` | 最长 96 字符；客户端每次重新分析生成新的值 | 本次模型运行标识，用于防止代理/服务端误重放，并在模型复写时区分分析轮次 |
 
 **请求体示例**（合法）：
 
 ```json
-{"trigger": "save", "edited_keys": ["self_intro", "interest_tags"]}
+{"trigger": "save", "edited_keys": ["self_intro", "interest_tags"], "analysis_run_id": "thoughtfulness-mfy2-abc123"}
 ```
 
 **请求体示例**（非法：trigger 超出枚举，返回 422）：
@@ -91,7 +92,7 @@ Authorization: Bearer <access_token>
 - **调用顺序**：前端在「保存资料」接口成功后调用本接口（trigger=save）；或用户在编辑页点「重新分析」（trigger=manual）。
 - **会员规则（有意差异化）**：阶段一其他 AI 功能仅会员可用；用心度**不设会员墙**——它是编辑页全员基础工具，且未来将作为「首页浏览他人资料」的门槛指标（score > 70 放行），设会员墙会导致非会员永远无法过门槛。后续如产品确认收费，需同步调整门槛规则。
 - **频率/额度**：每日限额 `ai_daily_thoughtfulness_limit`（默认 10 次/天），Redis 原子扣减，UTC 日期重置；超限返回 `429`。GET 不消耗额度。
-- **幂等与防重**：同用户评审结果按 `user_id` 唯一 UPSERT，重复触发只覆盖最新结果，不产生多行。
+- **幂等与防重**：同用户评审结果按 `user_id` 唯一 UPSERT，重复触发只覆盖最新结果，不产生多行；每次重新分析携带新的 `analysis_run_id`，后端会把上一版输出传给模型作为排除条件，若模型复读则追加一次明确重写请求。
 - **边界场景**：`edited_keys` 中非法 key 被静默忽略；AI 输出的 todos 中非法 key/空 advice 被过滤；资料极空的账号正常返回低分与建议；AI 服务不可用返回 `503`，不落库。
 - **文案红线**：AI prompt 已约束——不承诺交友/婚恋结果，不制造焦虑或施压。
 

@@ -109,14 +109,20 @@ THOUGHTFULNESS_KEY_LABELS: dict[str, str] = {
     "photos": "我的相册",
 }
 THOUGHTFULNESS_SYSTEM_PROMPT = (
-    "你是认真婚恋平台的资料评审助手，评估用户填写资料的用心程度并给出具体可执行的改进建议。"
-    "只基于提供的资料判断，不编造事实，不评价用户本人，只评价资料质量。"
-    "文案不得承诺交友或婚恋结果，不得制造焦虑、催促或施压。"
-    "输出JSON：score(int 0-100 整数), summary(string, 1-2句中文总结), "
-    "todos(array of {key,label,advice,priority})。"
+    "你是一位资深交友资料优化师，擅长通过用户主页资料判断社交吸引力，"
+    "像朋友一样用轻松、自然、带一点幽默的语气给出可执行反馈。"
+    "只基于提供的真实资料判断，不编造经历、照片内容、好友评价或用户没有填写的信息；"
+    "不评价用户本人，不承诺交友或婚恋结果，不制造焦虑、催促或施压。"
+    "请从六个维度分别评估0-100分：信息具体度、聊天破冰点、形象立体感、"
+    "社交信号清晰度、差异化记忆点、理想型描述质量。"
+    "综合分score是六个维度平均分并四舍五入。"
+    "summary用2-3句中文：先具体肯定资料中做得好的地方，再指出1-2个关键改进方向，"
+    "并描述优化后会形成的更鲜明形象。"
+    "输出JSON：score(int 0-100), summary(string), todos(array of {key,label,advice,priority})。"
+    "todos必须正好4条（如果资料已很好，也要选择最有价值的4条可选优化，不重复已做好的维度），"
+    "每条advice必须以动宾短语开头，并在同一句解释为什么有用。"
     "key只能取 basic_info/self_intro/qa_answers/interest_tags/personality_tags/mbti/avatar/photos 之一；"
-    "label用中文展示名；advice是一句具体的修改建议(不超过80字)；"
-    "todos按priority从高到低排序，最多5条，资料已经很好时返回空数组。priority取 high/medium/low。"
+    "label用中文展示名；priority取 high/medium/low，按重要性排序。"
 )
 
 
@@ -168,7 +174,10 @@ async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProf
                        p.residence_province_code, p.residence_city_code, p.residence_district_code,
                        p.hometown_province_code, p.hometown_city_code, p.hometown_district_code,
                        p.self_intro, p.interest_tags, p.personality_tags, p.mbti, p.tags
-                FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.id = :user_id"""),
+                       ,p.love_view, p.ideal_partner, p.hobbies, p.family_background,
+                       p.single_reason, p.household, p.house, p.car, p.smoking,
+                       p.constellation, p.zodiac
+                FROM users u LEFT JOIN user_profile p ON p.user_id = u.id WHERE u.id = :user_id"""),
             {"user_id": user_id})).mappings().first()
     if profile_row is None:
         raise HTTPException(404, detail="用户资料不存在")
@@ -184,7 +193,13 @@ async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProf
         ("现居地", profile_row["residence_city_code"]), ("家乡", profile_row["hometown_city_code"]),
         ("自我介绍", profile_row["self_intro"]), ("兴趣标签", profile_row["interest_tags"]),
         ("性格标签", profile_row["personality_tags"]), ("MBTI", profile_row["mbti"]),
-        ("标签选择", profile_row["tags"]), ("头像", "已上传" if profile_row["avatar"] else "未上传"),
+        ("标签选择", profile_row["tags"]), ("爱情观", profile_row["love_view"]),
+        ("理想另一半", profile_row["ideal_partner"]), ("兴趣爱好补充", profile_row["hobbies"]),
+        ("家庭背景", profile_row["family_background"]), ("单身原因", profile_row["single_reason"]),
+        ("户籍信息", profile_row["household"]), ("住房情况", profile_row["house"]),
+        ("车辆情况", profile_row["car"]), ("吸烟情况", profile_row["smoking"]),
+        ("星座", profile_row["constellation"]), ("生肖", profile_row["zodiac"]),
+        ("头像", "已上传" if profile_row["avatar"] else "未上传"),
     ]
     for label, value in mapping:
         if value is None or (isinstance(value, str) and value.strip() == ""):
@@ -194,18 +209,48 @@ async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProf
     facts.append(f"相册照片数：{photo_count}")
     edited_keys = [k for k in (request.edited_keys or [])[:20] if k in THOUGHTFULNESS_KEY_LABELS]
 
+    previous_row = (await db.execute(text("""SELECT summary, todos
+        FROM ai_profile_thoughtfulness WHERE user_id=:user_id"""), {"user_id": user_id})).mappings().first()
+    previous_summary = str(previous_row["summary"] or "").strip() if previous_row is not None else ""
+    previous_todos = previous_row["todos"] if previous_row is not None else []
+    if isinstance(previous_todos, str):
+        try:
+            previous_todos = json.loads(previous_todos)
+        except Exception:
+            previous_todos = []
+    previous_text = json.dumps({"summary": previous_summary, "todos": previous_todos}, ensure_ascii=False)
+    run_id = request.analysis_run_id or "server-generated"
+
     raw = await complete(
         [
             {"role": "system", "content": THOUGHTFULNESS_SYSTEM_PROMPT},
             {"role": "user", "content": (
                 f"THOUGHTFULNESS_REVIEW trigger={request.trigger} "
+                f"analysis_run_id={run_id} "
                 f"edited_keys={','.join(edited_keys) if edited_keys else 'unknown'}\n"
+                f"上一次评审输出（如果存在，本次必须换一种表达并重新组织建议，不能原样复用）：{previous_text}\n"
                 + "\n".join(facts)
             )},
         ],
         json_mode=True,
     )
     data = parse_json(raw)
+
+    # 模型偶尔会在资料未变化时复读上一版；追加一次明确的重写指令，保证手动重分析确实重新生成。
+    current_text = json.dumps({"summary": data.get("summary"), "todos": data.get("todos")}, ensure_ascii=False)
+    if previous_summary != "" and current_text == previous_text:
+        raw = await complete(
+            [
+                {"role": "system", "content": THOUGHTFULNESS_SYSTEM_PROMPT},
+                {"role": "user", "content": (
+                    f"THOUGHTFULNESS_REWRITE analysis_run_id={run_id}\n"
+                    "下面是上一版结果。请重新阅读资料，改写summary并重新排序或改写todos；不得复制上一版任何完整句子。\n"
+                    f"上一版：{previous_text}\n" + "\n".join(facts)
+                )},
+            ],
+            json_mode=True,
+        )
+        data = parse_json(raw)
     try:
         score = max(0, min(100, int(data.get("score"))))
     except (TypeError, ValueError):
@@ -214,7 +259,7 @@ async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProf
 
     todo_items = data.get("todos") if isinstance(data.get("todos"), list) else []
     todos: list[AIProfileThoughtfulnessTodo] = []
-    for item in todo_items[:8]:
+    for item in todo_items[:4]:
         if not isinstance(item, dict):
             continue
         key = str(item.get("key") or "")
