@@ -3,6 +3,14 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
+    ai_compatibility,
+    ai_consents,
+    ai_recommend,
+    ai_profile,
+    ai_search,
+    ai_tasks,
+    ai_moxiang,
+    ai_memory,
     activity_admin,
     admin,
     admin_home,
@@ -39,6 +47,8 @@ from app.api.routes import (
     organization_admin,
     payments,
     points,
+    paper_plane_unlock,
+    paper_plane_contact_exchange,
     presence,
     profile,
     regions,
@@ -49,6 +59,9 @@ from app.api.routes import (
     promoter_level_admin,
     social,
     users,
+    voice,
+    voice_moxiang,
+    voice_ws,
 )
 
 
@@ -61,11 +74,14 @@ api_router.include_router(auth.router, tags=["账号与认证"])
 api_router.include_router(ai.router, tags=["AI能力"])
 api_router.include_router(ai_advisor.router, tags=["AIAdvisor"])
 api_router.include_router(ai_avatar.router, tags=["AI 分身"])
+api_router.include_router(ai_avatar.memory_router, tags=["AI 分身"])
 api_router.include_router(users.router, tags=["账号与认证"])
 api_router.include_router(certifications.router, tags=["认证审核"])
 api_router.include_router(membership.router, tags=["会员"])
 api_router.include_router(payments.router, tags=["支付"])
 api_router.include_router(points.router, tags=["积分"])
+api_router.include_router(paper_plane_unlock.router, tags=["社区"])
+api_router.include_router(paper_plane_contact_exchange.router, tags=["社区"])
 api_router.include_router(regions.router, tags=["地区"])
 api_router.include_router(presence.router, tags=["消息"])
 api_router.include_router(identity.router, tags=["账号与认证"])
@@ -110,6 +126,19 @@ api_router.include_router(organization.router, tags=["组织与归属"])
 api_router.include_router(organization.promotion_router, tags=["组织与归属"])
 api_router.include_router(organization.partner_router, tags=["组织与归属"])
 api_router.include_router(finance.router, tags=["财务与结算"])
+api_router.include_router(ai_tasks.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_consents.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_profile.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_search.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_compatibility.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_recommend.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_moxiang.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_memory.router, prefix="/ai", tags=["AI"])
+api_router.include_router(voice.router, prefix="/voice", tags=["语音"])
+api_router.include_router(voice_ws.router, prefix="/voice", tags=["语音"])
+api_router.include_router(
+    voice_moxiang.router, prefix="/voice", tags=["语音"]
+)
 
 
 OPENAPI_TAGS = [
@@ -128,5 +157,7 @@ OPENAPI_TAGS = [
     {"name": "积分", "description": "积分账户和积分流水相关能力。"},
     {"name": "地区", "description": "省市区等地区数据查询。"},
     {"name": "系统", "description": "健康检查和系统发现信息。"},
+    {"name": "AI", "description": "AI 画像、搜索与匹配度通用任务查询、取消和状态轮询。"},
+    {"name": "语音", "description": "语音转写（STT）与语音合成（TTS）。"},
     {"name": "AI 分身", "description": "基于目标用户公开资料的独立 AI 对话能力。"},
 ]

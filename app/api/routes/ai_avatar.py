@@ -1,8 +1,8 @@
-"""Authenticated AI-avatar profile and conversation endpoints."""
+"""Authenticated AI-avatar and authorized public-memory endpoints."""
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Path
+from fastapi import APIRouter, Body, Depends, Header, Path, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user
@@ -16,6 +16,8 @@ from app.schemas.ai_avatar import (
     AiAvatarOwnerDashboardResponse,
     AiAvatarProfileResponse,
     AiAvatarSendResponse,
+    AvatarReplyRequest,
+    AvatarReplyResponse,
 )
 from app.services.ai_avatar import (
     add_owner_answer,
@@ -26,10 +28,32 @@ from app.services.ai_avatar import (
     get_ai_conversation,
     get_owner_dashboard,
     get_public_ai_context,
+    reply_from_public_profile,
     send_ai_message,
 )
 
 router = APIRouter(prefix="/ai-avatars")
+memory_router = APIRouter(prefix="/ai/avatar")
+
+
+@memory_router.post(
+    "/{target_user_id}/reply",
+    response_model=AvatarReplyResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="基于获授权公开资料向 AI 分身提问",
+)
+async def avatar_reply(
+    target_user_id: int = Path(..., ge=1),
+    body: AvatarReplyRequest = Body(...),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AvatarReplyResponse:
+    return await reply_from_public_profile(
+        db,
+        viewer_user_id=current.id,
+        target_user_id=target_user_id,
+        request=body,
+    )
 
 
 @router.get("/me/dashboard", response_model=AiAvatarOwnerDashboardResponse, summary="读取我的 AI 分身问答")

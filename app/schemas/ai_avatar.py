@@ -1,4 +1,4 @@
-"""Request and response contracts for AI-avatar conversations."""
+"""AI 分身公开记忆回复与会话接口契约。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,24 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class AvatarReplyRequest(BaseModel):
+    """访客问题；不接受历史、目标资料或客户端声明的授权状态。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(..., min_length=1, max_length=300)
+
+
+class AvatarReplyResponse(BaseModel):
+    """分身只返回明确标注的 AI 资料答复。"""
+
+    target_user_id: int = Field(..., ge=1)
+    reply: str = Field(..., min_length=1, max_length=600)
+    ai_generated: bool = True
+    source: str = "authorized_public_profile"
+    disclaimer: str
 
 
 class AiAvatarMessageRequest(BaseModel):
