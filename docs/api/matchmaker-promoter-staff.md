@@ -260,7 +260,24 @@ Authorization: Bearer <access_token>
 ## 四、迁移与验证
 
 1. **迁移**：执行 `python database_setup_marriage.py`：
-   - 新库 `CREATE TABLE user_matchmaker_apply` 已含 `channel` 列；
-   - 老库通过 `_ensure_required_columns` 幂等 `ALTER TABLE ... ADD COLUMN channel`。
-2. **测试**：`tests/test_promoter_staff_admin.py`（OpenAPI 注册 / 401 / query 参数完整性 / schema 长度与枚举校验）→ `uv run pytest tests/test_promoter_staff_admin.py -q`（8 passed）。
+   - 新库 `CREATE TABLE user_matchmaker_apply` 已含 `channel` + 6 个业务字段；
+   - 老库通过 `_ensure_required_columns` 幂等 `ALTER TABLE` 补齐 7 列（`channel` + `matchmaker_type` / `slogan` / `commission_level_id` / 3 权限 bool）。
+2. **测试**：`tests/test_promoter_staff_admin.py` → `uv run pytest -q`（12 passed）。
 3. **关联表**：`users`、`user_matchmaker_apply`、`user_role(role_code='promoter')`、`promotion_attribution`、`promotion_touch`。
+
+---
+
+## 五、补充业务字段（与图 1 添加/编辑弹窗对齐）
+
+推广红娘弹窗除基础身份字段外还含以下 5 块业务配置，**仅 promoter 记录使用**，service_matchmaker/partner 申请不填（共享 `user_matchmaker_apply` 表，但只对 promoter 有意义）：
+
+| 字段 | 类型 | 默认 | 含义 |
+| --- | --- | --- | --- |
+| `matchmaker_type` | `part_time` / `full_time` | `part_time` | 红娘类型：兼职 / 全职 |
+| `slogan` | varchar(128) | `null` | 红娘口号（预设 + 自定义） |
+| `commission_level_id` | int(1~4) | `null` | 分成级别：1 初级 / 2 推广大师 / 3 推广大使 / 4 推广天使 |
+| `can_view_lead_follow` | bool | `true` | 允许查看客源线索跟进记录 |
+| `can_write_lead_follow` | bool | `true` | 允许在客源线索中写跟进 |
+| `can_view_member_crm_follow` | bool | `true` | 允许查看会员 CRM 跟进记录 |
+
+> 注：`commission_level_id` 当前直接存整数 1~4（不引用独立 `promoter_commission_level` 表），后续如需独立配置表可平滑迁移（参见「分成配置」扩展计划）。

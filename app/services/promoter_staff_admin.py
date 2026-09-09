@@ -28,6 +28,8 @@ _APPLY_TYPE = "promoter"
 
 _SELECT_BODY = """SELECT u.id AS user_id, u.avatar, u.nickname, u.phone AS user_phone,
     ma.id AS apply_id, ma.real_name, ma.phone AS apply_phone, ma.channel, ma.intro,
+    ma.matchmaker_type, ma.slogan, ma.commission_level_id,
+    ma.can_view_lead_follow, ma.can_write_lead_follow, ma.can_view_member_crm_follow,
     ma.status, ma.reviewed_at, ma.suspended_at, ma.suspension_reason, ma.created_at,
     (SELECT COUNT(*) FROM promotion_attribution pa
         WHERE pa.promoter_id = u.id AND pa.status = 1) AS member_count,
@@ -50,6 +52,12 @@ def _status_label(status: int) -> str:
 
 def _phone(row: dict[str, Any]) -> str | None:
     return (row.get("apply_phone") or row.get("user_phone")) or None
+
+
+def _bool(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    return bool(int(value))
 
 
 def _item(row: dict[str, Any]) -> PromoterStaffItem:
@@ -79,6 +87,12 @@ def _detail(row: dict[str, Any]) -> PromoterStaffDetail:
         **item.model_dump(),
         real_name=row.get("real_name") or row.get("nickname"),
         suspension_reason=row.get("suspension_reason"),
+        matchmaker_type=row.get("matchmaker_type"),
+        slogan=row.get("slogan"),
+        commission_level_id=int(row["commission_level_id"]) if row.get("commission_level_id") is not None else None,
+        can_view_lead_follow=_bool(row.get("can_view_lead_follow")),
+        can_write_lead_follow=_bool(row.get("can_write_lead_follow")),
+        can_view_member_crm_follow=_bool(row.get("can_view_member_crm_follow")),
     )
 
 
@@ -199,8 +213,14 @@ async def create_promoter(
     await db.execute(
         text(
             """INSERT INTO user_matchmaker_apply
-            (user_id, application_type, real_name, phone, intro, channel, status, reviewed_by, reviewed_at)
-            VALUES (:id, 'promoter', :name, :phone, :intro, :channel, 1, :actor, UTC_TIMESTAMP())"""
+            (user_id, application_type, real_name, phone, intro, channel,
+             matchmaker_type, slogan, commission_level_id,
+             can_view_lead_follow, can_write_lead_follow, can_view_member_crm_follow,
+             status, reviewed_by, reviewed_at)
+            VALUES (:id, 'promoter', :name, :phone, :intro, :channel,
+             :matchmaker_type, :slogan, :commission_level_id,
+             :can_view_lead_follow, :can_write_lead_follow, :can_view_member_crm_follow,
+             1, :actor, UTC_TIMESTAMP())"""
         ),
         {
             "id": user_id,
@@ -208,6 +228,12 @@ async def create_promoter(
             "phone": body.phone or user["phone"],
             "intro": body.intro,
             "channel": body.channel,
+            "matchmaker_type": body.matchmaker_type,
+            "slogan": body.slogan,
+            "commission_level_id": body.commission_level_id,
+            "can_view_lead_follow": int(body.can_view_lead_follow),
+            "can_write_lead_follow": int(body.can_write_lead_follow),
+            "can_view_member_crm_follow": int(body.can_view_member_crm_follow),
             "actor": actor_account_id,
         },
     )
@@ -233,6 +259,12 @@ async def update_promoter(
             """UPDATE user_matchmaker_apply
             SET channel = COALESCE(:channel, channel),
                 intro = COALESCE(:intro, intro),
+                matchmaker_type = COALESCE(:matchmaker_type, matchmaker_type),
+                slogan = COALESCE(:slogan, slogan),
+                commission_level_id = COALESCE(:commission_level_id, commission_level_id),
+                can_view_lead_follow = COALESCE(:can_view_lead_follow, can_view_lead_follow),
+                can_write_lead_follow = COALESCE(:can_write_lead_follow, can_write_lead_follow),
+                can_view_member_crm_follow = COALESCE(:can_view_member_crm_follow, can_view_member_crm_follow),
                 suspension_reason = COALESCE(:reason, suspension_reason),
                 status = CASE WHEN :status IS NOT NULL THEN :status ELSE status END,
                 suspended_at = CASE
@@ -245,6 +277,12 @@ async def update_promoter(
         {
             "channel": body.channel,
             "intro": body.intro,
+            "matchmaker_type": body.matchmaker_type,
+            "slogan": body.slogan,
+            "commission_level_id": body.commission_level_id,
+            "can_view_lead_follow": body.can_view_lead_follow,
+            "can_write_lead_follow": body.can_write_lead_follow,
+            "can_view_member_crm_follow": body.can_view_member_crm_follow,
             "reason": body.reason,
             "status": body.status,
             "uid": user_id,
