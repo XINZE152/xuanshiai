@@ -1,11 +1,12 @@
 import json
+import inspect
 
 import pytest
 from pydantic import ValidationError
 
 from app.api.routes import ai
 from app.schemas.ai import AIProfileThoughtfulnessRequest, AIProfileThoughtfulnessResponse
-from app.services.ai import THOUGHTFULNESS_KEY_LABELS, _thoughtfulness_row_to_response
+from app.services.ai import THOUGHTFULNESS_KEY_LABELS, _thoughtfulness_row_to_response, analyze_thoughtfulness
 from app.services.ai_provider import _mock_response
 
 
@@ -21,6 +22,7 @@ def test_thoughtfulness_request_contract() -> None:
     assert request.trigger == "save"
     assert AIProfileThoughtfulnessRequest().trigger == "save"
     assert AIProfileThoughtfulnessRequest().edited_keys == []
+    assert AIProfileThoughtfulnessRequest(analysis_run_id="thoughtfulness-test-1").analysis_run_id == "thoughtfulness-test-1"
     with pytest.raises(ValidationError):
         AIProfileThoughtfulnessRequest(trigger="auto")
     with pytest.raises(ValidationError):
@@ -64,3 +66,16 @@ def test_thoughtfulness_row_normalization_filters_invalid_todos() -> None:
     assert response.summary == "ok"
     assert [t.key for t in response.todos] == ["self_intro"]
     assert response.todos[0].label == "自我介绍"
+
+
+def test_thoughtfulness_reads_the_real_profile_table() -> None:
+    source = inspect.getsource(analyze_thoughtfulness)
+    assert "LEFT JOIN user_profile p ON p.user_id = u.id" in source
+    assert "LEFT JOIN profiles p ON p.user_id = u.id" not in source
+
+
+def test_thoughtfulness_reanalysis_carries_run_id_and_rewrite_guard() -> None:
+    source = inspect.getsource(analyze_thoughtfulness)
+    assert "analysis_run_id" in source
+    assert "THOUGHTFULNESS_REWRITE" in source
+    assert "上一版结果" in source

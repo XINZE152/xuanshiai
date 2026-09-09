@@ -57,6 +57,7 @@ class AIProfileThoughtfulnessRequest(BaseModel):
     """触发 AI 用心度评审：trigger=save 为保存资料后自动触发，manual 为用户手动重新分析。"""
     trigger: Literal["save", "manual"] = "save"
     edited_keys: list[str] = Field(default_factory=list, max_length=20)
+    analysis_run_id: str | None = Field(default=None, max_length=96)
 
 
 class AIProfileThoughtfulnessTodo(BaseModel):
