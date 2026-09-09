@@ -1086,7 +1086,10 @@ def test_four_create_services_support_transaction_composition() -> None:
 
 def test_idempotency_table_has_one_unique_key_per_user_operation_and_key() -> None:
     setup = Path("database_setup_marriage.py").read_text(encoding="utf-8")
-    assert "'api_idempotency_record':" in setup
+    assert any(
+        marker in setup
+        for marker in ("'api_idempotency_record':", '"api_idempotency_record":')
+    )
     assert (
         "UNIQUE KEY `uk_api_idempotency_scope` "
         "(`user_id`,`operation`,`idempotency_key`)"
@@ -1095,7 +1098,12 @@ def test_idempotency_table_has_one_unique_key_per_user_operation_and_key() -> No
 
 def test_idempotency_table_uses_case_sensitive_keys_and_explicit_utc_timestamps() -> None:
     setup = Path("database_setup_marriage.py").read_text(encoding="utf-8")
-    table_sql = setup.split("'api_idempotency_record':", 1)[1].split('""",', 1)[0].lower()
+    marker = next(
+        marker
+        for marker in ("'api_idempotency_record':", '"api_idempotency_record":')
+        if marker in setup
+    )
+    table_sql = setup.split(marker, 1)[1].split('""",', 1)[0].lower()
 
     assert (
         "`idempotency_key` varchar(128) character set utf8mb4 "

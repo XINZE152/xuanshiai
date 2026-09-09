@@ -22,18 +22,28 @@ async def vip_members(page: int = Query(1, ge=1, le=1000), page_size: int = Quer
     where = ["m.status <> 3"]
     params: dict = {"limit": page_size, "offset": (page - 1) * page_size}
     if search:
-        where.append("(u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"); params["search"] = search
-    if vip_level: where.append("m.package_type = :vip_level"); params["vip_level"] = vip_level
-    if vip_status == "active": where.append("(m.end_at IS NULL OR m.end_at > UTC_TIMESTAMP())")
-    if vip_status == "expired": where.append("m.end_at IS NOT NULL AND m.end_at <= UTC_TIMESTAMP()")
+        where.append("(u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))")
+        params["search"] = search
+    if vip_level:
+        where.append("m.package_type = :vip_level")
+        params["vip_level"] = vip_level
+    if vip_status == "active":
+        where.append("(m.end_at IS NULL OR m.end_at > UTC_TIMESTAMP())")
+    if vip_status == "expired":
+        where.append("m.end_at IS NOT NULL AND m.end_at <= UTC_TIMESTAMP()")
     if expiring_within_days is not None:
-        where.append("m.end_at IS NOT NULL AND m.end_at <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL :days DAY)"); params["days"] = expiring_within_days
+        where.append("m.end_at IS NOT NULL AND m.end_at <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL :days DAY)")
+        params["days"] = expiring_within_days
     clause = " AND ".join(where)
     base = "FROM user_membership m JOIN users u ON u.id = m.user_id"
     nature = "CASE WHEN (SELECT COUNT(*) FROM user_membership prev WHERE prev.user_id=m.user_id AND prev.id<m.id)>1 THEN 'again' WHEN (SELECT COUNT(*) FROM user_membership prev WHERE prev.user_id=m.user_id AND prev.id<m.id)=1 THEN 'renew' ELSE 'first' END"
     method = "CASE WHEN EXISTS (SELECT 1 FROM payment_order po WHERE po.order_no=m.order_no AND po.user_id=m.user_id AND po.status=1) THEN 'self' ELSE 'admin' END"
-    if open_method: where.append(f"({method}) = :open_method"); params["open_method"] = open_method
-    if open_nature: where.append(f"({nature}) = :open_nature"); params["open_nature"] = open_nature
+    if open_method:
+        where.append(f"({method}) = :open_method")
+        params["open_method"] = open_method
+    if open_nature:
+        where.append(f"({nature}) = :open_nature")
+        params["open_nature"] = open_nature
     clause = " AND ".join(where)
     rows = await db.execute(text(f"SELECT m.id membership_id, m.user_id, u.nickname, u.phone, m.package_type, m.amount, m.order_no, m.start_at, m.end_at, m.status, {method} open_method, {nature} open_nature, 0 line_total, 0 line_remaining {base} WHERE {clause} ORDER BY m.end_at IS NULL, m.end_at ASC, m.id DESC LIMIT :limit OFFSET :offset"), params)
     count = await db.execute(text(f"SELECT COUNT(*) {base} WHERE {clause}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})

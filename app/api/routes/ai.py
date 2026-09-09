@@ -21,7 +21,7 @@ from app.schemas.ai import (
     AISearchRequest,
     AISearchResponse,
 )
-from app.services.ai import (
+from app.services.ai_assistant import (
     analyze_thoughtfulness,
     assistant_message,
     create_assistant_session,
