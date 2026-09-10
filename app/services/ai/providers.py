@@ -69,20 +69,44 @@ logger = logging.getLogger(__name__)
 # 模式辅助与 AsyncOpenAI 异步客户端，裸 httpx 需要手写这些能力且易出错。openai
 # 是 MIT 许可、活跃维护的成熟库，与现有 httpx 共存（openai 内部亦依赖 httpx），
 # 无版本冲突风险。替代方案 httpx 已评估但不采用，理由如上。
-from openai import (  # noqa: E402
-    APIConnectionError as _APIConnectionError,
-    APIError as _APIError,
-    APITimeoutError as _APITimeoutError,
-    AsyncOpenAI,
-    RateLimitError as _RateLimitError,
-)
 # 4xx 状态码异常子类，用于区分可重试与不可重试。
-from openai import (  # noqa: E402
-    APIStatusError as _APIStatusError,
-    AuthenticationError as _AuthenticationError,
-    BadRequestError as _BadRequestError,
-    PermissionDeniedError as _PermissionDeniedError,
-)
+#
+# 可选导入（graceful degradation）：openai 只在真实 provider 发起调用时才需要。
+# 部署环境（如生产服务器）未安装该包时，服务仍可正常启动——其余全部功能
+# 不受影响；真实 AI provider 调用会在 _ensure_client 处抛出明确的
+# NON_RETRYABLE ProviderError（"AI_SDK_NOT_INSTALLED"），而不是让整个
+# 进程在 import 阶段崩溃。
+try:  # pragma: no cover - 分支取决于部署环境是否安装 openai
+    from openai import (  # noqa: E402
+        APIConnectionError as _APIConnectionError,
+        APIError as _APIError,
+        APITimeoutError as _APITimeoutError,
+        AsyncOpenAI,
+        RateLimitError as _RateLimitError,
+        APIStatusError as _APIStatusError,
+        AuthenticationError as _AuthenticationError,
+        BadRequestError as _BadRequestError,
+        PermissionDeniedError as _PermissionDeniedError,
+    )
+
+    OPENAI_SDK_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    OPENAI_SDK_AVAILABLE = False
+    AsyncOpenAI = None  # type: ignore[assignment, misc]
+
+    # 占位异常基类：保证下方 isinstance 映射代码在未安装 SDK 时语法与运行
+    # 皆成立（永远不会命中，统一落到兜底 ProviderError 分支）。
+    class _OpenAIStubError(Exception):
+        pass
+
+    _APIConnectionError = _OpenAIStubError  # type: ignore[assignment,misc]
+    _APIError = _OpenAIStubError  # type: ignore[assignment,misc]
+    _APITimeoutError = _OpenAIStubError  # type: ignore[assignment,misc]
+    _RateLimitError = _OpenAIStubError  # type: ignore[assignment,misc]
+    _APIStatusError = _OpenAIStubError  # type: ignore[assignment,misc]
+    _AuthenticationError = _OpenAIStubError  # type: ignore[assignment,misc]
+    _BadRequestError = _OpenAIStubError  # type: ignore[assignment,misc]
+    _PermissionDeniedError = _OpenAIStubError  # type: ignore[assignment,misc]
 
 
 def _build_openai_compat_client(
@@ -94,6 +118,15 @@ def _build_openai_compat_client(
     "合法死锁"（挂起调用占住 worker 10 分钟）。由 settings.ai_gateway_timeout_seconds
     提供（默认 30.0，范围 0-120）。
     """
+    if not OPENAI_SDK_AVAILABLE:
+        raise ProviderError(
+            code="AI_SDK_NOT_INSTALLED",
+            message=(
+                "服务器未安装 openai Python 包（pip install 'openai>=1.50,<2.0'），"
+                "真实 AI provider 不可用；服务其余功能正常"
+            ),
+            kind=ProviderErrorKind.NON_RETRYABLE,
+        )
     return AsyncOpenAI(
         api_key=api_key.get_secret_value() if hasattr(api_key, "get_secret_value") else api_key,
         base_url=base_url,
