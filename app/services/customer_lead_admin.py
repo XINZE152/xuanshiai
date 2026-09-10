@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.customer_lead_admin import (
     CustomerLead, CustomerLeadAbandonment, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadFollowUp,
-    CustomerLeadFollowUpCreate, CustomerLeadPage, CustomerLeadStatistics, CustomerLeadUpdate,
+    CustomerLeadBatchImportResult, CustomerLeadFollowUpCreate, CustomerLeadImportRow,
+    CustomerLeadPage, CustomerLeadStatistics, CustomerLeadUpdate,
 )
 
 LEAD_SELECT = """SELECT id, name, phone, wechat, source, intention_level, status, matchmaker_id,
@@ -164,3 +165,55 @@ async def list_abandonments(db: AsyncSession, active_only: bool) -> list[Custome
     where = "WHERE restored_at IS NULL" if active_only else ""
     rows = await db.execute(text(f"SELECT id, lead_id, reason, abandoned_by, abandoned_at, restored_by, restored_at, restore_reason FROM customer_lead_abandonment {where} ORDER BY id DESC"))
     return [CustomerLeadAbandonment(**dict(row)) for row in rows.mappings().all()]
+
+
+async def batch_import_leads(
+    db: AsyncSession,
+    account_id: int,
+    rows: list[CustomerLeadImportRow],
+    dup_mode: str = "skip",
+) -> CustomerLeadBatchImportResult:
+    """批量导入客源线索。dup_mode=skip 时联系方式重复的行跳过，append 时仍然导入。"""
+    created = skipped = failed = 0
+    errors: list[str] = []
+    for index, row in enumerate(rows, start=2):  # Excel 数据从第 2 行起
+        if not row.phone and not row.wechat:
+            failed += 1
+            errors.append(f"第 {index} 行：phone 或 wechat 至少提供一个")
+            continue
+        try:
+            if dup_mode == "skip":
+                contact_conditions: list[str] = []
+                dup_params: dict[str, Any] = {}
+                if row.phone:
+                    contact_conditions.append("phone = :phone")
+                    dup_params["phone"] = row.phone
+                if row.wechat:
+                    contact_conditions.append("wechat = :wechat")
+                    dup_params["wechat"] = row.wechat
+                duplicate = await db.execute(
+                    text("SELECT id FROM customer_lead WHERE status NOT IN ('LOST', 'CLOSED') AND ("
+                         + " OR ".join(contact_conditions) + ") LIMIT 1"),
+                    dup_params,
+                )
+                if duplicate.scalar():
+                    skipped += 1
+                    continue
+            result = await db.execute(text("""INSERT INTO customer_lead
+                (name, phone, wechat, source, intention_level, remark, created_by)
+                VALUES (:name, :phone, :wechat, :source, :intention_level, :remark, :created_by)"""),
+                {**row.model_dump(), "created_by": account_id},
+            )
+            lead_id = int(result.lastrowid)
+            await db.execute(text("""INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id)
+                VALUES (:actor, 'customer_lead.import', 'customer_lead', :id)"""),
+                {"actor": account_id, "id": lead_id},
+            )
+            created += 1
+        except HTTPException:
+            raise
+        except Exception as exc:  # 单行失败不阻断整批
+            failed += 1
+            errors.append(f"第 {index} 行：{exc}")
+    await db.commit()
+    return CustomerLeadBatchImportResult(created=created, skipped=skipped, failed=failed, errors=errors[:50])

@@ -24,6 +24,7 @@ from app.schemas.finance import (
     FinanceOrderCreate,
     FinanceReportRow,
     FinanceRefundRequest,
+    FinanceDailyRow,
     MatchmakerOption,
     PaymentOrderResponse,
     ProductCommissionConfigCreate,
@@ -37,6 +38,7 @@ from app.schemas.finance import (
     WithdrawalAdminPage,
 )
 from app.services.matchmaker import activate_paid_service_order
+from app.services.runtime_config import withdrawal_policy
 
 
 CENT = Decimal("0.01")
@@ -307,6 +309,13 @@ async def get_balance(db: AsyncSession, account_type: str, account_id: int) -> A
 
 
 async def request_withdrawal(db: AsyncSession, current: CurrentUser, request: WithdrawalCreate) -> WithdrawalResponse:
+    # 财务配置：提现开关与单笔最低金额（后台「系统配置」页实时可调）
+    policy = await withdrawal_policy(db)
+    if not policy["enabled"]:
+        raise HTTPException(403, detail="提现功能暂未开放，请联系平台客服")
+    min_amount = Decimal(str(policy["min_amount"] or "0"))
+    if request.amount < min_amount:
+        raise HTTPException(422, detail=f"单笔提现金额不能低于 {min_amount:.2f} 元")
     # Serialize balance checks with other withdrawals for the same account.
     await db.execute(text("""SELECT id FROM account_ledger
         WHERE account_type = 'user' AND account_id = :user_id FOR UPDATE"""), {"user_id": current.id})
@@ -359,7 +368,7 @@ async def review_withdrawal(db: AsyncSession, admin: CurrentUser, withdrawal_id:
     return _withdrawal(result.mappings().one())
 
 
-async def admin_list_orders(db: AsyncSession, page: int, page_size: int, status: int | None = None, user_id: int | None = None, order_no: str | None = None) -> PaymentOrderAdminPage:
+async def admin_list_orders(db: AsyncSession, page: int, page_size: int, status: int | None = None, user_id: int | None = None, order_no: str | None = None, start_time: str | None = None, end_time: str | None = None) -> PaymentOrderAdminPage:
     where = ["1 = 1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
     if status is not None:
@@ -371,6 +380,12 @@ async def admin_list_orders(db: AsyncSession, page: int, page_size: int, status:
     if order_no:
         where.append("po.order_no = :order_no")
         params["order_no"] = order_no
+    if start_time:
+        where.append("po.created_at >= CONCAT(:start_time, ' 00:00:00')")
+        params["start_time"] = start_time
+    if end_time:
+        where.append("po.created_at < DATE_ADD(CONCAT(:end_time, ' 00:00:00'), INTERVAL 1 DAY)")
+        params["end_time"] = end_time
     clause = " AND ".join(where)
     rows = await db.execute(text(f"""SELECT po.id, po.order_no, po.user_id,
         po.product_type, po.product_name, po.amount, po.status, po.pay_time, po.created_at
@@ -382,12 +397,21 @@ async def admin_list_orders(db: AsyncSession, page: int, page_size: int, status:
     return PaymentOrderAdminPage(items=[_order(row) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
-async def admin_list_withdrawals(db: AsyncSession, page: int, page_size: int, status: str | None = None) -> WithdrawalAdminPage:
+async def admin_list_withdrawals(db: AsyncSession, page: int, page_size: int, status: str | None = None, account_id: int | None = None, start_time: str | None = None, end_time: str | None = None) -> WithdrawalAdminPage:
     where = ["1 = 1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
     if status:
         where.append("status = :status")
         params["status"] = status
+    if account_id is not None:
+        where.append("account_id = :account_id")
+        params["account_id"] = account_id
+    if start_time:
+        where.append("created_at >= CONCAT(:start_time, ' 00:00:00')")
+        params["start_time"] = start_time
+    if end_time:
+        where.append("created_at < DATE_ADD(CONCAT(:end_time, ' 00:00:00'), INTERVAL 1 DAY)")
+        params["end_time"] = end_time
     clause = " AND ".join(where)
     rows = await db.execute(text(f"""SELECT id, account_type, account_id, amount, status,
         payee_masked, failure_reason, created_at, updated_at FROM withdrawal_request
@@ -398,7 +422,36 @@ async def admin_list_withdrawals(db: AsyncSession, page: int, page_size: int, st
     return WithdrawalAdminPage(items=[_withdrawal(row) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
-async def admin_list_ledger(db: AsyncSession, page: int, page_size: int, account_type: str | None = None, account_id: int | None = None) -> LedgerEntryPage:
+async def admin_revenue_daily_report(
+    db: AsyncSession, start_date: str | None = None, end_date: str | None = None
+) -> list[FinanceDailyRow]:
+    """后台统计报表：按支付日期聚合订单收入与退款（status=1 已支付 / status=3 已退款）。"""
+    where = ["po.pay_time IS NOT NULL"]
+    params: dict[str, object] = {}
+    if start_date:
+        where.append("DATE(po.pay_time) >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        where.append("DATE(po.pay_time) <= :end_date")
+        params["end_date"] = end_date
+    clause = " AND ".join(where)
+    rows = (await db.execute(text(f"""SELECT DATE_FORMAT(po.pay_time, '%Y-%m-%d') AS date,
+        COUNT(CASE WHEN po.status = 1 THEN 1 END) AS pay_count,
+        COALESCE(SUM(CASE WHEN po.status = 1 THEN po.amount ELSE 0 END), 0) AS income_amount,
+        COUNT(CASE WHEN po.status = 3 THEN 1 END) AS refund_count,
+        COALESCE(SUM(CASE WHEN po.status = 3 THEN po.amount ELSE 0 END), 0) AS refund_amount
+        FROM payment_order po WHERE {clause}
+        GROUP BY date ORDER BY date DESC"""), params)).mappings().all()
+    return [FinanceDailyRow(
+        date=str(row["date"]),
+        pay_count=int(row["pay_count"] or 0),
+        income_amount=Decimal(str(row["income_amount"] or 0)),
+        refund_count=int(row["refund_count"] or 0),
+        refund_amount=Decimal(str(row["refund_amount"] or 0)),
+    ) for row in rows]
+
+
+async def admin_list_ledger(db: AsyncSession, page: int, page_size: int, account_type: str | None = None, account_id: int | None = None, start_time: str | None = None, end_time: str | None = None) -> LedgerEntryPage:
     where = ["1 = 1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
     if account_type:
@@ -407,6 +460,12 @@ async def admin_list_ledger(db: AsyncSession, page: int, page_size: int, account
     if account_id is not None:
         where.append("account_id = :account_id")
         params["account_id"] = account_id
+    if start_time:
+        where.append("created_at >= CONCAT(:start_time, ' 00:00:00')")
+        params["start_time"] = start_time
+    if end_time:
+        where.append("created_at < DATE_ADD(CONCAT(:end_time, ' 00:00:00'), INTERVAL 1 DAY)")
+        params["end_time"] = end_time
     clause = " AND ".join(where)
     rows = await db.execute(text(f"""SELECT id, account_type, account_id, direction, amount,
         state, source_type, source_id, idempotency_key, created_at

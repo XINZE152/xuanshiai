@@ -97,3 +97,24 @@ class MatchmakerAdminLoginLogPage(BaseModel):
     page_size: int
     total: int
     has_more: bool
+
+
+class MatchmakerAdminAuditLogItem(BaseModel):
+    """后台通用审计日志行（business_audit_log），用于系统日志页各 Tab。"""
+
+    id: int
+    actor_account_id: int | None
+    actor_name: str | None
+    action: str
+    resource_type: str
+    resource_id: int | None
+    reason: str | None
+    created_at: datetime
+
+
+class MatchmakerAdminAuditLogPage(BaseModel):
+    items: list[MatchmakerAdminAuditLogItem]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool

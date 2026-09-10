@@ -15,6 +15,7 @@ from app.schemas.finance import (
     FinanceOrderCreate,
     FinanceReportRow,
     FinanceRefundRequest,
+    FinanceDailyRow,
     ProductCommissionConfigCreate,
     ProductCommissionConfigResponse,
     PaymentOrderResponse,
@@ -43,6 +44,7 @@ from app.services.finance import (
     admin_list_ledger,
     admin_list_orders,
     admin_list_withdrawals,
+    admin_revenue_daily_report,
 )
 
 router = APIRouter(prefix="/finance")
@@ -100,27 +102,43 @@ async def report(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_
     return await admin_finance_report(db)
 
 
+@admin_router.get("/daily-report", response_model=list[FinanceDailyRow], summary="查询按日收入/退款统计报表")
+async def daily_report(
+    start_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
+    end_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
+    admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[FinanceDailyRow]:
+    admin.require("finance.read")
+    return await admin_revenue_daily_report(db, start_date, end_date)
+
+
 @admin_router.get("/orders", response_model=PaymentOrderAdminPage, summary="后台分页查询订单")
 async def admin_orders(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     status: int | None = Query(None, ge=0, le=3), user_id: int | None = Query(None, ge=1),
     order_no: str | None = Query(None, min_length=1, max_length=64),
+    start_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
+    end_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> PaymentOrderAdminPage:
     admin.require("finance.read")
-    return await admin_list_orders(db, page, page_size, status, user_id, order_no)
+    return await admin_list_orders(db, page, page_size, status, user_id, order_no, start_time, end_time)
 
 
 @admin_router.get("/withdrawals", response_model=WithdrawalAdminPage, summary="后台分页查询提现")
 async def admin_withdrawals(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     status: str | None = Query(None, max_length=32),
+    account_id: int | None = Query(None, ge=1),
+    start_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
+    end_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> WithdrawalAdminPage:
     admin.require("finance.read")
-    return await admin_list_withdrawals(db, page, page_size, status)
+    return await admin_list_withdrawals(db, page, page_size, status, account_id, start_time, end_time)
 
 
 @admin_router.get("/ledger", response_model=LedgerEntryPage, summary="后台分页查询资金流水")
@@ -128,11 +146,13 @@ async def admin_ledger(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     account_type: str | None = Query(None, max_length=32),
     account_id: int | None = Query(None, ge=1),
+    start_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
+    end_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> LedgerEntryPage:
     admin.require("finance.read")
-    return await admin_list_ledger(db, page, page_size, account_type, account_id)
+    return await admin_list_ledger(db, page, page_size, account_type, account_id, start_time, end_time)
 
 
 @admin_router.post("/orders/{order_id}/settle", response_model=list[CommissionEntryResponse], summary="结算已支付订单分成")

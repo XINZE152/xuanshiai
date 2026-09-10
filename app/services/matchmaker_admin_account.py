@@ -13,6 +13,8 @@ from app.schemas.matchmaker_admin_account import (
     MatchmakerAdminAccountPage,
     MatchmakerAdminAccountUpdate,
     MatchmakerAdminAccountStatusUpdate,
+    MatchmakerAdminAuditLogItem,
+    MatchmakerAdminAuditLogPage,
     MatchmakerAdminLoginLogItem,
     MatchmakerAdminLoginLogPage,
     MatchmakerAdminPasswordReset,
@@ -257,5 +259,48 @@ async def list_login_logs(
     total = int(count.scalar() or 0)
     return MatchmakerAdminLoginLogPage(
         items=[MatchmakerAdminLoginLogItem(**dict(row)) for row in rows.mappings().all()],
+        page=page, page_size=page_size, total=total, has_more=page * page_size < total,
+    )
+
+
+async def list_audit_logs(
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    action_prefix: str | None = None,
+    actor_account_id: int | None = None,
+    from_time: datetime | None = None,
+    to_time: datetime | None = None,
+    keyword: str | None = None,
+) -> MatchmakerAdminAuditLogPage:
+    """后台通用审计日志分页（business_audit_log），按 action 前缀/操作人/时间/关键词过滤。"""
+    conditions = ["1 = 1"]
+    params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    if action_prefix:
+        conditions.append("a.action LIKE CONCAT(:action_prefix, '%')")
+        params["action_prefix"] = action_prefix
+    if actor_account_id is not None:
+        conditions.append("a.actor_user_id = :actor_id")
+        params["actor_id"] = actor_account_id
+    if from_time:
+        conditions.append("a.created_at >= :from_time")
+        params["from_time"] = from_time
+    if to_time:
+        conditions.append("a.created_at <= :to_time")
+        params["to_time"] = to_time
+    if keyword:
+        conditions.append("(a.reason LIKE CONCAT('%', :kw, '%') OR a.action LIKE CONCAT('%', :kw, '%'))")
+        params["kw"] = keyword
+    condition = " AND ".join(conditions)
+    rows = await db.execute(text(f"""SELECT a.id, a.actor_user_id, acc.username AS actor_name,
+        a.action, a.resource_type, a.resource_id, a.reason, a.created_at
+        FROM business_audit_log a
+        LEFT JOIN matchmaker_admin_account acc ON acc.id = a.actor_user_id
+        WHERE {condition}
+        ORDER BY a.id DESC LIMIT :limit OFFSET :offset"""), params)
+    count = await db.execute(text(f"SELECT COUNT(*) FROM business_audit_log a WHERE {condition}"), params)
+    total = int(count.scalar() or 0)
+    return MatchmakerAdminAuditLogPage(
+        items=[MatchmakerAdminAuditLogItem(**dict(row)) for row in rows.mappings().all()],
         page=page, page_size=page_size, total=total, has_more=page * page_size < total,
     )

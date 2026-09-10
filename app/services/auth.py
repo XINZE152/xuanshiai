@@ -33,6 +33,7 @@ from app.services.sms.providers import get_sms_provider
 from app.services.wechat.providers import get_wechat_provider
 from app.services.presence import mark_session_online
 from app.services.points import auto_login_reward
+from app.services.runtime_config import mini_realname_enabled, platform_registration_open, same_id_multiple_accounts_allowed
 
 
 def normalize_user_agent(user_agent: str | None) -> str | None:
@@ -180,6 +181,8 @@ async def get_or_create_user_by_phone(db: AsyncSession, phone: str, ip: str | No
         user_id = row["id"]
         await ensure_default_user_role(db, user_id)
         return user_id
+    if not await platform_registration_open(db):
+        raise HTTPException(403, detail="平台当前暂停新用户注册，请联系红娘开通后再试")
     result = await db.execute(
         text("INSERT INTO users (phone, phone_verified_at, register_ip) VALUES (:phone, UTC_TIMESTAMP(), :ip)"),
         {"phone": phone, "ip": ip},
@@ -223,6 +226,8 @@ async def login_wechat(db: AsyncSession, request: WechatLoginRequest, ip: str | 
             await db.execute(text("UPDATE users SET nickname = COALESCE(:nickname, nickname), avatar = COALESCE(:avatar, avatar), last_login_at = UTC_TIMESTAMP() WHERE id = :id"), {"id": user_id, "nickname": request.nickname, "avatar": request.avatar})
             phone = row["phone"]
         else:
+            if not await platform_registration_open(db):
+                raise HTTPException(403, detail="平台当前暂停新用户注册，请联系红娘开通后再试")
             result = await db.execute(text("INSERT INTO users (openid, unionid, nickname, avatar, register_ip) VALUES (:openid, :unionid, :nickname, :avatar, :ip)"), {"openid": identity["openid"], "unionid": identity.get("unionid"), "nickname": request.nickname, "avatar": request.avatar, "ip": ip})
             user_id, phone = result.lastrowid, None
         await ensure_default_user_role(db, user_id)
@@ -303,14 +308,18 @@ def calculate_age(birthday: date) -> int:
 
 
 async def submit_realname(db: AsyncSession, user_id: int, request: RealNameRequest) -> dict[str, Any]:
+    if not await mini_realname_enabled(db):
+        raise HTTPException(403, detail="实名认证功能暂未开放")
     birth = date(int(request.id_card[6:10]), int(request.id_card[10:12]), int(request.id_card[12:14]))
     if calculate_age(birth) < 18:
         raise HTTPException(422, detail="仅支持年满18周岁的用户认证")
     card_hash = hashlib.sha256(request.id_card.upper().encode()).hexdigest()
+    allow_same_id = await same_id_multiple_accounts_allowed(db)
     async with db.begin():
-        duplicate = await db.execute(text("SELECT user_id FROM user_auth WHERE id_card_hash = :hash AND user_id <> :uid AND realname_status = 2"), {"hash": card_hash, "uid": user_id})
-        if duplicate.first():
-            raise HTTPException(409, detail="该身份信息已被其他账号认证")
+        if not allow_same_id:
+            duplicate = await db.execute(text("SELECT user_id FROM user_auth WHERE id_card_hash = :hash AND user_id <> :uid AND realname_status = 2"), {"hash": card_hash, "uid": user_id})
+            if duplicate.first():
+                raise HTTPException(409, detail="该身份信息已被其他账号认证")
         current = await db.execute(text("SELECT realname_status FROM user_auth WHERE user_id = :uid FOR UPDATE"), {"uid": user_id})
         existing = current.scalar()
         if existing == 2:

@@ -750,4 +750,27 @@ BUSINESS_TABLES = {
             PRIMARY KEY (`id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘使用教程'
     """,
+    # ============================================
+    # 运营工具/活动/商家/短视频等通用内容项（2026-09 对标补齐）
+    # ============================================
+    "admin_content_item": """
+        CREATE TABLE IF NOT EXISTS `admin_content_item` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `tenant_id` bigint unsigned NOT NULL DEFAULT 1,
+            `domain` varchar(64) NOT NULL,
+            `title` varchar(255) NOT NULL DEFAULT '',
+            `subtitle` varchar(500) DEFAULT NULL,
+            `image_url` varchar(500) DEFAULT NULL,
+            `amount` decimal(12,2) DEFAULT NULL,
+            `status` tinyint NOT NULL DEFAULT 1 COMMENT '1正常 2停用/隐藏',
+            `sort` int NOT NULL DEFAULT 0,
+            `extra_json` longtext NOT NULL,
+            `created_by` bigint unsigned DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_content_domain` (`tenant_id`, `domain`, `status`, `sort`),
+            KEY `idx_content_created` (`domain`, `created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='活动/商家/短视频/礼品等通用内容项'
+    """,
 }

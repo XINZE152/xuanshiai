@@ -13,6 +13,7 @@ from app.schemas.matchmaker_admin_account import (
     MatchmakerAdminAccountPage,
     MatchmakerAdminAccountStatusUpdate,
     MatchmakerAdminAccountUpdate,
+    MatchmakerAdminAuditLogPage,
     MatchmakerAdminLoginLogPage,
     MatchmakerAdminPasswordReset,
     MatchmakerAdminSessionPage,
@@ -21,6 +22,7 @@ from app.services.matchmaker_admin_account import (
     create_account,
     get_account,
     list_accounts,
+    list_audit_logs,
     list_login_logs,
     list_sessions,
     reset_password,
@@ -70,6 +72,22 @@ async def login_logs(
 ) -> MatchmakerAdminLoginLogPage:
     current.require("matchmaker.account.manage")
     return await list_login_logs(db, page, page_size, account_id, username, from_time, to_time)
+
+
+@router.get("/audit-logs", response_model=MatchmakerAdminAuditLogPage, summary="后台通用审计日志（系统日志页）")
+async def audit_logs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    action_prefix: str | None = Query(None, max_length=64, description="action 前缀过滤，如 admin_account.password"),
+    actor_account_id: int | None = Query(None, ge=1),
+    from_time: datetime | None = Query(None, alias="from"),
+    to_time: datetime | None = Query(None, alias="to"),
+    keyword: str | None = Query(None, min_length=1, max_length=64),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MatchmakerAdminAuditLogPage:
+    current.require("matchmaker.account.manage")
+    return await list_audit_logs(db, page, page_size, action_prefix, actor_account_id, from_time, to_time, keyword)
 
 
 @router.get("/accounts/{account_id}", response_model=MatchmakerAdminAccountItem)

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.redis import consume_daily, get_daily_used, refund_daily
 from app.services.admin_config import get_runtime_value
+from app.services.runtime_config import match_line_permissions
 from app.schemas.community import (
     ActivityPage,
     ActivityResponse,
@@ -1548,12 +1549,17 @@ async def get_community_quotas(db: AsyncSession, user_id: int) -> CommunityQuota
             )
         ).scalar()
     )
-    apply_total = int(await get_runtime_value(
-        db,
-        "platform_permissions",
-        "vip_apply_daily_limit" if vip else "free_apply_daily_limit",
-        settings.apply_daily_vip_limit if vip else settings.apply_daily_free_limit,
-    ))
+    line_perm = await match_line_permissions(db)
+    unified = line_perm.get("apply_daily")
+    if unified and int(unified) > 0:
+        apply_total = int(unified)
+    else:
+        apply_total = int(await get_runtime_value(
+            db,
+            "platform_permissions",
+            "vip_apply_daily_limit" if vip else "free_apply_daily_limit",
+            settings.apply_daily_vip_limit if vip else settings.apply_daily_free_limit,
+        ))
     paper_total = int(await get_runtime_value(
         db, "platform_permissions", "paper_plane_daily_limit", settings.paper_plane_daily_limit
     ))

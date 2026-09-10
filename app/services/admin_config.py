@@ -15,30 +15,57 @@ NAMESPACE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
     "platform_basic": (
         "平台基本配置", "平台品牌、分享、默认地区和默认头像。",
-        {"platform_name": "宣誓爱", "slogan": "你的爱值得郑重宣告", "pc_logo_url": None,
+        {"platform_name": "宣智爱", "slogan": "你的爱值得被宣告", "pc_logo_url": None,
          "pc_guide_image_url": None, "douyin_qrcode_url": None,
-         "home_share_title": "点击立即体验『宣誓爱』本地实名社交婚恋平台",
+         "home_share_title": "点击立即体验「宣智爱」本地实名社交婚恋平台",
          "home_share_summary": "一个有趣、有料、真实、优质的社交活动平台。",
          "wechat_push_summary": "点击底部+立即脱单！实名认证/线上相识/联谊活动/线下约见",
          "home_share_image_url": None, "wechat_login_logo_url": None,
          "login_slogan_url": None, "default_hometown": {"province": "江苏省", "city": "南京市"},
          "default_residence": {"province": "江苏省", "city": "南京市"},
+         "default_native_place_text": "江苏省 / 南京市", "default_live_place_text": "江苏省 / 南京市",
          "default_avatar_male_url": None, "default_avatar_female_url": None},
         [],
     ),
     "platform_operation": (
-        "平台运营模式", "平台开放状态和维护提示。",
-        {"mode": "normal", "registration_enabled": True, "browse_enabled": True,
+        "平台运营模式", "平台整体运营模式与开放状态。",
+        {"mode": "online-offline", "registration_enabled": True, "browse_enabled": True,
          "online_match_enabled": True, "membership_enabled": True, "matchmaker_enabled": True,
          "maintenance_message": "平台正在维护中，请稍后再试。"}, [],
     ),
     "platform_navigation": (
         "导航配置", "PC、H5、小程序和会员中心导航入口。",
-        {"pc": [], "h5": [], "mini_program": [], "member_center": []}, [],
+        {"sections": [], "icon_rows": [], "pc": [], "h5": [], "mini_program": [], "member_center": []}, [],
     ),
     "platform_layout": (
-        "平台布局", "首页和资料页模块开关、排序及展示参数。",
-        {"home_template": "default", "profile_template": "default", "modules": [], "banners": [], "popups": []}, [],
+        "平台布局", "手机端首页、会员资料页、红娘团队页与电脑端页面布局参数。",
+        {"home": {}, "member": {}, "team": {}, "pc": {},
+         "home_template": "default", "profile_template": "default", "modules": [], "banners": [], "popups": []}, [],
+    ),
+    "platform_register_guide": (
+        "信息登记引导页配置", "会员登记流程前引导入口的标题、描述、展示与排序。",
+        {"rows": []}, [],
+    ),
+    "platform_register_fields": (
+        "基本资料登记配置", "会员资料登记页各字段的引导文案与注册流程开关。",
+        {"subtitle": "", "fields": []}, [],
+    ),
+    "platform_private_fields": (
+        "私密信息登记与展示配置", "私密资料项在注册、编辑与详情页中的展示开关及引导文案。",
+        {"rows": []}, [],
+    ),
+    "platform_filter_config": (
+        "筛选功能配置", "会员筛选条件的开关、排序与使用权限。",
+        {"rows": []}, [],
+    ),
+    "platform_member_states": (
+        "会员中心状态文案", "会员中心-状态设置中各状态的自定义名称与描述文案。",
+        {"items": []}, [],
+    ),
+    "platform_custom_pages": (
+        "自定义页面文案", "关于我们、私人定制、防骗提醒等自定义页面的标题与正文。",
+        {"about_html": None, "custom_name": "私人定制", "custom_desc_html": None,
+         "cheat_title": "防骗提醒", "cheat_html": None}, [],
     ),
     "platform_permissions": (
         "平台权限配置", "浏览、资料查看、牵线和会员状态权限。",
@@ -124,6 +151,207 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
         "系统配置", "管理员、广告、日志和系统运行规则。",
         {"basic": {"business_entity": None, "platform_name": "宣誓爱"}, "ad": {"enabled": False, "items": []},
          "audit_log_retention_days": 365, "admin_login_log_retention_days": 180}, [],
+    ),
+    "sys_site": (
+        "系统配置-站点信息", "系统管理-系统配置页：经营主体、域名、备案、客服、Logo、协议与隐私等站点信息。",
+        {"business_entity": None, "domain": "www.xuanshiai.com", "domain_icp": "苏ICP备2026018853号-3",
+         "police_icp": None, "region": "江苏省-南京市", "service_phone": None, "service_wechat": None,
+         "service_qrcode_url": None, "pc_footer_html": None, "admin_logo_url": None,
+         "matchmaker_logo_url": None, "user_agreement_html": None, "privacy_policy_html": None}, [],
+    ),
+    "sys_access": (
+        "系统配置-注册访问", "系统管理-系统配置页：平台浏览、注册、IP 限制与短信验证码开关。",
+        {"browse_enabled": True, "secure_login": False, "register_enabled": True,
+         "ip_type": "黑名单", "ip_text": None, "sms_captcha_enabled": True}, [],
+    ),
+    "sys_storage": (
+        "系统配置-文件存储", "系统管理-系统配置页：私有化对象存储(七牛)密钥与地址。",
+        {"qiniu_access_key": None, "qiniu_secret_key": None, "bucket": None,
+         "upload_host": None, "remote_host": None, "private_queue": None}, [],
+    ),
+    "sys_payment": (
+        "系统配置-支付配置", "系统管理-系统配置页：微信/支付宝支付商户参数与证书。",
+        {"enabled": True, "provider": "wechat", "wechat_appid": None, "wechat_mch_id": None,
+         "cert_type": "公钥模式", "wechat_pubkey_id": None, "wechat_pubkey": None,
+         "wechat_api_v2_key": None, "wechat_api_v3_key": None, "p12_file": None, "sort": 1,
+         "alipay_enabled": False}, [],
+    ),
+    "sys_watermark": (
+        "系统配置-图片水印", "系统管理-系统配置页：图片水印开关、样式与参数。",
+        {"enabled": True, "mode": "指定位置", "text": "宣智爱", "font": "微软雅黑",
+         "scale": 40, "font_size": 0, "color": None, "rotate": 0, "opacity": 0,
+         "fill_width": 400, "fill_height": 400}, [],
+    ),
+    "sys_posters": (
+        "系统配置-海报配置", "系统管理-系统配置页：各场景分享海报及扫码关注公众号开关。",
+        {"rows": []}, [],
+    ),
+    "sys_region": (
+        "系统配置-自定义区域", "系统管理-系统配置页：区域数据管理（省份及下级区域）。",
+        {"provinces": []}, [],
+    ),
+    "sys_ads": (
+        "系统管理-广告位", "系统管理-广告管理页：H5/小程序各广告位的图、类型与开关。",
+        {"rows": []}, [],
+    ),
+    "sys_outbound": (
+        "系统管理-电话外呼平台", "系统管理-外呼平台页：外呼服务商与账户、呼叫中心地址。",
+        {"provider": None, "account_name": None, "call_center_url": None,
+         "record_download_url": None}, [],
+    ),
+    "sys_sms": (
+        "系统管理-短信配置", "系统管理-短信：签名与全部通知场景开关（仅本地配置存储，发送走服务商）。",
+        {"signature": None, "send_enabled": True, "notices": []}, [],
+    ),
+    # ---------------- 电子合同（财务管理-合同管理/模板/印章/合同配置） ----------------
+    "econtract_config": (
+        "电子合同配置", "财务管理-合同配置页：电子合同关键键值配置。",
+        {"items": [
+            {"id": 1, "key": "sign_expire_days", "name": "合同签署有效期（天）", "value": "7", "description": "超期未签署的合同自动置为已过期", "update_time": None},
+            {"id": 2, "key": "expire_remind_days", "name": "到期提醒（天）", "value": "3", "description": "合同到期前 N 天提醒签署人", "update_time": None},
+            {"id": 3, "key": "default_contract_type", "name": "默认合同类型", "value": "红娘服务协议", "description": "新发起合同的默认类型", "update_time": None},
+            {"id": 4, "key": "allow_revoke", "name": "是否允许撤销签署", "value": "no", "description": "yes = 已签署合同可由管理员撤销", "update_time": None},
+        ]}, [],
+    ),
+    "econtract_records": (
+        "电子合同记录", "财务管理-合同管理页：合同签署记录（占位数据源，待电子签服务商接入）。",
+        {"items": []}, [],
+    ),
+    "econtract_templates": (
+        "电子合同模板", "财务管理-模板管理页：合同模板（占位数据源）。",
+        {"items": []}, [],
+    ),
+    "econtract_seals": (
+        "电子印章", "财务管理-印章管理页：印章图与启停（占位数据源）。",
+        {"items": []}, [],
+    ),
+    # ---------------- 电话外呼记录（系统管理） ----------------
+    "outbound_seats": (
+        "外呼坐席", "系统管理-外呼状态页：坐席工号/状态/外呼号码/绑定红娘及统计（占位数据源，待外呼服务商接入）。",
+        {"items": []}, [],
+    ),
+    "outbound_call_records": (
+        "外呼呼叫记录", "系统管理-呼叫记录页：通话记录与录音地址（占位数据源）。",
+        {"items": []}, [],
+    ),
+    # ---------------- 短信运营记录（系统管理） ----------------
+    "sms_broadcasts": (
+        "短信群发任务", "系统管理-短信群发页：群发任务与状态（占位数据源，实际下发走短信服务商）。",
+        {"items": []}, [],
+    ),
+    "sms_send_records": (
+        "短信发送记录", "系统管理-发送记录页：发送明细与余量统计（占位数据源）。",
+        {"items": [], "balance": 0, "provider": "腾讯云专线"}, [],
+    ),
+    # ---------------- 公众号（后端暂无公众号平台对接，先落配置存储） ----------------
+    "wechat_mp": (
+        "公众号参数配置", "公众号-参数配置页：公众号凭据、加密模式、二维码与安全验证文件。",
+        {"wx_no": "", "app_id": "", "app_secret": "", "api_token": "", "encoding_aes_key": "",
+         "crypto_mode": "safe", "qrcode_url": None, "verify_file_name": "", "verify_file_url": None,
+         "platform_templates": []}, [],
+    ),
+    "wechat_mp_fans": (
+        "公众号关注粉丝", "公众号-关注粉丝页：粉丝列表（占位数据源，待公众号平台同步接口）。",
+        {"items": []}, [],
+    ),
+    "wechat_mp_menu": (
+        "公众号菜单", "公众号-菜单配置页：一级/二级菜单与发布时间。",
+        {"top_menus": [], "sub_menus": [], "published_at": None}, [],
+    ),
+    "wechat_mp_replies": (
+        "公众号自动回复", "公众号-自动回复页：关注/关键词/消息回复内容与回复方式。",
+        {"follow": {"mode": "all", "items": []}, "keyword": {"items": []},
+         "message": {"mode": "all", "items": []}}, [],
+    ),
+    "wechat_mp_templates": (
+        "公众号模板消息", "公众号-模板消息页：模板行配置与启停。",
+        {"items": []}, [],
+    ),
+    "wechat_mp_broadcasts": (
+        "公众号消息群发", "公众号-消息群发页：已创建群发消息（占位数据源）。",
+        {"items": []}, [],
+    ),
+    # ---------------- 小程序 ----------------
+    "wechat_mini": (
+        "小程序参数配置", "小程序-参数配置页：开关、凭据、样式、小程序码/分享封面与实名认证功能开关。",
+        {"enabled": True, "app_id": "", "app_secret": "", "bar_color": "#6a2fbf",
+         "qrcode_url": None, "share_cover_url": None, "realname_enabled": True,
+         "authorized": False}, [],
+    ),
+    # ---------------- 后台权限分组（账号权限实际挂在账号上，分组为管理端组织占位） ----------------
+    "admin_groups": (
+        "后台权限分组", "系统管理-权限分组页：用户组与其权限集合。",
+        {"groups": []}, [],
+    ),
+    # ---------------- 运营工具/活动/商家/短视频等（2026-09 对标补齐） ----------------
+    "tools_active": (
+        "活动参数配置", "活动报名-参数配置：活动分类、报名设置与宣传图。",
+        {"categories": [], "banner_url": None, "signup_tip": "", "allow_cancel": True, "max_signups_per_user": 1}, [],
+    ),
+    "tools_active_alliance": (
+        "活动运营方案", "活动报名-运营方案：富文本说明内容。",
+        {"content_html": "", "enabled": True}, [],
+    ),
+    "tools_merchant_alliance": (
+        "商家联盟功能配置", "商家联盟-功能配置：商家/商品分类管理与联盟开关。",
+        {"categories": [], "enabled": True, "join_tip": ""}, [],
+    ),
+    "tools_short_video": (
+        "短视频参数配置", "短视频-参数配置：红包、评论、打赏与展示开关。",
+        {"red_packet_enabled": True, "comment_enabled": True, "tip_enabled": True,
+         "publish_review": False, "banner_url": None, "daily_publish_limit": 5}, [],
+    ),
+    "tools_free_pay": (
+        "自由收款配置", "运营工具-自由收款：收款类目、收款项目与收款码。",
+        {"categories": [], "items": [], "qrcode_url": None, "remark": ""}, [],
+    ),
+    "tools_member_zone": (
+        "会员分区配置", "运营工具-会员分区：分区列表、条件与背景图。",
+        {"zones": []}, [],
+    ),
+    "tools_generate_tool": (
+        "推文助手配置", "运营工具-推文助手：生成模板与默认文案。",
+        {"templates": [], "default_content": ""}, [],
+    ),
+    "tools_love_partner": (
+        "合伙红娘功能配置", "合伙红娘-功能配置：加盟说明与开关。",
+        {"content_html": "", "enabled": True, "apply_tip": ""}, [],
+    ),
+    "tools_partner_bonus": (
+        "合伙红娘分成配置", "合伙红娘-分成配置：各级分成比例与奖励。",
+        {"levels": [], "mode": "ratio", "default_ratio": 0}, [],
+    ),
+    "tools_customer_leads": (
+        "客源线索功能配置", "客源线索-功能配置：线索分配、跟进与保护规则。",
+        {"auto_assign": False, "protect_days": 30, "follow_up_tip": "",
+         "abandon_days": 15, "daily_new_limit": 10}, [],
+    ),
+    "tools_interactive_function": (
+        "互动消息功能设置", "运营工具-互动消息：消息类型开关与频率限制。",
+        {"like_enabled": True, "greet_enabled": True, "gift_notice_enabled": True,
+         "daily_push_limit": 20, "quiet_hours": ""}, [],
+    ),
+    "tools_interactive_content": (
+        "互动消息内容设置", "运营工具-互动消息：各类消息文案模板。",
+        {"templates": []}, [],
+    ),
+    "tools_column_config": (
+        "搭子社群栏目配置", "运营工具-搭子社群：栏目标题、描述与分享封面。",
+        {"title": "搭子社群", "description": "兴趣搭子、活动搭子，找同频的人。",
+         "share_cover_url": None, "categories": []}, [],
+    ),
+    "tools_good_news": (
+        "红娘喜讯栏目配置", "运营工具-红娘喜讯：栏目标题、描述、分享封面、宣传头图、喜讯分类与祝福语。",
+        {"title": "红娘喜讯", "description": "Ta们都是在我们的介绍撮合下，从相识、到恋爱、到见父母、到订婚、到结婚生子！",
+         "share_cover_mode": "default", "share_cover_url": None, "banner_url": None,
+         "view_url": "/subpages/xixun/index",
+         "categories": ["牵手成功", "恋爱生活", "已见父母", "已订婚", "已领证", "已办婚礼", "婚后生活", "锦旗飘扬"],
+         "category_icons": [],
+         "blessings": []}, [],
+    ),
+    "tools_branch": (
+        "分站配置", "分店管理-分站配置：分站列表与当前启用分站。",
+        {"current_site": "", "sites": []}, [],
     ),
 }
 

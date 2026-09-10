@@ -5,8 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
 from app.db.session import get_db
-from app.schemas.customer_lead_admin import CustomerLead, CustomerLeadAbandonment, CustomerLeadAbandonRequest, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadFollowUp, CustomerLeadFollowUpCreate, CustomerLeadPage, CustomerLeadRestoreRequest, CustomerLeadStatistics, CustomerLeadUpdate
-from app.services.customer_lead_admin import abandon_lead, add_follow_up, assign_lead, create_lead, get_lead, lead_statistics, list_abandonments, list_follow_ups, list_leads, restore_lead, update_lead
+from app.schemas.customer_lead_admin import CustomerLead, CustomerLeadAbandonment, CustomerLeadAbandonRequest, CustomerLeadBatchImportRequest, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadBatchImportResult, CustomerLeadFollowUp, CustomerLeadFollowUpCreate, CustomerLeadPage, CustomerLeadRestoreRequest, CustomerLeadStatistics, CustomerLeadUpdate
+from app.services.customer_lead_admin import abandon_lead, add_follow_up, assign_lead, batch_import_leads, create_lead, get_lead, lead_statistics, list_abandonments, list_follow_ups, list_leads, restore_lead, update_lead
 
 router = APIRouter(prefix="/admin/customer-leads")
 
@@ -57,6 +57,16 @@ async def lead_update(lead_id: int = Path(..., ge=1), body: CustomerLeadUpdate =
 async def follow_up_list(lead_id: int = Path(..., ge=1), page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=100), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[CustomerLeadFollowUp]:
     current.require("customer_lead.manage")
     return await list_follow_ups(db, lead_id, page, page_size)
+
+
+@router.post("/batch-import", response_model=CustomerLeadBatchImportResult, summary="批量导入客源线索")
+async def batch_import(
+    request: CustomerLeadBatchImportRequest,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CustomerLeadBatchImportResult:
+    current.require("customer_lead.manage")
+    return await batch_import_leads(db, current.account.id, request.rows, request.dup_mode)
 
 
 @router.post("/{lead_id}/follow-ups", response_model=CustomerLeadFollowUp, status_code=201, summary="新增线索跟进记录")

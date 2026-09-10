@@ -121,3 +121,24 @@ class CustomerLeadAbandonment(BaseModel):
     restored_by: int | None
     restored_at: datetime | None
     restore_reason: str | None
+
+
+class CustomerLeadImportRow(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    phone: str | None = Field(default=None, max_length=32)
+    wechat: str | None = Field(default=None, max_length=128)
+    source: str = Field(min_length=1, max_length=64)
+    intention_level: Literal[1, 2, 3] = 1
+    remark: str | None = Field(default=None, max_length=2000)
+
+
+class CustomerLeadBatchImportRequest(BaseModel):
+    rows: list[CustomerLeadImportRow] = Field(min_length=1, max_length=1000)
+    dup_mode: Literal["skip", "append"] = "skip"
+
+
+class CustomerLeadBatchImportResult(BaseModel):
+    created: int = 0
+    skipped: int = 0
+    failed: int = 0
+    errors: list[str] = Field(default_factory=list)

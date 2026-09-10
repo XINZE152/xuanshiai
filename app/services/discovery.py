@@ -59,6 +59,11 @@ from app.services.profile import _calculate_age, _json_dict, _json_list, get_pro
 from app.services.quotas import consume_extra
 from app.services.admin_config import get_runtime_value
 from app.services.restrictions import ensure_user_allowed
+from app.services.runtime_config import (
+    match_line_permissions,
+    platform_browse_open,
+    platform_maintenance_message,
+)
 
 logger = logging.getLogger(__name__)
 candidate_visibility_service = CandidateVisibilityService()
@@ -510,6 +515,8 @@ async def _fetch_rows(
 
 
 async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: DiscoveryFilters, *, plaza: bool) -> DiscoveryPage:
+    if not await platform_browse_open(db):
+        raise HTTPException(403, detail=await platform_maintenance_message(db))
     viewer = await _viewer_context(db, viewer_id)
     if viewer["completion_score"] < 100:
         raise HTTPException(403, detail="请先完善资料后再进入推荐")
@@ -537,6 +544,8 @@ async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: Discover
 
 
 async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySearch) -> DiscoveryPage:
+    if not await platform_browse_open(db):
+        raise HTTPException(403, detail=await platform_maintenance_message(db))
     filters = DiscoveryFilters(
         cursor=query.cursor,
         page=query.page,
@@ -664,6 +673,8 @@ async def _record_browse(db: AsyncSession, viewer_id: int, target_id: int) -> No
 
 
 async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> PublicProfileResponse:
+    if not await platform_browse_open(db):
+        raise HTTPException(403, detail=await platform_maintenance_message(db))
     if viewer_id == target_id:
         raise HTTPException(422, detail="不能浏览自己的名片")
     await _ensure_target(db, viewer_id, target_id)
@@ -914,6 +925,16 @@ async def _notify(db: AsyncSession, user_id: int, notification_type: str, title:
 
 
 async def _consume_apply_quota(db: AsyncSession, viewer_id: int, vip: bool) -> bool:
+    key = await _quota_key("apply", viewer_id)
+    # 权限配置(卡片4) line.times > 0 时为全局统一每日上限，覆盖 VIP/免费两套旧限额
+    line_perm = await match_line_permissions(db)
+    unified = line_perm.get("apply_daily")
+    if unified and int(unified) > 0:
+        if not await consume_daily(key, int(unified)):
+            if await consume_extra(db, viewer_id, "apply", "积分兑换申请次数"):
+                return False
+            raise HTTPException(429, detail="今日认识申请次数已用完")
+        return True
     free_limit = int(await get_runtime_value(db, "platform_permissions", "free_apply_daily_limit", settings.apply_daily_free_limit))
     vip_limit = int(await get_runtime_value(db, "platform_permissions", "vip_apply_daily_limit", settings.apply_daily_vip_limit))
     limit = vip_limit if vip else free_limit
@@ -929,7 +950,7 @@ async def _consume_apply_quota(db: AsyncSession, viewer_id: int, vip: bool) -> b
         if isinstance(rights, dict):
             limit = free_limit + int(rights.get("apply_bonus") or 0)
 
-    if not await consume_daily(await _quota_key("apply", viewer_id), limit):
+    if not await consume_daily(key, limit):
         if await consume_extra(db, viewer_id, "apply", "积分兑换申请次数"):
             return False
         raise HTTPException(429, detail="今日认识申请次数已用完")
@@ -953,8 +974,16 @@ async def create_application(db: AsyncSession, viewer_id: int, target_id: int, r
         raise HTTPException(403, detail="请先完善资料后再申请认识")
     if not viewer.get("phone"):
         raise HTTPException(403, detail="请先绑定手机号")
-    if viewer.get("realname_status") != 2:
+    line_perm = await match_line_permissions(db)
+    # 卡片4「没有实名认证是否允许发起牵线」：no/未配置 = 禁止（与旧行为一致）
+    if viewer.get("realname_status") != 2 and line_perm.get("realname_allowed") is not True:
         raise HTTPException(403, detail="请先完成实名认证")
+    # 卡片4「没有实名认证的是否允许被牵线」：no = 禁止向未实名对象发起；未配置 = 沿用旧行为(允许)
+    if line_perm.get("be_linked_allowed") is False:
+        target_auth = await db.execute(text("SELECT COALESCE(realname_status, 0) AS realname_status FROM user_auth WHERE user_id = :target_id"), {"target_id": target_id})
+        target_status = int((target_auth.mappings().first() or {}).get("realname_status") or 0)
+        if target_status != 2:
+            raise HTTPException(403, detail="对方尚未完成实名认证，暂时无法发起认识申请")
     existing = await db.execute(text("SELECT id, status FROM match_apply WHERE ((from_user_id = :from_id AND to_user_id = :to_id) OR (from_user_id = :to_id AND to_user_id = :from_id)) AND status IN (0, 1) LIMIT 1"), {"from_id": viewer_id, "to_id": target_id})
     if existing.first():
         raise HTTPException(409, detail="双方已有进行中的认识申请或匹配")

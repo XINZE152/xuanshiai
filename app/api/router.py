@@ -15,6 +15,7 @@ from app.api.routes import (
     admin,
     admin_home,
     admin_config,
+    admin_content,
     ai_avatar,
     auth,
     ai,
@@ -100,6 +101,7 @@ api_router.include_router(message_admin.router, tags=["\u7ba1\u7406\u540e\u53f0"
 api_router.include_router(admin.router, tags=["管理后台"])
 api_router.include_router(admin_home.router, tags=["管理端首页"])
 api_router.include_router(admin_config.router, tags=["管理后台配置"])
+api_router.include_router(admin_content.router, tags=["管理后台通用内容"])
 api_router.include_router(admin_home.legacy_router, tags=["管理端首页兼容"])
 api_router.include_router(matchmaker_admin.router, tags=["红娘后台"])
 api_router.include_router(matchmaker_admin_account.router, tags=["红娘后台"])

@@ -177,6 +177,16 @@ class FinanceRefundRequest(BaseModel):
 # ============================================
 
 
+class FinanceDailyRow(BaseModel):
+    """按日聚合的订单收入/退款报表行（依据 payment_order 的支付时间）。"""
+
+    date: str
+    pay_count: int
+    income_amount: Decimal
+    refund_count: int
+    refund_amount: Decimal
+
+
 class CommissionEntryDetailItem(BaseModel):
     """详情页单条明细：含关联订单/会员/红娘/事件，金额字段以 str 序列化避免精度丢失。"""
 
