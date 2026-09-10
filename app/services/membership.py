@@ -1,7 +1,9 @@
 import json
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any, Mapping
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -25,6 +27,94 @@ DEFAULT_RIGHTS = {
     "visitor_detail": False,
     "browse_history_scope": "today",
 }
+
+_SQL_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SQL_QUALIFIED_IDENTIFIER = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?"
+)
+
+ACTIVE_MEMBERSHIP_CONDITION_SQL = """{membership_alias}.status = 1
+  AND ({membership_alias}.start_at IS NULL OR {membership_alias}.start_at <= UTC_TIMESTAMP())
+  AND ({membership_alias}.end_at IS NULL OR {membership_alias}.end_at > UTC_TIMESTAMP())"""
+
+ACTIVE_MEMBERSHIP_WHERE_SQL = """{membership_alias}.user_id = :{user_id_param}
+  AND """ + ACTIVE_MEMBERSHIP_CONDITION_SQL
+
+ACTIVE_MEMBERSHIP_EXISTS_SQL = """EXISTS (SELECT 1 FROM user_membership {membership_alias}
+               WHERE {membership_alias}.user_id = :{user_id_param} AND {membership_alias}.status = 1
+                 AND ({membership_alias}.start_at IS NULL OR {membership_alias}.start_at <= UTC_TIMESTAMP())
+                 AND ({membership_alias}.end_at IS NULL OR {membership_alias}.end_at > UTC_TIMESTAMP()))"""
+
+
+def _validate_sql_identifier(value: str) -> str:
+    if not _SQL_IDENTIFIER.fullmatch(value):
+        raise ValueError("invalid SQL identifier")
+    return value
+
+
+def active_membership_where_sql(*, membership_alias: str, user_id_param: str) -> str:
+    return ACTIVE_MEMBERSHIP_WHERE_SQL.format(
+        membership_alias=_validate_sql_identifier(membership_alias),
+        user_id_param=_validate_sql_identifier(user_id_param),
+    )
+
+
+def active_membership_exists_sql(*, membership_alias: str, user_id_param: str) -> str:
+    return ACTIVE_MEMBERSHIP_EXISTS_SQL.format(
+        membership_alias=_validate_sql_identifier(membership_alias),
+        user_id_param=_validate_sql_identifier(user_id_param),
+    )
+
+
+def active_membership_exists_for_column_sql(
+    *, membership_alias: str, user_id_column: str
+) -> str:
+    """Build an active-membership EXISTS predicate correlated to a safe column."""
+    alias = _validate_sql_identifier(membership_alias)
+    if not _SQL_QUALIFIED_IDENTIFIER.fullmatch(user_id_column):
+        raise ValueError("invalid SQL identifier")
+    return (
+        f"EXISTS (SELECT 1 FROM user_membership {alias} WHERE "
+        f"{alias}.user_id = {user_id_column} AND "
+        + ACTIVE_MEMBERSHIP_CONDITION_SQL.format(membership_alias=alias)
+        + ")"
+    )
+
+
+async def has_active_membership(db: AsyncSession, user_id: int) -> bool:
+    """Return whether a user currently has an effective VIP membership.
+
+    This is the authorization source for member-only features.  It deliberately
+    queries on every call so an expiry or status update is not hidden by a
+    process-local cache.
+    """
+    result = await db.execute(
+        text("SELECT " + active_membership_exists_sql(
+            membership_alias="membership", user_id_param="user_id"
+        )),
+        {"user_id": user_id},
+    )
+    return bool(result.scalar())
+
+
+async def get_active_membership_row(
+    db: AsyncSession, user_id: int
+) -> Mapping[str, Any] | None:
+    """Load the current effective membership and package rights in one query."""
+    result = await db.execute(
+        text(
+            "SELECT m.package_type, m.start_at, m.end_at, p.rights "
+            "FROM user_membership m "
+            "LEFT JOIN config_membership_package p ON p.code = m.package_type "
+            "WHERE "
+            + active_membership_where_sql(
+                membership_alias="m", user_id_param="user_id"
+            )
+            + " ORDER BY m.end_at DESC LIMIT 1"
+        ),
+        {"user_id": user_id},
+    )
+    return result.mappings().first()
 
 
 def _rights(value, vip: bool = False) -> dict:
@@ -60,8 +150,7 @@ async def list_packages(db: AsyncSession) -> list[MembershipPackage]:
 
 
 async def get_status(db: AsyncSession, user_id: int) -> MembershipStatus:
-    result = await db.execute(text("SELECT m.package_type,m.start_at,m.end_at,p.rights FROM user_membership m LEFT JOIN config_membership_package p ON p.code=m.package_type WHERE m.user_id=:id AND m.status=1 AND (m.start_at IS NULL OR m.start_at<=UTC_TIMESTAMP()) AND (m.end_at IS NULL OR m.end_at>UTC_TIMESTAMP()) ORDER BY m.end_at DESC LIMIT 1"), {"id": user_id})
-    row = result.mappings().first()
+    row = await get_active_membership_row(db, user_id)
     return MembershipStatus(is_vip=bool(row), package_type=row["package_type"] if row else None, start_at=row["start_at"] if row else None, end_at=row["end_at"] if row else None, rights=_rights(row["rights"] if row else None, bool(row)))
 
 
@@ -69,7 +158,26 @@ async def history(db: AsyncSession, user_id: int, page: int, page_size: int) -> 
     total = int((await db.execute(text("SELECT COUNT(*) FROM user_membership WHERE user_id=:id"), {"id": user_id})).scalar() or 0)
     result = await db.execute(text("SELECT id,package_type,amount,order_no,start_at,end_at,status FROM user_membership WHERE user_id=:id ORDER BY created_at DESC,id DESC LIMIT :limit OFFSET :offset"), {"id": user_id, "limit": page_size, "offset": (page - 1) * page_size})
     now = datetime.now(UTC).replace(tzinfo=None)
-    items = [MembershipHistoryItem(id=r["id"], package_type=r["package_type"], amount=float(r["amount"]) if r["amount"] is not None else None, order_no=r["order_no"], start_at=r["start_at"], end_at=r["end_at"], status=r["status"], is_vip=r["status"] == 1 and (r["end_at"] is None or r["end_at"] > now), rights=_rights(None, r["status"] == 1)) for r in result.mappings()]
+    items = []
+    for row in result.mappings():
+        is_vip = (
+            row["status"] == 1
+            and (row["start_at"] is None or row["start_at"] <= now)
+            and (row["end_at"] is None or row["end_at"] > now)
+        )
+        items.append(
+            MembershipHistoryItem(
+                id=row["id"],
+                package_type=row["package_type"],
+                amount=float(row["amount"]) if row["amount"] is not None else None,
+                order_no=row["order_no"],
+                start_at=row["start_at"],
+                end_at=row["end_at"],
+                status=row["status"],
+                is_vip=is_vip,
+                rights=_rights(None, is_vip),
+            )
+        )
     return MembershipHistoryPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 

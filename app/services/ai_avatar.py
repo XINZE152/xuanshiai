@@ -31,6 +31,7 @@ from app.schemas.ai_avatar import (
     AvatarReplyResponse,
 )
 from app.services.ai.features import memory_projection_read_mode
+from app.services.membership import has_active_membership
 from app.services.ai.memory.consumers import (
     PersonaMemoryAdapter,
     context_to_provider_messages,
@@ -195,16 +196,7 @@ def _classify_question(content: str) -> Category:
 
 
 async def _is_vip(db: AsyncSession, user_id: int) -> bool:
-    result = await db.execute(
-        text(
-            """SELECT EXISTS (SELECT 1 FROM user_membership
-               WHERE user_id = :user_id AND status = 1
-                 AND (start_at IS NULL OR start_at <= UTC_TIMESTAMP())
-                 AND (end_at IS NULL OR end_at > UTC_TIMESTAMP()))"""
-        ),
-        {"user_id": user_id},
-    )
-    return bool(result.scalar())
+    return await has_active_membership(db, user_id)
 
 
 async def _ensure_not_blocked(db: AsyncSession, viewer_id: int, target_id: int) -> None:

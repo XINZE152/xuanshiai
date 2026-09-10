@@ -393,6 +393,30 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 生产 `AUTO_INIT_DB` 必须为 `false`；未批准条件保持 `AI_FEATURE_DISABLED`。回滚：先关闭 `AI_MASTER_ENABLED` 和各模块开关，停止 Worker/消费者，旧 `/discovery/*` 接口与 `legacy-rule-v1` 字段保持可用。
 
+### 10.6 内嵌清理任务与运行指标（Task 17）
+
+业务 Worker 主循环内嵌三类节流清理任务（每类独立会话/事务，失败绝不影响业务轮次）：
+
+- **语音临时音频清理**：`ai_voice_audio_cleanup_interval_seconds` 节流，扫描
+  `upload_dir/voice/tts` 与 `upload_dir/tts`，删除超过 `ai_voice_audio_retention_hours`
+  的音频；越界路径拒绝并记 `voice_audio_cleanup_out_of_bounds_refused`。
+- **Memory State TTL 清理**：`ai_memory_state_ttl_cleanup_interval_seconds` 节流，
+  批次行数/批次数/墙钟三重上限；打点 `memory_state_ttl_cleanup_{success,failed,skipped}`。
+- **Retention 清理**：`ai_retention_cleanup_interval_seconds` 节流，清理过期
+  voice transcript、generation audit 与终态 outbox 行（成功/死信保留期分开配置）。
+
+**指标**：所有运行指标经 `emit_ai_metric` 输出结构化日志（`ai_metric name=... value=... tags=...`），
+生产以日志聚合为时序出口。指标清单、告警阈值与逐项处置步骤见运行手册
+`docs/runbooks/ai-retention-and-recovery.md`（含 queue_age、retry_backlog、
+provider_timeout、websocket_fallback、audit_lost、quota_refund_failure 等全部条目）。
+
+**审计写入**：`record_generation_audit` 走有界异步队列（上限 2048）+ 后台 flusher，
+队列满丢最旧并计 `audit_lost`；Worker 关闭时自动排空。审计失败绝不阻塞业务链路。
+
+**WebSocket 终态通知**：任务终态 commit 后经 Redis pub/sub 唤醒等待方
+（`app/services/ai/task_events.py`）；Redis 不可用自动退回轮询并计
+`websocket_fallback`；消息只作唤醒信号，权威状态始终以数据库重读为准。
+
 ## 11. G5 证据链脚手架（Task 10，2026-08-17 证据治理分支）
 
 > 本节登记 `codex/ai-g5-g7-20260817` 分支的证据链脚手架状态。本轮硬约束：禁止运行 pytest/ruff/python 脚本来验证，禁止构建/容器/微信/稳定性观察。所有"已完成"仅指结构/代码已写，运行验证 NOT_RUN。

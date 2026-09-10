@@ -25,6 +25,7 @@ from app.services.voice.base import (
     TranscribeResult,
     VoiceProvider,
 )
+from app.services.voice.cleanup import TTS_SUBDIR
 
 logger = logging.getLogger(__name__)
 
@@ -313,9 +314,9 @@ class _AliyunVoiceClient:
             # 没有 AccessKey 配置：返回空字符串（mock 联调或测试注入场景）。
             return self._token or ""
         # 复用 stream_provider 的 Token 获取逻辑。
-        from app.services.voice.stream_provider import _fetch_nls_token
+        from app.services.voice.stream_provider import _get_nls_token_cached
 
-        token, expires_in = await _fetch_nls_token(
+        token, expires_in = await _get_nls_token_cached(
             access_key_id=self._access_key_id,
             access_key_secret=self._access_key_secret,
             region=self._region,
@@ -426,8 +427,9 @@ class _AliyunVoiceClient:
         """Call TTS: synthesize text → return {audio_url, duration_ms, ...}.
 
         阿里云 NLS 语音合成 HTTP API（cosyvoice）。合成音频落盘到
-        ``settings.upload_dir`` 下的 voice/tts 子目录，返回可访问的相对路径
-        供前端播放。测试通过 ``http_client`` / ``file_writer`` kwarg 注入 mock。
+        ``settings.upload_dir`` 下的 ``tts/`` 子目录（常量与统一清理函数的
+        扫描目录同源），返回可访问的相对路径供前端播放。测试通过
+        ``http_client`` / ``file_writer`` kwarg 注入 mock。
         """
         import os
         import time
@@ -492,7 +494,7 @@ class _AliyunVoiceClient:
             audio_bytes = response.content
             if not audio_bytes:
                 raise _AliyunAPIError("NLS TTS 返回空音频")
-            filename = f"tts/{int(time.time() * 1000)}-{os.urandom(4).hex()}.{audio_format}"
+            filename = f"{TTS_SUBDIR}/{int(time.time() * 1000)}-{os.urandom(4).hex()}.{audio_format}"
             if file_writer is not None:
                 result = await file_writer(filename, audio_bytes)
                 audio_url = result if isinstance(result, str) else filename

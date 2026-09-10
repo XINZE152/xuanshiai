@@ -323,6 +323,11 @@ PERSONA_PUBLIC_FIELD_ALLOWLIST: frozenset[str] = frozenset(PROFILE_ALLOWLIST)
 # 缓存：viewer+target+projection_version+visibility_revision 隔离，TTL 到期
 # 自然清除；撤权/注销经 invalidate_persona_memory_cache 主动失效。
 PERSONA_CACHE_PREFIX = "ai:memory:persona:v1"
+PERSONA_CACHE_GENERATION_PREFIX = "ai:memory:persona-generation:v1"
+# generation key 必须活得比分身缓存条目更久：若先于旧条目过期，generation
+# 归零会让撤权前的旧缓存（键尾 generation=0）复活。下限即
+# PERSONA_CACHE_TTL_SECONDS，取 1 小时兼顾失效注销用户的键回收。
+PERSONA_CACHE_GENERATION_TTL_SECONDS = 3600
 PERSONA_CACHE_TTL_SECONDS = 300
 
 _SQL_PRIVACY_REVISION = (
@@ -417,10 +422,14 @@ class PersonaMemoryAdapter:
             # revision 归并为 0 后复用旧缓存。
             visibility_revision = None
 
+        generation = await self._cache_generation(int(target_user_id))
+        # generation 读不到（Redis 抖动/键缺失）时禁用缓存走数据库，
+        # fail-closed：数据库路径始终是权威来源，请求本身不受影响。
+
         cache_key = (
             f"{PERSONA_CACHE_PREFIX}:{int(viewer_user_id)}:{int(target_user_id)}:"
-            f"{version}:{visibility_revision}"
-            if visibility_revision is not None
+            f"{version}:{visibility_revision}:{generation}"
+            if visibility_revision is not None and generation is not None
             else None
         )
 
@@ -537,25 +546,39 @@ class PersonaMemoryAdapter:
         except Exception:
             logger.warning("persona_cache_write_failed key_prefix=%s", cache_key[:48])
 
+    async def _cache_generation(self, target_user_id: int) -> int | None:
+        key = f"{PERSONA_CACHE_GENERATION_PREFIX}:{int(target_user_id)}"
+        try:
+            raw = await self._cache.get(key)
+            return int(raw or 0)
+        except Exception:
+            return None
+
 
 async def invalidate_persona_memory_cache(
     *, target_user_id: int, cache: Any = None
 ) -> int:
-    """撤权/注销主动失效：删除以该用户为 target 的全部分身缓存键。"""
+    """撤权/注销主动失效：递增 target generation，使旧键立即失效。"""
 
     if cache is None:
         from app.core.redis import redis_client
 
         cache = redis_client
-    pattern = f"{PERSONA_CACHE_PREFIX}:*:{int(target_user_id)}:*"
-    deleted = 0
     try:
-        keys = [key async for key in cache.scan_iter(match=pattern)]
-        if keys:
-            await cache.delete(*keys)
-            deleted = len(keys)
+        generation_key = (
+            f"{PERSONA_CACHE_GENERATION_PREFIX}:{int(target_user_id)}"
+        )
+        generation = await cache.incr(generation_key)
+        # 每次失效续期 generation key：成员键 TTL 只有 300 秒，generation
+        # key 过早过期会让键尾旧值归零、撤权前的旧缓存复活。
+        try:
+            await cache.expire(generation_key, PERSONA_CACHE_GENERATION_TTL_SECONDS)
+        except Exception:
+            # expire 失败不影响失效本身：generation 已递增，旧键已失效。
+            pass
+        return int(generation)
     except Exception:
         logger.warning(
             "persona_cache_invalidate_failed target=%s", int(target_user_id)
         )
-    return deleted
+    return 0

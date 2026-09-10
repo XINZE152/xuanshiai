@@ -9,7 +9,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.services.ai.audit import GenerationAuditEvent, record_generation_audit
+from app.services.ai.audit import (
+    GenerationAuditEvent,
+    record_generation_audit,
+    shutdown_audit_flusher,
+)
 from tests.integration.ai.conftest import TEST_DATABASE_URL
 
 
@@ -22,6 +26,8 @@ async def test_generation_audit_is_persisted_and_redacted(
     monkeypatch.setattr(settings, "database_url", TEST_DATABASE_URL)
     monkeypatch.setattr(settings, "ai_audit_enabled", True)
 
+    # 审计写入走有界队列 + 后台 flusher（异步落库）；显式 drain 保证
+    # 断言前事件已持久化，同时真实覆盖 flusher -> pymysql -> MySQL 链路。
     await record_generation_audit(
         GenerationAuditEvent(
             request_id=request_id,
@@ -38,6 +44,7 @@ async def test_generation_audit_is_persisted_and_redacted(
             safety_result={"marker": "must-not-be-raw-input"},
         )
     )
+    await shutdown_audit_flusher()
     row = (
         await real_db_session.execute(
             text(

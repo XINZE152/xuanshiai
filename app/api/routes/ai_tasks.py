@@ -24,6 +24,7 @@ from app.api.dependencies import CurrentUser, get_current_user
 from app.core.logging import request_id_context
 from app.db.session import get_db
 from app.schemas.ai_common import AiErrorResponse, AiTaskStatus, TaskPollState
+from app.services.ai.task_events import notify_task_event
 from app.services.ai.tasks import (
     TaskError,
     get_task,
@@ -188,4 +189,6 @@ async def cancel_ai_task(
     except TaskError as exc:
         raise _error_response(exc) from exc
     await db.commit()
+    # 终态已提交后才唤醒任务等待方（WebSocket 轮询/订阅者）；best-effort。
+    await notify_task_event(task.task_id, str(task.status.value))
     return CancelAcceptedResponse(task_id=task.task_id, status=task.status)

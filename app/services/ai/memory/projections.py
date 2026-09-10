@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import ValidationError
@@ -422,6 +423,121 @@ class MemoryProjectionService:
     # ------------------------------------------------------------------
     # build / rebuild / invalidate（Task 4）
     # ------------------------------------------------------------------
+
+    _SQL_PROJECTION_BATCH_READ = (
+        "SELECT projection_id, owner_user_id, function_key, purpose, data_category, "
+        "subject, projection_version, projection_input_hash, status, invalidated_at, "
+        "invalidated_reason, entries_json, policy_revision, consent_snapshot_id, "
+        "built_at FROM ai_memory_projection WHERE owner_user_id IN ({owners}) "
+        "AND function_key = :function_key AND purpose = :purpose "
+        "AND data_category = :data_category AND status = 'active'"
+    )
+    _SQL_GRANT_BATCH_READ = (
+        "SELECT grant_id, owner_user_id, function_key, purpose, data_category, "
+        "status, consent_snapshot_id, policy_revision, granted_at, revoked_at "
+        "FROM ai_memory_projection_grant WHERE owner_user_id IN ({owners}) "
+        "AND function_key = :function_key AND purpose = :purpose "
+        "AND data_category = :data_category"
+    )
+    _SQL_CONSENT_BATCH_READ = (
+        "SELECT user_id, scope, version, policy_revision, granted_at "
+        "FROM ai_consent_grant WHERE user_id IN ({owners}) "
+        "AND scope = :scope AND revoked_at IS NULL ORDER BY granted_at DESC"
+    )
+
+    async def read_active_batch(
+        self,
+        *,
+        owner_user_ids: "Sequence[int]",
+        function_key: str,
+        purpose: str,
+        data_category: str,
+    ) -> dict[int, dict[str, Any]]:
+        """批量版 read_active（Task 14）：3 条 IN 查询替代 3N 条单用户查询。
+
+        验证链与 read_active 完全一致，缺任一门该用户即不返回（fail
+        closed，不泄露存在性）：grant 非活跃、consent 缺失或快照不一致、
+        policy_revision 漂移、可读性校验失败。与 read_active 的两点差异：
+        - 不取 ``FOR UPDATE`` 行锁：本方法只服务只读/物化路径，授权并发
+          由 revoke 事务的原子状态翻转与每次读取的重新校验保证；
+        - 同一用户同维度取 ``projection_version`` 最大的一行（与单用户
+          ``ORDER BY projection_version DESC LIMIT 1`` 语义一致）。
+        """
+        ProjectionPolicy.assert_function_enabled(function_key)
+        owners = sorted({int(uid) for uid in owner_user_ids})
+        if not owners:
+            return {}
+        owner_params = ", ".join(f":owner{i}" for i in range(len(owners)))
+        owner_values = {f"owner{i}": uid for i, uid in enumerate(owners)}
+        dimension = self._dimension(function_key, purpose, data_category)
+        current_revision = self._current_revision()
+
+        projection_rows = (
+            await self._db.execute(
+                text(self._SQL_PROJECTION_BATCH_READ.format(owners=owner_params)),
+                {**owner_values, **dimension},
+            )
+        ).mappings().all()
+        latest: dict[int, dict[str, Any]] = {}
+        for row in projection_rows:
+            uid = int(row["owner_user_id"])
+            existing = latest.get(uid)
+            if (
+                existing is None
+                or int(row["projection_version"]) > int(existing["projection_version"])
+            ):
+                latest[uid] = dict(row)
+        if not latest:
+            return {}
+
+        grant_rows = (
+            await self._db.execute(
+                text(self._SQL_GRANT_BATCH_READ.format(owners=owner_params)),
+                {**owner_values, **dimension},
+            )
+        ).mappings().all()
+        grants = {int(row["owner_user_id"]): dict(row) for row in grant_rows}
+
+        consent_rows = (
+            await self._db.execute(
+                text(self._SQL_CONSENT_BATCH_READ.format(owners=owner_params)),
+                {**owner_values, "scope": PROFILE_CONSENT_SCOPE},
+            )
+        ).mappings().all()
+        # granted_at DESC 排序下每用户第一行即最新授权。
+        consents: dict[int, dict[str, Any]] = {}
+        for row in consent_rows:
+            consents.setdefault(int(row["user_id"]), dict(row))
+
+        result: dict[int, dict[str, Any]] = {}
+        for uid, projection in latest.items():
+            grant_row = grants.get(uid)
+            if grant_row is None or str(grant_row["status"]) != "active":
+                continue
+            consent = consents.get(uid)
+            if consent is None:
+                continue
+            if self._snapshot_id(consent) != str(projection["consent_snapshot_id"]):
+                continue
+            if str(projection["policy_revision"]) != current_revision:
+                continue
+            if str(grant_row["policy_revision"]) != current_revision:
+                continue
+            projection["entries"] = json.loads(str(projection["entries_json"]))
+            try:
+                ProjectionPolicy.assert_readable(
+                    projection,
+                    owner_user_id=uid,
+                    function_key=function_key,
+                    purpose=purpose,
+                    data_category=data_category,
+                    policy_revision=current_revision,
+                )
+            except ProjectionPolicyDenied:
+                continue
+            projection.pop("entries_json", None)
+            result[uid] = projection
+        return result
 
     _SQL_OUTBOX_ENQUEUE = (
         "INSERT INTO derivation_outbox "

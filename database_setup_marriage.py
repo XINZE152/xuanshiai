@@ -2886,6 +2886,7 @@ class DatabaseManager:
         # AI 派生投影（revision/outbox/消费收据）与业务表同一入口。
         from app.db.derivation_schema import (
             DERIVATION_TABLES,
+            ensure_derivation_retention_indexes,
             ensure_derivation_task10_columns,
         )
 
@@ -2902,6 +2903,7 @@ class DatabaseManager:
             ensure_ai_profile_journey_columns,
             ensure_ai_profile_session_columns,
             ensure_ai_projection_columns,
+            ensure_ai_retention_indexes,
             ensure_ai_search_snapshot_columns,
             ensure_ai_task_columns,
         )
@@ -2995,6 +2997,8 @@ class DatabaseManager:
         # constraint/index changes remain in the reviewed migration runner.
         ensure_ai_legacy_columns(cursor)
         ensure_derivation_task10_columns(cursor)
+        ensure_ai_retention_indexes(cursor)
+        ensure_derivation_retention_indexes(cursor)
 
         self._backfill_comment_roots(cursor)
 

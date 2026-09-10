@@ -84,10 +84,12 @@ from app.services.candidate_query import (
 )
 from app.services.candidate_visibility import (
     CandidateVisibilityService,
+    SqlPredicate,
     ViewerContext,
     VisibilityScene,
 )
 from app.services.discovery import CARD_FROM, CARD_SELECT
+from app.services.membership import has_active_membership
 from app.services.revisions import RevisionVector
 
 logger = logging.getLogger(__name__)
@@ -1630,16 +1632,7 @@ async def _load_viewer_context(db: AsyncSession, user_id: int) -> dict[str, Any]
 
 
 async def _is_vip(db: AsyncSession, user_id: int) -> bool:
-    result = await db.execute(
-        text(
-            "SELECT EXISTS (SELECT 1 FROM user_membership "
-            "WHERE user_id = :user_id AND status = 1 "
-            "AND (start_at IS NULL OR start_at <= UTC_TIMESTAMP()) "
-            "AND (end_at IS NULL OR end_at > UTC_TIMESTAMP()))"
-        ),
-        {"user_id": user_id},
-    )
-    return bool(result.scalar())
+    return await has_active_membership(db, user_id)
 
 
 async def _load_projections(
@@ -1671,6 +1664,8 @@ async def _load_memory_projection_fields(
 
     ideal_partner_preference 投影在这里结构性不可达——候选人资料只允许
     来自候选人自己的 personal_profile；缺投影的候选人不返回。
+    Task 14：单次批量读取（read_active_batch）替代逐用户 read_active；
+    每用户验证链（grant/consent 快照/policy revision/可读性）不变。
     """
 
     from app.services.ai.memory.projections import MemoryProjectionService
@@ -1678,16 +1673,13 @@ async def _load_memory_projection_fields(
     result: dict[int, dict[str, Any]] = {}
     if not user_ids:
         return result
-    service = MemoryProjectionService(db)
-    for user_id in user_ids:
-        doc = await service.read_active(
-            owner_user_id=user_id,
-            function_key="search",
-            purpose="candidate_filter",
-            data_category="personal_profile",
-        )
-        if doc is None:
-            continue
+    docs = await MemoryProjectionService(db).read_active_batch(
+        owner_user_ids=user_ids,
+        function_key="search",
+        purpose="candidate_filter",
+        data_category="personal_profile",
+    )
+    for user_id, doc in docs.items():
         result[user_id] = {
             "id": doc.get("projection_id"),
             "source_hash": doc.get("projection_input_hash"),
@@ -1904,6 +1896,88 @@ def _result_card(row: dict[str, Any], *, viewer_is_vip: bool = False) -> dict[st
     }
 
 
+_SEARCH_RESULT_UPSERT_SQL = (
+    "INSERT INTO ai_search_result "
+    "(snapshot_id, target_user_id, rank_position, matched_condition_count, "
+    " matched_conditions, unknown_conditions, reason_codes, profile_revision, "
+    " projection_id, source_hash, consent_snapshot_json, source_revision_json, "
+    " result_expires_at, stale, generation, created_at) "
+    "VALUES (:snapshot_id, :target_user_id, :rank_position, "
+    " :matched_condition_count, :matched_conditions, :unknown_conditions, "
+    " :reason_codes, :profile_revision, :projection_id, :source_hash, "
+    " :consent_snapshot_json, :source_revision_json, :result_expires_at, "
+    " 0, :generation, UTC_TIMESTAMP()) "
+    "ON DUPLICATE KEY UPDATE "
+    " rank_position = VALUES(rank_position), "
+    " matched_condition_count = VALUES(matched_condition_count), "
+    " matched_conditions = VALUES(matched_conditions), "
+    " unknown_conditions = VALUES(unknown_conditions), "
+    " reason_codes = VALUES(reason_codes), "
+    " profile_revision = VALUES(profile_revision), "
+    " projection_id = VALUES(projection_id), "
+    " source_hash = VALUES(source_hash), "
+    " consent_snapshot_json = VALUES(consent_snapshot_json), "
+    " source_revision_json = VALUES(source_revision_json), "
+    " result_expires_at = VALUES(result_expires_at), "
+    " stale = 0, "
+    " generation = VALUES(generation)"
+)
+
+# Task 15：批量物化分片。executemany 走 driver 的多行重写；分片上限只为
+# 限制单条语句包体（matched/unknown/reason JSON 体积可观）。
+_SEARCH_RESULT_UPSERT_BATCH = 50
+
+
+def _result_row_params(
+    snapshot_id: str,
+    target_user_id: int,
+    rank_position: int,
+    evidence: SearchEvidence,
+    result_expires_at: datetime,
+    *,
+    generation: int = _SEARCH_RESULT_DEFAULT_GENERATION,
+) -> dict[str, Any]:
+    return {
+        "snapshot_id": snapshot_id,
+        "target_user_id": target_user_id,
+        "rank_position": rank_position,
+        "matched_condition_count": evidence.matched_condition_count,
+        "matched_conditions": json.dumps(
+            evidence.matched_conditions, ensure_ascii=False
+        ),
+        "unknown_conditions": json.dumps(
+            evidence.unknown_conditions, ensure_ascii=False
+        ),
+        "reason_codes": json.dumps(evidence.reason_codes, ensure_ascii=False),
+        "profile_revision": evidence.profile_revision,
+        "projection_id": evidence.projection_id,
+        "source_hash": evidence.source_hash,
+        "consent_snapshot_json": json.dumps(
+            evidence.consent_snapshot, ensure_ascii=False
+        ) if evidence.consent_snapshot is not None else None,
+        "source_revision_json": json.dumps(
+            evidence.source_revision, ensure_ascii=False
+        ) if evidence.source_revision is not None else None,
+        "result_expires_at": result_expires_at,
+        "generation": generation,
+    }
+
+
+async def _upsert_result_rows(
+    db: AsyncSession,
+    row_params: list[dict[str, Any]],
+) -> None:
+    """批量 upsert 结果行（executemany）。
+
+    ON DUPLICATE KEY 语义与逐行写入完全一致；同一语句同一事务内执行，
+    单事务失败整体回滚（调用方持有事务），重试幂等（upsert 不产生重复行，
+    generation 单调递增保证旧版本不覆盖新版本）。空列表为 no-op。
+    """
+    for start in range(0, len(row_params), _SEARCH_RESULT_UPSERT_BATCH):
+        chunk = row_params[start : start + _SEARCH_RESULT_UPSERT_BATCH]
+        await db.execute(text(_SEARCH_RESULT_UPSERT_SQL), chunk)
+
+
 async def _upsert_result_row(
     db: AsyncSession,
     snapshot_id: str,
@@ -1917,57 +1991,19 @@ async def _upsert_result_row(
     # Task8 Step2：upsert 时携带 generation。ON DUPLICATE KEY UPDATE 也更新
     # generation，保证同一 (snapshot_id, target_user_id) 的行在新 generation 下
     # 被正确刷新；旧 generation 的行由 materialize 成功后统一清理。
-    await db.execute(
-        text(
-            "INSERT INTO ai_search_result "
-            "(snapshot_id, target_user_id, rank_position, matched_condition_count, "
-            " matched_conditions, unknown_conditions, reason_codes, profile_revision, "
-            " projection_id, source_hash, consent_snapshot_json, source_revision_json, "
-            " result_expires_at, stale, generation, created_at) "
-            "VALUES (:snapshot_id, :target_user_id, :rank_position, "
-            " :matched_condition_count, :matched_conditions, :unknown_conditions, "
-            " :reason_codes, :profile_revision, :projection_id, :source_hash, "
-            " :consent_snapshot_json, :source_revision_json, :result_expires_at, "
-            " 0, :generation, UTC_TIMESTAMP()) "
-            "ON DUPLICATE KEY UPDATE "
-            " rank_position = VALUES(rank_position), "
-            " matched_condition_count = VALUES(matched_condition_count), "
-            " matched_conditions = VALUES(matched_conditions), "
-            " unknown_conditions = VALUES(unknown_conditions), "
-            " reason_codes = VALUES(reason_codes), "
-            " profile_revision = VALUES(profile_revision), "
-            " projection_id = VALUES(projection_id), "
-            " source_hash = VALUES(source_hash), "
-            " consent_snapshot_json = VALUES(consent_snapshot_json), "
-            " source_revision_json = VALUES(source_revision_json), "
-            " result_expires_at = VALUES(result_expires_at), "
-            " stale = 0, "
-            " generation = VALUES(generation)"
-        ),
-        {
-            "snapshot_id": snapshot_id,
-            "target_user_id": target_user_id,
-            "rank_position": rank_position,
-            "matched_condition_count": evidence.matched_condition_count,
-            "matched_conditions": json.dumps(
-                evidence.matched_conditions, ensure_ascii=False
-            ),
-            "unknown_conditions": json.dumps(
-                evidence.unknown_conditions, ensure_ascii=False
-            ),
-            "reason_codes": json.dumps(evidence.reason_codes, ensure_ascii=False),
-            "profile_revision": evidence.profile_revision,
-            "projection_id": evidence.projection_id,
-            "source_hash": evidence.source_hash,
-            "consent_snapshot_json": json.dumps(
-                evidence.consent_snapshot, ensure_ascii=False
-            ) if evidence.consent_snapshot is not None else None,
-            "source_revision_json": json.dumps(
-                evidence.source_revision, ensure_ascii=False
-            ) if evidence.source_revision is not None else None,
-            "result_expires_at": result_expires_at,
-            "generation": generation,
-        },
+    # （Task 15：单行入口保留为批量路径的委托，参数构造单一来源。）
+    await _upsert_result_rows(
+        db,
+        [
+            _result_row_params(
+                snapshot_id,
+                target_user_id,
+                rank_position,
+                evidence,
+                result_expires_at,
+                generation=generation,
+            )
+        ],
     )
 
 
@@ -2119,16 +2155,25 @@ async def _load_materialized_result_rows(
 
 
 async def _load_materialized_candidate_cards(
-    db: AsyncSession, viewer_id: int, user_ids: list[int]
+    db: AsyncSession,
+    viewer_id: int,
+    user_ids: list[int],
+    *,
+    visibility: SqlPredicate,
 ) -> dict[int, dict[str, Any]]:
     if not user_ids:
         return {}
     placeholders = ", ".join(f":card_uid{i}" for i in range(len(user_ids)))
     result = await db.execute(
-        text(CARD_SELECT + CARD_FROM + f" WHERE u.id IN ({placeholders})"),
+        text(
+            CARD_SELECT
+            + CARD_FROM
+            + f" WHERE u.id IN ({placeholders}) AND {visibility.clause}"
+        ),
         {
             "viewer_id": viewer_id,
             "candidate_query_limit": len(user_ids),
+            **visibility.params,
             **{f"card_uid{i}": uid for i, uid in enumerate(user_ids)},
         },
     )
@@ -2138,6 +2183,19 @@ async def _load_materialized_candidate_cards(
 async def _candidate_projection_is_current(
     db: AsyncSession, candidate_id: int, stored: dict[str, Any]
 ) -> bool:
+    """物化行消费前的投影新鲜度复验（fail closed）。
+
+    - legacy/shadow 模式：物化行携带的投影 id、source hash、完整 revision
+      向量与 consent 快照必须与当前投影逐项一致，且 revision 向量仍等于
+      当前版本向量、consent 仍为 active 同快照。
+    - memory 模式（Task 14 语义修正）：memory 投影没有 revision 向量，
+      物化行存的是 ``source_revision_json=None`` 和仅含 snapshot_id 的
+      consent —— 若沿用 legacy 校验会把 memory 模式的全部结果过滤掉。
+      memory 模式改为复验：(a) 物化行与当前投影同 id 同 input hash，
+      (b) 投影仍 active 且 grant/consent 快照/policy revision 全部通过
+      read_active 同款服务端重验。任一失败按 miss 处理。
+    """
+
     projection = (await _load_projections(db, [candidate_id])).get(candidate_id)
     if projection is None:
         return False
@@ -2148,12 +2206,20 @@ async def _candidate_projection_is_current(
     if (
         stored_projection_id is None
         or projection_id is None
-        or int(stored_projection_id or 0) != int(projection_id or 0)
+        or str(stored_projection_id) != str(projection_id)
         or not stored_source_hash
         or not projection_source_hash
         or stored_source_hash != projection_source_hash
     ):
         return False
+    from app.services.ai.features import memory_projection_read_mode
+
+    if memory_projection_read_mode() == "memory":
+        # 走到这里说明 _load_projections → read_active(_batch) 已对当前投影
+        # 完成全量门禁重验（grant active、consent 快照一致、policy revision
+        # 未漂移、可读性），任一失败该投影为 None 已在上面 fail closed。
+        # 物化行又与当前投影同 id 同 input hash → 引用的就是这份已验证投影。
+        return True
     stored_revision = _maybe_json(
         stored.get("source_revision_json") or stored.get("source_revision")
     )
@@ -2256,10 +2322,11 @@ async def _materialize_partial_results(
 
     初筛集仅含 hard 确定性条件全部命中的候选（hard 过滤由 baseline 查询
     保证）；evidence 的 matched/reason 只统计 hard 条件（脱敏出参与完整集
-    一致，绝不含仅 soft 命中者）。旧行不动、复用 _upsert_result_row。
+    一致，绝不含仅 soft 命中者）。旧行不动、复用批量 upsert。
     不 commit。
     """
     partial_rows = visible[:_SEARCH_PARTIAL_LIMIT]
+    row_params: list[dict[str, Any]] = []
     for rank_position, (_, row, evidence) in enumerate(partial_rows, start=1):
         hard_keys = [
             key
@@ -2273,15 +2340,17 @@ async def _materialize_partial_results(
             unknown_conditions=[],
             reason_codes=(["HARD_CONDITION_MATCH"] if hard_keys else []),
         )
-        await _upsert_result_row(
-            db,
-            snapshot_id,
-            int(row["user_id"]),
-            rank_position,
-            hard_evidence,
-            result_expires_at,
-            generation=_SEARCH_PARTIAL_GENERATION,
+        row_params.append(
+            _result_row_params(
+                snapshot_id,
+                int(row["user_id"]),
+                rank_position,
+                hard_evidence,
+                result_expires_at,
+                generation=_SEARCH_PARTIAL_GENERATION,
+            )
         )
+    await _upsert_result_rows(db, row_params)
     await db.execute(
         text(
             "UPDATE ai_search_snapshot SET partial_visible = 'partial', "
@@ -2409,16 +2478,19 @@ async def materialize_search_snapshot(
         text("DELETE FROM ai_search_result WHERE snapshot_id = :snapshot_id AND rank_position > :limit"),
         {"snapshot_id": snapshot_id, "limit": SEARCH_MATERIALIZATION_LIMIT},
     )
+    row_params: list[dict[str, Any]] = []
     for rank_position, (_, row, evidence) in enumerate(materialized, start=1):
-        await _upsert_result_row(
-            db,
-            snapshot_id,
-            int(row["user_id"]),
-            rank_position,
-            evidence,
-            result_expires_at,
-            generation=new_generation,
+        row_params.append(
+            _result_row_params(
+                snapshot_id,
+                int(row["user_id"]),
+                rank_position,
+                evidence,
+                result_expires_at,
+                generation=new_generation,
+            )
         )
+    await _upsert_result_rows(db, row_params)
     # 原子切换 active generation：删除旧 generation 的所有行（不在新结果中的候选）
     # 这保证「同 snapshot 第一次 200 候选、第二次候选集合变化时旧候选为 0」。
     await db.execute(
@@ -2549,8 +2621,21 @@ async def read_materialized_search_results(
         if not await _candidate_projection_is_current(db, candidate_id, stored):
             continue
         accepted.append(stored)
+    viewer = await _load_viewer_context(db, owner_user_id)
+    final_card_visibility = candidate_visibility_service.predicate(
+        ViewerContext(
+            user_id=owner_user_id,
+            realname_status=int(viewer.get("realname_status") or 0),
+            # predicate() evaluates VIP membership in its final card SELECT.
+            is_vip=False,
+        ),
+        VisibilityScene.SEARCH,
+    )
     cards = await _load_materialized_candidate_cards(
-        db, owner_user_id, [int(row["target_user_id"]) for row in accepted]
+        db,
+        owner_user_id,
+        [int(row["target_user_id"]) for row in accepted],
+        visibility=final_card_visibility,
     )
     viewer_is_vip = await _is_vip(db, owner_user_id)
     items: list[SearchResultItemRead] = []

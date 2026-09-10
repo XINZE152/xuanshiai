@@ -41,6 +41,8 @@ DERIVATION_TABLES = {
             PRIMARY KEY (`event_id`),
             KEY `idx_derivation_outbox_publish` (`status`, `published_at`, `priority`, `occurred_at`),
             KEY `idx_derivation_outbox_dead_letter` (`dead_letter_at`, `status`),
+            KEY `idx_derivation_outbox_retention_succeeded` (`status`, `occurred_at`, `event_id`),
+            KEY `idx_derivation_outbox_retention_dead_letter` (`status`, `dead_letter_at`, `event_id`),
             KEY `idx_derivation_outbox_aggregate` (`aggregate_type`, `aggregate_id`, `occurred_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='派生事件外发盒'
     """,
@@ -74,6 +76,21 @@ DERIVATION_TASK10_REQUIRED_COLUMNS: dict[str, dict[str, str]] = {
     },
 }
 
+DERIVATION_RETENTION_INDEXES: dict[str, dict[str, tuple[str, ...]]] = {
+    "derivation_outbox": {
+        "idx_derivation_outbox_retention_succeeded": (
+            "status",
+            "occurred_at",
+            "event_id",
+        ),
+        "idx_derivation_outbox_retention_dead_letter": (
+            "status",
+            "dead_letter_at",
+            "event_id",
+        ),
+    },
+}
+
 
 def ensure_derivation_task10_columns(cursor: object) -> None:
     """Add Task 10 columns to a database created before the second migration."""
@@ -87,4 +104,20 @@ def ensure_derivation_task10_columns(cursor: object) -> None:
             if column_name not in existing:
                 cursor.execute(
                     f"ALTER TABLE `{table_name}` ADD COLUMN {column_def}"
+                )
+
+
+def ensure_derivation_retention_indexes(cursor: object) -> None:
+    """Idempotently add Task9 terminal-outbox cleanup indexes to legacy DBs."""
+    for table_name, required_indexes in DERIVATION_RETENTION_INDEXES.items():
+        try:
+            cursor.execute(f"SHOW INDEX FROM `{table_name}`")
+            existing = {str(row["Key_name"]) for row in cursor.fetchall()}
+        except Exception:  # noqa: BLE001, S112 - legacy bootstrap is best effort
+            continue
+        for index_name, columns in required_indexes.items():
+            if index_name not in existing:
+                column_sql = ", ".join(f"`{column}`" for column in columns)
+                cursor.execute(
+                    f"ALTER TABLE `{table_name}` ADD KEY `{index_name}` ({column_sql})"
                 )

@@ -70,6 +70,61 @@
   差异类型）→ 满足门槛后切 memory；回滚 = 改回 flag，无需数据库操作；
 - worker 需重启以加载 `memory_projection` noop 消费者注册（防止未知事件类型报错）。
 
+## 8. Retention 与 outbox 生命周期（Task 9，2026-09-09）
+
+`memory_projection` 仍是既有内部通知事件：它继续由 `derivation_outbox` 的
+cleanup 消费者以 noop receipt 消费，**不得**因 retention 改名、删除或改作公开
+接口。只有所有消费者和本文档都完成迁移后，才可以退役事件类型。
+
+| 数据 | 配置 | 生命周期与删除规则 |
+| --- | --- | --- |
+| 临时 TTS 音频文件 | `AI_VOICE_AUDIO_RETENTION_HOURS` | 文件 mtime 超期后清理；与任何数据库文本无关。 |
+| `voice_transcript` | `AI_VOICE_TRANSCRIPT_RETENTION_HOURS` | REST ASR 转写文本按 `created_at` 保留，到期后批量物理删除。 |
+| `ai_memory_state` | 每行 `valid_until` + `AI_MEMORY_STATE_TTL_*` | 不是普通行删除：到期先追加 `state_expired` 账本事件并物化为 expired，保留其事件链。 |
+| 成功 `derivation_outbox` | `AI_DERIVATION_OUTBOX_SUCCEEDED_RETENTION_HOURS` | `succeeded` 行从 `occurred_at` 起保留；到期时先删消费者 receipt，再删终态 event。 |
+| 重试/死信 `derivation_outbox` | 既有 3 次有限重试（30s、60s backoff）+ `AI_DERIVATION_OUTBOX_DEAD_LETTER_RETENTION_HOURS` | `pending`/`processing` 永不由 retention 删除；失败到第 3 次转 `dead_letter`，清空最小 payload、保留错误码；死信从 `dead_letter_at` 起保留，到期时与 receipt 一并删除。 |
+| `ai_generation_audit` | `AI_GENERATION_AUDIT_RETENTION_HOURS` | 仅最小 provider 调用元数据按 `created_at` 批量删除；表中不存 prompt、response、音频或 transcript。 |
+
+`AI_RETENTION_CLEANUP_BATCH_SIZE` 限制每个类别每轮删除的最大行数，
+`AI_RETENTION_CLEANUP_INTERVAL_SECONDS` 控制业务 worker 的执行间隔。每轮使用
+独立数据库会话，异常显式回滚；worker 记录
+`ai_retention_cleanup_round`（transcript/audit/succeeded/dead-letter 四类计数），
+失败不会阻断普通 `ai_task` 轮次或 outbox 消费轮次。
+
+### 调度与索引拓扑
+
+- `python -m app.workers.ai_worker --once` 是确定的数据库 retention 维护入口：先
+  执行一轮业务 `ai_task`，再执行一次 retention。后者失败仅记录
+  `ai_retention_cleanup_once_failed`，不会把已完成的业务任务轮次改为失败。
+- `--consumers --once` 与 `--consumers` 只消费 outbox（包括 processing 租约恢复与
+  dead-letter 转换），**不**执行 retention；部署可将它作为独立常驻消费者运行。
+  `--dry-run` 在两种模式都不访问数据库，因此也不清理数据。
+- 常驻的非 `--consumers` worker 按 `AI_RETENTION_CLEANUP_INTERVAL_SECONDS` 执行
+  retention；`--once` 不受该间隔节流，适用于 Cron/任务计划程序的确定性维护。
+- 清理查询按 `(created_at, id)` 扫描 `voice_transcript` 和
+  `ai_generation_audit`；终态 outbox 分别按
+  `(status, occurred_at, event_id)` 与 `(status, dead_letter_at, event_id)` 扫描。
+  每个类别均有 `LIMIT AI_RETENTION_CLEANUP_BATCH_SIZE`，而
+  `pending`/`processing` 不在任何 retention 谓词中。
+
+新库 bootstrap 在 `AI_TABLES` / `DERIVATION_TABLES` 创建上述索引；已有库由
+`initialize_database` 的幂等兼容步骤补齐缺失索引。该步骤只执行 `SHOW INDEX` 后的
+`ALTER TABLE ADD KEY`，不会回填、删除或重写业务数据；部署前应在目标库执行一次
+schema 备份，并在变更窗口核对四个索引已经存在。
+
+### 用户删除语义
+
+- 删除单个画像、字段或撤回画像授权，只清理该画像链路的已失效资源；不把无关的
+  独立语音 transcript 或最小生成审计当作该字段的同义数据删除。
+- 账号删除事件当前会经过既有 `user_deleted` / `account_deleted` outbox 清理链，
+  清理画像、搜索、兼容度、投影与任务所有权；**本 Task 9 没有扩展该链路来按用户
+  立即物理删除 `voice_transcript` 或 `ai_generation_audit`**。前者会在其 72 小时
+  retention 到期后删除；后者没有 `owner_user_id`，仅按审计保留期删除。若合规要求
+  账号删除即时擦除两者，必须另行增加可归属的审计关联和经评审的删除迁移，不能以
+  猜测的 task_id 关联误删审计。
+- 数据库备份/日志副本不在应用 worker 的控制范围。备份遵循基础设施既定备份、加密
+  和过期销毁策略；本实现不宣称能同步擦除已经生成的备份副本。
+
 ## 7. 对抗性审查补充（2026-09-06）
 
 提交 bd2be00 后复审，发现并处置 5 项（1 项代码修复 + 4 项边界登记）：

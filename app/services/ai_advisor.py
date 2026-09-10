@@ -28,9 +28,20 @@ from app.services.ai_provider import complete, parse_json
 from app.services.content_filter import assert_text_allowed
 from app.services.ai.memory.consumers import CounselorMemoryAdapter
 from app.services.ai.features import memory_projection_read_mode
+from app.services.membership import has_active_membership
 
 _DISCLAIMER = "以上建议仅供参考，请根据真实感受沟通，并尊重对方边界。"
 logger = logging.getLogger(__name__)
+_RISK_BLOCK_DETAIL = "AI建议命中高风险规则，暂不返回"
+
+
+class _AdvisorRiskBlocked(HTTPException):
+    """Internal marker for policy interception (never exposed as a new status)."""
+
+    risk_control = True
+
+    def __init__(self) -> None:
+        super().__init__(422, detail=_RISK_BLOCK_DETAIL)
 _HIGH_RISK_TERMS = (
     "\u81ea\u6740", "\u81ea\u4f24", "\u4ed6\u6740", "\u4f24\u5bb3\u5bf9\u65b9", "\u8bc8\u9a97", "\u8f6c\u8d26", "\u94f6\u884c\u5361", "\u9a8c\u8bc1\u7801",
     "\u88f8\u7167", "\u8272\u60c5", "\u672a\u6210\u5e74", "\u5f3a\u5978", "\u8ddf\u8e2a", "\u62a5\u590d", "\u5a01\u80c1", "\u6bd2\u54c1",
@@ -51,11 +62,7 @@ _FALLBACK_KNOWLEDGE: dict[str, tuple[str, ...]] = {
 
 
 async def _require_vip(db: AsyncSession, user_id: int) -> None:
-    row = await db.execute(text("""SELECT 1 FROM user_membership
-        WHERE user_id=:user_id AND status=1
-          AND (start_at IS NULL OR start_at<=UTC_TIMESTAMP())
-          AND (end_at IS NULL OR end_at>UTC_TIMESTAMP()) LIMIT 1"""), {"user_id": user_id})
-    if not row.scalar():
+    if not await has_active_membership(db, user_id):
         raise HTTPException(403, detail="AI功能仅限有效会员使用")
 
 
@@ -285,6 +292,42 @@ def _response_from_stored(row: Any) -> AdvisorAdviceResponse:
     )
 
 
+def _status_for_advisor_exception(exc: HTTPException) -> str:
+    """Map an expected control-flow exception to the persisted audit status.
+
+    Only an explicit risk-policy interception is ``blocked``.  Other HTTP
+    exceptions (provider/business failures surfaced as HTTP errors) remain
+    ``failed`` so the audit trail reflects the original cause.
+    """
+    if isinstance(exc, _AdvisorRiskBlocked) or getattr(exc, "risk_control", False):
+        return "blocked"
+    return "failed"
+
+
+def _exception_detail(exc: HTTPException) -> str:
+    """Persist both HTTP status and provider/business reason in error_detail."""
+    return f"HTTP {exc.status_code}: {exc.detail}"
+
+
+async def _rollback_safely(db: AsyncSession) -> None:
+    try:
+        await db.rollback()
+    except Exception:
+        logger.exception("advisor_audit_rollback_failed")
+
+
+async def _refund_quota_safely(quota_key: str) -> bool:
+    try:
+        await refund_daily(quota_key)
+        return True
+    except Exception:
+        # A refund failure must never replace the original provider/business
+        # exception.  The failed refund is observable in logs and the call
+        # audit still records the original status/error detail.
+        logger.exception("advisor_quota_refund_failed")
+        return False
+
+
 async def get_advice(
     db: AsyncSession,
     user_id: int,
@@ -384,7 +427,7 @@ async def get_advice(
         ], json_mode=True)
         data = _normalize_result(parse_json(raw), request)
         if data["risk_level"] == "high":
-            raise HTTPException(422, detail="AI建议命中高风险规则，暂不返回")
+            raise _AdvisorRiskBlocked()
         result = await db.execute(text("""INSERT INTO ai_advisor_message
             (session_id, user_id, role, scenario, input_text, output_json, risk_level, status,
              model_name, prompt_version, knowledge_version, request_id, idempotency_key, latency_ms, quota_consumed)
@@ -417,26 +460,30 @@ async def get_advice(
         )
         await db.commit()
     except HTTPException as exc:
-        await db.rollback()
-        await refund_daily(quota_key)
-        await _write_call_log(
-            db,
-            request_id=request_id,
-            user_id=user_id,
-            session_id=session_id,
-            scenario=request.scenario,
-            status="blocked",
-            risk_level="high",
-            latency_ms=int((time.monotonic() - started) * 1000),
-            quota_consumed=True,
-            quota_refunded=True,
-            error_detail=str(exc.detail),
-        )
-        await db.commit()
+        await _rollback_safely(db)
+        refunded = await _refund_quota_safely(quota_key)
+        audit_status = _status_for_advisor_exception(exc)
+        try:
+            await _write_call_log(
+                db,
+                request_id=request_id,
+                user_id=user_id,
+                session_id=session_id,
+                scenario=request.scenario,
+                status=audit_status,
+                risk_level="high" if audit_status == "blocked" else "none",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                quota_consumed=True,
+                quota_refunded=refunded,
+                error_detail=_exception_detail(exc),
+            )
+            await db.commit()
+        except Exception:
+            await _rollback_safely(db)
         raise
     except Exception as exc:
-        await db.rollback()
-        await refund_daily(quota_key)
+        await _rollback_safely(db)
+        refunded = await _refund_quota_safely(quota_key)
         try:
             await _write_call_log(
                 db,
@@ -447,12 +494,12 @@ async def get_advice(
                 status="failed",
                 latency_ms=int((time.monotonic() - started) * 1000),
                 quota_consumed=True,
-                quota_refunded=True,
+                quota_refunded=refunded,
                 error_detail=str(exc),
             )
             await db.commit()
         except Exception:
-            await db.rollback()
+            await _rollback_safely(db)
         raise HTTPException(503, detail="AI军师服务暂时不可用") from exc
 
     row = (await db.execute(text("""SELECT id, session_id, scenario, output_json, created_at
