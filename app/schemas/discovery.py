@@ -79,6 +79,7 @@ class DiscoveryCard(BaseModel):
     is_married: int | None
     online_status: int
     mbti: str | None
+    personal_tags: list[str] = Field(default_factory=list, description="合并后的兴趣标签，受资料可见性约束")
     interest_tags: list[str]
     certification_tags: list[str]
     match_score: float
