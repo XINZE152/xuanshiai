@@ -4,11 +4,15 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.customer_lead_admin import (
     CustomerLead, CustomerLeadAbandonment, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadFollowUp,
     CustomerLeadFollowUpCreate, CustomerLeadPage, CustomerLeadStatistics, CustomerLeadUpdate,
+)
+from app.services.customer_lead_contact import (
+    ensure_contact_available, normalize_contact, raise_duplicate_contact,
 )
 
 LEAD_SELECT = """SELECT id, name, phone, wechat, source, intention_level, status, matchmaker_id,
@@ -34,27 +38,22 @@ async def _validate_owner(db: AsyncSession, assignment: CustomerLeadAssignment) 
 
 
 async def create_lead(db: AsyncSession, account_id: int, request: CustomerLeadCreate) -> CustomerLead:
-    contact_conditions: list[str] = []
-    params: dict[str, Any] = {}
-    if request.phone:
-        contact_conditions.append("phone = :phone")
-        params["phone"] = request.phone
-    if request.wechat:
-        contact_conditions.append("wechat = :wechat")
-        params["wechat"] = request.wechat
-    duplicate = await db.execute(text("SELECT id FROM customer_lead WHERE status NOT IN ('LOST', 'CLOSED') AND (" + " OR ".join(contact_conditions) + ") LIMIT 1"), params)
-    existing_id = duplicate.scalar()
-    if existing_id:
-        raise HTTPException(409, detail=f"该联系方式已存在客源线索（ID: {existing_id}）")
-    result = await db.execute(text("""INSERT INTO customer_lead
-        (name, phone, wechat, source, intention_level, remark, created_by)
-        VALUES (:name, :phone, :wechat, :source, :intention_level, :remark, :created_by)"""), {
-        **request.model_dump(), "created_by": account_id,
-    })
-    lead_id = int(result.lastrowid)
-    await db.execute(text("""INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id)
-        VALUES (:actor, 'customer_lead.create', 'customer_lead', :id)"""), {"actor": account_id, "id": lead_id})
-    await db.commit()
+    phone = normalize_contact(request.phone)
+    wechat = normalize_contact(request.wechat)
+    await ensure_contact_available(db, phone, wechat)
+    try:
+        result = await db.execute(text("""INSERT INTO customer_lead
+            (name, phone, wechat, source, intention_level, remark, created_by)
+            VALUES (:name, :phone, :wechat, :source, :intention_level, :remark, :created_by)"""), {
+            **request.model_dump(), "phone": phone, "wechat": wechat, "created_by": account_id,
+        })
+        lead_id = int(result.lastrowid)
+        await db.execute(text("""INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id)
+            VALUES (:actor, 'customer_lead.create', 'customer_lead', :id)"""), {"actor": account_id, "id": lead_id})
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise_duplicate_contact()
     return await get_lead(db, lead_id)
 
 
@@ -84,12 +83,22 @@ async def list_leads(db: AsyncSession, page: int, page_size: int, status: str | 
 
 
 async def update_lead(db: AsyncSession, account_id: int, lead_id: int, request: CustomerLeadUpdate) -> CustomerLead:
-    await get_lead(db, lead_id)
+    current = await get_lead(db, lead_id)
     values = request.model_dump(exclude_unset=True)
+    target_status = values.get("status") or current.status
+    # 目标状态仍为有效线索时，联系方式不得与其它有效线索重复；改为 LOST/CLOSED 后生成列会置空。
+    if target_status not in ("LOST", "CLOSED"):
+        target_phone = normalize_contact(values["phone"]) if "phone" in values else normalize_contact(current.phone)
+        target_wechat = normalize_contact(values["wechat"]) if "wechat" in values else normalize_contact(current.wechat)
+        await ensure_contact_available(db, target_phone, target_wechat, exclude_lead_id=lead_id)
     assignments = ", ".join(f"{key} = :{key}" for key in values)
-    await db.execute(text(f"UPDATE customer_lead SET {assignments}, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {**values, "id": lead_id})
-    await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) VALUES (:actor, 'customer_lead.update', 'customer_lead', :id)"), {"actor": account_id, "id": lead_id})
-    await db.commit()
+    try:
+        await db.execute(text(f"UPDATE customer_lead SET {assignments}, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {**values, "id": lead_id})
+        await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) VALUES (:actor, 'customer_lead.update', 'customer_lead', :id)"), {"actor": account_id, "id": lead_id})
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise_duplicate_contact()
     return await get_lead(db, lead_id)
 
 
@@ -145,10 +154,18 @@ async def abandon_lead(db: AsyncSession, account_id: int, lead_id: int, reason: 
 
 
 async def restore_lead(db: AsyncSession, account_id: int, lead_id: int, reason: str) -> CustomerLead:
-    await get_lead(db, lead_id)
+    current = await get_lead(db, lead_id)
     active = (await db.execute(text("SELECT id FROM customer_lead_abandonment WHERE lead_id = :id AND restored_at IS NULL ORDER BY id DESC LIMIT 1"), {"id": lead_id})).scalar()
     if not active:
         raise HTTPException(409, detail="该客源不在弃海池")
+    # 恢复后线索回到有效状态，先确认联系方式没有被其它有效线索占用。
+    await ensure_contact_available(
+        db,
+        normalize_contact(current.phone),
+        normalize_contact(current.wechat),
+        exclude_lead_id=lead_id,
+        detail="该客源的联系方式已被其他有效线索占用，无法恢复",
+    )
     await db.execute(text("UPDATE customer_lead_abandonment SET restored_by = :account_id, restored_at = UTC_TIMESTAMP(), restore_reason = :reason WHERE id = :id"), {"account_id": account_id, "reason": reason, "id": active})
     await db.execute(text("UPDATE customer_lead SET status = 'NEW', updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"id": lead_id})
     await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) VALUES (:actor, 'customer_lead.restore', 'customer_lead', :id)"), {"actor": account_id, "id": lead_id})

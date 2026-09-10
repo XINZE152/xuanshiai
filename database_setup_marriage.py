@@ -390,6 +390,7 @@ class DatabaseManager:
         self._ensure_community_post_feed_indexes(cursor)
         self._ensure_idempotency_contract(cursor)
         self._ensure_ai_advisor_indexes(cursor)
+        self._ensure_customer_lead_contact_uniqueness(cursor)
 
     def _ensure_ai_advisor_indexes(self, cursor):
         """补齐 AI 军师旧表的幂等索引，避免重复请求重复扣额度。"""
@@ -560,6 +561,58 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE `user_matchmaker_apply` ADD UNIQUE KEY `uk_user_id_type` (`user_id`,`application_type`)")
         except pymysql.MySQLError as exc:
             logger.warning(f"⚠️ 红娘申请索引升级失败，请检查历史重复数据: {exc}")
+
+    def _ensure_customer_lead_contact_uniqueness(self, cursor):
+        """客源线索有效联系方式全局唯一：弃海/关闭线索不占用联系方式。
+
+        通过生成列实现条件唯一（status 为 LOST/CLOSED 时键值为 NULL，允许多行），
+        与应用层 create/update 查重口径一致；存量重复未清理时跳过并提示。
+        """
+        table = "`customer_lead`"
+        column_specs = {
+            "active_phone": (
+                "ADD COLUMN `active_phone` varchar(32) GENERATED ALWAYS AS "
+                "(CASE WHEN `status` IN ('LOST','CLOSED') THEN NULL ELSE NULLIF(TRIM(`phone`), '') END) STORED "
+                "COMMENT '有效手机号（弃海/关闭为NULL，唯一）'"
+            ),
+            "active_wechat": (
+                "ADD COLUMN `active_wechat` varchar(128) GENERATED ALWAYS AS "
+                "(CASE WHEN `status` IN ('LOST','CLOSED') THEN NULL ELSE NULLIF(TRIM(`wechat`), '') END) STORED "
+                "COMMENT '有效微信（弃海/关闭为NULL，唯一）'"
+            ),
+        }
+        unique_specs = {
+            "active_phone": "ADD UNIQUE KEY `uk_customer_lead_active_phone` (`active_phone`)",
+            "active_wechat": "ADD UNIQUE KEY `uk_customer_lead_active_wechat` (`active_wechat`)",
+        }
+        try:
+            cursor.execute(f"SHOW TABLES LIKE 'customer_lead'")
+            if not cursor.fetchone():
+                return
+            for column, spec in column_specs.items():
+                cursor.execute(f"SHOW COLUMNS FROM {table} LIKE '{column}'")
+                if not cursor.fetchone():
+                    cursor.execute(f"ALTER TABLE {table} {spec}")
+                    logger.info(f"✅ 已添加 customer_lead.{column} 生成列")
+            for column, spec in unique_specs.items():
+                cursor.execute(f"SHOW INDEX FROM {table} WHERE Key_name = 'uk_customer_lead_{column}'")
+                if cursor.fetchone():
+                    continue
+                cursor.execute(
+                    f"""SELECT {column} FROM {table}
+                    WHERE {column} IS NOT NULL
+                    GROUP BY {column} HAVING COUNT(*) > 1 LIMIT 1"""
+                )
+                if cursor.fetchone():
+                    logger.warning(
+                        f"customer_lead 存在重复有效联系方式（{column}），跳过唯一索引迁移，"
+                        "请先运行 scripts/dedupe_customer_leads.py 清理"
+                    )
+                    continue
+                cursor.execute(f"ALTER TABLE {table} {spec}")
+                logger.info(f"✅ 已添加 customer_lead 唯一索引 uk_customer_lead_{column}")
+        except Exception as exc:
+            logger.warning(f"⚠️ customer_lead 联系方式唯一约束迁移失败: {exc}")
 
     def _add_foreign_key(
         self,
