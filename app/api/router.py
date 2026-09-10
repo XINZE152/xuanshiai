@@ -35,6 +35,7 @@ from app.api.routes import (
     live_callbacks,
     live_host,
     live_ws,
+    matchmaker_workspace,
     matchmaker,
     matchmaker_admin,
     matchmaker_admin_account,
@@ -99,6 +100,7 @@ api_router.include_router(profile.router, tags=["首页与资料"])
 api_router.include_router(discovery.router, tags=["首页与资料"])
 api_router.include_router(discovery.users_router, tags=["首页与资料"])
 api_router.include_router(matchmaker.router, tags=["红娘"])
+api_router.include_router(matchmaker_workspace.router, tags=["红娘"])
 api_router.include_router(matchmaker.product_router, tags=["红娘"])
 api_router.include_router(matchmaker.requests_router, tags=["红娘"])
 api_router.include_router(meeting.router, tags=["红娘"])

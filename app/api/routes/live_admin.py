@@ -23,8 +23,8 @@ async def create(body: LiveSessionCreate, current: CurrentUser = Depends(get_cur
 
 @router.put("/sessions/{session_id}/roles", response_model=LiveRoleAssignmentResponse, summary="分配直播场次角色")
 async def assign_role(
-    session_id: int = Path(..., ge=1),
     body: LiveRoleAssignment,
+    session_id: int = Path(..., ge=1),
     current: CurrentUser = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ) -> LiveRoleAssignmentResponse:

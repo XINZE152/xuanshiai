@@ -161,6 +161,8 @@ async def attribute_promotion(db: AsyncSession, current: CurrentUser, request: P
     touch = touch_result.mappings().first()
     if not touch:
         raise HTTPException(404, detail="推广码不存在")
+    if touch["promoter_id"] is None:
+        raise HTTPException(422, detail="该代码仅用于合伙团队邀请，不能用于会员推广归属")
     if int(touch["promoter_id"]) == current.id:
         raise HTTPException(422, detail="不能将自己归属到自己的推广码")
     await db.execute(text("UPDATE promotion_touch SET registered_user_id = :user_id WHERE id = :id"), {"user_id": current.id, "id": touch["id"]})
