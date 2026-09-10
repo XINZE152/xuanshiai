@@ -9,7 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
 from app.db.session import get_db
-from app.schemas.matchmaker_crm_admin import MemberAssignmentResponse, MemberAssignmentUpdate, MemberDetail, MemberListItem, MemberPage, MemberStatistics, MemberStatusResponse, MemberStatusUpdate
+from app.schemas.matchmaker_crm_admin import MatchRecordCreate, MatchRecordItem, MatchRecordPage, MatchRecordResponse, MemberAssignmentResponse, MemberAssignmentUpdate, MemberDetail, MemberListItem, MemberPage, MemberStatistics, MemberStatusResponse, MemberStatusUpdate
+from app.schemas.admin import CertificationReviewRequest, RealnameReviewRequest
+from app.services.auth import list_realname_reviews, review_realname
+from app.services.certifications import list_certification_reviews, review_certification
 
 router = APIRouter(prefix="/admin/matchmaker")
 
@@ -18,6 +21,60 @@ class MemberBatchStatus(BaseModel):
     member_ids: list[int] = Field(min_length=1, max_length=200)
     status: int = Field(ge=1, le=3)
     reason: str = Field(min_length=1, max_length=255)
+
+
+@router.get("/match-records", response_model=MatchRecordPage, summary="管理员查询牵线记录")
+async def match_records(
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None, max_length=64),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MatchRecordPage:
+    where = ["1=1"]
+    params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    if search:
+        where.append("(fu.nickname LIKE CONCAT('%', :search, '%') OR tu.nickname LIKE CONCAT('%', :search, '%') OR fu.phone LIKE CONCAT('%', :search, '%') OR tu.phone LIKE CONCAT('%', :search, '%'))")
+        params["search"] = search
+    clause = " AND ".join(where)
+    base = "FROM match_apply a JOIN users fu ON fu.id = a.from_user_id JOIN users tu ON tu.id = a.to_user_id"
+    rows = await db.execute(text(f"""SELECT a.id, a.from_user_id, a.to_user_id, a.status, a.created_at, a.responded_at,
+        fu.nickname AS from_nickname, tu.nickname AS to_nickname,
+        ra.matchmaker_id
+        {base} LEFT JOIN (SELECT user_id, MAX(matchmaker_id) AS matchmaker_id FROM resource_assignment WHERE status = 1 GROUP BY user_id) ra ON ra.user_id = a.from_user_id
+        WHERE {clause} ORDER BY a.created_at DESC, a.id DESC LIMIT :limit OFFSET :offset"""), params)
+    total = int((await db.execute(text(f"SELECT COUNT(*) {base} WHERE {clause}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})).scalar() or 0)
+    return MatchRecordPage(items=[MatchRecordItem(**dict(row)) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
+
+
+@router.post("/match-records", response_model=MatchRecordResponse, status_code=201, summary="管理员新增牵线记录")
+async def create_match_record(
+    body: MatchRecordCreate,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MatchRecordResponse:
+    if body.from_love_user_id == body.to_love_user_id:
+        raise HTTPException(status_code=422, detail="牵线会员与被牵线会员不能相同")
+    if body.complete_time < body.create_time:
+        raise HTTPException(status_code=422, detail="牵线完成时间不能早于申请时间")
+    ids = {"from_id": body.from_love_user_id, "to_id": body.to_love_user_id}
+    members = await db.execute(text("SELECT id FROM users WHERE id IN (:from_id, :to_id)"), ids)
+    if len(members.all()) != 2:
+        raise HTTPException(status_code=404, detail="会员不存在")
+    existing = await db.execute(text("SELECT id FROM match_apply WHERE from_user_id=:from_id AND to_user_id=:to_id AND created_at=:created_at LIMIT 1"), {**ids, "created_at": body.create_time})
+    if existing.scalar():
+        raise HTTPException(status_code=409, detail="该牵线记录已存在")
+    result = await db.execute(text("""INSERT INTO match_apply
+        (from_user_id, to_user_id, message, status, responded_at, expire_at, created_at, updated_at)
+        VALUES (:from_id, :to_id, '后台添加牵线记录', :status, :responded_at, NULL, :created_at, UTC_TIMESTAMP())"""), {
+        **ids, "status": body.line_status, "created_at": body.create_time, "responded_at": body.complete_time,
+    })
+    if body.line_status == 1:
+        await db.execute(text("""INSERT INTO user_match (user_id, target_user_id, status)
+            VALUES (:left, :right, 1), (:right, :left, 1)
+            ON DUPLICATE KEY UPDATE status = 1, updated_at = UTC_TIMESTAMP()"""), {"left": body.from_love_user_id, "right": body.to_love_user_id})
+    await db.commit()
+    return MatchRecordResponse(id=int(result.lastrowid), from_user_id=body.from_love_user_id, to_user_id=body.to_love_user_id, status=body.line_status, created_at=body.create_time, responded_at=body.complete_time)
 
 
 async def _member_query(db: AsyncSession, where: str, params: dict, page: int, page_size: int) -> MemberPage:
@@ -70,7 +127,11 @@ async def members(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20
         where += " AND u.status = :status"
         params["status"] = status
     if search:
-        where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
+        if search.isdigit():
+            where += " AND (u.id = :search_id OR u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
+            params["search_id"] = int(search)
+        else:
+            where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
         params["search"] = search
     if vip is True:
         where += " AND v.user_id IS NOT NULL AND (v.vip_end_at IS NULL OR v.vip_end_at > UTC_TIMESTAMP())"
@@ -144,6 +205,54 @@ async def member_auth_list(
     rows = await db.execute(text(f"SELECT u.id, u.nickname, u.phone, u.gender, u.birthday, ua.real_name, ua.id_card, COALESCE(ua.auth_status,0) auth_status, ua.updated_at submitted_at {base} WHERE {clause} ORDER BY submitted_at DESC, u.id DESC LIMIT :limit OFFSET :offset"), params)
     total = int((await db.scalar(text(f"SELECT COUNT(*) {base} WHERE {clause}"), {k: v for k, v in params.items() if k not in ('limit', 'offset')})) or 0)
     return {"items": [dict(row) for row in rows.mappings().all()], "page": page, "page_size": page_size, "total": total, "has_more": page * page_size < total}
+
+
+@router.get("/members/realname-reviews")
+async def member_realname_reviews(
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    status: int | None = Query(None, ge=0, le=4),
+    search: str | None = Query(None, max_length=64),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    if status is not None and status not in (1, 4):
+        raise HTTPException(422, detail="实名认证状态只支持审核中或人工复核")
+    return (await list_realname_reviews(db, page=page, page_size=page_size, status=status, search=search)).model_dump()
+
+
+@router.patch("/members/{member_id}/realname/review")
+async def review_member_realname(
+    member_id: int,
+    body: RealnameReviewRequest,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return (await review_realname(db, member_id, body.status, body.reason, current.account.id)).model_dump()
+
+
+@router.get("/members/certification-reviews")
+async def member_certification_reviews(
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    kind: str | None = Query(None, pattern="^(education|house|marriage)$"),
+    status: int | None = Query(None, ge=0, le=3),
+    search: str | None = Query(None, max_length=64),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return (await list_certification_reviews(db, page=page, page_size=page_size, kind=kind, status=status, search=search)).model_dump()
+
+
+@router.patch("/members/{member_id}/certifications/{kind}/review")
+async def review_member_certification(
+    member_id: int,
+    kind: str = Path(..., pattern="^(education|house|marriage)$"),
+    body: CertificationReviewRequest = ...,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return (await review_certification(db, member_id, kind, body)).model_dump()
 
 
 @router.get("/members/{member_id}", response_model=MemberDetail, summary="查询会员详情")

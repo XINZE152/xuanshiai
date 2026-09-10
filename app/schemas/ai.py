@@ -53,6 +53,36 @@ class AIProfilePolishResponse(BaseModel):
     changed_points: list[str]
 
 
+class AIProfileThoughtfulnessRequest(BaseModel):
+    """触发 AI 用心度评审：trigger=save 为保存资料后自动触发，manual 为用户手动重新分析。"""
+    trigger: Literal["save", "manual"] = "save"
+    edited_keys: list[str] = Field(default_factory=list, max_length=20)
+    analysis_run_id: str | None = Field(default=None, max_length=96)
+
+
+class AIProfileThoughtfulnessTodo(BaseModel):
+    key: Literal[
+        "basic_info",
+        "self_intro",
+        "qa_answers",
+        "interest_tags",
+        "personality_tags",
+        "mbti",
+        "avatar",
+        "photos",
+    ]
+    label: str = Field(min_length=1, max_length=40)
+    advice: str = Field(min_length=1, max_length=300)
+    priority: Literal["high", "medium", "low"] = "medium"
+
+
+class AIProfileThoughtfulnessResponse(BaseModel):
+    score: int = Field(ge=0, le=100)
+    summary: str = Field(max_length=500)
+    todos: list[AIProfileThoughtfulnessTodo]
+    generated_at: datetime
+
+
 class AISearchRequest(BaseModel):
     query: str = Field(min_length=2, max_length=500)
     page: int = Field(default=1, ge=1, le=1000)

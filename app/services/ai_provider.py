@@ -117,13 +117,28 @@ def _mock_response(messages: list[dict[str, str]], *, json_mode: bool) -> str:
         return json.dumps({"polished": user.split("\n", 1)[-1][:300], "changed_points": ["保留原意并调整表达"]}, ensure_ascii=False)
     if "SEARCH_PARSE" in user:
         return json.dumps({"normalized_query": user.split("\n", 1)[-1][:500], "filters": {}, "unresolved": []}, ensure_ascii=False)
+    if "THOUGHTFULNESS_REVIEW" in user:
+        return json.dumps({
+            "score": 70,
+            "summary": "你的资料已经具备基本框架，再补充一些具体细节会更有吸引力。",
+            "todos": [
+                {"key": "self_intro", "label": "自我介绍", "advice": "补充一个具体的生活场景或周末常态，让资料更有画面感。", "priority": "medium"},
+            ],
+        }, ensure_ascii=False)
     if "MATCH_EXPLAIN" in user:
         return json.dumps({"reason": "资料中的兴趣和生活方式存在重合，建议从共同兴趣开始交流。", "suggestions": ["可以从共同兴趣开始聊天"]}, ensure_ascii=False)
     if "ADVISOR_ADVICE" in user:
         scenario = _prompt_value(user, "Scenario") or "reply"
         tone = _prompt_value(user, "Tone") or "natural"
         return json.dumps(_advisor_mock_advice(scenario, tone), ensure_ascii=False)
+    if any(
+        "Use only this authorized public profile context" in str(message.get("content") or "")
+        for message in messages
+    ):
+        return json.dumps(
+            {
+                "reply": "我是 AI 分身，只能根据当前获授权的公开资料回答。未公开的信息建议在双方同意认识后再慢慢了解。"
+            },
+            ensure_ascii=False,
+        )
     return "我可以帮你梳理这段聊天，并给出更具体的沟通建议。"
-
-
-

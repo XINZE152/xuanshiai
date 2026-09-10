@@ -51,6 +51,7 @@ from app.services.profile import _calculate_age
 from app.services.restrictions import ensure_user_allowed
 from app.services.restrictions import create_restriction
 from app.schemas.restrictions import RestrictionCreate
+from app.services.revisions import RevisionKind, increment_revision_and_enqueue
 
 
 def _social_user(row: dict[str, Any]) -> SocialUser:
@@ -243,6 +244,7 @@ async def list_messages(db: AsyncSession, user_id: int, session_id: int, page: i
 async def send_message(db: AsyncSession, user_id: int, session_id: int, request: ChatMessageCreate) -> ChatMessageResponse:
     await ensure_user_allowed(db, user_id, "MESSAGE_RESTRICTED")
     session, target_id = await _session(db, user_id, session_id)
+    await _ensure_message_privacy(db, user_id, target_id)
     result = await db.execute(text("""INSERT INTO chat_message (session_id, from_user_id, to_user_id, type, content, media_url)
         VALUES (:session_id, :from_id, :to_id, :type, :content, :media_url)"""), {"session_id": session_id, "from_id": user_id, "to_id": target_id, **request.model_dump()})
     preview = request.content if request.type == 1 else "[媒体消息]"
@@ -347,9 +349,10 @@ async def get_privacy(db: AsyncSession, user_id: int) -> PrivacyResponse:
     result = await db.execute(text("SELECT * FROM user_privacy WHERE user_id = :user_id"), {"user_id": user_id})
     row = result.mappings().first()
     values = dict(row) if row else {"user_id": user_id}
-    defaults = {"hide_phone": 0, "hide_school": 0, "hide_company": 0, "hide_distance": 0, "hide_online_status": 0, "only_auth_can_contact": 0, "only_vip_can_see_detail": 0, "who_can_see_me": 1, "match_status": 1, "anonymous_browse_enabled": 0, "show_profile": 1, "show_likes": 1, "show_posts": 1, "notify_like": 1, "notify_comment": 1, "notify_follow": 1, "notify_message": 1, "notify_match": 1, "notify_apply": 1, "notify_system": 1, "notify_activity": 1}
+    defaults = {"profile_visibility": "all", "message_privacy": "all", "hide_phone": 0, "hide_school": 0, "hide_company": 0, "hide_distance": 0, "hide_online_status": 0, "only_auth_can_contact": 0, "only_vip_can_see_detail": 0, "who_can_see_me": 1, "match_status": 1, "anonymous_browse_enabled": 0, "show_profile": 1, "show_likes": 1, "show_posts": 1, "notify_like": 1, "notify_comment": 1, "notify_follow": 1, "notify_message": 1, "notify_match": 1, "notify_apply": 1, "notify_system": 1, "notify_activity": 1}
     values = {**defaults, **values, "user_id": user_id}
-    return PrivacyResponse(**{key: bool(value) if key not in ("user_id", "who_can_see_me", "match_status") else value for key, value in values.items() if key in PrivacyResponse.model_fields})
+    boolean_fields = set(PrivacyResponse.model_fields) - {"user_id", "profile_visibility", "message_privacy", "who_can_see_me", "match_status", "updated_at"}
+    return PrivacyResponse(**{key: bool(value) if key in boolean_fields else value for key, value in values.items() if key in PrivacyResponse.model_fields})
 
 
 async def update_privacy(db: AsyncSession, user_id: int, request: PrivacyUpdateRequest) -> PrivacyResponse:
@@ -360,8 +363,36 @@ async def update_privacy(db: AsyncSession, user_id: int, request: PrivacyUpdateR
         placeholders = ", ".join(f":{column}" for column in columns)
         updates = ", ".join(f"{column} = VALUES({column})" for column in values)
         await db.execute(text(f"INSERT INTO user_privacy ({', '.join(columns)}) VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {updates}, updated_at = UTC_TIMESTAMP()"), {"user_id": user_id, **values})
+        await increment_revision_and_enqueue(
+            db,
+            user_id,
+            RevisionKind.PRIVACY,
+            tuple(values.keys()),
+            "privacy_updated",
+            10,
+        )
         await db.commit()
     return await get_privacy(db, user_id)
+
+
+async def _ensure_message_privacy(db: AsyncSession, sender_id: int, recipient_id: int) -> None:
+    """Enforce the recipient's inbound-message policy after session authorization."""
+    result = await db.execute(
+        text("""SELECT COALESCE(pr.message_privacy, 'all') AS message_privacy,
+                      COALESCE(pr.only_auth_can_contact, 0) AS only_auth_can_contact,
+                      COALESCE(sender_auth.realname_status, 0) AS sender_realname_status
+               FROM users recipient
+               LEFT JOIN user_privacy pr ON pr.user_id = recipient.id
+               LEFT JOIN user_auth sender_auth ON sender_auth.user_id = :sender_id
+               WHERE recipient.id = :recipient_id"""),
+        {"sender_id": sender_id, "recipient_id": recipient_id},
+    )
+    row = result.mappings().first()
+    if not row:
+        raise HTTPException(404, detail="接收用户不存在")
+    requires_certification = row["message_privacy"] == "certified" or bool(row["only_auth_can_contact"])
+    if requires_certification and int(row["sender_realname_status"] or 0) != 2:
+        raise HTTPException(403, detail="对方仅接收认证用户的消息")
 
 
 async def list_blocks(db: AsyncSession, user_id: int) -> list[SocialUser]:
@@ -373,14 +404,24 @@ async def list_blocks(db: AsyncSession, user_id: int) -> list[SocialUser]:
 async def set_block(db: AsyncSession, user_id: int, target_id: int, request: BlockRequest, enabled: bool) -> None:
     if enabled:
         await _ensure_target(db, user_id, target_id)
-        await db.execute(text("INSERT IGNORE INTO user_block (user_id, target_user_id, reason) VALUES (:user_id, :target_id, :reason)"), {"user_id": user_id, "target_id": target_id, "reason": request.reason if request else None})
+        inserted = await db.execute(text("INSERT IGNORE INTO user_block (user_id, target_user_id, reason) VALUES (:user_id, :target_id, :reason)"), {"user_id": user_id, "target_id": target_id, "reason": request.reason if request else None})
         await db.execute(text("UPDATE user_match SET status = 3, updated_at = UTC_TIMESTAMP() WHERE (user_id = :user_id AND target_user_id = :target_id) OR (user_id = :target_id AND target_user_id = :user_id)"), {"user_id": user_id, "target_id": target_id})
         await db.execute(text("UPDATE match_apply SET status = 3, updated_at = UTC_TIMESTAMP() WHERE status = 0 AND ((from_user_id = :user_id AND to_user_id = :target_id) OR (from_user_id = :target_id AND to_user_id = :user_id))"), {"user_id": user_id, "target_id": target_id})
+        # Only enqueue an invalidation when the block actually took effect;
+        # INSERT IGNORE with rowcount 0 means the pair was already blocked.
+        if getattr(inserted, "rowcount", 1) > 0:
+            await increment_revision_and_enqueue(db, user_id, RevisionKind.RELATIONSHIP, ("block",), "relationship_blocked", 10)
+            await increment_revision_and_enqueue(db, target_id, RevisionKind.RELATIONSHIP, ("block",), "relationship_blocked", 10)
     else:
         result = await db.execute(text("SELECT 1 FROM users WHERE id = :target_id AND status = 1"), {"target_id": target_id})
         if not result.scalar():
             raise HTTPException(404, detail="目标用户不存在")
-        await db.execute(text("DELETE FROM user_block WHERE user_id = :user_id AND target_user_id = :target_id"), {"user_id": user_id, "target_id": target_id})
+        deleted = await db.execute(text("DELETE FROM user_block WHERE user_id = :user_id AND target_user_id = :target_id"), {"user_id": user_id, "target_id": target_id})
+        # Only enqueue an invalidation when the block was actually lifted;
+        # DELETE with rowcount 0 means the pair was not blocked.
+        if getattr(deleted, "rowcount", 1) > 0:
+            await increment_revision_and_enqueue(db, user_id, RevisionKind.RELATIONSHIP, ("block",), "relationship_unblocked", 10)
+            await increment_revision_and_enqueue(db, target_id, RevisionKind.RELATIONSHIP, ("block",), "relationship_unblocked", 10)
     await db.commit()
 
 
@@ -444,6 +485,9 @@ async def _insert_report(
 
 
 async def create_report(db: AsyncSession, user_id: int, target_id: int, request: ReportRequest) -> ReportResponse:
+    target_type = request.target_type or "user"
+    if target_type != "user":
+        return await create_content_report(db, user_id, target_type=target_type, target_id=request.target_id or target_id, reason_id=request.type, description=request.description, images=request.images)
     await _ensure_target(db, user_id, target_id)
     await _ensure_report_images(db, user_id, request.images)
     return await _insert_report(
@@ -471,7 +515,7 @@ async def create_content_report(
     from app.services.community import REPORT_REASONS
 
     allowed = {item["id"] for item in REPORT_REASONS}
-    if reason_id not in allowed:
+    if target_type in {"post", "comment", "paper_plane"} and reason_id not in allowed:
         raise HTTPException(422, detail="举报原因无效")
     image_list = images or []
     await _ensure_report_images(db, user_id, image_list)
@@ -500,6 +544,21 @@ async def create_content_report(
         row = result.mappings().first()
         if not row:
             raise HTTPException(404, detail="纸飞机不存在")
+    elif target_type == "message":
+        result = await db.execute(text("SELECT id, from_user_id AS user_id FROM chat_message WHERE id=:target_id"), {"target_id": target_id})
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(404, detail="聊天消息不存在")
+    elif target_type == "user_media":
+        result = await db.execute(text("SELECT id, user_id FROM user_media WHERE id=:target_id AND deleted_at IS NULL"), {"target_id": target_id})
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(404, detail="用户媒体不存在")
+    elif target_type == "community_media":
+        result = await db.execute(text("SELECT id, user_id FROM community_media WHERE id=:target_id AND deleted_at IS NULL"), {"target_id": target_id})
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(404, detail="社区媒体不存在")
     else:
         raise HTTPException(422, detail="不支持的举报对象类型")
 
@@ -560,7 +619,7 @@ async def list_admin_reports(
     result = await db.execute(
         text(
             f"""SELECT id, user_id AS reporter_user_id, target_user_id, target_type, target_id,
-            type, `desc` AS description, status, result, COALESCE(action, 'none') AS action,
+            type, `desc` AS description, images, status, result, COALESCE(action, 'none') AS action,
             reviewed_by, reviewed_at, created_at, updated_at
             FROM user_report
             WHERE {where_sql}
@@ -581,6 +640,13 @@ async def list_admin_reports(
                 target_id=int(data["target_id"]) if data.get("target_id") is not None else None,
                 type=data.get("type"),
                 description=data.get("description"),
+                images=(
+                    data.get("images")
+                    if isinstance(data.get("images"), list)
+                    else json.loads(data["images"])
+                    if isinstance(data.get("images"), str)
+                    else []
+                ),
                 status=int(data["status"]),
                 result=data.get("result"),
                 action=data.get("action") or "none",
@@ -637,7 +703,7 @@ async def list_my_reports(
     result = await db.execute(
         text(
             f"""SELECT r.id, r.user_id AS reporter_user_id, r.target_user_id,
-            r.target_type, r.target_id, r.type, r.`desc` AS description, r.status,
+            r.target_type, r.target_id, r.type, r.`desc` AS description, r.images, r.status,
             r.result, COALESCE(r.action, 'none') AS action, r.reviewed_by,
             r.reviewed_at, r.created_at, r.updated_at,
             EXISTS (SELECT 1 FROM report_appeal a WHERE a.report_id = r.id) AS has_appeal
@@ -670,7 +736,15 @@ async def get_admin_report(db: AsyncSession, report_id: int) -> AdminReportItem:
     row = result.mappings().first()
     if not row:
         raise HTTPException(404, detail="举报记录不存在")
-    return AdminReportItem(**dict(row))
+    data = dict(row)
+    data["images"] = (
+        data.get("images")
+        if isinstance(data.get("images"), list)
+        else json.loads(data["images"])
+        if isinstance(data.get("images"), str)
+        else []
+    )
+    return AdminReportItem(**data)
 
 
 def _appeal_response(row: dict[str, Any]) -> ReportAppealResponse:
@@ -865,6 +939,18 @@ async def moderate_content(
             if expected_report_id is not None:
                 return False
             raise HTTPException(404, detail="纸飞机不存在")
+    elif target_type in {"message", "chat_message"}:
+        result = await db.execute(text("UPDATE chat_message SET revoked_at = CASE WHEN :hide = 1 THEN COALESCE(revoked_at, UTC_TIMESTAMP()) ELSE NULL END WHERE id=:target_id"), {"target_id": target_id, "hide": int(hide)})
+        if result.rowcount == 0:
+            raise HTTPException(404, detail="聊天消息不存在")
+    elif target_type == "user_media":
+        result = await db.execute(text("UPDATE user_media SET review_status=:status, review_reason=:reason, reviewed_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP() WHERE id=:target_id AND deleted_at IS NULL"), {"target_id": target_id, "status": 3 if hide else 1, "reason": reason})
+        if result.rowcount == 0:
+            raise HTTPException(404, detail="用户媒体不存在")
+    elif target_type == "community_media":
+        result = await db.execute(text("UPDATE community_media SET moderation_status=:status, moderation_reason=:reason, moderated_by=:actor_id, moderated_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP() WHERE id=:target_id AND deleted_at IS NULL"), {"target_id": target_id, "status": "hidden" if hide else "approved", "reason": reason, "actor_id": actor_id})
+        if result.rowcount == 0:
+            raise HTTPException(404, detail="社区媒体不存在")
     else:
         raise HTTPException(422, detail="不支持的内容类型")
 
@@ -886,6 +972,36 @@ async def moderate_content(
 
 
     return True
+
+
+async def restrict_user_content(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    restriction: RestrictionCreate,
+    actor_id: int,
+    reason: str,
+) -> dict[str, int]:
+    """Apply a user restriction and hide all of the user's historical content."""
+    await create_restriction(db, user_id, restriction, actor_id, commit=False)
+    counts: dict[str, int] = {}
+    statements = {
+        "user_media": "UPDATE user_media SET review_status=3, review_reason=:reason, reviewed_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP() WHERE user_id=:user_id AND deleted_at IS NULL AND review_status <> 3",
+        "community_post": "UPDATE community_post SET moderation_status=2, updated_at=UTC_TIMESTAMP() WHERE user_id=:user_id AND deleted_at IS NULL AND moderation_status <> 2",
+        "community_comment": "UPDATE community_comment SET moderation_status=2 WHERE user_id=:user_id AND deleted_at IS NULL AND moderation_status <> 2",
+        "paper_plane": "UPDATE paper_plane SET moderation_status=2 WHERE user_id=:user_id AND deleted_at IS NULL AND moderation_status <> 2",
+        "community_media": "UPDATE community_media SET moderation_status='hidden', moderation_reason=:reason, moderated_by=:actor_id, moderated_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP() WHERE user_id=:user_id AND deleted_at IS NULL AND moderation_status <> 'hidden'",
+        "chat_message": "UPDATE chat_message SET revoked_at=COALESCE(revoked_at, UTC_TIMESTAMP()) WHERE from_user_id=:user_id AND revoked_at IS NULL",
+    }
+    for resource_type, statement in statements.items():
+        result = await db.execute(text(statement), {"user_id": user_id, "reason": reason, "actor_id": actor_id})
+        counts[resource_type] = max(int(result.rowcount or 0), 0)
+        if counts[resource_type]:
+            await db.execute(text("""INSERT INTO business_audit_log
+                (actor_user_id, action, resource_type, resource_id, reason)
+                VALUES (:actor_id, 'restrict_user_content', :resource_type, :user_id, :reason)"""),
+                {"actor_id": actor_id, "resource_type": resource_type, "user_id": user_id, "reason": reason})
+    return counts
 
 
 async def review_report(db: AsyncSession, report_id: int, request: ReportReviewRequest, *, actor_id: int | None = None) -> ReportReviewResponse:
@@ -915,6 +1031,31 @@ async def review_report(db: AsyncSession, report_id: int, request: ReportReviewR
     restriction_created = False
     target_type = row.get("target_type") or "user"
     target_id = row.get("target_id")
+    # A successful report always takes effect immediately, even when the client
+    # omits the optional action field.
+    if status == 1 and action == "none":
+        if target_type == "user":
+            await db.execute(
+                text("UPDATE users SET status=2, nickname='已封禁用户', avatar=NULL, updated_at=UTC_TIMESTAMP() WHERE id=:user_id"),
+                {"user_id": int(row["target_user_id"])},
+            )
+            if actor_id is not None:
+                await db.execute(text("""INSERT INTO business_audit_log
+                    (actor_user_id, action, resource_type, resource_id, reason)
+                    VALUES (:actor_id, 'ban_user', 'user', :user_id, :reason)"""),
+                    {"actor_id": actor_id, "user_id": int(row["target_user_id"]), "reason": request.result})
+        elif target_id is not None:
+            await moderate_content(
+                db,
+                target_type=target_type,
+                target_id=int(target_id),
+                hide=True,
+                reason=request.result,
+                actor_id=actor_id,
+                source_report_id=report_id,
+            )
+            content_moderated = True
+        action = "hide_content" if target_type != "user" else "none"
     if action in ("hide_content", "restore_content"):
         if target_type == "user" or target_id is None:
             raise HTTPException(422, detail="用户举报不支持内容处置，请使用内容下架接口")
@@ -928,19 +1069,29 @@ async def review_report(db: AsyncSession, report_id: int, request: ReportReviewR
             source_report_id=report_id if action == "hide_content" else None,
         )
         content_moderated = True
-    if action == "restrict_user":
-        await create_restriction(
+    if action in ("restrict_user", "restrict_user_content"):
+        restriction = RestrictionCreate(
+            restriction_type=request.restriction_type,
+            reason_code=request.restriction_reason_code,
+            reason=request.result,
+            ends_at=request.restriction_ends_at,
+        )
+        if action == "restrict_user_content":
+            await restrict_user_content(
+                db,
+                user_id=int(row["target_user_id"]),
+                restriction=restriction,
+                actor_id=actor_id or 0,
+                reason=request.result,
+            )
+        else:
+            await create_restriction(
             db,
             int(row["target_user_id"]),
-            RestrictionCreate(
-                restriction_type=request.restriction_type,
-                reason_code=request.restriction_reason_code,
-                reason=request.result,
-                ends_at=request.restriction_ends_at,
-            ),
+            restriction,
             actor_id or 0,
             commit=False,
-        )
+            )
         restriction_created = True
 
     await db.execute(

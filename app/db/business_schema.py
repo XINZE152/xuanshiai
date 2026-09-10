@@ -721,4 +721,98 @@ BUSINESS_TABLES = {
             KEY `idx_chat_request_responder` (`responder_id`,`status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话结构化请求'
     """,
+    "commission_level": """
+        CREATE TABLE IF NOT EXISTS `commission_level` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `code` varchar(32) NOT NULL,
+            `name` varchar(64) NOT NULL,
+            `mode` varchar(16) NOT NULL DEFAULT 'rate' COMMENT 'rate按比例/fixed固定金额',
+            `rate_percent` decimal(7,4) NOT NULL DEFAULT 0 COMMENT '按比例分成比例(%)',
+            `fixed_amount` decimal(12,2) DEFAULT NULL COMMENT '固定分成金额(元)，mode=fixed 时生效',
+            `platform_extra_amount` decimal(12,2) NOT NULL DEFAULT 0 COMMENT '平台额外奖励(元)，每达成一次分成订单额外发放',
+            `promotion_condition` varchar(255) DEFAULT NULL COMMENT '自动升级到此级别的条件描述',
+            `sort` int NOT NULL DEFAULT 0,
+            `status` tinyint NOT NULL DEFAULT 1 COMMENT '1启用 2停用',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_commission_level_code` (`code`),
+            KEY `idx_commission_level_status` (`status`, `sort`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘分成级别'
+    """,
+    "promoter_level_config": """
+        CREATE TABLE IF NOT EXISTS `promoter_level_config` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `level_id` tinyint unsigned NOT NULL COMMENT '业务级别：1 初级 / 2 推广大师 / 3 推广大使 / 4 推广天使（固定 4 种）',
+            `level_name` varchar(32) NOT NULL COMMENT '级别名称',
+            `auto_split_mode` varchar(16) NOT NULL DEFAULT 'fixed_amount' COMMENT 'fixed_amount 自定义固定金额 / auto_rate 按同比自动计算',
+            `auto_split_rate` decimal(7,4) DEFAULT NULL COMMENT '按同比自动计算的比例(%)，auto_split_mode=auto_rate 时生效',
+            `promote_threshold` int DEFAULT NULL COMMENT '自动升级条件：累计发展有效相亲会员数阈值',
+            `register_reward_male` decimal(12,2) NOT NULL DEFAULT 0 COMMENT '男会员注册奖励(元/人)',
+            `register_reward_female` decimal(12,2) NOT NULL DEFAULT 0 COMMENT '女会员注册奖励(元/人)',
+            `consume_commission_mode` varchar(16) NOT NULL DEFAULT 'none' COMMENT '会员消费分成模式：none 不分成 / auto_rate 按比例',
+            `consume_commission_rate` decimal(7,4) DEFAULT NULL COMMENT '会员消费分成比例(%)，consume_commission_mode=auto_rate 时生效',
+            `updated_by` bigint unsigned DEFAULT NULL,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_promoter_level` (`level_id`),
+            KEY `idx_promoter_level_created` (`created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='推广红娘分成级别配置（固定 4 种，不可新增/删除）'
+    """,
+    "matchmaker_profile": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_profile` (
+            `user_id` bigint unsigned NOT NULL,
+            `wechat` varchar(64) DEFAULT NULL,
+            `commission_level_id` bigint unsigned DEFAULT NULL,
+            `role_tag` varchar(16) NOT NULL DEFAULT 'normal' COMMENT 'super超级红娘 normal普通红娘',
+            `visible` tinyint NOT NULL DEFAULT 1 COMMENT '1前台展示 0隐藏',
+            `locked` tinyint NOT NULL DEFAULT 0 COMMENT '1锁定禁止登录工作台',
+            `description` varchar(2000) DEFAULT NULL,
+            `deleted_at` datetime DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`user_id`),
+            KEY `idx_matchmaker_profile_level` (`commission_level_id`, `visible`),
+            KEY `idx_matchmaker_profile_lock` (`locked`, `deleted_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘管理档案'
+    """,
+    "admin_menu": """
+        CREATE TABLE IF NOT EXISTS `admin_menu` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `parent_id` bigint unsigned DEFAULT NULL,
+            `name` varchar(64) NOT NULL,
+            `path` varchar(128) DEFAULT NULL,
+            `menu_type` varchar(16) NOT NULL DEFAULT 'menu' COMMENT 'directory/menu/button',
+            `permission_code` varchar(64) DEFAULT NULL,
+            `icon` varchar(64) DEFAULT NULL,
+            `sort` int NOT NULL DEFAULT 0,
+            `status` tinyint NOT NULL DEFAULT 1 COMMENT '1启用 2停用',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_admin_menu_parent` (`parent_id`, `status`, `sort`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘后台菜单权限树'
+    """,
+    "matchmaker_menu_permission": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_menu_permission` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `matchmaker_user_id` bigint unsigned NOT NULL,
+            `menu_id` bigint unsigned NOT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_matchmaker_menu` (`matchmaker_user_id`, `menu_id`),
+            KEY `idx_matchmaker_menu_user` (`matchmaker_user_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘已分配菜单'
+    """,
+    "matchmaker_tutorial": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_tutorial` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `title` varchar(128) NOT NULL,
+            `content` text NOT NULL,
+            `link_url` varchar(500) DEFAULT NULL,
+            `status` tinyint NOT NULL DEFAULT 1,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘使用教程'
+    """,
 }

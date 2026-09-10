@@ -4,7 +4,12 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
-from app.schemas.auth import NicknameUpdateRequest, PhotoOrderRequest, PreferenceUpdateRequest, ProfileUpdateRequest
+from app.schemas.auth import (
+    NicknameUpdateRequest,
+    PhotoOrderRequest,
+    PreferenceUpdateRequest,
+    ProfileUpdateRequest,
+)
 from app.services.profile import COMPLETION_RULES, IMAGE_MAX_PIXELS, _image_outputs
 
 
@@ -53,6 +58,19 @@ def test_preference_ranges_must_be_ordered() -> None:
         PreferenceUpdateRequest(age_min=35, age_max=25)
     with pytest.raises(ValidationError):
         PreferenceUpdateRequest(height_min=180, height_max=160)
+
+
+def test_preference_relationship_options_are_restricted() -> None:
+    request = PreferenceUpdateRequest(
+        dating_goal="倾向结婚",
+        meeting_pace="真诚高效",
+        children_intention="看情况决定是否要孩子",
+    )
+    assert request.dating_goal == "倾向结婚"
+    with pytest.raises(ValidationError):
+        PreferenceUpdateRequest(dating_goal="随缘")
+    with pytest.raises(ValidationError):
+        PreferenceUpdateRequest(children_intention="不确定")
 
 
 def test_photo_order_rejects_duplicate_ids() -> None:

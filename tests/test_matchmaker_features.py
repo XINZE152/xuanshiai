@@ -13,6 +13,7 @@ from app.schemas.matchmaker import (
     MatchmakerServiceRequestResponse,
     MatchmakerServiceRequestUpdate,
 )
+from app.schemas.matchmaker_crm_admin import MatchRecordCreate
 
 
 client = TestClient(app)
@@ -115,3 +116,25 @@ def test_contact_exchange_schema_requires_explicit_consent_action() -> None:
     assert MatchmakerContactExchangeUpdate(action="CONSENT").action == "CONSENT"
     with pytest.raises(ValidationError):
         MatchmakerContactExchangeUpdate(action="DELIVER")
+
+
+def test_admin_match_record_contract_is_registered_and_validated() -> None:
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/api/v1/admin/matchmaker/match-records" in paths
+    assert "post" in paths["/api/v1/admin/matchmaker/match-records"]
+    record = MatchRecordCreate(
+        from_love_user_id=101,
+        to_love_user_id=202,
+        create_time="2026-09-06T09:00:00Z",
+        complete_time="2026-09-06T10:00:00Z",
+        line_status=1,
+    )
+    assert record.line_status == 1
+    with pytest.raises(ValidationError):
+        MatchRecordCreate(
+            from_love_user_id=1,
+            to_love_user_id=1,
+            create_time="2026-09-06T10:00:00Z",
+            complete_time="2026-09-06T09:00:00Z",
+            line_status=9,
+        )

@@ -36,6 +36,16 @@ start.sh
 .vscode/*.log
 .DS_Store
 Thumbs.db
+
+# Local tool artifacts
+.superpowers/
+graphify-out/
+inspiration_linker.db
+# Binary audio smoke-test outputs (not source-controlled)
+artifacts/tts_smoke.mp3
+artifacts/tts_smoke.wav
+# moxiang prompt-loop 草稿(每次回放都会覆盖,不入库)
+
 docs/后端功能模块划分汇总.md
 docs/后端功能清单评估.md
 docs/首页和我的页面后端任务划分.md
@@ -43,6 +53,19 @@ docs/婚恋小程序验收清单.md
 docs/待完成事项.md
 restar.md
 outputs
+# local worktrees
+.worktrees/
+.scripts/
+
+migrations/
+scripts/
+artifacts/
+
+# Local runtime logs
 *.log
 uvicorn.err.log
 uvicorn.out.log
+
+.workbudddy/
+.workbuddy/memory/2026-09-08.md
+.workbuddy/memory/MEMORY.md

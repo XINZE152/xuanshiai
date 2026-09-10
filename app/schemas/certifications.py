@@ -11,6 +11,7 @@ class CertificationItem(BaseModel):
     kind: str
     status: int
     material_submitted: bool
+    material: str | None
     submitted_at: datetime | None
     reviewed_at: datetime | None
     fail_reason: str | None
@@ -21,6 +22,26 @@ class CertificationsResponse(BaseModel):
     education: CertificationItem
     house: CertificationItem
     marriage: CertificationItem
+
+
+class CertificationReviewItem(BaseModel):
+    user_id: int
+    nickname: str | None
+    kind: Literal["education", "house", "marriage"]
+    status: int
+    material_submitted: bool
+    material: str | None = None
+    submitted_at: datetime | None
+    reviewed_at: datetime | None
+    fail_reason: str | None
+
+
+class CertificationReviewPage(BaseModel):
+    items: list[CertificationReviewItem]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
 
 
 class EducationCertificationRequest(BaseModel):

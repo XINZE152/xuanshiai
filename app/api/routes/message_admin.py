@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
+from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser, get_current_admin, get_current_matchmaker_admin
 from app.db.session import get_db
 from app.schemas.message_admin import (
     AdminAnnouncementCreate,
@@ -38,7 +38,7 @@ async def messages(
 async def moderate(
     message_id: int = Path(..., ge=1),
     body: AdminMessageModerationRequest = ...,
-    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    current: CurrentUser = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ) -> AdminMessageItem:
     return await moderate_admin_message(db, current, message_id, body.action, body.reason)

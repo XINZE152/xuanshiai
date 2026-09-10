@@ -329,6 +329,9 @@ class PreferenceUpdateRequest(BaseModel):
     housing_requirement: Literal[0, 1, 2] | None = None
     smoking_requirement: Literal[0, 1, 2] | None = None
     drinking_requirement: Literal[0, 1, 2] | None = None
+    dating_goal: Literal["倾向恋爱", "倾向结婚"] | None = None
+    meeting_pace: Literal["倾向尽快见面", "真诚高效", "了解清楚再见面", "都行看对方的见面意愿"] | None = None
+    children_intention: Literal["想要孩子", "看情况决定是否要孩子", "不想要孩子"] | None = None
     extra_requirement: str | None = Field(default=None, max_length=255)
 
     @model_validator(mode="after")
@@ -356,6 +359,9 @@ class PreferenceResponse(BaseModel):
     housing_requirement: int | None
     smoking_requirement: int | None
     drinking_requirement: int | None
+    dating_goal: str | None
+    meeting_pace: str | None
+    children_intention: str | None
     extra_requirement: str | None
 
 
