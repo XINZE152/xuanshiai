@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     superlike_daily_vip_limit: int = 3
     paper_plane_daily_limit: int = 3
 
+    live_enabled: bool = False
+    tencent_live_sdk_app_id: int | None = Field(default=None, ge=1)
+    tencent_live_secret_key: SecretStr | None = None
+    tencent_live_user_sig_ttl_seconds: int = Field(default=900, ge=60, le=86400)
+    tencent_live_callback_secret: SecretStr | None = None
+
     # AI avatar calls an OpenAI-compatible chat-completions service from the
     # backend only. API keys must never be exposed to the mini-program.
     ai_avatar_provider: Literal["disabled", "openai_compatible"] = "disabled"

@@ -3,10 +3,18 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 LeadStatus = Literal["NEW", "CONTACTED", "INTENDED", "CONVERTED", "LOST", "CLOSED"]
+
+
+def _strip_contact(value: object) -> object:
+    """联系方式归一化：去首尾空白，空串视为未提供（None）。"""
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped if stripped else None
+    return value
 
 
 class CustomerLeadCreate(BaseModel):
@@ -16,6 +24,11 @@ class CustomerLeadCreate(BaseModel):
     source: str = Field(min_length=1, max_length=64)
     intention_level: Literal[1, 2, 3] = 1
     remark: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("phone", "wechat", mode="before")
+    @classmethod
+    def normalize_contact(cls, value: object) -> object:
+        return _strip_contact(value)
 
     @model_validator(mode="after")
     def require_contact(self) -> "CustomerLeadCreate":
@@ -32,6 +45,11 @@ class CustomerLeadUpdate(BaseModel):
     status: LeadStatus | None = None
     remark: str | None = Field(default=None, max_length=2000)
     next_follow_at: datetime | None = None
+
+    @field_validator("phone", "wechat", mode="before")
+    @classmethod
+    def normalize_contact(cls, value: object) -> object:
+        return _strip_contact(value)
 
     @model_validator(mode="after")
     def require_update(self) -> "CustomerLeadUpdate":
