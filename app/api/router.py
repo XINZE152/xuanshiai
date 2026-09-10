@@ -30,6 +30,11 @@ from app.api.routes import (
     health,
     identity,
     location,
+    live,
+    live_admin,
+    live_callbacks,
+    live_host,
+    live_ws,
     matchmaker,
     matchmaker_admin,
     matchmaker_admin_account,
@@ -66,8 +71,13 @@ from app.api.routes import (
 
 
 api_router = APIRouter()
+api_router.include_router(live_callbacks.router, tags=["live-callback"])
 api_router.include_router(location.router, tags=["位置服务"])
 api_router.include_router(location.users_router, tags=["位置服务"])
+api_router.include_router(live.router, tags=["直播相亲"])
+api_router.include_router(live_host.router, tags=["直播相亲"])
+api_router.include_router(live_admin.router, tags=["直播相亲管理"])
+api_router.include_router(live_ws.router, tags=["直播相亲"])
 api_router.include_router(health.router, tags=["系统"])
 api_router.include_router(app_version.router, tags=["系统"])
 api_router.include_router(auth.router, tags=["账号与认证"])
@@ -159,5 +169,7 @@ OPENAPI_TAGS = [
     {"name": "系统", "description": "健康检查和系统发现信息。"},
     {"name": "AI", "description": "AI 画像、搜索与匹配度通用任务查询、取消和状态轮询。"},
     {"name": "语音", "description": "语音转写（STT）与语音合成（TTS）。"},
+    {"name": "直播相亲", "description": "直播场次、预约签到、上台和互动。"},
+    {"name": "直播相亲管理", "description": "直播场次创建和运营管理。"},
     {"name": "AI 分身", "description": "基于目标用户公开资料的独立 AI 对话能力。"},
 ]
