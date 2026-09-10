@@ -105,6 +105,8 @@ BUSINESS_TABLES = {
             `source` varchar(64) NOT NULL,
             `intention_level` tinyint NOT NULL DEFAULT '1' COMMENT '1低 2中 3高',
             `status` varchar(32) NOT NULL DEFAULT 'NEW' COMMENT 'NEW/CONTACTED/INTENDED/CONVERTED/LOST/CLOSED',
+            `active_phone` varchar(32) GENERATED ALWAYS AS (CASE WHEN `status` IN ('LOST','CLOSED') THEN NULL ELSE NULLIF(TRIM(`phone`), '') END) STORED COMMENT '有效手机号（弃海/关闭为NULL，唯一）',
+            `active_wechat` varchar(128) GENERATED ALWAYS AS (CASE WHEN `status` IN ('LOST','CLOSED') THEN NULL ELSE NULLIF(TRIM(`wechat`), '') END) STORED COMMENT '有效微信（弃海/关闭为NULL，唯一）',
             `matchmaker_id` bigint unsigned DEFAULT NULL,
             `organization_id` bigint unsigned DEFAULT NULL,
             `next_follow_at` datetime DEFAULT NULL,
@@ -114,6 +116,8 @@ BUSINESS_TABLES = {
             `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_customer_lead_active_phone` (`active_phone`),
+            UNIQUE KEY `uk_customer_lead_active_wechat` (`active_wechat`),
             KEY `idx_customer_lead_status` (`status`, `created_at`),
             KEY `idx_customer_lead_matchmaker` (`matchmaker_id`, `status`),
             KEY `idx_customer_lead_phone` (`phone`)
@@ -202,6 +206,50 @@ BUSINESS_TABLES = {
             PRIMARY KEY (`id`),
             KEY `idx_member_call_record_user` (`user_id`, `created_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员 CRM 通话记录'
+    """,
+    "matchmaker_workspace_profile": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_workspace_profile` (
+            `user_id` bigint unsigned NOT NULL,
+            `display_name` varchar(64) NOT NULL,
+            `level` varchar(16) NOT NULL DEFAULT 'NORMAL' COMMENT 'NORMAL/SUPER，由平台配置超级红娘范围',
+            `organization_id` bigint unsigned DEFAULT NULL,
+            `status` tinyint NOT NULL DEFAULT '1' COMMENT '1正常 2暂停',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`user_id`),
+            KEY `idx_matchmaker_workspace_org` (`organization_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='移动端服务红娘工作台资料和数据范围'
+    """,
+    "matchmaker_member_review": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_member_review` (
+            `user_id` bigint unsigned NOT NULL,
+            `status` varchar(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/PASSED/REJECTED；仅公开资料审核',
+            `reason` varchar(500) DEFAULT NULL,
+            `reviewed_by` bigint unsigned DEFAULT NULL,
+            `reviewed_at` datetime DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`user_id`),
+            KEY `idx_matchmaker_member_review_status` (`status`, `reviewed_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='服务红娘公开资料审核，不替代实名认证或学历认证'
+    """,
+    "matchmaker_introduction": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_introduction` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `from_user_id` bigint unsigned NOT NULL,
+            `to_user_id` bigint unsigned NOT NULL,
+            `matchmaker_id` bigint unsigned NOT NULL,
+            `organization_id` bigint unsigned DEFAULT NULL,
+            `status` varchar(16) NOT NULL COMMENT 'PENDING/IN_PROGRESS/SUCCEEDED/FAILED',
+            `failure_reason` varchar(500) DEFAULT NULL,
+            `note` varchar(500) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_matchmaker_introduction_marker` (`matchmaker_id`, `note`),
+            KEY `idx_matchmaker_introduction_scope` (`matchmaker_id`, `status`, `created_at`),
+            KEY `idx_matchmaker_introduction_org` (`organization_id`, `status`, `created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='服务红娘牵线流程记录，与认识申请状态分离'
     """,
     "matchmaker_admin_account": """
         CREATE TABLE IF NOT EXISTS `matchmaker_admin_account` (
@@ -392,6 +440,23 @@ BUSINESS_TABLES = {
             UNIQUE KEY `uk_partner_membership_active` (`promoter_id`, `status`),
             KEY `idx_partner_membership_team` (`team_id`, `status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='合伙团队成员关系'
+    """,
+    "partner_join_request": """
+        CREATE TABLE IF NOT EXISTS `partner_join_request` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `team_id` bigint unsigned NOT NULL,
+            `promoter_id` bigint unsigned NOT NULL,
+            `invite_code` varchar(64) NOT NULL,
+            `status` varchar(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/APPROVED/REJECTED/CANCELLED',
+            `reject_reason` varchar(200) DEFAULT NULL,
+            `reviewed_by` bigint unsigned DEFAULT NULL,
+            `reviewed_at` datetime DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_partner_join_team_status` (`team_id`, `status`),
+            KEY `idx_partner_join_promoter` (`promoter_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='推广红娘入团申请'
     """,
     "business_audit_log": """
         CREATE TABLE IF NOT EXISTS `business_audit_log` (
