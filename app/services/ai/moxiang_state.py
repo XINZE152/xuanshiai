@@ -394,21 +394,69 @@ async def list_turns(
 # ----------------------------------------------------------------------
 
 
+JOURNEY_STAGE_ORDER: tuple[str, ...] = ("chatting", "building", "ready", "published")
+
+# 发布阶段只允许单调前进；同一阶段是幂等重放。这里保留“可跳级”兼容性：
+# 旧发布路径可能从 chatting/building 直接写 published，不能因状态表落地而
+# 把既有发布流程变成非法请求。
+JOURNEY_STAGE_TRANSITIONS: dict[str, frozenset[str]] = {
+    source: frozenset(JOURNEY_STAGE_ORDER[index:])
+    for index, source in enumerate(JOURNEY_STAGE_ORDER)
+}
+
+# snooze/pause/wake 是交互状态，不是发布阶段回退。snooze 仅在待整理邀请
+# 上把 building 会话放回 chatting；pause/wake 由 profile session.status 处理，
+# journey_stage 保持原值。
+JOURNEY_INTERACTION_TRANSITIONS: dict[str, frozenset[tuple[str, str]]] = {
+    "snooze": frozenset({("building", "chatting")}),
+    "pause": frozenset((stage, stage) for stage in JOURNEY_STAGE_ORDER),
+    "wake": frozenset((stage, stage) for stage in JOURNEY_STAGE_ORDER),
+}
+
+
+class JourneyTransitionError(ValueError):
+    """稳定的 409 语义错误，供路由层映射非法旅程转换。"""
+
+    code = "JOURNEY_STAGE_TRANSITION_INVALID"
+
+    def __init__(self, current: str, target: str, event: str = "advance") -> None:
+        self.current = current
+        self.target = target
+        self.event = event
+        super().__init__(
+            f"invalid journey transition ({event}): {current} -> {target}"
+        )
+
+
 def advance_journey_stage(current: str, target: str) -> str:
     """合法状态机校验（Contract §1.2）。
 
-    chatting → building → ready → published 单向链；试图回退或跳级抛
-    ``ValueError``（由路由层翻译为 409）。
+    ``chatting → building → ready → published`` 是单调发布轴：同态重放和
+    向后续阶段跳级均兼容，只有回退与未知目标抛稳定的转换错误。
     """
     if current not in JOURNEY_STAGE_SET:
         current = "chatting"
     if target not in JOURNEY_STAGE_SET:
-        raise ValueError(f"invalid journey stage: {target!r}")
-    order = ("chatting", "building", "ready", "published")
-    if order.index(target) < order.index(current):
-        raise ValueError(
-            f"journey stage must not regress: {current} -> {target}"
-        )
-    if target == current:
-        return current
+        raise JourneyTransitionError(current, target)
+    if target not in JOURNEY_STAGE_TRANSITIONS[current]:
+        raise JourneyTransitionError(current, target)
+    return target
+
+
+def transition_journey_stage(current: str, target: str, *, event: str = "advance") -> str:
+    """Apply one explicit journey transition.
+
+    ``event='advance'`` uses the monotonic publication table. ``snooze`` is the
+    sole intentional stage regression (``building → chatting``). ``pause`` and
+    ``wake`` are session-status interactions and therefore require a same-stage
+    target; they never rewrite publication progress.
+    """
+    if event == "advance":
+        return advance_journey_stage(current, target)
+    if event not in JOURNEY_INTERACTION_TRANSITIONS:
+        raise JourneyTransitionError(current, target, event)
+    if current not in JOURNEY_STAGE_SET or target not in JOURNEY_STAGE_SET:
+        raise JourneyTransitionError(current, target, event)
+    if (current, target) not in JOURNEY_INTERACTION_TRANSITIONS[event]:
+        raise JourneyTransitionError(current, target, event)
     return target

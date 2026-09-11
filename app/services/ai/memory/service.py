@@ -20,6 +20,7 @@ tables directly — reads use plain SELECTs).  Guarantees:
 from __future__ import annotations
 
 import json
+import unicodedata
 from typing import Any
 
 from sqlalchemy import text
@@ -40,6 +41,7 @@ __all__ = [
     "MemoryClaimStateDenied",
     "MemoryRevisionConflict",
     "MemoryService",
+    "normalize_idempotency_key",
 ]
 
 
@@ -55,6 +57,22 @@ class MemoryClaimStateDenied(Exception):
     """The claim's current status does not allow this action."""
 
 
+def normalize_idempotency_key(idempotency_key: str | None, *, max_length: int = 128) -> str:
+    """Normalize the shared AI Memory idempotency-key contract."""
+
+    key = idempotency_key.strip() if idempotency_key is not None else ""
+    if (
+        not key
+        or len(key) > max_length
+        or any(ch.isspace() or unicodedata.category(ch) == "Cc" for ch in key)
+    ):
+        raise ValueError(
+            f"Idempotency-Key must be 1-{max_length} characters and contain "
+            "no whitespace or control characters"
+        )
+    return key
+
+
 def _loads(value: Any) -> Any:
     if value is None or not isinstance(value, str):
         return value
@@ -67,6 +85,21 @@ class MemoryService:
     def __init__(self, db: AsyncSession, *, ledger: MemoryLedger | None = None) -> None:
         self._db = db
         self._ledger = ledger or MemoryLedger(db)
+
+    @staticmethod
+    def _validate_idempotency_key(idempotency_key: str, *, max_length: int = 128) -> str:
+        return normalize_idempotency_key(idempotency_key, max_length=max_length)
+
+    @classmethod
+    def _validate_propose_idempotency_key(cls, idempotency_key: str) -> str:
+        """Validate and normalize propose key before deriving the ``:claim`` key.
+
+        The public key contract is 1–128 characters.  Propose emits a second
+        event using ``:claim``; reject keys longer than 122 rather than
+        truncating (which could create collisions).
+        """
+
+        return cls._validate_idempotency_key(idempotency_key, max_length=122)
 
     _SQL_CLAIM_BY_ID = (
         "SELECT claim_id, owner_user_id, subject, namespace, canonical_key, dimension, "
@@ -294,13 +327,18 @@ class MemoryService:
         return grants
 
     async def revoke_projection_grant(
-        self, owner_user_id: int, grant_id: str
+        self, owner_user_id: int, grant_id: str, *, idempotency_key: str
     ) -> dict[str, Any]:
         """撤销 owner 的单个投影授权并立即失效对应投影（owner-scoped 404）。
 
         grant_id 形如 ``prj-grant:{owner}:{function_key}:{purpose}:{category}``，
         归属校验同时校验 id 内嵌 owner 与行 owner，双保险不泄露他人授权。
+
+        Grant 的状态机本身天然幂等：key 作为统一输入门禁验证并进入服务层，
+        但 grant 存储没有独立操作账本，因此不持久化或比较该 key。
         """
+
+        self._validate_idempotency_key(idempotency_key)
 
         row = (
             await self._db.execute(
@@ -466,6 +504,7 @@ class MemoryService:
         （explicit→user_explicit / inferred→inferred），不得从 confidence 猜测。
         """
 
+        idempotency_key = self._validate_propose_idempotency_key(idempotency_key)
         # 统一锁序：先拿 owner 序列行锁再触碰 suppression/claim 行，
         # 与 append 的物化路径构成同一顺序，消除 AB-BA 死锁窗口。
         await self._ledger.lock_owner(owner_user_id)
@@ -549,7 +588,9 @@ class MemoryService:
     ) -> MemoryEventRecord:
         """用户确认：只有本动作能把 Claim 升级为 confirmed 并设定重要度/硬约束。"""
 
-        key = idempotency_key or f"claim-confirm:{claim_id}:{expected_revision}"
+        key = self._validate_idempotency_key(
+            idempotency_key or f"claim-confirm:{claim_id}:{expected_revision}"
+        )
         # 锁序同 propose：先 owner 序列锁，再 claim 行锁。
         await self._ledger.lock_owner(owner_user_id)
         row = await self._read_claim_by_id(owner_user_id, claim_id)
@@ -608,7 +649,9 @@ class MemoryService:
     ) -> MemoryEventRecord:
         """用户纠正：生成 user_corrected 事件，保留旧 Claim 行与因果链。"""
 
-        key = idempotency_key or f"claim-correct:{claim_id}:{expected_revision}"
+        key = self._validate_idempotency_key(
+            idempotency_key or f"claim-correct:{claim_id}:{expected_revision}"
+        )
         await self._ledger.lock_owner(owner_user_id)
         row = await self._read_claim_by_id(owner_user_id, claim_id)
         replay = await self._replay_if_same_target(
@@ -668,6 +711,7 @@ class MemoryService:
     ) -> list[MemoryEventRecord]:
         """沉淀一条从 Claim 派生的 Insight（只存摘要与 Claim ids，不复制原文）。"""
 
+        idempotency_key = self._validate_idempotency_key(idempotency_key)
         event = MemoryEventInput(
             owner_user_id=owner_user_id,
             subject=subject,  # type: ignore[arg-type]
@@ -704,6 +748,7 @@ class MemoryService:
         意图重试用同一 key 回放；lift 之后再次删除是新的用户意图，用新 key。
         """
 
+        idempotency_key = self._validate_idempotency_key(idempotency_key)
         event = MemoryEventInput(
             owner_user_id=owner_user_id,
             subject=subject,  # type: ignore[arg-type]
@@ -727,6 +772,7 @@ class MemoryService:
     ) -> MemoryEventRecord:
         """解除墓碑：只能由墓碑属主发起（他人读取即 NotFound）。"""
 
+        idempotency_key = self._validate_idempotency_key(idempotency_key)
         await self._ledger.lock_owner(owner_user_id)
         tombstone = await self.read_suppression(
             owner_user_id=owner_user_id,

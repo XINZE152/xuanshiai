@@ -9,6 +9,8 @@ from enum import Enum
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.membership import active_membership_exists_sql
+
 POLICY_REVISION = "ai-policy-2026-08-07-v1"
 _SQL_ALIAS = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -108,15 +110,12 @@ class CandidateVisibilityService:
             text(
                 """SELECT candidate.id AS candidate_id,
                     COALESCE(viewer_auth.realname_status, 0) AS viewer_realname_status,
-                    EXISTS (
-                        SELECT 1 FROM user_membership viewer_membership
-                        WHERE viewer_membership.user_id = :visibility_viewer_id
-                          AND viewer_membership.status = 1
-                          AND (viewer_membership.start_at IS NULL
-                               OR viewer_membership.start_at <= UTC_TIMESTAMP())
-                          AND (viewer_membership.end_at IS NULL
-                               OR viewer_membership.end_at > UTC_TIMESTAMP())
-                    ) AS viewer_is_vip,
+                    """
+                + active_membership_exists_sql(
+                    membership_alias="viewer_membership",
+                    user_id_param="visibility_viewer_id",
+                )
+                + """ AS viewer_is_vip,
                     COALESCE(candidate_privacy.who_can_see_me, 1) AS who_can_see_me,
                     candidate.status = 1 AS account_active,
                     COALESCE(candidate_privacy.show_profile, 1) = 1 AS profile_visible,
@@ -213,8 +212,12 @@ class CandidateVisibilityService:
                 f"COALESCE({privacy_alias}.who_can_see_me, 1) IN (1, 2, 3)",
                 "(:visibility_realname_status = 2 "
                 f"OR COALESCE({privacy_alias}.who_can_see_me, 1) <> 2)",
-                "(:visibility_viewer_is_vip = 1 "
-                f"OR COALESCE({privacy_alias}.who_can_see_me, 1) <> 3)",
+                "("
+                + active_membership_exists_sql(
+                    membership_alias="visibility_membership",
+                    user_id_param="visibility_viewer_id",
+                )
+                + f" OR COALESCE({privacy_alias}.who_can_see_me, 1) <> 3)",
                 "NOT EXISTS (SELECT 1 FROM user_media pending_media "
                 f"WHERE pending_media.user_id = {candidate_alias}.id "
                 "AND pending_media.deleted_at IS NULL "
@@ -231,7 +234,6 @@ class CandidateVisibilityService:
             params={
                 "visibility_viewer_id": viewer.user_id,
                 "visibility_realname_status": viewer.realname_status or 0,
-                "visibility_viewer_is_vip": int(viewer.is_vip),
             },
             scene=scene,
         )

@@ -43,6 +43,7 @@ from app.services.voice.base import (
     SynthesizeRequest,
     SynthesizeResult,
 )
+from app.services.voice.cleanup import VOICE_TTS_SUBDIR
 from app.services.voice.gateway import VoiceGateway
 
 logger = logging.getLogger(__name__)
@@ -385,12 +386,13 @@ class VoiceConversationOrchestrator:
         """把音频二进制落盘到 upload_dir/voice/tts，返回相对 URL。
 
         与 :meth:`providers._AliyunVoiceClient.synthesize_speech` 的落盘逻辑
-        对齐，路径 ``/storage/uploads/voice/tts/<ts>-<rand>.mp3``。
+        对齐，路径 ``/storage/uploads/voice/tts/<ts>-<rand>.mp3``。子目录常量
+        与统一清理函数（``app.services.voice.cleanup``）的扫描目录同源。
         """
         import aiofiles
 
         filename = (
-            f"voice/tts/{int(time.time() * 1000)}-"
+            f"{VOICE_TTS_SUBDIR}/{int(time.time() * 1000)}-"
             f"{os.urandom(4).hex()}.{audio_format}"
         )
         full_path = os.path.join(settings.upload_dir, filename)

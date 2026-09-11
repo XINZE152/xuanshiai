@@ -18,13 +18,16 @@ asyncio 兼容性未经验证；PyPI 上的同名 ``nls`` 包是一个不相关�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 import uuid
+import weakref
 from typing import TYPE_CHECKING, Any
 
 from app.core.config import settings
+from app.core.redis import redis_client
 from app.services.voice.providers import (
     _AliyunAPIError,
     _AliyunAuthError,
@@ -47,6 +50,10 @@ _TOKEN_API_URL = (
 _TOKEN_TTL_SECONDS = 86400
 # Token 提前刷新阈值（秒）：过期前 5 分钟刷新，避免边界竞态。
 _TOKEN_REFRESH_MARGIN_SECONDS = 300
+_NLS_TOKEN_CACHE_PREFIX = "ai:nls-token:v1"
+_NLS_TOKEN_LOCKS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[str, asyncio.Lock]
+] = weakref.WeakKeyDictionary()
 
 # 协议消息 header.action / header.name 枚举（真实协议事件名，经抓包确认）。
 _ACTION_START_TRANSCRIPTION = "StartTranscription"
@@ -59,6 +66,84 @@ _NAME_TRANSCRIPTION_RESULT_CHANGED = "TranscriptionResultChanged"
 _NAME_SENTENCE_END = "SentenceEnd"
 _NAME_TRANSCRIPTION_COMPLETED = "TranscriptionCompleted"
 _NAME_TASK_FAILED = "TaskFailed"
+
+
+def _nls_token_cache_key(
+    access_key_id: str, access_key_secret: str, region: str
+) -> str:
+    """Build a Redis key without exposing the AccessKey secret."""
+    secret_fingerprint = hashlib.sha256(
+        access_key_secret.encode("utf-8")
+    ).hexdigest()
+    return f"{_NLS_TOKEN_CACHE_PREFIX}:{access_key_id}:{secret_fingerprint}:{region}"
+
+
+def _nls_token_lock(cache_key: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    locks = _NLS_TOKEN_LOCKS.get(loop)
+    if locks is None:
+        locks = {}
+        _NLS_TOKEN_LOCKS[loop] = locks
+    return locks.setdefault(cache_key, asyncio.Lock())
+
+
+async def _get_nls_token_cached(
+    *,
+    access_key_id: str,
+    access_key_secret: str,
+    region: str,
+    http_client: Any | None = None,
+) -> tuple[str, int]:
+    """Get an NLS token from Redis with credential-safe single-flight refresh."""
+    if not access_key_id or not access_key_secret or not region:
+        raise _AliyunAuthError("NLS Token 缺少 AccessKey 或 region 配置")
+    cache_key = _nls_token_cache_key(access_key_id, access_key_secret, region)
+
+    async def read_cached() -> tuple[str, int] | None:
+        try:
+            raw = await redis_client.get(cache_key)
+        except Exception:
+            logger.debug("nls_token_cache_read_failed", exc_info=True)
+            return None
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+            token = str(payload.get("token") or "")
+            expires_at = float(payload.get("expires_at") or 0)
+            remaining = int(expires_at - time.time())
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if token and remaining > _TOKEN_REFRESH_MARGIN_SECONDS:
+            return token, remaining
+        return None
+
+    cached = await read_cached()
+    if cached is not None:
+        return cached
+    async with _nls_token_lock(cache_key):
+        cached = await read_cached()
+        if cached is not None:
+            return cached
+        token, expires_in = await _fetch_nls_token(
+            access_key_id=access_key_id,
+            access_key_secret=access_key_secret,
+            region=region,
+            http_client=http_client,
+        )
+        expires_in = max(60, int(expires_in))
+        try:
+            await redis_client.set(
+                cache_key,
+                json.dumps(
+                    {"token": token, "expires_at": time.time() + expires_in},
+                    separators=(",", ":"),
+                ),
+                ex=expires_in,
+            )
+        except Exception:
+            logger.debug("nls_token_cache_write_failed", exc_info=True)
+        return token, expires_in
 
 
 class AliyunStreamASRClient:
@@ -130,7 +215,12 @@ class AliyunStreamASRClient:
                 "实时 ASR 缺少 AccessKey 配置（AI_ALIYUN_VOICE_ACCESS_KEY_ID/"
                 "SECRET），请在 .env 配置（仅开发/测试环境）"
             )
-        token, expires_in = await self._fetch_token()
+        token, expires_in = await _get_nls_token_cached(
+            access_key_id=self._access_key_id,
+            access_key_secret=self._access_key_secret,
+            region=self._region,
+            http_client=self._http_client,
+        )
         self._token_cache = (token, time.time() + expires_in)
         return token
 

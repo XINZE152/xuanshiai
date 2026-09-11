@@ -609,9 +609,16 @@ class FakeSearchSession:
         self.rollbacks += 1
 
     async def execute(
-        self, statement: object, params: dict[str, Any] | None = None
+        self, statement: object, params: dict[str, Any] | list[dict[str, Any]] | None = None
     ) -> _MappingResult | _WriteResult:
         sql = str(statement)
+        if isinstance(params, list):
+            # Task 15：executemany——逐行分派同一 SQL，合并 rowcount。
+            rowcount = 0
+            for single in params:
+                result = await self.execute(statement, single)
+                rowcount += getattr(result, "rowcount", 1)
+            return _WriteResult(rowcount=rowcount)
         values = dict(params or {})
         self.calls.append((sql, values))
         store = self._store

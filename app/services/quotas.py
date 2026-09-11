@@ -7,14 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.redis import redis_client
 from app.schemas.quotas import QuotaItem, QuotaSummary
+from app.services.membership import get_active_membership_row
 
 
 async def _membership_rights(db: AsyncSession, user_id: int) -> tuple[bool, dict]:
-    result = await db.execute(text("SELECT p.rights FROM user_membership m LEFT JOIN config_membership_package p ON p.code=m.package_type WHERE m.user_id=:user_id AND m.status=1 AND (m.start_at IS NULL OR m.start_at<=UTC_TIMESTAMP()) AND (m.end_at IS NULL OR m.end_at>UTC_TIMESTAMP()) ORDER BY m.end_at DESC LIMIT 1"), {"user_id": user_id})
-    row = result.first()
+    row = await get_active_membership_row(db, user_id)
     if not row:
         return False, {}
-    value = row[0]
+    value = row["rights"]
     if isinstance(value, str):
         try:
             value = json.loads(value)

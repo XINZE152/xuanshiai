@@ -105,6 +105,8 @@ BUSINESS_TABLES = {
             `source` varchar(64) NOT NULL,
             `intention_level` tinyint NOT NULL DEFAULT '1' COMMENT '1低 2中 3高',
             `status` varchar(32) NOT NULL DEFAULT 'NEW' COMMENT 'NEW/CONTACTED/INTENDED/CONVERTED/LOST/CLOSED',
+            `active_phone` varchar(32) GENERATED ALWAYS AS (CASE WHEN `status` IN ('LOST','CLOSED') THEN NULL ELSE NULLIF(TRIM(`phone`), '') END) STORED COMMENT '有效手机号（弃海/关闭为NULL，唯一）',
+            `active_wechat` varchar(128) GENERATED ALWAYS AS (CASE WHEN `status` IN ('LOST','CLOSED') THEN NULL ELSE NULLIF(TRIM(`wechat`), '') END) STORED COMMENT '有效微信（弃海/关闭为NULL，唯一）',
             `matchmaker_id` bigint unsigned DEFAULT NULL,
             `organization_id` bigint unsigned DEFAULT NULL,
             `next_follow_at` datetime DEFAULT NULL,
@@ -114,6 +116,8 @@ BUSINESS_TABLES = {
             `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_customer_lead_active_phone` (`active_phone`),
+            UNIQUE KEY `uk_customer_lead_active_wechat` (`active_wechat`),
             KEY `idx_customer_lead_status` (`status`, `created_at`),
             KEY `idx_customer_lead_matchmaker` (`matchmaker_id`, `status`),
             KEY `idx_customer_lead_phone` (`phone`)
@@ -202,6 +206,50 @@ BUSINESS_TABLES = {
             PRIMARY KEY (`id`),
             KEY `idx_member_call_record_user` (`user_id`, `created_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员 CRM 通话记录'
+    """,
+    "matchmaker_workspace_profile": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_workspace_profile` (
+            `user_id` bigint unsigned NOT NULL,
+            `display_name` varchar(64) NOT NULL,
+            `level` varchar(16) NOT NULL DEFAULT 'NORMAL' COMMENT 'NORMAL/SUPER，由平台配置超级红娘范围',
+            `organization_id` bigint unsigned DEFAULT NULL,
+            `status` tinyint NOT NULL DEFAULT '1' COMMENT '1正常 2暂停',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`user_id`),
+            KEY `idx_matchmaker_workspace_org` (`organization_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='移动端服务红娘工作台资料和数据范围'
+    """,
+    "matchmaker_member_review": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_member_review` (
+            `user_id` bigint unsigned NOT NULL,
+            `status` varchar(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/PASSED/REJECTED；仅公开资料审核',
+            `reason` varchar(500) DEFAULT NULL,
+            `reviewed_by` bigint unsigned DEFAULT NULL,
+            `reviewed_at` datetime DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`user_id`),
+            KEY `idx_matchmaker_member_review_status` (`status`, `reviewed_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='服务红娘公开资料审核，不替代实名认证或学历认证'
+    """,
+    "matchmaker_introduction": """
+        CREATE TABLE IF NOT EXISTS `matchmaker_introduction` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `from_user_id` bigint unsigned NOT NULL,
+            `to_user_id` bigint unsigned NOT NULL,
+            `matchmaker_id` bigint unsigned NOT NULL,
+            `organization_id` bigint unsigned DEFAULT NULL,
+            `status` varchar(16) NOT NULL COMMENT 'PENDING/IN_PROGRESS/SUCCEEDED/FAILED',
+            `failure_reason` varchar(500) DEFAULT NULL,
+            `note` varchar(500) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_matchmaker_introduction_marker` (`matchmaker_id`, `note`),
+            KEY `idx_matchmaker_introduction_scope` (`matchmaker_id`, `status`, `created_at`),
+            KEY `idx_matchmaker_introduction_org` (`organization_id`, `status`, `created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='服务红娘牵线流程记录，与认识申请状态分离'
     """,
     "matchmaker_admin_account": """
         CREATE TABLE IF NOT EXISTS `matchmaker_admin_account` (
@@ -392,6 +440,23 @@ BUSINESS_TABLES = {
             UNIQUE KEY `uk_partner_membership_active` (`promoter_id`, `status`),
             KEY `idx_partner_membership_team` (`team_id`, `status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='合伙团队成员关系'
+    """,
+    "partner_join_request": """
+        CREATE TABLE IF NOT EXISTS `partner_join_request` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `team_id` bigint unsigned NOT NULL,
+            `promoter_id` bigint unsigned NOT NULL,
+            `invite_code` varchar(64) NOT NULL,
+            `status` varchar(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/APPROVED/REJECTED/CANCELLED',
+            `reject_reason` varchar(200) DEFAULT NULL,
+            `reviewed_by` bigint unsigned DEFAULT NULL,
+            `reviewed_at` datetime DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_partner_join_team_status` (`team_id`, `status`),
+            KEY `idx_partner_join_promoter` (`promoter_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='推广红娘入团申请'
     """,
     "business_audit_log": """
         CREATE TABLE IF NOT EXISTS `business_audit_log` (
@@ -779,5 +844,116 @@ BUSINESS_TABLES = {
             KEY `idx_content_domain` (`tenant_id`, `domain`, `status`, `sort`),
             KEY `idx_content_created` (`domain`, `created_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='活动/商家/短视频/礼品等通用内容项'
+    """,
+    "live_session": """
+        CREATE TABLE IF NOT EXISTS `live_session` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `title` varchar(128) NOT NULL,
+            `city_code` varchar(32) DEFAULT NULL,
+            `scheduled_at` datetime NOT NULL,
+            `status` varchar(32) NOT NULL DEFAULT 'DRAFT',
+            `state_version` int unsigned NOT NULL DEFAULT 1,
+            `host_user_id` bigint unsigned NOT NULL,
+            `max_stage_seats` tinyint unsigned NOT NULL DEFAULT 8,
+            `recording_enabled` tinyint NOT NULL DEFAULT 0,
+            `rules_text` text DEFAULT NULL,
+            `created_by` bigint unsigned NOT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            `closed_at` datetime DEFAULT NULL,
+            PRIMARY KEY (`id`), KEY `idx_live_session_status_time` (`status`, `scheduled_at`),
+            KEY `idx_live_session_host` (`host_user_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播相亲场次'
+    """,
+    "live_session_role": """
+        CREATE TABLE IF NOT EXISTS `live_session_role` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `session_id` bigint unsigned NOT NULL, `user_id` bigint unsigned NOT NULL,
+            `role_code` varchar(24) NOT NULL, `status` tinyint NOT NULL DEFAULT 1,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`), UNIQUE KEY `uk_live_role` (`session_id`, `user_id`, `role_code`),
+            KEY `idx_live_role_user` (`user_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播场次角色'
+    """,
+    "live_registration": """
+        CREATE TABLE IF NOT EXISTS `live_registration` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT, `session_id` bigint unsigned NOT NULL,
+            `user_id` bigint unsigned NOT NULL, `status` varchar(24) NOT NULL DEFAULT 'RESERVED',
+            `device_check_passed` tinyint NOT NULL DEFAULT 0, `checked_in_at` datetime DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`), UNIQUE KEY `uk_live_registration` (`session_id`, `user_id`),
+            KEY `idx_live_registration_status` (`session_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播预约签到'
+    """,
+    "live_stage_seat": """
+        CREATE TABLE IF NOT EXISTS `live_stage_seat` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT, `session_id` bigint unsigned NOT NULL,
+            `seat_no` tinyint unsigned NOT NULL, `user_id` bigint unsigned DEFAULT NULL,
+            `status` varchar(24) NOT NULL DEFAULT 'EMPTY', `invited_by` bigint unsigned DEFAULT NULL,
+            `invitation_token` char(32) DEFAULT NULL, `invitation_expires_at` datetime DEFAULT NULL,
+            `joined_at` datetime DEFAULT NULL, `left_at` datetime DEFAULT NULL,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`), UNIQUE KEY `uk_live_seat_no` (`session_id`, `seat_no`),
+            UNIQUE KEY `uk_live_invitation_token` (`invitation_token`), KEY `idx_live_seat_user` (`session_id`, `user_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播舞台席位'
+    """,
+    "live_state_transition": """
+        CREATE TABLE IF NOT EXISTS `live_state_transition` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT, `session_id` bigint unsigned NOT NULL,
+            `from_status` varchar(32) NOT NULL, `to_status` varchar(32) NOT NULL,
+            `state_version` int unsigned NOT NULL, `actor_user_id` bigint unsigned NOT NULL,
+            `reason` varchar(255) DEFAULT NULL, `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`), UNIQUE KEY `uk_live_transition_version` (`session_id`, `state_version`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播状态迁移'
+    """,
+    "live_interaction": """
+        CREATE TABLE IF NOT EXISTS `live_interaction` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT, `session_id` bigint unsigned NOT NULL,
+            `actor_user_id` bigint unsigned NOT NULL, `target_user_id` bigint unsigned NOT NULL,
+            `interaction_type` varchar(24) NOT NULL, `status` varchar(24) NOT NULL DEFAULT 'ACTIVE',
+            `idempotency_key` varchar(128) NOT NULL, `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`), UNIQUE KEY `uk_live_interaction_key` (`actor_user_id`, `idempotency_key`),
+            KEY `idx_live_interaction_pair` (`session_id`, `interaction_type`, `actor_user_id`, `target_user_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播亮灯选择确认'
+    """,
+    "live_report": """
+        CREATE TABLE IF NOT EXISTS `live_report` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT, `session_id` bigint unsigned NOT NULL,
+            `reporter_user_id` bigint unsigned NOT NULL, `target_user_id` bigint unsigned NOT NULL,
+            `category` varchar(32) NOT NULL, `description` varchar(500) DEFAULT NULL,
+            `status` varchar(24) NOT NULL DEFAULT 'PENDING', `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`), KEY `idx_live_report_session` (`session_id`, `status`, `created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播举报'
+    """,
+    "live_provider_event": """
+        CREATE TABLE IF NOT EXISTS `live_provider_event` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `provider` varchar(24) NOT NULL,
+            `provider_event_id` varchar(128) NOT NULL,
+            `event_type` varchar(64) DEFAULT NULL,
+            `session_id` bigint unsigned DEFAULT NULL,
+            `payload_hash` char(64) NOT NULL,
+            `status` varchar(24) NOT NULL DEFAULT 'RECEIVED',
+            `received_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `processed_at` datetime DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_live_provider_event` (`provider`, `provider_event_id`),
+            KEY `idx_live_provider_session` (`session_id`, `received_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播云厂商回调事件'
+    """,
+    "live_moderation_action": """
+        CREATE TABLE IF NOT EXISTS `live_moderation_action` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `session_id` bigint unsigned NOT NULL,
+            `actor_user_id` bigint unsigned NOT NULL,
+            `target_user_id` bigint unsigned NOT NULL,
+            `action_type` varchar(32) NOT NULL,
+            `reason` varchar(255) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_live_moderation_session` (`session_id`, `created_at`),
+            KEY `idx_live_moderation_target` (`target_user_id`, `created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播人工处置记录'
     """,
 }

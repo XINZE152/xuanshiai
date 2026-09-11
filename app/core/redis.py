@@ -82,6 +82,19 @@ if value > tonumber(ARGV[1]) then redis.call('DECR', KEYS[1]); return 0 end
 return 1
 """
 
+# Read and decrement in one Redis script so two concurrent refund attempts
+# cannot both observe the same positive value and drive the quota negative.
+# The script intentionally does not call EXPIRE: DECR preserves the existing
+# TTL, while a missing/empty key is a no-op.
+REFUND_DAILY_LUA = """
+local value = redis.call('GET', KEYS[1])
+if not value then return 0 end
+value = tonumber(value)
+if not value or value <= 0 then return 0 end
+redis.call('DECR', KEYS[1])
+return 1
+"""
+
 
 def daily_quota_key(prefix: str, user_id: int) -> str:
     """Build a daily quota key using UTC date (aligned with consume_daily TTL reset)."""
@@ -116,9 +129,7 @@ async def consume_daily(key: str, limit: int) -> bool:
 
 async def refund_daily(key: str) -> None:
     try:
-        value = await redis_client.get(key)
-        if value and int(value) > 0:
-            await redis_client.decr(key)
+        await redis_client.eval(REFUND_DAILY_LUA, 1, key)
     except RedisError as exc:
         if _local_fallback_enabled():
             used = _local_quota_counts.get(key, 0)

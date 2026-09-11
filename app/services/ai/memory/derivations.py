@@ -17,12 +17,20 @@ Fan-out model:
   invalidates every proposed/confirmed Insight derived from that claim.
   Insights never mutate Claims — they are read-only derivations.
 - :func:`expire_memory_states` enforces the mandatory State TTL.
+- :func:`run_memory_state_ttl_cleanup` 是 worker 定时清理入口：每批领取一个
+  独立 AsyncSession（绝不复用业务会话），批次内提交、异常显式回滚，受
+  批量与单轮墙钟时间上限约束。
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import logging
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,11 +48,17 @@ from app.services.derivation_outbox import DerivationEvent, register_cleanup_han
 __all__ = [
     "MEMORY_AGGREGATE_TYPE",
     "MEMORY_EVENT_TYPE_BY_NODE",
+    "MemoryStateTtlCleanupStats",
+    "RetentionCleanupStats",
     "enqueue_memory_event",
     "expire_memory_states",
     "handle_memory_derivation",
     "invalidate_insights_for_claim",
+    "run_memory_state_ttl_cleanup",
+    "run_retention_cleanup",
 ]
+
+logger = logging.getLogger(__name__)
 
 MEMORY_AGGREGATE_TYPE = "ai_memory"
 MEMORY_EVENT_TYPE_BY_NODE: dict[str, str] = {
@@ -271,6 +285,231 @@ async def expire_memory_states(
             )
         )
     return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Memory State TTL 定时清理（Batch-1 Task 2）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MemoryStateTtlCleanupStats:
+    """单轮 Memory State TTL 清理统计（进入日志与 worker 指标）。"""
+
+    expired: int = 0
+    batches: int = 0
+    failed_batches: int = 0
+    truncated: bool = False
+
+
+async def run_memory_state_ttl_cleanup(
+    session_provider: Callable[[], Any],
+    *,
+    now: datetime,
+    batch_size: int = 200,
+    max_batches: int = 10,
+    time_budget_seconds: float = 30.0,
+) -> MemoryStateTtlCleanupStats:
+    """按批次执行 :func:`expire_memory_states` 的 worker 定时清理入口。
+
+    事务纪律（task-2-brief 强制约束）：
+
+    - **独立会话**：每个批次通过 ``session_provider()`` 领取全新 AsyncSession
+      （worker 传 ``session_factory``），绝不复用请求/业务/消费会话；
+    - **批次独立提交**：每批 ``expire_memory_states`` 完成后立即 commit，
+      批与批之间互不牵连；
+    - **异常显式回滚**：批次抛错时显式 ``rollback`` 丢弃该批全部未提交写入
+      （事件/物化视图/outbox 行），计入 ``failed_batches`` 并终止本轮——
+      不对故障数据库连续加压，下一轮按间隔重试；失败批次绝不污染后续
+      outbox 或 worker 事务；
+    - **双重上限**：``batch_size`` 是单批过期 State 行数上限，
+      ``max_batches`` 是单轮批次数上限；``time_budget_seconds`` 是单轮墙钟
+      时间上限（每批开始前检查，预算耗尽即停，``truncated=True`` 表示本轮
+      尚有剩余积压留给下一轮）。
+
+    ``session_provider`` 仅要求返回 async 上下文管理器，真实
+    ``async_sessionmaker`` 与测试替身均可注入。
+    """
+
+    stats = MemoryStateTtlCleanupStats()
+    deadline = time.monotonic() + max(0.0, time_budget_seconds)
+    for _ in range(max(0, max_batches)):
+        if time.monotonic() >= deadline:
+            stats.truncated = True
+            break
+        async with session_provider() as batch_db:
+            try:
+                expired = await expire_memory_states(batch_db, now=now, limit=batch_size)
+                await batch_db.commit()
+            except Exception:
+                # 异常时显式回滚：本批所有未提交写入（事件/物化/outbox 行）
+                # 必须全部丢弃，绝不污染后续 outbox 或 worker 事务。本轮到此
+                # 为止，下一轮按间隔重试（不对故障数据库连续加压）。
+                await batch_db.rollback()
+                stats.failed_batches += 1
+                logger.exception("memory_state_ttl_cleanup_batch_failed")
+                break
+        stats.expired += expired
+        stats.batches += 1
+        if expired < batch_size:
+            # 本批不满：积压已清空，无需继续领取（避免空转查询）。
+            break
+    else:
+        # for 正常耗尽 max_batches：全部为满批，视为本轮被批次数截断。
+        stats.truncated = True
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Transcript / audit / outbox retention（Task 9）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RetentionCleanupStats:
+    """Counts from one bounded database-retention cleanup round.
+
+    ``memory_state`` deliberately is not included here: State has a per-row
+    ``valid_until`` business TTL and must first emit a ``state_expired`` ledger
+    event through :func:`run_memory_state_ttl_cleanup`, rather than being
+    physically deleted as ordinary transient data.
+    """
+
+    voice_transcripts: int = 0
+    generation_audits: int = 0
+    outbox_succeeded: int = 0
+    outbox_dead_letters: int = 0
+
+
+def _affected_rows(result: Any) -> int:
+    """Normalize SQLAlchemy DB-API row counts (including drivers returning -1)."""
+
+    rowcount = getattr(result, "rowcount", 0)
+    return max(0, int(rowcount or 0))
+
+
+async def _purge_terminal_outbox_rows(
+    db: AsyncSession,
+    *,
+    status: str,
+    cutoff: datetime,
+    timestamp_column: str,
+    limit: int,
+    index_name: str,
+) -> int:
+    """Delete one bounded terminal outbox set and its receipts.
+
+    The consumer only claims ``pending``/expired ``processing`` rows, so a
+    terminal row is safe to retain briefly for operations evidence and then
+    remove.  Receipt rows are deleted first to avoid leaving tombstone-free
+    consumer state behind.  ``timestamp_column`` and ``index_name`` are
+    internal fixed SQL, never user input.  The deterministic-cursor scan is
+    pinned to its retention index: on real MySQL 8 the optimizer can prefer
+    the equally-prefixed ``idx_derivation_outbox_publish`` (adding a filesort
+    and unbounded row reads), so the index choice is forced, not hoped for.
+    """
+
+    rows = (
+        await db.execute(
+            text(
+                "SELECT event_id FROM derivation_outbox FORCE INDEX (`" + index_name + "`) "
+                "WHERE status = :status AND " + timestamp_column + " < :cutoff "
+                "ORDER BY "
+                + timestamp_column
+                + " ASC, event_id ASC LIMIT :limit FOR UPDATE SKIP LOCKED"
+            ),
+            {"status": status, "cutoff": cutoff, "limit": limit},
+        )
+    ).mappings().all()
+    removed = 0
+    for row in rows:
+        event_id = str(row["event_id"])
+        await db.execute(
+            text("DELETE FROM derivation_consumer_receipt WHERE event_id = :event_id"),
+            {"event_id": event_id},
+        )
+        result = await db.execute(
+            text(
+                "DELETE FROM derivation_outbox WHERE event_id = :event_id "
+                "AND status = :status"
+            ),
+            {"event_id": event_id, "status": status},
+        )
+        removed += _affected_rows(result)
+    return removed
+
+
+async def run_retention_cleanup(
+    session_provider: Callable[[], Any],
+    *,
+    now: datetime,
+    batch_size: int,
+    voice_transcript_retention_hours: int,
+    outbox_succeeded_retention_hours: int,
+    outbox_dead_letter_retention_hours: int,
+    generation_audit_retention_hours: int,
+) -> RetentionCleanupStats:
+    """Purge only expired transient text/audit records and terminal outbox rows.
+
+    One dedicated session owns this bounded round and commits all of its work
+    atomically.  A failure explicitly rolls back, so the next worker interval
+    can retry without partial receipt/outbox removal.  Active outbox rows are
+    intentionally absent from every statement: their retry lifecycle remains
+    ``pending -> processing -> succeeded`` or ``dead_letter`` in the existing
+    cleanup consumer.
+    """
+
+    stats = RetentionCleanupStats()
+    async with session_provider() as db:
+        try:
+            transcript_cutoff = now - timedelta(hours=voice_transcript_retention_hours)
+            audit_cutoff = now - timedelta(hours=generation_audit_retention_hours)
+            succeeded_cutoff = now - timedelta(
+                hours=outbox_succeeded_retention_hours
+            )
+            dead_letter_cutoff = now - timedelta(
+                hours=outbox_dead_letter_retention_hours
+            )
+            # 单表 DELETE 不支持索引提示；确定性依赖 (created_at, id) 索引
+            # 唯一存在——20260909_01 迁移替换掉旧单列索引后无等价索引竞争。
+            transcript_result = await db.execute(
+                text(
+                    "DELETE FROM voice_transcript WHERE created_at < :cutoff "
+                    "ORDER BY created_at ASC, id ASC LIMIT :limit"
+                ),
+                {"cutoff": transcript_cutoff, "limit": batch_size},
+            )
+            stats.voice_transcripts = _affected_rows(transcript_result)
+            audit_result = await db.execute(
+                text(
+                    "DELETE FROM ai_generation_audit WHERE created_at < :cutoff "
+                    "ORDER BY created_at ASC, id ASC LIMIT :limit"
+                ),
+                {"cutoff": audit_cutoff, "limit": batch_size},
+            )
+            stats.generation_audits = _affected_rows(audit_result)
+            stats.outbox_succeeded = await _purge_terminal_outbox_rows(
+                db,
+                status="succeeded",
+                cutoff=succeeded_cutoff,
+                timestamp_column="occurred_at",
+                limit=batch_size,
+                index_name="idx_derivation_outbox_retention_succeeded",
+            )
+            stats.outbox_dead_letters = await _purge_terminal_outbox_rows(
+                db,
+                status="dead_letter",
+                cutoff=dead_letter_cutoff,
+                timestamp_column="dead_letter_at",
+                limit=batch_size,
+                index_name="idx_derivation_outbox_retention_dead_letter",
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("ai_retention_cleanup_failed")
+            raise
+    return stats
 
 
 # 注册进既有 cleanup 消费者分发表：ai_worker --consumers 循环无需改动即可

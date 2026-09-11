@@ -14,8 +14,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.profile_tags import TAG_OPTIONS_BY_CATEGORY
+from app.core.profile_tags import CUSTOM_TAG_CATEGORY_KEY, DISCOVERY_CITY_OPTIONS, custom_tags, personal_tags
 from app.core.redis import consume_daily, get_daily_used, refund_daily
+from app.services.membership import (
+    active_membership_exists_for_column_sql,
+    get_active_membership_row,
+    has_active_membership,
+)
 from app.schemas.discovery import (
     ApplicationCreateRequest,
     ApplicationPage,
@@ -99,10 +104,9 @@ CARD_SELECT = """
            COALESCE(pr.show_profile, 1) AS show_profile,
            COALESCE(pr.who_can_see_me, 1) AS who_can_see_me,
            COALESCE(pr.match_status, 1) AS match_status,
-           EXISTS (SELECT 1 FROM user_membership m
-                   WHERE m.user_id = u.id AND m.status = 1
-                     AND (m.start_at IS NULL OR m.start_at <= UTC_TIMESTAMP())
-                     AND (m.end_at IS NULL OR m.end_at > UTC_TIMESTAMP())) AS is_vip,
+           """ + active_membership_exists_for_column_sql(
+               membership_alias="m", user_id_column="u.id"
+           ) + """ AS is_vip,
            EXISTS (SELECT 1 FROM user_boost b
                    WHERE b.target_user_id = u.id AND b.status = 1
                      AND (b.start_at IS NULL OR b.start_at <= UTC_TIMESTAMP())
@@ -146,14 +150,7 @@ async def _viewer_context(db: AsyncSession, user_id: int) -> dict[str, Any]:
 
 
 async def _is_vip(db: AsyncSession, user_id: int) -> bool:
-    result = await db.execute(
-        text("""SELECT EXISTS (SELECT 1 FROM user_membership
-                   WHERE user_id = :user_id AND status = 1
-                     AND (start_at IS NULL OR start_at <= UTC_TIMESTAMP())
-                     AND (end_at IS NULL OR end_at > UTC_TIMESTAMP()))"""),
-        {"user_id": user_id},
-    )
-    return bool(result.scalar())
+    return await has_active_membership(db, user_id)
 
 
 def _visibility_predicate(
@@ -221,7 +218,8 @@ def _all_tags(row: dict[str, Any]) -> set[str]:
     tags = set(_json_list(row.get("interest_tags"))) | set(_json_list(row.get("personality_tags")))
     for values in _json_dict(row.get("tags")).values():
         tags.update(values)
-    return tags
+    stored_custom = custom_tags(_json_dict(row.get("tags")).get(CUSTOM_TAG_CATEGORY_KEY, []))
+    return set(personal_tags(list(tags), stored_custom))
 
 
 def _candidate_score(viewer: dict[str, Any], candidate: dict[str, Any]) -> tuple[float, str]:
@@ -290,7 +288,8 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         is_married=row.get("is_married") if not detail_locked else None,
         online_status=0 if row.get("hide_online_status") else int(row.get("online_status") or 0),
         mbti=row.get("mbti") if not detail_locked else None,
-        interest_tags=_json_list(row.get("interest_tags"))[:5] if not detail_locked else [],
+        personal_tags=personal_tags(_json_list(row.get("interest_tags")) + _json_list(row.get("personality_tags")), custom_tags(_json_dict(row.get("tags")).get(CUSTOM_TAG_CATEGORY_KEY, [])))[:10] if not detail_locked else [],
+        interest_tags=personal_tags(_json_list(row.get("interest_tags")), custom_tags(_json_dict(row.get("tags")).get(CUSTOM_TAG_CATEGORY_KEY, [])))[:5] if not detail_locked else [],
         certification_tags=certification_tags,
         match_score=score,
         match_reason=reason,
@@ -341,7 +340,12 @@ def _filter_sql(filters: DiscoveryFilters, params: dict[str, Any]) -> list[str]:
         clauses.append("p.income <= :filter_income_max")
         params["filter_income_max"] = filters.income_max
     if filters.pure_free:
-        clauses.append("NOT EXISTS (SELECT 1 FROM user_membership m2 WHERE m2.user_id = u.id AND m2.status = 1 AND (m2.end_at IS NULL OR m2.end_at > UTC_TIMESTAMP()))")
+        clauses.append(
+            "NOT "
+            + active_membership_exists_for_column_sql(
+                membership_alias="m2", user_id_column="u.id"
+            )
+        )
         clauses.append("NOT EXISTS (SELECT 1 FROM user_boost b2 WHERE b2.target_user_id = u.id AND b2.status = 1 AND (b2.end_at IS NULL OR b2.end_at > UTC_TIMESTAMP()))")
     return clauses
 
@@ -588,7 +592,7 @@ async def get_filter_options() -> FilterOptionsResponse:
         genders=[{"value": 1, "label": "男"}, {"value": 2, "label": "女"}],
         marriage_statuses=[{"value": 1, "label": "未婚"}, {"value": 2, "label": "离异"}, {"value": 3, "label": "丧偶"}],
         education_levels=[{"value": 1, "label": "博士"}, {"value": 2, "label": "硕士"}, {"value": 3, "label": "本科"}, {"value": 4, "label": "大专"}, {"value": 5, "label": "高中"}],
-        cities=sorted(TAG_OPTIONS_BY_CATEGORY["city"]),
+        cities=sorted(DISCOVERY_CITY_OPTIONS),
     )
 
 
@@ -631,9 +635,10 @@ async def _quota_key(prefix: str, user_id: int) -> str:
 async def _quota_limit(db: AsyncSession, user_id: int, is_vip: bool) -> int:
     if not is_vip:
         return int(await get_runtime_value(db, "platform_permissions", "free_browse_daily_limit", settings.browse_daily_limit))
-    result = await db.execute(text("SELECT p.rights FROM user_membership m LEFT JOIN config_membership_package p ON p.code=m.package_type WHERE m.user_id=:user_id AND m.status=1 AND (m.start_at IS NULL OR m.start_at<=UTC_TIMESTAMP()) AND (m.end_at IS NULL OR m.end_at>UTC_TIMESTAMP()) ORDER BY m.end_at DESC LIMIT 1"), {"user_id": user_id})
-    row = result.first()
-    value = row[0] if row else None
+    row = await get_active_membership_row(db, user_id)
+    if not row:
+        return int(await get_runtime_value(db, "platform_permissions", "free_browse_daily_limit", settings.browse_daily_limit))
+    value = row["rights"]
     if isinstance(value, str):
         try:
             value = json.loads(value)
@@ -939,9 +944,12 @@ async def _consume_apply_quota(db: AsyncSession, viewer_id: int, vip: bool) -> b
     vip_limit = int(await get_runtime_value(db, "platform_permissions", "vip_apply_daily_limit", settings.apply_daily_vip_limit))
     limit = vip_limit if vip else free_limit
     if vip:
-        result = await db.execute(text("SELECT p.rights FROM user_membership m LEFT JOIN config_membership_package p ON p.code=m.package_type WHERE m.user_id=:user_id AND m.status=1 AND (m.start_at IS NULL OR m.start_at<=UTC_TIMESTAMP()) AND (m.end_at IS NULL OR m.end_at>UTC_TIMESTAMP()) ORDER BY m.end_at DESC LIMIT 1"), {"user_id": viewer_id})
-        value = result.first()
-        rights = value[0] if value else None
+        membership = await get_active_membership_row(db, viewer_id)
+        if membership is None:
+            limit = free_limit
+            rights = None
+        else:
+            rights = membership["rights"]
         if isinstance(rights, str):
             try:
                 rights = json.loads(rights)

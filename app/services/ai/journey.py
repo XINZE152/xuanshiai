@@ -36,6 +36,7 @@ from app.services.ai.journey_progress import (
 )
 from app.services.ai.memory.policy import MemoryPolicy, MemoryPolicyDenied
 from app.services.ai.memory.service import MemoryService
+from app.services.ai.moxiang_state import transition_journey_stage
 from app.services.ai.prompts.moxiang_master import (
     build_build_context,
     steering_hook_lines,
@@ -692,10 +693,58 @@ def _invite_from_row(row: Any) -> JourneyInvite:
     )
 
 
+@dataclass(frozen=True)
+class _LockedJourneySession:
+    """Minimal session state read while holding the journey concurrency lock."""
+
+    session_id: str
+    journey_stage: str
+
+
+async def _lock_active_journey_session(
+    db: AsyncSession, *, session_id: str, user_id: int, subject: str
+) -> _LockedJourneySession | None:
+    """Lock the session row before an invitation flow reads or rewrites its stage.
+
+    The session row, rather than the invite row, is the authority for the
+    journey stage.  A publish transaction writes ``published/active_status=0``
+    to that same row, so this lock makes a late invite transaction observe the
+    committed terminal state instead of restoring ``building`` or ``chatting``.
+    """
+    result = await db.execute(
+        text(
+            "SELECT session_id, user_id, subject, status, active_status, journey_stage "
+            "FROM ai_profile_session WHERE session_id = :session_id FOR UPDATE"
+        ),
+        {"session_id": session_id},
+    )
+    raw_row = result.mappings().first()
+    if raw_row is None:
+        return None
+    row = _mapping(raw_row)
+    if (
+        int(row.get("user_id") or 0) != user_id
+        or str(row.get("subject") or "") != subject
+        or int(row.get("active_status") or 0) != 1
+        or str(row.get("status") or "") == "published"
+        or str(row.get("journey_stage") or "") == "published"
+    ):
+        return None
+    return _LockedJourneySession(
+        session_id=str(row["session_id"]),
+        journey_stage=str(row.get("journey_stage") or "chatting"),
+    )
+
+
 async def maybe_create_build_invite(
     db: AsyncSession, *, session_id: str, user_id: int, subject: str
 ) -> JourneyInvite | None:
     """Create one pending invitation once the shared threshold is reached."""
+    locked_session = await _lock_active_journey_session(
+        db, session_id=session_id, user_id=user_id, subject=subject
+    )
+    if locked_session is None:
+        return None
     existing = await db.execute(
         text(
             "SELECT invite_id, session_id, subject, status, summary_json, "
@@ -753,6 +802,9 @@ async def maybe_create_build_invite(
         return None
 
     invite_id = f"invite-{uuid.uuid4().hex}"
+    building_stage = transition_journey_stage(
+        locked_session.journey_stage, "building"
+    )
     summary_items = tuple(item.model_dump() for item in build_invite_summary(eligible))
     invite_no = auto_invite_count + 1
     try:
@@ -795,10 +847,10 @@ async def maybe_create_build_invite(
         return _invite_from_row(row) if row is not None else None
     await db.execute(
         text(
-            "UPDATE ai_profile_session SET journey_stage = 'building', "
+            "UPDATE ai_profile_session SET journey_stage = :journey_stage, "
             "updated_at = UTC_TIMESTAMP() WHERE session_id = :session_id"
         ),
-        {"session_id": session_id},
+        {"journey_stage": building_stage, "session_id": session_id},
     )
     return JourneyInvite(
         invite_id=invite_id,
@@ -822,6 +874,41 @@ async def resolve_journey_invite(
     """Resolve a pending invite and promote candidates only on acceptance."""
     if resolution not in {"accepted", "snoozed"}:
         raise AIInputError("邀请操作非法")
+    # Read only enough to locate the session.  Accept needs a draft lock too:
+    # acquire it before the session lock so it matches publish_profile_draft's
+    # draft → session order.  snooze never touches a draft and keeps its
+    # session → invite order.
+    invite_lookup = (
+        await db.execute(
+            text(
+                "SELECT session_id, user_id, subject FROM ai_profile_build_invite "
+                "WHERE invite_id = :invite_id LIMIT 1"
+            ),
+            {"invite_id": invite_id},
+        )
+    ).first()
+    if invite_lookup is None or int(_mapping(invite_lookup).get("user_id") or 0) != user_id:
+        raise AIInputError("邀请不存在或无权操作")
+    lookup = _mapping(invite_lookup)
+    draft_row: Any | None = None
+    if resolution == "accepted":
+        draft_row = (
+            await db.execute(
+                text(
+                    "SELECT draft_id FROM ai_profile_draft WHERE session_id = :session_id "
+                    "AND status = 'draft' ORDER BY updated_at DESC LIMIT 1 FOR UPDATE"
+                ),
+                {"session_id": str(lookup["session_id"])},
+            )
+        ).first()
+    locked_session = await _lock_active_journey_session(
+        db,
+        session_id=str(lookup["session_id"]),
+        user_id=user_id,
+        subject=str(lookup["subject"]),
+    )
+    if locked_session is None:
+        raise AIInputError("会话已结束，无法处理邀请")
     row = (
         await db.execute(
             text(
@@ -838,6 +925,11 @@ async def resolve_journey_invite(
     if invite.status != "pending":
         raise AIInputError("该邀请已处理")
     if resolution == "snoozed":
+        # snooze 是交互转换，不是发布阶段的单调推进；显式校验既有
+        # building → chatting 兼容边，避免把所有裸 UPDATE 当作 advance。
+        snoozed_stage = transition_journey_stage(
+            locked_session.journey_stage, "chatting", event="snooze"
+        )
         await db.execute(
             text(
                 "UPDATE ai_profile_build_invite SET status = 'snoozed', "
@@ -848,28 +940,22 @@ async def resolve_journey_invite(
         )
         await db.execute(
             text(
-                "UPDATE ai_profile_session SET journey_stage = 'chatting', "
+                "UPDATE ai_profile_session SET journey_stage = :journey_stage, "
                 "updated_at = UTC_TIMESTAMP() WHERE session_id = :session_id"
             ),
-            {"session_id": invite.session_id},
+            {"journey_stage": snoozed_stage, "session_id": invite.session_id},
         )
         return JourneyInvite(**{**invite.__dict__, "status": "snoozed"}), None
 
+    building_stage = transition_journey_stage(
+        locked_session.journey_stage, "building"
+    )
     session = await load_owned_active_session(db, invite.session_id, user_id)
     candidates = tuple(
         candidate
         for candidate in await list_session_candidates(db, session_id=invite.session_id)
         if candidate.confidence >= HIGH_CONFIDENCE_THRESHOLD
     )
-    draft_row = (
-        await db.execute(
-            text(
-                "SELECT draft_id FROM ai_profile_draft WHERE session_id = :session_id "
-                "AND status = 'draft' ORDER BY updated_at DESC LIMIT 1 FOR UPDATE"
-            ),
-            {"session_id": invite.session_id},
-        )
-    ).first()
     draft_id = str(_mapping(draft_row)["draft_id"]) if draft_row is not None else uuid.uuid4().hex
     if draft_row is None:
         await db.execute(
@@ -945,9 +1031,12 @@ async def resolve_journey_invite(
     )
     await db.execute(
         text(
-            "UPDATE ai_profile_session SET journey_stage = 'building', updated_at = UTC_TIMESTAMP() "
+            "UPDATE ai_profile_session SET journey_stage = :journey_stage, updated_at = UTC_TIMESTAMP() "
             "WHERE session_id = :session_id"
         ),
-        {"session_id": invite.session_id},
+        {
+            "journey_stage": building_stage,
+            "session_id": invite.session_id,
+        },
     )
     return JourneyInvite(**{**invite.__dict__, "status": "accepted"}), draft_id
