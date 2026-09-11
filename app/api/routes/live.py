@@ -36,6 +36,16 @@ async def session_detail(session_id: int = Path(..., ge=1), db: AsyncSession = D
     return LiveSessionResponse(**await service.get_session(db, session_id))
 
 
+@router.get("/sessions/{session_id}/reservation/me", response_model=LiveRegistrationResponse, summary="查询我的直播预约")
+async def my_reservation(
+    session_id: int = Path(..., ge=1),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> LiveRegistrationResponse:
+    await service.get_session(db, session_id)
+    return LiveRegistrationResponse(**await service.registration(db, session_id, current.id))
+
+
 @router.post("/sessions/{session_id}/reservations", response_model=LiveRegistrationResponse, status_code=201, summary="预约直播场次")
 async def reserve(session_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_realname_verified_user), db: AsyncSession = Depends(get_db)) -> LiveRegistrationResponse:
     return await service.reserve(db, session_id, current)
