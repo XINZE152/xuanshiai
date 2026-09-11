@@ -121,6 +121,7 @@ ApportionStrategy = Literal[
     "round_robin_random",
     "by_region",
     "by_promoter",
+    "by_partner",
     "none",
 ]
 
@@ -243,6 +244,7 @@ class CommissionLevelUpdate(BaseModel):
     rate_percent: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("100"))
     fixed_amount: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("10000000"))
     platform_extra_amount: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("10000000"))
+    platform_extra_pay_mode: Literal["manual", "balance"] | None = None
     promotion_condition: str | None = Field(default=None, max_length=255)
     sort: int | None = None
     status: Literal[1, 2] | None = None

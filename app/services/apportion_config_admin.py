@@ -90,8 +90,8 @@ async def upsert_assign(
     scope: ApportionScope,
     request: ApportionAssignUpdate,
 ) -> ApportionConfig:
-    if scope == "customer_lead" and request.strategy in {"by_region", "by_promoter"}:
-        # 客源线索维度暂无地区/推广概念，约束在 UI 之外
+    if scope == "customer_lead" and request.strategy in {"by_region", "by_promoter", "by_partner"}:
+        # 客源线索维度暂无地区/推广/合伙概念，约束在 UI 之外
         raise HTTPException(
             400,
             detail=f"客源线索不支持 strategy={request.strategy}",

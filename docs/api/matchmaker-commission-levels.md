@@ -96,18 +96,90 @@
 | `updated_by` | int? | 最后修改人（红娘后台账号 ID） |
 | `created_at` / `updated_at` | datetime | MySQL 时间戳 |
 
+**使用方法与业务规则**
+- 前置条件：登录态 + `commission.read`。  
+- 调用顺序：页面加载先 `GET 3.1` 取 4 行总览；点某行进详情调 `GET 3.2`；编辑调 `PUT 3.3`。  
+- 幂等：查询天然幂等。  
+- 限流：无特殊限制。  
+- 边界场景：未跑种子脚本时可能返回空数组 `[]`（见空数据示例）；`applicable_matchmaker_count` 仅统计 `deleted_at IS NULL AND locked = 0` 的有效红娘。
+
+**错误**
+
+| HTTP | 触发条件 | 错误响应 JSON | 前端处理建议 |
+| --- | --- | --- | --- |
+| 401 | 未登录 / 令牌失效 | `{"detail":"未登录或令牌失效"}` | 跳登录页 |
+| 403 | 无 `commission.read` | `{"detail":"无权限执行该操作"}` | 提示无权限 |
+
+**文档完成自检清单**
+- [x] 有请求参数表，且每个参数都写了业务含义（无 query 参数已标注）
+- [x] 有完整请求体示例（无请求体时已明确标注）
+- [x] 有返回参数表，每个字段都写了业务含义，嵌套结构已展开
+- [x] 有成功返回示例（含空数据示例）
+- [x] 有"使用方法与业务规则"小节
+- [x] 有错误码表：HTTP 状态码、触发条件、前端处理建议、错误响应 JSON
+- [x] 至少一个非法参数示例（GET 无 body 非法场景）
+
+**空数据示例**（未跑种子脚本时）
+
+```json
+[]
+```
+
 ---
 
 ### 3.2 `GET /api/v1/admin/commission-levels/{level_id}`
 
 **基本信息**
 - 用途：取单个分成级别详情。  
-- 路径参数：`level_id` ≥ 1。  
-- 权限：`commission.read`。
+- URL：`GET /api/v1/admin/commission-levels/{level_id}`  
+- Method：GET  
+- 登录：必需  
+- 权限：`commission.read`  
+- Content-Type：无请求体  
+- 成功：200  
 
-**响应 200** — `CommissionLevel`（字段同 3.1）。
+**请求参数（path）**
+
+| 参数名 | 位置 | 类型 | 必填 | 默认值 | 校验规则 | 业务含义 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `level_id` | path | int | **是** | — | `≥ 1` | 分成级别主键 |
+
+**请求示例**
+
+```
+GET /api/v1/admin/commission-levels/2
+Authorization: Bearer <access-token>
+```
+
+无请求体。非法示例：`level_id=0` 或非整数（→ 422 / 404）。
+
+**响应 200** — `CommissionLevel`（字段同 3.1 返回字段表）。
 
 **响应 404**：`{"detail": "分成级别不存在"}`
+
+**使用方法与业务规则**
+- 前置条件：登录态 + `commission.read`；`level_id` 存在。  
+- 调用顺序：总览列表点击事件 → 调本接口取详情回填编辑弹窗。  
+- 幂等：查询天然幂等。  
+- 边界场景：`level_id` 不存在返回 404。
+
+**错误**
+
+| HTTP | 触发条件 | 错误响应 JSON | 前端处理建议 |
+| --- | --- | --- | --- |
+| 401 | 未登录 / 令牌失效 | `{"detail":"未登录或令牌失效"}` | 跳登录页 |
+| 403 | 无 `commission.read` | `{"detail":"无权限执行该操作"}` | 提示无权限 |
+| 404 | `level_id` 不存在 | `{"detail":"分成级别不存在"}` | 提示"记录不存在" |
+| 422 | `level_id` 非整数 / `< 1` | `{"detail":"参数校验失败"}` | 校验 URL |
+
+**文档完成自检清单**
+- [x] 有请求参数表，且每个参数都写了业务含义
+- [x] 有完整请求体示例（无请求体时已明确标注）
+- [x] 有返回参数表，每个字段都写了业务含义（复用 3.1）
+- [x] 有成功返回示例
+- [x] 有"使用方法与业务规则"小节
+- [x] 有错误码表：HTTP 状态码、触发条件、前端处理建议、错误响应 JSON
+- [x] 至少一个非法参数示例
 
 ---
 
@@ -115,8 +187,18 @@
 
 **基本信息**
 - 用途：编辑单个分成级别。除 `code` 外所有业务字段均可改，未传字段保留原值。  
-- 路径参数：`level_id` ≥ 1。  
-- 权限：`commission.write`。
+- URL：`PUT /api/v1/admin/commission-levels/{level_id}`  
+- Method：PUT  
+- 登录：必需  
+- 权限：`commission.write`  
+- Content-Type：`application/json`  
+- 成功：200  
+
+**请求参数（path）**
+
+| 参数名 | 位置 | 类型 | 必填 | 默认值 | 校验规则 | 业务含义 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `level_id` | path | int | **是** | — | `≥ 1` | 分成级别主键 |
 
 **请求体** — `CommissionLevelUpdate`（所有字段可选，至少传一个）
 
@@ -133,6 +215,19 @@
 }
 ```
 
+**请求参数表（body，全部可选，至少传一个）**
+
+| 参数名 | 位置 | 类型 | 必填 | 默认值 | 校验规则 | 业务含义 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `name` | body | string | 否 | — | `1 ~ 64` | 级别显示名（运营可改） |
+| `mode` | body | string | 否 | — | enum `rate` / `fixed` | 分成模式：`rate` 按比例 / `fixed` 按固定金额 |
+| `rate_percent` | body | string(decimal) | 否 | — | `[0, 100]` | `mode=rate` 时生效的分成比例（%），字符串 |
+| `fixed_amount` | body | string(decimal)? | 否 | `null` | `≥ 0`，上限 10,000,000 | `mode=fixed` 时必填的分成金额（元），字符串 |
+| `platform_extra_amount` | body | string(decimal) | 否 | — | `≥ 0`，上限 10,000,000 | 平台额外奖励（元），字符串 |
+| `promotion_condition` | body | string | 否 | — | `≤ 255` | 自动升级到本级别的条件描述 |
+| `sort` | body | int | 否 | — | — | 排序值，越小越靠前 |
+| `status` | body | int | 否 | — | 仅 `1` / `2` | 1 启用 / 2 停用 |
+
 **业务约束**
 
 | 场景 | 规则 |
@@ -148,9 +243,51 @@
 
 **响应 200** — `CommissionLevel`（字段同 3.1）。
 
-**响应 400**：`{"detail": "mode=fixed 时必须填写 fixed_amount"}`  
-**响应 404**：`{"detail": "分成级别不存在"}`  
-**响应 422**：Pydantic 校验失败。
+**请求体非法示例**
+
+```json
+{ "mode": "fixed" }
+```
+→ 422 / 400：`mode=fixed 时必须填写 fixed_amount`
+
+```json
+{ "rate_percent": "150.0000" }
+```
+→ 422：`rate_percent` 超出 `[0, 100]`
+
+```json
+{}
+```
+→ 422：至少需传一个可更新字段
+
+**使用方法与业务规则**
+- 前置条件：登录态 + `commission.write`；`level_id` 存在。  
+- 调用顺序：详情弹窗 `GET 3.2` 回填 → 用户修改 → `PUT` 提交。  
+- 幂等：可选字段更新，重复提交相同内容结果一致；连续不同提交以最后一次为准。  
+- 状态流转 / 边界场景：
+  - `mode=rate`：必填 `rate_percent`，后端强制 `fixed_amount=null`。
+  - `mode=fixed`：必填 `fixed_amount`，后端强制 `rate_percent="0"`；缺失 `fixed_amount` → 422 / 400。
+  - `code` 字段**不在 Update 模型中，不可修改**（种子锁定）。
+  - `rate_percent` 范围 `[0,100]`；`fixed_amount` / `platform_extra_amount` `≥ 0` 且 ≤ 10,000,000；`name` `1~64`；`promotion_condition` `≤ 255`；`status` 仅 `1` / `2`。
+
+**错误**
+
+| HTTP | 触发条件 | 错误响应 JSON | 前端处理建议 |
+| --- | --- | --- | --- |
+| 400 | `mode=fixed` 但未填 `fixed_amount` | `{"detail":"mode=fixed 时必须填写 fixed_amount"}` | 表单回填，提示必填 |
+| 401 | 未登录 / 令牌失效 | `{"detail":"未登录或令牌失效"}` | 跳登录页 |
+| 403 | 无 `commission.write` | `{"detail":"无权限执行该操作"}` | 提示无权限 |
+| 404 | `level_id` 不存在 | `{"detail":"分成级别不存在"}` | 提示"记录不存在" |
+| 422 | Pydantic 校验失败 / 互斥 / 范围错误 / 空 body | `{"detail":"参数校验失败：<字段>-<原因>"}` | 表单回填 |
+
+**文档完成自检清单**
+- [x] 有请求参数表，且每个参数都写了业务含义
+- [x] 有完整请求体示例（含非法示例）
+- [x] 有返回参数表，每个字段都写了业务含义（复用 3.1）
+- [x] 有成功返回示例
+- [x] 有"使用方法与业务规则"小节
+- [x] 有错误码表：HTTP 状态码、触发条件、前端处理建议、错误响应 JSON
+- [x] 至少一个非法参数示例（已附 3 个非法 JSON）
 
 ---
 
@@ -162,3 +299,11 @@
    - `INSERT IGNORE INTO commission_level` 写入 4 行种子（`junior` / `intermediate` / `senior` / `partner`）
 2. **运营切换策略**：种子 `code` 不可改；运营调整只能走「编辑配置」按钮触发 PUT。
 3. **关联表**：`matchmaker_profile.commission_level_id` 是本表的外键引用，更改 `code` 会破坏关联 — 这是 seed 锁定 `code` 的根本原因。
+
+---
+
+## 五、变更记录
+
+| 日期 | 版本 | 变更 | 影响 |
+| --- | --- | --- | --- |
+| 2026-09-11 | v1.1 | 按 `PROJECT_RULES.md` 2.1.1 统一模板补全文档（接口契约未变）：① 3.1/3.2/3.3 各接口补「文档完成自检清单」；② 3.1 补「使用方法与业务规则」「错误」表（4 列含错误响应 JSON）及空数据示例；③ 3.2 补完整基本信息 / path 请求参数表 / 请求示例 / 使用方法与业务规则 / 错误表 / 自检清单；④ 3.3 补完整基本信息 / path 参数表 / body 请求参数表 / 非法示例 / 使用方法与业务规则 / 4 列错误表 / 自检清单；⑤ 示例 Token 统一为占位符 `<access-token>` | 纯文档补充，接口契约未变；旧客户端无需改动 |

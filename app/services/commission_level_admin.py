@@ -21,7 +21,7 @@ from app.schemas.matchmaker_admin import (
 
 
 _SELECT = """SELECT cl.id, cl.code, cl.name, cl.mode, cl.rate_percent, cl.fixed_amount,
-    cl.platform_extra_amount, cl.promotion_condition, cl.sort, cl.status,
+    cl.platform_extra_amount, cl.platform_extra_pay_mode, cl.promotion_condition, cl.sort, cl.status,
     COALESCE(profile.matchmaker_count, 0) AS applicable_matchmaker_count,
     cl.created_at, cl.updated_at
     FROM commission_level cl
@@ -39,6 +39,9 @@ def _coerce(row: dict[str, Any]) -> CommissionLevel:
     payload.setdefault("promotion_condition", None)
     payload.setdefault("updated_by", None)
     payload.setdefault("applicable_matchmaker_count", 0)
+    # 旧库补列后可能为 NULL，缺省按人工转账处理
+    if not payload.get("platform_extra_pay_mode"):
+        payload["platform_extra_pay_mode"] = "manual"
     for key in ("rate_percent", "platform_extra_amount", "fixed_amount"):
         if payload.get(key) is not None and not isinstance(payload[key], Decimal):
             payload[key] = Decimal(str(payload[key]))

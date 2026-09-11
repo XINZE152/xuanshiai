@@ -37,6 +37,7 @@ class MatchmakerStaffItem(BaseModel):
     role_label: str
     phone: str | None
     wechat: str | None
+    wechat_qr: str | None = None
     commission_level_id: int | None
     commission_level_name: str | None
     commission_rate: Decimal | None
@@ -45,6 +46,10 @@ class MatchmakerStaffItem(BaseModel):
     locked: bool = False
     visible: bool = True
     description: str | None = None
+    slogan: str | None = None
+    sort: int = 0
+    contact_editable: bool = True
+    lock_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -80,10 +85,15 @@ class MatchmakerStaffCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=32)
     phone: str = Field(min_length=11, max_length=20)
     wechat: str | None = Field(default=None, max_length=64)
+    wechat_qr: str | None = Field(default=None, max_length=500)
     store_id: int | None = Field(default=None, ge=1)
     commission_level_id: int | None = Field(default=None, ge=1)
     role_tag: Literal["super", "normal"] = "normal"
     description: str | None = Field(default=None, max_length=2000)
+    slogan: str | None = Field(default=None, max_length=64)
+    sort: int = Field(default=0, ge=0)
+    contact_editable: bool = True
+    lock_at: datetime | None = None
     visible: bool = True
 
     @field_validator("phone")
@@ -102,10 +112,15 @@ class MatchmakerStaffUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=32)
     phone: str | None = Field(default=None, min_length=11, max_length=20)
     wechat: str | None = Field(default=None, max_length=64)
+    wechat_qr: str | None = Field(default=None, max_length=500)
     store_id: int | None = Field(default=None, ge=1)
     commission_level_id: int | None = Field(default=None, ge=1)
     role_tag: Literal["super", "normal"] | None = None
     description: str | None = Field(default=None, max_length=2000)
+    slogan: str | None = None
+    sort: int | None = None
+    contact_editable: bool | None = None
+    lock_at: datetime | None = None
     password: str | None = Field(default=None, min_length=8, max_length=128)
     visible: bool | None = None
 
@@ -168,6 +183,11 @@ class MatchmakerWorkReport(BaseModel):
     commission_amount: Decimal = Decimal("0.00")
     follow_up_count: int = 0
     assigned_member_count: int = 0
+    new_member_count: int = 0
+    lead_follow_up_count: int = 0
+    meeting_request_count: int = 0
+    meeting_arranged_count: int = 0
+    offline_income: Decimal = Decimal("0.00")
 
 
 class FunnelItem(BaseModel):

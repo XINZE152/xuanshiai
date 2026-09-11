@@ -59,6 +59,7 @@ def _item(row: dict) -> MatchmakerStaffItem:
         role_label="超级红娘" if row.get("role_tag") == "super" else "普通红娘",
         phone=row.get("phone"),
         wechat=row.get("wechat"),
+        wechat_qr=row.get("wechat_qr"),
         commission_level_id=int(row["commission_level_id"])
         if row.get("commission_level_id")
         else None,
@@ -71,13 +72,20 @@ def _item(row: dict) -> MatchmakerStaffItem:
         locked=bool(row.get("locked")),
         visible=bool(row.get("visible", 1)),
         description=row.get("description"),
+        slogan=row.get("slogan"),
+        sort=int(row.get("sort") or 0),
+        # 旧库行可能为 NULL，缺省按允许（1）处理
+        contact_editable=bool(row["contact_editable"])
+        if row.get("contact_editable") is not None
+        else True,
+        lock_at=_dt(row.get("lock_at")),
         created_at=_dt(row.get("created_at")),
         updated_at=_dt(row.get("updated_at")),
     )
 
 
 SELECT_STAFF = """SELECT u.id, u.avatar, u.nickname, u.phone, u.created_at, u.updated_at,
-    p.wechat, p.role_tag, p.visible, p.locked, p.description, p.commission_level_id,
+    p.wechat, p.wechat_qr, p.role_tag, p.visible, p.locked, p.description, p.slogan, p.sort, p.contact_editable, p.lock_at, p.commission_level_id,
     l.name commission_level_name, l.rate_percent,
     a.id account_id, a.username,
     o.id store_id, COALESCE(o.display_name, o.name) store_name,
@@ -240,15 +248,20 @@ async def create_staff(
     )
     await db.execute(
         text(
-            "INSERT INTO matchmaker_profile (user_id,wechat,commission_level_id,role_tag,visible,description) VALUES (:id,:wechat,:level,:role,:visible,:description)"
+            "INSERT INTO matchmaker_profile (user_id,wechat,wechat_qr,commission_level_id,role_tag,visible,description,slogan,sort,contact_editable,lock_at) VALUES (:id,:wechat,:wechat_qr,:level,:role,:visible,:description,:slogan,:sort,:contact_editable,:lock_at)"
         ),
         {
             "id": user_id,
             "wechat": body.wechat,
+            "wechat_qr": body.wechat_qr,
             "level": body.commission_level_id,
             "role": body.role_tag,
             "visible": int(body.visible),
             "description": body.description,
+            "slogan": body.slogan,
+            "sort": body.sort,
+            "contact_editable": int(body.contact_editable),
+            "lock_at": body.lock_at,
         },
     )
     if body.store_id:
@@ -277,19 +290,25 @@ async def update_staff(
             )
     profile_map = {
         "wechat": "wechat",
+        "wechat_qr": "wechat_qr",
         "commission_level_id": "commission_level_id",
         "role_tag": "role_tag",
         "visible": "visible",
         "description": "description",
+        "slogan": "slogan",
+        "sort": "sort",
+        "contact_editable": "contact_editable",
+        "lock_at": "lock_at",
     }
     for source, target in profile_map.items():
         if source in values:
+            value = values[source]
+            # visible / contact_editable 为布尔开关，入库统一转 tinyint；显式置空时保持 NULL
+            if source in ("visible", "contact_editable"):
+                value = None if value is None else int(value)
             await db.execute(
                 text(f"UPDATE matchmaker_profile SET {target}=:value WHERE user_id=:id"),
-                {
-                    "value": int(values[source]) if source == "visible" else values[source],
-                    "id": matchmaker_id,
-                },
+                {"value": value, "id": matchmaker_id},
             )
     if "password" in values:
         await db.execute(
@@ -458,7 +477,20 @@ async def work_report(
         (
             await db.execute(
                 text(
-                    """SELECT (SELECT COUNT(*) FROM customer_lead WHERE matchmaker_id=:id AND created_at>=:from_date AND created_at<:to_date) new_lead_count, (SELECT COUNT(*) FROM matchmaker_service WHERE matchmaker_id=:id AND created_at>=:from_date AND created_at<:to_date) matchmaking_count, (SELECT COUNT(*) FROM matchmaker_service WHERE matchmaker_id=:id AND status=2 AND updated_at>=:from_date AND updated_at<:to_date) success_count, (SELECT COALESCE(SUM(amount),0) FROM commission_entry WHERE beneficiary_type='service_matchmaker' AND beneficiary_id=:id AND created_at>=:from_date AND created_at<:to_date AND status<>'REVERSED') commission_amount, (SELECT COUNT(*) FROM member_follow_up f JOIN resource_assignment a ON a.user_id=f.user_id AND a.matchmaker_id=:id AND a.status=1 WHERE f.created_at>=:from_date AND f.created_at<:to_date) follow_up_count, (SELECT COUNT(*) FROM resource_assignment WHERE matchmaker_id=:id AND status=1 AND effective_at<:to_date) assigned_member_count"""
+                    """SELECT (SELECT COUNT(*) FROM customer_lead WHERE matchmaker_id=:id AND created_at>=:from_date AND created_at<:to_date) new_lead_count, (SELECT COUNT(*) FROM matchmaker_service WHERE matchmaker_id=:id AND created_at>=:from_date AND created_at<:to_date) matchmaking_count, (SELECT COUNT(*) FROM matchmaker_service WHERE matchmaker_id=:id AND status=2 AND updated_at>=:from_date AND updated_at<:to_date) success_count, (SELECT COALESCE(SUM(amount),0) FROM commission_entry WHERE beneficiary_type='service_matchmaker' AND beneficiary_id=:id AND created_at>=:from_date AND created_at<:to_date AND status<>'REVERSED') commission_amount, (SELECT COUNT(*) FROM member_follow_up f JOIN resource_assignment a ON a.user_id=f.user_id AND a.matchmaker_id=:id AND a.status=1 WHERE f.created_at>=:from_date AND f.created_at<:to_date) follow_up_count, (SELECT COUNT(*) FROM resource_assignment WHERE matchmaker_id=:id AND status=1 AND effective_at<:to_date) assigned_member_count,
+                    -- 以下为本次新增的 5 个工作量指标
+                    -- 新增会员资料：会员归属红娘通过 resource_assignment(matchmaker_id,user_id) 记录，按生效时间落在区间内的条数；
+                    -- 项目无独立 user_profile 表，会员归属以 resource_assignment 为准（与既有 assigned_member_count 同口径，仅改为区间计数）
+                    (SELECT COUNT(*) FROM resource_assignment WHERE matchmaker_id=:id AND status=1 AND effective_at>=:from_date AND effective_at<:to_date) new_member_count,
+                    -- 线索跟进：customer_lead_follow_up 经 lead_id 关联 customer_lead，按归属红娘与跟进创建时间计数
+                    (SELECT COUNT(*) FROM customer_lead_follow_up f JOIN customer_lead c ON c.id=f.lead_id WHERE c.matchmaker_id=:id AND f.created_at>=:from_date AND f.created_at<:to_date) lead_follow_up_count,
+                    -- 预约申请：meeting_request.matchmaker_id 直接关联
+                    (SELECT COUNT(*) FROM meeting_request WHERE matchmaker_id=:id AND created_at>=:from_date AND created_at<:to_date) meeting_request_count,
+                    -- 约会安排：meeting_record 经 request_id 关联 meeting_request，按归属红娘与约会记录创建时间计数
+                    (SELECT COUNT(*) FROM meeting_record r JOIN meeting_request q ON q.id=r.request_id WHERE q.matchmaker_id=:id AND r.created_at>=:from_date AND r.created_at<:to_date) meeting_arranged_count,
+                    -- 线下业绩：payment_order 已含 matchmaker_id，按 product_type='offline_vip'（平台既有线下业绩口径，见 admin_home.py）与支付成功状态、支付时间区间聚合；
+                    -- 若后续下线该商品编码，需同步调整此口径
+                    (SELECT COALESCE(SUM(amount),0) FROM payment_order WHERE matchmaker_id=:id AND status=1 AND product_type='offline_vip' AND pay_time>=:from_date AND pay_time<:to_date) offline_income"""
                 ),
                 params,
             )

@@ -665,6 +665,7 @@ BUSINESS_TABLES = {
             `rate_percent` decimal(7,4) NOT NULL DEFAULT 0 COMMENT '按比例分成比例(%)',
             `fixed_amount` decimal(12,2) DEFAULT NULL COMMENT '固定分成金额(元)，mode=fixed 时生效',
             `platform_extra_amount` decimal(12,2) NOT NULL DEFAULT 0 COMMENT '平台额外奖励(元)，每达成一次分成订单额外发放',
+            `platform_extra_pay_mode` varchar(16) NOT NULL DEFAULT 'manual' COMMENT '平台额外奖励支付方式 manual人工转账/balance转入余额',
             `promotion_condition` varchar(255) DEFAULT NULL COMMENT '自动升级到此级别的条件描述',
             `sort` int NOT NULL DEFAULT 0,
             `status` tinyint NOT NULL DEFAULT 1 COMMENT '1启用 2停用',
@@ -704,12 +705,18 @@ BUSINESS_TABLES = {
             `visible` tinyint NOT NULL DEFAULT 1 COMMENT '1前台展示 0隐藏',
             `locked` tinyint NOT NULL DEFAULT 0 COMMENT '1锁定禁止登录工作台',
             `description` varchar(2000) DEFAULT NULL,
+            `slogan` varchar(64) DEFAULT NULL COMMENT '红娘口号',
+            `sort` int NOT NULL DEFAULT 0 COMMENT '显示排序，数字越大越靠前',
+            `contact_editable` tinyint NOT NULL DEFAULT 1 COMMENT '是否允许红娘在其工作台修改客户手机号/微信 1允许 0不允许',
+            `lock_at` datetime DEFAULT NULL COMMENT '定时锁定时间，到点自动锁定账号',
+            `wechat_qr` varchar(500) DEFAULT NULL COMMENT '红娘微信二维码图片地址',
             `deleted_at` datetime DEFAULT NULL,
             `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (`user_id`),
             KEY `idx_matchmaker_profile_level` (`commission_level_id`, `visible`),
-            KEY `idx_matchmaker_profile_lock` (`locked`, `deleted_at`)
+            KEY `idx_matchmaker_profile_lock` (`locked`, `deleted_at`),
+            KEY `idx_matchmaker_profile_sort` (`sort`, `deleted_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='红娘管理档案'
     """,
     "admin_menu": """
