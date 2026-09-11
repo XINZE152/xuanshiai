@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.profile_tags import personal_tags
 from app.core.config import settings
 from app.core.redis import consume_daily, daily_quota_key, refund_daily
 from app.schemas.ai_avatar import (
@@ -269,7 +270,7 @@ async def get_public_ai_context(
         tags.extend(_json_list(row["personality_tags"]))
         for values in tag_groups.values():
             tags.extend(values)
-    tags = _unique([_trim(item, 40) or "" for item in tags])[:20]
+    tags = personal_tags(_unique([_trim(item, 40) or "" for item in tags]), tag_groups.get("custom", []))[:10]
 
     interests = list(tags)
     hobbies = _trim(row["hobbies"], 300) if not restricted else None

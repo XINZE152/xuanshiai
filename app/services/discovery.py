@@ -14,7 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.profile_tags import TAG_OPTIONS_BY_CATEGORY
+from app.core.profile_tags import CUSTOM_TAG_CATEGORY_KEY, DISCOVERY_CITY_OPTIONS, custom_tags, personal_tags
 from app.core.redis import consume_daily, get_daily_used, refund_daily
 from app.services.membership import (
     active_membership_exists_for_column_sql,
@@ -213,7 +213,8 @@ def _all_tags(row: dict[str, Any]) -> set[str]:
     tags = set(_json_list(row.get("interest_tags"))) | set(_json_list(row.get("personality_tags")))
     for values in _json_dict(row.get("tags")).values():
         tags.update(values)
-    return tags
+    stored_custom = custom_tags(_json_dict(row.get("tags")).get(CUSTOM_TAG_CATEGORY_KEY, []))
+    return set(personal_tags(list(tags), stored_custom))
 
 
 def _candidate_score(viewer: dict[str, Any], candidate: dict[str, Any]) -> tuple[float, str]:
@@ -282,7 +283,8 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         is_married=row.get("is_married") if not detail_locked else None,
         online_status=0 if row.get("hide_online_status") else int(row.get("online_status") or 0),
         mbti=row.get("mbti") if not detail_locked else None,
-        interest_tags=_json_list(row.get("interest_tags"))[:5] if not detail_locked else [],
+        personal_tags=personal_tags(_json_list(row.get("interest_tags")) + _json_list(row.get("personality_tags")), custom_tags(_json_dict(row.get("tags")).get(CUSTOM_TAG_CATEGORY_KEY, [])))[:10] if not detail_locked else [],
+        interest_tags=personal_tags(_json_list(row.get("interest_tags")), custom_tags(_json_dict(row.get("tags")).get(CUSTOM_TAG_CATEGORY_KEY, [])))[:5] if not detail_locked else [],
         certification_tags=certification_tags,
         match_score=score,
         match_reason=reason,
@@ -581,7 +583,7 @@ async def get_filter_options() -> FilterOptionsResponse:
         genders=[{"value": 1, "label": "男"}, {"value": 2, "label": "女"}],
         marriage_statuses=[{"value": 1, "label": "未婚"}, {"value": 2, "label": "离异"}, {"value": 3, "label": "丧偶"}],
         education_levels=[{"value": 1, "label": "博士"}, {"value": 2, "label": "硕士"}, {"value": 3, "label": "本科"}, {"value": 4, "label": "大专"}, {"value": 5, "label": "高中"}],
-        cities=sorted(TAG_OPTIONS_BY_CATEGORY["city"]),
+        cities=sorted(DISCOVERY_CITY_OPTIONS),
     )
 
 

@@ -25,7 +25,7 @@ def test_profile_validates_mbti_height_and_tags() -> None:
         mbti="INTJ",
         interest_tags=["健身", "旅行", "摄影"],
         personality_tags=["内向但真诚", "温柔细心", "独立自信"],
-        tag_selections={"sports": ["健身", "跑步"], "city": ["上海"]},
+        tag_selections={"sports": ["健身", "跑步"], "arts_leisure": ["摄影"]},
     )
     assert request.mbti == "INTJ"
     assert request.tag_selections["sports"] == ["健身", "跑步"]
