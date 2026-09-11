@@ -29,7 +29,9 @@ async def get_dashboard(from_date: date | None = Query(None, alias="from"), to_d
 
 @router.get("/member-statistics", summary="查询会员 CRM 数据报表")
 async def get_member_statistics(from_date: date | None = Query(None, alias="from"), to_date: date | None = Query(None, alias="to"), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
-    admin.require("dashboard.read")
+    # 该报表同时服务于首页大盘与「会员CRM → 数据报表」页，两类权限任一即可。
+    if not ({"dashboard.read", "matchmaker.member.read"} & set(admin.permissions)) and "*" not in admin.permissions:
+        admin.require("matchmaker.member.read")
     end = to_date or date.today()
     return await admin_home.member_statistics(db, admin, from_date or end - timedelta(days=14), end)
 

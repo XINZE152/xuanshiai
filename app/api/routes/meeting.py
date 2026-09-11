@@ -29,8 +29,11 @@ from app.services.meeting import (
     admin_get_meeting,
     admin_list_meetings,
     admin_list_requests,
+    admin_options,
     admin_update_request,
     admin_update_meeting,
+    admin_delete_meeting,
+    admin_delete_request,
 )
 
 router = APIRouter(prefix="/matchmaker/meetings")
@@ -112,3 +115,23 @@ async def admin_meeting_update(meeting_id: int = Path(..., ge=1), body: MeetingR
 async def admin_meeting_feedback(meeting_id: int = Path(..., ge=1), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[MeetingFeedbackAdminItem]:
     admin.require("meeting.feedback.read")
     return await admin_feedback(db, meeting_id)
+
+
+@admin_router.get("/options", summary="约见/约会管理页面下拉字典")
+async def admin_meeting_options(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    admin.require("meeting.read")
+    return await admin_options(db)
+
+
+@admin_router.delete("/requests/{request_id}", summary="删除约见申请")
+async def admin_delete_request_route(request_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    current.require("meeting.write")
+    deleted = await admin_delete_request(db, request_id, current.account.id)
+    return {"id": request_id, "deleted": deleted}
+
+
+@admin_router.delete("/{meeting_id}", summary="删除约会记录")
+async def admin_delete_meeting_route(meeting_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    current.require("meeting.write")
+    deleted = await admin_delete_meeting(db, meeting_id, current.account.id)
+    return {"id": meeting_id, "deleted": deleted}

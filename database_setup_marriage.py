@@ -260,6 +260,7 @@ class DatabaseManager:
                 "dating_goal": "`dating_goal` varchar(32) DEFAULT NULL COMMENT '交友目标：倾向恋爱/倾向结婚'",
                 "meeting_pace": "`meeting_pace` varchar(64) DEFAULT NULL COMMENT '见面节奏'",
                 "children_intention": "`children_intention` varchar(64) DEFAULT NULL COMMENT '生育意愿'",
+                "preferred_occupation": "`preferred_occupation` varchar(128) DEFAULT NULL COMMENT '期望职业（择偶要求）'",
             },
             "user_profile_completion": {
                 "weight_completed": "`weight_completed` tinyint NOT NULL DEFAULT '0'",
@@ -374,6 +375,7 @@ class DatabaseManager:
                 "can_view_lead_follow": "`can_view_lead_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许查看客源线索跟进记录（推广红娘用）'",
                 "can_write_lead_follow": "`can_write_lead_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许客源线索中写跟进（推广红娘用）'",
                 "can_view_member_crm_follow": "`can_view_member_crm_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许查看会员CRM跟进记录（推广红娘用）'",
+                "visible": "`visible` tinyint NOT NULL DEFAULT 1 COMMENT '推广红娘前台是否展示 1展示 0隐藏'",
             },
             "ai_advisor_message": {
                 "model_name": "`model_name` varchar(128) DEFAULT NULL",
@@ -403,6 +405,19 @@ class DatabaseManager:
                 "start_at": "`start_at` datetime DEFAULT CURRENT_TIMESTAMP",
                 "end_at": "`end_at` datetime DEFAULT NULL",
                 "status": "`status` tinyint NOT NULL DEFAULT '1' COMMENT '1生效中 2已过期 3已撤销'",
+                "pay_status": "`pay_status` tinyint NOT NULL DEFAULT '0' COMMENT '0未支付 1已支付'",
+                "pay_method": "`pay_method` varchar(32) DEFAULT NULL COMMENT '支付方式'",
+            },
+            # 会员认证：补齐实名/学历/房产认证审核所需字段
+            "user_auth": {
+                "face_method": "`face_method` varchar(32) DEFAULT NULL COMMENT '验证方式 动作活检/照片比对'",
+                "face_vendor": "`face_vendor` varchar(64) DEFAULT NULL COMMENT '人脸服务商'",
+                "face_score": "`face_score` decimal(5,2) DEFAULT NULL COMMENT '人脸比对得分'",
+                "id_card_issued": "`id_card_issued` varchar(64) DEFAULT NULL COMMENT '身份证发证机关'",
+            },
+            # 线上行为：举报页需要展示提交人 IP
+            "user_report": {
+                "submit_ip": "`submit_ip` varchar(64) DEFAULT NULL COMMENT '提交人IP'",
             },
         }
 
@@ -1637,6 +1652,7 @@ class DatabaseManager:
                     `can_view_lead_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许查看客源线索跟进记录（推广红娘用）',
                     `can_write_lead_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许客源线索中写跟进（推广红娘用）',
                     `can_view_member_crm_follow` tinyint NOT NULL DEFAULT 1 COMMENT '允许查看会员CRM跟进记录（推广红娘用）',
+                    `visible` tinyint NOT NULL DEFAULT 1 COMMENT '推广红娘前台是否展示 1展示 0隐藏',
                     `intro` text COMMENT '自我介绍/优势',
                     `cert_images` json DEFAULT NULL COMMENT '资质证书图片',
                     `application_details` json DEFAULT NULL COMMENT '红娘审核扩展资料',
@@ -2590,6 +2606,146 @@ class DatabaseManager:
                     PRIMARY KEY (`id`),
                     UNIQUE KEY `uk_word` (`word`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='敏感词库'
+            """,
+            # ============================================
+            # 43.1 会员认证扩展（会员CRM / 会员认证页）
+            # ============================================
+            "user_commitment_sign": """
+                CREATE TABLE IF NOT EXISTS `user_commitment_sign` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `title` varchar(128) NOT NULL DEFAULT '单身承诺' COMMENT '承诺书标题',
+                    `content` text COMMENT '签署时的承诺书内容快照',
+                    `file_url` varchar(512) DEFAULT NULL COMMENT '签名文件地址',
+                    `sign_times` int NOT NULL DEFAULT '1' COMMENT '第几次签署',
+                    `status` tinyint NOT NULL DEFAULT '0' COMMENT '0待审 1通过 2未通过',
+                    `remark` varchar(255) DEFAULT NULL COMMENT '审核备注',
+                    `reviewed_by` bigint unsigned DEFAULT NULL COMMENT '审核人',
+                    `reviewed_at` datetime DEFAULT NULL COMMENT '审核时间',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_commit_user` (`user_id`,`created_at`),
+                    KEY `idx_commit_status` (`status`,`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员承诺书签署记录'
+            """,
+            "user_marriage_check": """
+                CREATE TABLE IF NOT EXISTS `user_marriage_check` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `check_method` varchar(64) DEFAULT NULL COMMENT '核验方式 民政数据接口/线下核查',
+                    `declared_status` varchar(64) DEFAULT NULL COMMENT '客户资料中填写的婚姻状态',
+                    `result` varchar(32) DEFAULT NULL COMMENT '核验结果 married已婚/no_record无登记信息/divorced离异',
+                    `cost` decimal(10,2) NOT NULL DEFAULT '0.00' COMMENT '查询费用',
+                    `checked_at` datetime DEFAULT NULL COMMENT '核验时间',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_marriage_user` (`user_id`),
+                    KEY `idx_marriage_result` (`result`,`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='婚姻状况核验记录'
+            """,
+            "config_auth_type": """
+                CREATE TABLE IF NOT EXISTS `config_auth_type` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `name` varchar(64) NOT NULL COMMENT '认证类型名称',
+                    `icon_url` varchar(512) DEFAULT NULL COMMENT '认证图标',
+                    `description` varchar(1000) DEFAULT NULL COMMENT '说明文案',
+                    `require_realname` tinyint NOT NULL DEFAULT '1' COMMENT '提交前是否要求先完成实名认证 1需要 0不需要',
+                    `sort` int NOT NULL DEFAULT '0' COMMENT '显示排序，数字越大越靠前',
+                    `status` tinyint NOT NULL DEFAULT '1' COMMENT '1启用 0关闭',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_auth_type_name` (`name`),
+                    KEY `idx_auth_type_sort` (`status`,`sort`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='其他认证类型配置'
+            """,
+            "user_auth_extra": """
+                CREATE TABLE IF NOT EXISTS `user_auth_extra` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL,
+                    `auth_type_id` bigint unsigned NOT NULL COMMENT '关联 config_auth_type.id',
+                    `auth_type_name` varchar(64) DEFAULT NULL COMMENT '认证类型名称快照',
+                    `file_url` varchar(512) DEFAULT NULL COMMENT '文件凭证',
+                    `status` tinyint NOT NULL DEFAULT '0' COMMENT '0待审 1通过 2未通过',
+                    `remark` varchar(255) DEFAULT NULL COMMENT '审核备注',
+                    `reviewed_by` bigint unsigned DEFAULT NULL,
+                    `reviewed_at` datetime DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_auth_extra_user` (`user_id`),
+                    KEY `idx_auth_extra_status` (`status`,`created_at`),
+                    KEY `idx_auth_extra_type` (`auth_type_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员其他认证提交记录'
+            """,
+            "user_gift_record": """
+                CREATE TABLE IF NOT EXISTS `user_gift_record` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL COMMENT '赠送人',
+                    `target_user_id` bigint unsigned NOT NULL COMMENT '赠送对象',
+                    `gift_id` bigint unsigned DEFAULT NULL COMMENT '关联 config_point_product.id',
+                    `gift_name` varchar(128) DEFAULT NULL COMMENT '礼物名称',
+                    `gift_qty` int NOT NULL DEFAULT '1' COMMENT '赠送数量',
+                    `qty_unit` varchar(16) DEFAULT NULL COMMENT '数量单位 颗/发/个/架',
+                    `point_cost` int NOT NULL DEFAULT '0' COMMENT '消耗积分',
+                    `paid_amount` decimal(10,2) NOT NULL DEFAULT '0.00' COMMENT '实付金额',
+                    `reward_points` int NOT NULL DEFAULT '0' COMMENT '奖励积分',
+                    `order_no` varchar(64) DEFAULT NULL COMMENT '支付订单号',
+                    `pay_status` tinyint NOT NULL DEFAULT '0' COMMENT '0未支付 1已支付',
+                    `pay_method` varchar(32) DEFAULT NULL COMMENT '支付方式',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_gift_user` (`user_id`,`created_at`),
+                    KEY `idx_gift_target` (`target_user_id`,`created_at`),
+                    KEY `idx_gift_pay` (`pay_status`,`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员赠送礼物记录'
+            """,
+            # ============================================
+            # 43.2 线下VIP服务（会员CRM / 线下VIP页）
+            # ============================================
+            "offline_vip": """
+                CREATE TABLE IF NOT EXISTS `offline_vip` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL COMMENT '会员用户ID',
+                    `sales_matchmaker_id` bigint unsigned DEFAULT NULL COMMENT '销售红娘 users.id',
+                    `service_matchmaker_id` bigint unsigned DEFAULT NULL COMMENT '服务红娘 users.id',
+                    `promoter_id` bigint unsigned DEFAULT NULL COMMENT '推广红娘 users.id',
+                    `sign_date` date DEFAULT NULL COMMENT '签约日期',
+                    `service_start` date DEFAULT NULL COMMENT '服务开始日期',
+                    `service_end` date DEFAULT NULL COMMENT '服务结束日期',
+                    `package_name` varchar(128) DEFAULT NULL COMMENT '服务套餐',
+                    `contract_amount` decimal(12,2) NOT NULL DEFAULT '0.00' COMMENT '合同金额',
+                    `promise_meet_count` int NOT NULL DEFAULT '0' COMMENT '承诺约见人数',
+                    `success_meet_count` int NOT NULL DEFAULT '0' COMMENT '已成功约见人数',
+                    `progress` varchar(24) NOT NULL DEFAULT 'matching' COMMENT '服务进度 matching/dating/deep/in_love/met_parents/paused/breakup/married',
+                    `contract_status` varchar(24) NOT NULL DEFAULT 'none' COMMENT '电子合同状态 none/pending/signed/void',
+                    `contract_no` varchar(64) DEFAULT NULL COMMENT '电子合同编号',
+                    `remark` varchar(500) DEFAULT NULL COMMENT '备注信息',
+                    `attach_urls` json DEFAULT NULL COMMENT '图片附件URL列表',
+                    `created_by` bigint unsigned DEFAULT NULL COMMENT '创建人（后台账号ID）',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    `deleted_at` datetime DEFAULT NULL,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_offline_vip_user` (`user_id`,`deleted_at`),
+                    KEY `idx_offline_vip_progress` (`progress`,`deleted_at`),
+                    KEY `idx_offline_vip_sign` (`sign_date`),
+                    KEY `idx_offline_vip_service` (`service_matchmaker_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='线下VIP会员服务记录'
+            """,
+            "offline_vip_meet_log": """
+                CREATE TABLE IF NOT EXISTS `offline_vip_meet_log` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `vip_id` bigint unsigned NOT NULL COMMENT '关联 offline_vip.id',
+                    `before_count` int NOT NULL DEFAULT '0' COMMENT '修改前成功约见数',
+                    `after_count` int NOT NULL DEFAULT '0' COMMENT '修改后成功约见数',
+                    `remark` varchar(255) DEFAULT NULL,
+                    `changed_by` bigint unsigned DEFAULT NULL COMMENT '修改人（后台账号ID）',
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    KEY `idx_meet_log_vip` (`vip_id`,`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='线下VIP成功约见次数人工修改记录'
             """,
             "community_moderation_task": """
                 CREATE TABLE IF NOT EXISTS `community_moderation_task` (

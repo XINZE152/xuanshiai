@@ -38,11 +38,15 @@ from app.api.routes import (
     matchmaker_crm_admin,
     matchmaker_dashboard_admin,
     matchmaker_member_admin,
+    member_auth_admin,
+    member_behavior_admin,
+    member_media_admin,
     media,
     meeting,
     member_follow_up_admin,
     member_records_admin,
     member_vip_admin,
+    offline_vip_admin,
     membership,
     organization,
     organization_admin,
@@ -113,9 +117,13 @@ api_router.include_router(member_records_admin.router, tags=["红娘后台"])
 api_router.include_router(customer_leads_admin.router, tags=["管理后台"])
 api_router.include_router(matchmaker_dashboard_admin.router, tags=["红娘后台"])
 api_router.include_router(member_vip_admin.router, tags=["管理后台"])
+api_router.include_router(member_auth_admin.router, tags=["管理后台"])
+api_router.include_router(member_media_admin.router, tags=["管理后台"])
+api_router.include_router(member_behavior_admin.router, tags=["管理后台"])
 api_router.include_router(activity_admin.router, tags=["管理后台"])
 api_router.include_router(activity_admin.signup_router, tags=["管理后台"])
 api_router.include_router(member_follow_up_admin.router, tags=["管理后台"])
+api_router.include_router(offline_vip_admin.router, tags=["管理后台"])
 api_router.include_router(reward_rule_admin.router, tags=["红娘后台"])
 api_router.include_router(apportion_config_admin.router, tags=["红娘后台"])
 api_router.include_router(commission_level_admin.router, tags=["红娘后台"])

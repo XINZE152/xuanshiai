@@ -147,6 +147,14 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
          "abandon": {"member_crm": {"days": 0, "daily_pickup_limit": 0}, "customer_lead": {"days": 0, "daily_pickup_limit": 0}},
          "commission_rules": []}, [],
     ),
+    "member_auth": (
+        "会员认证配置", "会员认证（M3-1）模块的快捷设置、承诺书与婚姻查询授权协议配置。",
+        {"realname_force_id_card": False, "realname_fee": "0",
+         "commitment_title": "单身承诺",
+         "commitment_content": "本人使用昵称[[会员昵称]]，编号：[[相亲会员编号]]，在[[相亲平台名称]]登记婚姻交友信息，承诺所登记资料属实，承诺当前婚恋状态为[[婚姻状态]]，本人自行承担信息不属实造成的一切后果，与平台无关。",
+         "marriage_agreement": "为保障婚恋交友平台信息真实性，维护健康诚信的交友环境，本人（授权人）自愿、真实、不可撤销地授权，依法依规查询本人婚姻状态信息，用于婚恋相亲资料核实。"},
+        [],
+    ),
     "system": (
         "系统配置", "管理员、广告、日志和系统运行规则。",
         {"basic": {"business_entity": None, "platform_name": "宣誓爱"}, "ad": {"enabled": False, "items": []},

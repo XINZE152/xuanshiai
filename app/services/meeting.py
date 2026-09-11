@@ -292,3 +292,67 @@ async def admin_feedback(db: AsyncSession, meeting_id: int) -> list[MeetingFeedb
         matchmaker_rating, continue_intent, private_feedback, created_at
         FROM meeting_feedback WHERE meeting_id = :id ORDER BY id ASC"""), {"id": meeting_id})
     return [MeetingFeedbackAdminItem(**dict(row)) for row in rows.mappings().all()]
+
+
+async def admin_options(db: AsyncSession) -> dict:
+    """约会管理页面：返回服务红娘下拉 + 男方/女方候选人下拉 + 约见申请状态枚举。"""
+
+    matchmaker_rows = await db.execute(text("""SELECT u.id, u.nickname, u.avatar, u.phone
+        FROM users u JOIN user_role ur ON ur.user_id = u.id AND ur.role_code = 'service_matchmaker' AND ur.status = 1
+        WHERE u.status = 1 ORDER BY u.id DESC LIMIT 200"""))
+    matchmakers = [dict(row) for row in matchmaker_rows.mappings().all()]
+
+    member_rows = await db.execute(text("""SELECT u.id, u.nickname, u.avatar, u.phone, u.gender, u.birthday
+        FROM users u WHERE u.status = 1 ORDER BY u.id DESC LIMIT 200"""))
+    candidates = [dict(row) for row in member_rows.mappings().all()]
+
+    return {
+        "matchmakers": matchmakers,
+        "candidates": candidates,
+        "request_status": [
+            {"value": "SUBMITTED", "label": "待处理"},
+            {"value": "CONTACTED", "label": "已联系"},
+            {"value": "ACCEPTED", "label": "已通过"},
+            {"value": "DECLINED", "label": "已拒绝"},
+            {"value": "CLOSED", "label": "已关闭"},
+        ],
+        "record_status": [
+            {"value": "SCHEDULED", "label": "待见面"},
+            {"value": "REMINDED", "label": "已提醒"},
+            {"value": "CHECKED_IN", "label": "已签到"},
+            {"value": "COMPLETED", "label": "已完成"},
+            {"value": "CANCELLED", "label": "已取消"},
+            {"value": "NO_SHOW", "label": "未到场"},
+        ],
+    }
+
+
+async def admin_delete_request(db: AsyncSession, request_id: int, actor_id: int) -> bool:
+    row = (await db.execute(text("SELECT id, status FROM meeting_request WHERE id = :id FOR UPDATE"), {"id": request_id})).mappings().first()
+    if not row:
+        raise HTTPException(404, detail="约见申请不存在")
+    if row["status"] in ("CLOSED",):
+        # 软关闭记录：物理删除
+        pass
+    await db.execute(text("DELETE FROM meeting_request WHERE id = :id"), {"id": request_id})
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id)
+        VALUES (:actor, 'meeting_request.delete', 'meeting_request', :id)"""), {"actor": actor_id, "id": request_id})
+    await db.commit()
+    return True
+
+
+async def admin_delete_meeting(db: AsyncSession, meeting_id: int, actor_id: int) -> bool:
+    row = (await db.execute(text("SELECT id, status FROM meeting_record WHERE id = :id FOR UPDATE"), {"id": meeting_id})).mappings().first()
+    if not row:
+        raise HTTPException(404, detail="约会记录不存在")
+    if row["status"] == "COMPLETED":
+        raise HTTPException(409, detail="已完成的约会记录不能删除")
+    # 先清掉已挂的反馈
+    await db.execute(text("DELETE FROM meeting_feedback WHERE meeting_id = :id"), {"id": meeting_id})
+    await db.execute(text("DELETE FROM meeting_record WHERE id = :id"), {"id": meeting_id})
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id)
+        VALUES (:actor, 'meeting_record.delete', 'meeting_record', :id)"""), {"actor": actor_id, "id": meeting_id})
+    await db.commit()
+    return True
