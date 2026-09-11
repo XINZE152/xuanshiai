@@ -72,7 +72,9 @@ from app.core.security import decode_access_token
 from app.db.session import session_factory as _db_session_factory
 from app.services.ai.flags import AiFeature, require_ai_feature
 from app.services.ai.gateway import AIGateway
+from app.services.ai.audit import emit_ai_metric
 from app.services.ai.base import ProviderError as AIProviderError
+from app.services.ai.task_events import task_event_channel
 from app.services.ai.profile import (
     AIConsentRequired,
     AIInputError,
@@ -285,6 +287,10 @@ _CANDIDATE_TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled", "superseded"}
 )
 
+# Task 11：等待终态的轮询节奏（快段 0.5s×30s 保实时性；慢段 2s×6min 兜住
+# 供应商重试）。pub/sub 唤醒只把下一次读取提前，不改变本节奏的上限。
+_TASK_EVENT_POLL_SCHEDULE = (0.5,) * 60 + (2.0,) * 180
+
 
 async def _load_master_history(
     db: Any, session_id: str, *, limit: int = 24
@@ -475,52 +481,112 @@ async def _replay_pending_confirm_card(
     )
 
 
-async def _wait_candidate_and_push(
-    ws: WebSocket, user_id: int, session_id: str, subject: str, task_id: str
-) -> None:
-    """Watch one durable candidate task without cancelling other turns."""
+async def _read_task_status(task_id: str) -> str | None:
+    """Read one ai_task status; returns None when the row is gone or DB failed."""
     if _db_session_factory is None:
+        return None
+    try:
+        async with _db_session_factory() as db:
+            row = (
+                await db.execute(
+                    sql_text(
+                        "SELECT status FROM ai_task "
+                        "WHERE task_id = :task_id"
+                    ),
+                    {"task_id": task_id},
+                )
+            ).mappings().first()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "moxiang_candidate_poll_failed task_id=%s err=%s",
+            task_id,
+            type(exc).__name__,
+        )
+        return None
+    if row is None:
+        return None
+    return str(row["status"])
+
+
+async def _open_task_pubsub(task_id: str) -> Any | None:
+    """Subscribe to the task's event channel; None when Redis is unavailable."""
+    try:
+        from app.core.redis import redis_client
+
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe(task_event_channel(task_id))
+        return pubsub
+    except Exception:  # noqa: BLE001 - Redis unavailable -> poll-only
+        logger.debug(
+            "moxiang_task_subscribe_failed task_id=%s", task_id, exc_info=True
+        )
+        return None
+
+
+async def _close_task_pubsub(pubsub: Any | None) -> None:
+    """Unsubscribe and release the pub/sub connection (best-effort)."""
+    if pubsub is None:
         return
-    await _send_json(
-        ws,
-        {
-            "type": "extraction_status",
-            "subject": subject,
-            "task_id": task_id,
-            "status": "processing",
-        },
-    )
-    # 快慢两段轮询：快段 0.5s×30s 保实时性；慢段 2s×6min 兜住供应商重试
-    # （实测 dots 单次抽取可到 6 分钟）。窗口内任务未到终态则静默放弃，
-    # 前端保留"正在理解"占位，进度以重连后的 journey_ready 快照兜底。
-    for poll_delay in (0.5,) * 60 + (2.0,) * 180:
-        await asyncio.sleep(poll_delay)
-        try:
-            async with _db_session_factory() as db:
-                row = (
-                    await db.execute(
-                        sql_text(
-                            "SELECT status FROM ai_task "
-                            "WHERE task_id = :task_id"
-                        ),
-                        {"task_id": task_id},
-                    )
-                ).mappings().first()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "moxiang_candidate_poll_failed task_id=%s err=%s",
-                task_id,
-                type(exc).__name__,
-            )
-            return
-        if row is None:
-            return
-        if str(row["status"]) in _CANDIDATE_TERMINAL_STATUSES:
-            break
-    else:
+    try:
+        await pubsub.unsubscribe()
+    except Exception:  # noqa: BLE001
+        logger.debug("moxiang_task_unsubscribe_failed", exc_info=True)
+    try:
+        await pubsub.aclose()
+    except Exception:  # noqa: BLE001
+        logger.debug("moxiang_task_pubsub_close_failed", exc_info=True)
+
+
+async def _wait_for_task_event(pubsub: Any | None, timeout: float) -> None:
+    """Block up to ``timeout`` for one wake-up event; never raises.
+
+    pubsub 为 None 或读取失败时按纯轮询节奏睡满 timeout——Redis 故障
+    自动退回轮询。
+    """
+    if pubsub is None:
+        await asyncio.sleep(max(0.0, timeout))
         return
-    terminal_status = str(row["status"])
-    if terminal_status != "succeeded":
+    try:
+        await pubsub.get_message(ignore_subscribe_messages=True, timeout=timeout)
+    except Exception:  # noqa: BLE001 - broken pubsub -> keep polling
+        logger.debug("moxiang_task_pubsub_read_failed", exc_info=True)
+
+
+async def _watch_until_terminal(pubsub: Any | None, task_id: str) -> str | None:
+    """Poll/until-wake loop; returns terminal status or None when window expires.
+
+    快慢两段轮询：快段 0.5s×30s 保实时性；慢段 2s×6min 兜住供应商重试
+    （实测 dots 单次抽取可到 6 分钟）。pub/sub 只把下一次读取提前，不
+    携带权威状态——每次唤醒与每个轮询点都以数据库重读为准。窗口内未
+    到终态则返回 None（前端保留"正在理解"占位，进度以重连后的
+    journey_ready 快照兜底）。
+    """
+    loop = asyncio.get_running_loop()
+    for poll_delay in _TASK_EVENT_POLL_SCHEDULE:
+        deadline = loop.time() + poll_delay
+        while True:
+            await _wait_for_task_event(pubsub, deadline - loop.time())
+            status = await _read_task_status(task_id)
+            if status is None:
+                return None
+            if status in _CANDIDATE_TERMINAL_STATUSES:
+                return status
+            if deadline - loop.time() <= 0:
+                # 轮询点已到仍未终态：进入下一段轮询窗口。
+                break
+    return None
+
+
+async def _push_candidate_terminal(
+    ws: WebSocket,
+    user_id: int,
+    session_id: str,
+    subject: str,
+    task_id: str,
+    status: str,
+) -> None:
+    """Push the terminal extraction_status event (and follow-ups) to the client."""
+    if status != "succeeded":
         await _send_json(
             ws,
             {
@@ -543,6 +609,47 @@ async def _wait_candidate_and_push(
     await _push_journey_progress(ws, session_id, subject)
     await _maybe_push_build_invite(
         ws, user_id=user_id, session_id=session_id, subject=subject
+    )
+
+
+async def _wait_candidate_and_push(
+    ws: WebSocket, user_id: int, session_id: str, subject: str, task_id: str
+) -> None:
+    """Watch one durable candidate task without cancelling other turns.
+
+    订阅竞态处理（计划 Task 11）：先读一次当前状态——任务可能在订阅建
+    立前就到终态（发布只发生在 commit 后一次）；未终态再订阅并等待唤
+    醒/轮询。Redis 不可用时自动退回纯轮询，语义不变、仅延迟变差。
+    disconnect 时由 finally 关闭订阅并释放连接。
+    """
+    if _db_session_factory is None:
+        return
+    await _send_json(
+        ws,
+        {
+            "type": "extraction_status",
+            "subject": subject,
+            "task_id": task_id,
+            "status": "processing",
+        },
+    )
+    status = await _read_task_status(task_id)
+    if status is None:
+        return
+    if status not in _CANDIDATE_TERMINAL_STATUSES:
+        pubsub = await _open_task_pubsub(task_id)
+        if pubsub is None:
+            emit_ai_metric(
+                "websocket_fallback", 1, {"endpoint": "moxiang_master"}
+            )
+        try:
+            status = await _watch_until_terminal(pubsub, task_id)
+        finally:
+            await _close_task_pubsub(pubsub)
+        if status is None:
+            return
+    await _push_candidate_terminal(
+        ws, user_id, session_id, subject, task_id, status
     )
 
 

@@ -38,7 +38,7 @@ from app.services.voice.providers import (
 )
 from app.services.voice.stream_provider import (
     _default_ws_connect,
-    _fetch_nls_token,
+    _get_nls_token_cached,
     _secret_value,
 )
 
@@ -130,7 +130,7 @@ class AliyunStreamTTSClient:
                 "流式 TTS 缺少 AccessKey 配置（AI_ALIYUN_VOICE_ACCESS_KEY_ID/"
                 "SECRET），请在 .env 配置（仅开发/测试环境）"
             )
-        token, expires_in = await _fetch_nls_token(
+        token, expires_in = await _get_nls_token_cached(
             access_key_id=self._access_key_id,
             access_key_secret=self._access_key_secret,
             region=self._region,

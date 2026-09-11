@@ -203,7 +203,10 @@ async def test_real_publish_pins_revision_consent_and_projection(
         )
     ).mappings().one()
     assert projection_gate["status"] == "active"
-    assert projection_gate["source_revision"] == submission.revision.revision_id
+    # 准入位 source_revision 存的是 user_revision_state 的 profile 分量
+    # （与任务 source_revision_json 同源），不是 ai_profile_revision 表主键；
+    # 在自增已增长的真实库上二者不相等，必须按向量分量断言。
+    assert projection_gate["source_revision"] == task.source_revision_json["profile"]
     assert projection_gate["projection_id"] is not None
 
     await _clean_user(real_db_session)

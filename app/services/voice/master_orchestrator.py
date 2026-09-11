@@ -14,6 +14,7 @@ VoiceGateway.synthesize 做 TTS。编排器只负责：消息组装 → stream_c
 from __future__ import annotations
 
 import logging
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -128,17 +129,43 @@ class MoxiangMasterOrchestrator:
             subject=subject,
         )
         error_code: str | None = None
+        provider_name = settings.ai_provider
+        provider_model: str | None = None
+        status = "succeeded"
+        stream: AsyncIterator[tuple[str, str]] | None = None
+        gateway_stream = False
+        stream_exhausted = False
+        saw_finish = False
         try:
-            provider = get_provider(settings.ai_provider)
-            provider_name = settings.ai_provider
-            provider_model = getattr(provider, "_model", None) or getattr(
-                provider, "model", None
-            )
+            # Production instances use the Gateway so streaming receives the
+            # same timeout and audit boundary as non-streaming calls.  The
+            # direct provider branch is retained for lightweight test doubles
+            # and older callers that inject a non-AIGateway object.
+            if isinstance(self.ai_gateway, AIGateway):
+                gateway_stream = True
+                context = AITaskContext(
+                    task_id="",
+                    request_id=request_id or uuid.uuid4().hex,
+                    scene="moxiang_master_chat",
+                    provider=provider_name,
+                    model=settings.ai_model_name,
+                    prompt_version=MOXIANG_MASTER_PROMPT_VERSION,
+                    schema_version="moxiang-master-v1",
+                    policy_revision=settings.ai_retention_policy_version
+                    or "ai-policy-2026-08-07-v1",
+                )
+                stream = self.ai_gateway.stream_chat(context, messages, json_mode=False)
+            else:
+                provider = get_provider(settings.ai_provider)
+                provider_model = getattr(provider, "_model", None) or getattr(
+                    provider, "model", None
+                )
+                stream = provider.stream_chat(messages, json_mode=False)
             full_reply = ""
-            async for kind, text in provider.stream_chat(
-                messages, json_mode=False
-            ):
+            async for kind, text in stream:
                 if self._generation_id != gen:
+                    status = "cancelled"
+                    error_code = "AI_CANCELLED"
                     return
                 if kind == "content":
                     full_reply += text
@@ -146,15 +173,33 @@ class MoxiangMasterOrchestrator:
                 elif kind == "reasoning":
                     yield (kind, text)
                 elif kind == "finish":
+                    saw_finish = True
                     yield (kind, text)
+            stream_exhausted = True
+            if not saw_finish:
+                status = "failed"
+                error_code = "AI_STREAM_INCOMPLETE"
             # 累积历史
             self._last_reply_text = full_reply
             self._history.append({"role": "user", "content": user_text})
             self._history.append({"role": "assistant", "content": full_reply})
             if len(self._history) > _MAX_HISTORY_TURNS * 2:
                 self._history = self._history[-(_MAX_HISTORY_TURNS * 2):]
+        except asyncio.CancelledError:
+            status = "cancelled"
+            error_code = "AI_CANCELLED"
+            logger.info("moxiang_master_reply_cancelled request_id=%s", request_id)
+            self._last_reply_text = ""
+            raise
+        except TimeoutError:
+            status = "timeout"
+            error_code = "AI_TIMEOUT"
+            logger.warning("moxiang_master_reply_timeout request_id=%s", request_id)
+            self._last_reply_text = ""
+            raise
         except Exception as exc:
-            error_code = type(exc).__name__
+            status = "failed"
+            error_code = getattr(exc, "code", None) or type(exc).__name__
             logger.warning(
                 "moxiang_master_reply_failed request_id=%s err=%s",
                 request_id,
@@ -163,26 +208,63 @@ class MoxiangMasterOrchestrator:
             self._last_reply_text = ""
             raise
         finally:
+            if not stream_exhausted and status == "succeeded":
+                status = "cancelled"
+                error_code = "AI_CANCELLED"
+            if stream is not None:
+                close_stream = getattr(stream, "aclose", None)
+                if close_stream is not None:
+                    try:
+                        await close_stream()
+                    except asyncio.CancelledError:
+                        # Closing a provider stream is best-effort.  A close
+                        # cancellation must not replace the generation error
+                        # or prevent the audit in the following block.
+                        logger.warning(
+                            "moxiang_master_stream_close_cancelled request_id=%s",
+                            request_id,
+                        )
+                    except Exception as close_exc:
+                        logger.warning(
+                            "moxiang_master_stream_close_failed request_id=%s err=%s",
+                            request_id,
+                            type(close_exc).__name__,
+                        )
             if self._generation_id == gen:
                 self.state = MasterState.IDLE
             duration_ms = int((time.monotonic() - started) * 1000)
-            await record_generation_audit(
-                GenerationAuditEvent(
-                    request_id=request_id or uuid.uuid4().hex,
-                    task_id=None,
-                    scene="moxiang_master_chat",
-                    provider=provider_name,
-                    model=provider_model,
-                    prompt_version=MOXIANG_MASTER_PROMPT_VERSION,
-                    schema_version="moxiang-master-v1",
-                    policy_revision=settings.ai_retention_policy_version or "ai-policy-2026-08-07-v1",
-                    status="succeeded" if error_code is None else "failed",
-                    error_code=error_code,
-                    duration_ms=duration_ms,
-                    input_revision={"history": len(self._history)},
-                    display_eligible=True,
-                )
-            )
+            # AIGateway.stream_chat owns the audit row for production calls;
+            # avoid recording a duplicate event from the orchestrator.
+            if not gateway_stream:
+                try:
+                    await record_generation_audit(
+                        GenerationAuditEvent(
+                            request_id=request_id or uuid.uuid4().hex,
+                            task_id=None,
+                            scene="moxiang_master_chat",
+                            provider=provider_name,
+                            model=provider_model,
+                            prompt_version=MOXIANG_MASTER_PROMPT_VERSION,
+                            schema_version="moxiang-master-v1",
+                            policy_revision=settings.ai_retention_policy_version
+                            or "ai-policy-2026-08-07-v1",
+                            status=status,
+                            error_code=error_code,
+                            duration_ms=duration_ms,
+                            input_revision={"history": len(self._history)},
+                            display_eligible=True,
+                        )
+                    )
+                except asyncio.CancelledError:
+                    logger.warning(
+                        "moxiang_master_audit_cancelled request_id=%s", request_id
+                    )
+                except Exception as audit_exc:  # audit must never mask generation
+                    logger.warning(
+                        "moxiang_master_audit_failed request_id=%s err=%s",
+                        request_id,
+                        type(audit_exc).__name__,
+                    )
 
     async def synthesize_current(self) -> MasterTurnResult:
         """对 _last_reply_text 合成 TTS。无文本则返回空。"""

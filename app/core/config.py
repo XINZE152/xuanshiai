@@ -206,7 +206,35 @@ class Settings(BaseSettings):
     # 语音转写单次音频时长上限（秒，与前端录音 60s 上限对齐）。
     ai_asr_max_duration_seconds: int = Field(default=60, gt=0, le=300)
     # 临时音频文件过期清理（小时），合规要求转写后短期保留即删除。
+    # 音频 retention 与 voice_transcript retention 分开配置，禁止混用。
     ai_voice_audio_retention_hours: int = Field(default=24, gt=0)
+    # REST ASR 的转写原文保留期。它是数据库文本，不是临时音频文件；到期后由
+    # worker 从 voice_transcript 删除，且不会影响 ai_memory_state 的逐行 TTL。
+    ai_voice_transcript_retention_hours: int = Field(default=72, gt=0)
+    # worker 主循环执行语音音频清理的最小间隔（秒）。0 表示每轮都尝试。
+    ai_voice_audio_cleanup_interval_seconds: int = Field(default=3600, ge=0)
+
+    # ==================== Memory State TTL 定时清理（Batch-1 Task 2）====================
+    # 单批过期的 ai_memory_state 行数上限（expire_memory_states 的 limit）。
+    ai_memory_state_ttl_batch_size: int = Field(default=200, ge=1)
+    # 单轮最多执行的批次数上限（每批独立会话/独立提交）。
+    ai_memory_state_ttl_max_batches: int = Field(default=10, ge=1)
+    # 单轮墙钟时间上限（秒）：每批开始前检查，预算耗尽即停、剩余留给下一轮。
+    ai_memory_state_ttl_time_budget_seconds: float = Field(default=30.0, gt=0)
+    # worker 主循环执行 Memory State TTL 清理的最小间隔（秒）。0 表示每轮都尝试。
+    ai_memory_state_ttl_cleanup_interval_seconds: int = Field(default=3600, ge=0)
+
+    # ==================== AI 文本/审计/outbox retention（Task 9）====================
+    # 成功 outbox 从 occurred_at 起保留一周；dead-letter 从 dead_letter_at 起
+    # 保留 30 天。pending/processing 永不由 retention 任务删除，仍由消费者的
+    # 有限重试、租约回收和 dead-letter 状态机负责。
+    ai_derivation_outbox_succeeded_retention_hours: int = Field(default=168, gt=0)
+    ai_derivation_outbox_dead_letter_retention_hours: int = Field(default=720, gt=0)
+    # Provider 审计不含 prompt/response，但保留最小调用元数据供追责与计费复核。
+    ai_generation_audit_retention_hours: int = Field(default=2160, gt=0)
+    # 每张表每轮最多删除的行数，以及 worker 定时执行的最小间隔。
+    ai_retention_cleanup_batch_size: int = Field(default=200, ge=1)
+    ai_retention_cleanup_interval_seconds: int = Field(default=3600, ge=0)
 
     # ==================== 实时半双工语音对话（P-04b）====================
     # 实时对话模式开关：默认关闭。生产环境 fail closed（见

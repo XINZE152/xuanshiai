@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Literal
 
 from fastapi import HTTPException
@@ -10,7 +11,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.redis import consume_daily, daily_quota_key
+from app.core.redis import consume_daily, daily_quota_key, refund_daily
+from app.services.ai.audit import emit_ai_metric
 from app.schemas.ai import (
     AIAssistantMessageResponse,
     AIAssistantSessionPage,
@@ -28,22 +30,34 @@ from app.schemas.ai import (
 from app.schemas.discovery import DiscoveryFilters
 from app.services.ai_provider import complete, parse_json
 from app.services.discovery import _candidate_score, _card, _fetch_rows, _viewer_context
+from app.services.membership import has_active_membership
 
 MatchType = Literal["who_likes_me", "i_like", "material", "soul"]
+logger = logging.getLogger(__name__)
 
 
 async def _require_vip(db: AsyncSession, user_id: int) -> None:
-    row = await db.execute(text("""SELECT 1 FROM user_membership
-        WHERE user_id=:user_id AND status=1
-          AND (start_at IS NULL OR start_at<=UTC_TIMESTAMP())
-          AND (end_at IS NULL OR end_at>UTC_TIMESTAMP()) LIMIT 1"""), {"user_id": user_id})
-    if not row.scalar():
+    if not await has_active_membership(db, user_id):
         raise HTTPException(403, detail="AI功能仅限会员使用")
 
 
-async def _consume_ai_quota(db: AsyncSession, user_id: int, code: str, limit: int) -> None:
-    if not await consume_daily(daily_quota_key(f"ai:{code}", user_id), limit):
+async def _consume_ai_quota(db: AsyncSession, user_id: int, code: str, limit: int) -> str:
+    key = daily_quota_key(f"ai:{code}", user_id)
+    if not await consume_daily(key, limit):
         raise HTTPException(429, detail="今日 AI 使用次数已用完")
+    return key
+
+
+async def _refund_ai_quota_safely(quota_key: str | None) -> None:
+    """Best-effort refund; a Redis failure must not replace the request error."""
+    if not quota_key:
+        return
+    try:
+        await refund_daily(quota_key)
+    except Exception:
+        # Task 17：退款失败单独计数（运行手册告警项；丢失额度需手工补偿）。
+        emit_ai_metric("quota_refund_failure", 1)
+        logger.exception("Failed to refund AI assistant quota", extra={"quota_key": quota_key})
 
 
 async def create_assistant_session(db: AsyncSession, user_id: int, title: str | None) -> AIAssistantSessionResponse:
@@ -70,31 +84,46 @@ async def assistant_message(db: AsyncSession, user_id: int, session_id: int, con
     session = (await db.execute(text("SELECT id FROM ai_assistant_session WHERE id=:id AND user_id=:user_id AND status=1"), {"id": session_id, "user_id": user_id})).scalar()
     if not session:
         raise HTTPException(404, detail="AI助手会话不存在")
-    await _consume_ai_quota(db, user_id, "assistant", settings.ai_daily_assistant_limit)
-    # The user explicitly chose to allow the assistant to inspect all of their
-    # own chat records. Only the user's two-party messages are included.
-    rows = (await db.execute(text("""SELECT from_user_id,content,created_at FROM chat_message
-        WHERE (from_user_id=:user_id OR to_user_id=:user_id) AND type=1 AND revoked_at IS NULL
-        ORDER BY created_at DESC LIMIT :limit"""), {"user_id": user_id, "limit": settings.ai_max_context_messages})).mappings().all()
-    context = "\n".join(f"{'我' if int(r['from_user_id']) == user_id else '对方'}：{r['content']}" for r in reversed(rows))
-    await db.execute(text("INSERT INTO ai_assistant_message (session_id,role,content) VALUES (:sid,'user',:content)"), {"sid": session_id, "content": content})
-    prompt = f"你是婚恋沟通助手，只提供沟通建议，不做医疗、法律或高风险决定。\n聊天记录：\n{context}\n用户问题：{content}"
-    answer = await complete([{"role": "system", "content": "你是谨慎、尊重隐私的婚恋沟通助手。"}, {"role": "user", "content": prompt}])
-    result = await db.execute(text("INSERT INTO ai_assistant_message (session_id,role,content) VALUES (:sid,'assistant',:content)"), {"sid": session_id, "content": answer})
-    await db.execute(text("UPDATE ai_assistant_session SET updated_at=UTC_TIMESTAMP() WHERE id=:id"), {"id": session_id})
-    await db.commit()
-    row = (await db.execute(text("SELECT id,session_id,role,content,created_at FROM ai_assistant_message WHERE id=:id"), {"id": result.lastrowid})).mappings().one()
-    return AIAssistantMessageResponse(id=int(row["id"]), session_id=int(row["session_id"]), role="assistant", content=row["content"], created_at=row["created_at"])
+    quota_key = await _consume_ai_quota(db, user_id, "assistant", settings.ai_daily_assistant_limit)
+    committed = False
+    try:
+        # The user explicitly chose to allow the assistant to inspect all of their
+        # own chat records. Only the user's two-party messages are included.
+        rows = (await db.execute(text("""SELECT from_user_id,content,created_at FROM chat_message
+            WHERE (from_user_id=:user_id OR to_user_id=:user_id) AND type=1 AND revoked_at IS NULL
+            ORDER BY created_at DESC LIMIT :limit"""), {"user_id": user_id, "limit": settings.ai_max_context_messages})).mappings().all()
+        context = "\n".join(f"{'我' if int(r['from_user_id']) == user_id else '对方'}：{r['content']}" for r in reversed(rows))
+        result = await db.execute(text("INSERT INTO ai_assistant_message (session_id,role,content) VALUES (:sid,'user',:content)"), {"sid": session_id, "content": content})
+        prompt = f"你是婚恋沟通助手，只提供沟通建议，不做医疗、法律或高风险决定。\n聊天记录：\n{context}\n用户问题：{content}"
+        answer = await complete([{"role": "system", "content": "你是谨慎、尊重隐私的婚恋沟通助手。"}, {"role": "user", "content": prompt}])
+        result = await db.execute(text("INSERT INTO ai_assistant_message (session_id,role,content) VALUES (:sid,'assistant',:content)"), {"sid": session_id, "content": answer})
+        await db.execute(text("UPDATE ai_assistant_session SET updated_at=UTC_TIMESTAMP() WHERE id=:id"), {"id": session_id})
+        await db.commit()
+        committed = True
+        row = (await db.execute(text("SELECT id,session_id,role,content,created_at FROM ai_assistant_message WHERE id=:id"), {"id": result.lastrowid})).mappings().one()
+        return AIAssistantMessageResponse(id=int(row["id"]), session_id=int(row["session_id"]), role="assistant", content=row["content"], created_at=row["created_at"])
+    except Exception:
+        if not committed:
+            try:
+                await db.rollback()
+            except Exception:
+                logger.exception("Failed to rollback AI assistant transaction")
+            await _refund_ai_quota_safely(quota_key)
+        raise
 
 
 async def polish_profile(db: AsyncSession, user_id: int, request: AIProfilePolishRequest) -> AIProfilePolishResponse:
     await _require_vip(db, user_id)
-    await _consume_ai_quota(db, user_id, "polish", settings.ai_daily_polish_limit)
-    content = await complete([{"role": "system", "content": "你只润色用户提供的原文，不添加未提供的事实。输出JSON：polished(string), changed_points(array[string])。"}, {"role": "user", "content": f"PROFILE_POLISH style={request.style} max_length={request.max_length}\n{request.content}"}], json_mode=True)
-    data = parse_json(content)
-    polished = str(data.get("polished") or request.content).strip()[:request.max_length]
-    points = data.get("changed_points") if isinstance(data.get("changed_points"), list) else []
-    return AIProfilePolishResponse(original=request.content, polished=polished, style=request.style, changed_points=[str(x) for x in points[:5]])
+    quota_key = await _consume_ai_quota(db, user_id, "polish", settings.ai_daily_polish_limit)
+    try:
+        content = await complete([{"role": "system", "content": "你只润色用户提供的原文，不添加未提供的事实。输出JSON：polished(string), changed_points(array[string])。"}, {"role": "user", "content": f"PROFILE_POLISH style={request.style} max_length={request.max_length}\n{request.content}"}], json_mode=True)
+        data = parse_json(content)
+        polished = str(data.get("polished") or request.content).strip()[:request.max_length]
+        points = data.get("changed_points") if isinstance(data.get("changed_points"), list) else []
+        return AIProfilePolishResponse(original=request.content, polished=polished, style=request.style, changed_points=[str(x) for x in points[:5]])
+    except Exception:
+        await _refund_ai_quota_safely(quota_key)
+        raise
 
 
 THOUGHTFULNESS_KEY_LABELS: dict[str, str] = {
@@ -293,27 +322,32 @@ async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProf
 
 async def parse_search(db: AsyncSession, user_id: int, request: AISearchRequest) -> AISearchResponse:
     await _require_vip(db, user_id)
-    await _consume_ai_quota(db, user_id, "search", settings.ai_daily_search_limit)
-    raw = await complete([{"role": "system", "content": "把自然语言婚恋搜索转换为JSON。只允许输出 filters、normalized_query、unresolved。filters只能包含 gender,age_min,age_max,city_code,marriage_status,education_min,height_min,height_max,income_min,income_max,tag。不要编造城市编码。"}, {"role": "user", "content": f"SEARCH_PARSE\n{request.query}"}], json_mode=True)
-    data = parse_json(raw)
-    filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
-    allowed = set(DiscoveryFilters.model_fields) | {"tag"}
-    filters = {k: v for k, v in filters.items() if k in allowed and v is not None}
+    quota_key = await _consume_ai_quota(db, user_id, "search", settings.ai_daily_search_limit)
     try:
-        parsed = DiscoveryFilters(page=request.page, page_size=request.page_size, **{k: v for k, v in filters.items() if k != "tag"})
+        raw = await complete([{"role": "system", "content": "把自然语言婚恋搜索转换为JSON。只允许输出 filters、normalized_query、unresolved。filters只能包含 gender,age_min,age_max,city_code,marriage_status,education_min,height_min,height_max,income_min,income_max,tag。不要编造城市编码。"}, {"role": "user", "content": f"SEARCH_PARSE\n{request.query}"}], json_mode=True)
+        data = parse_json(raw)
+        filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+        allowed = set(DiscoveryFilters.model_fields) | {"tag"}
+        filters = {k: v for k, v in filters.items() if k in allowed and v is not None}
+        try:
+            parsed = DiscoveryFilters(page=request.page, page_size=request.page_size, **{k: v for k, v in filters.items() if k != "tag"})
+        except Exception:
+            parsed = DiscoveryFilters(page=request.page, page_size=request.page_size)
+            filters = {}
+        rows = await _fetch_rows(db, user_id, parsed, plaza=True, tag=str(filters["tag"]) if filters.get("tag") else None, respect_preferences=False)
+        viewer = await _viewer_context(db, user_id)
+        scored = sorted([(_candidate_score(viewer, row), row) for row in rows], key=lambda x: x[0][0], reverse=True)
+        start = (request.page - 1) * request.page_size
+        selected = scored[start:start + request.page_size]
+        # Presentation follows the current entitlement; it never authorizes
+        # the feature (the guard above is the authorization boundary).
+        viewer_vip = await has_active_membership(db, user_id)
+        from app.schemas.discovery import DiscoveryPage
+        result_page = DiscoveryPage(items=[_card(row, score, reason, detail_locked=bool(row.get("only_vip_can_see_detail")) and not viewer_vip) for (score, reason), row in selected], page=request.page, page_size=request.page_size, total=len(scored), has_more=start + request.page_size < len(scored))
+        return AISearchResponse(query=request.query, normalized_query=str(data.get("normalized_query") or request.query), filters=filters, unresolved=[str(x) for x in data.get("unresolved", []) if isinstance(x, (str, int))], results=result_page.model_dump())
     except Exception:
-        parsed = DiscoveryFilters(page=request.page, page_size=request.page_size)
-        filters = {}
-    from app.services.discovery import _fetch_rows
-    rows = await _fetch_rows(db, user_id, parsed, plaza=True, tag=str(filters["tag"]) if filters.get("tag") else None, respect_preferences=False)
-    viewer = await _viewer_context(db, user_id)
-    scored = sorted([(_candidate_score(viewer, row), row) for row in rows], key=lambda x: x[0][0], reverse=True)
-    start = (request.page - 1) * request.page_size
-    selected = scored[start:start + request.page_size]
-    viewer_vip = True
-    from app.schemas.discovery import DiscoveryPage
-    result_page = DiscoveryPage(items=[_card(row, score, reason, detail_locked=bool(row.get("only_vip_can_see_detail")) and not viewer_vip) for (score, reason), row in selected], page=request.page, page_size=request.page_size, total=len(scored), has_more=start + request.page_size < len(scored))
-    return AISearchResponse(query=request.query, normalized_query=str(data.get("normalized_query") or request.query), filters=filters, unresolved=[str(x) for x in data.get("unresolved", []) if isinstance(x, (str, int))], results=result_page.model_dump())
+        await _refund_ai_quota_safely(quota_key)
+        raise
 
 
 def _breakdown(viewer: dict[str, Any], row: dict[str, Any], match_type: MatchType) -> dict[str, float]:
@@ -330,21 +364,25 @@ def _breakdown(viewer: dict[str, Any], row: dict[str, Any], match_type: MatchTyp
 
 async def match_page(db: AsyncSession, user_id: int, match_type: MatchType, page: int, page_size: int) -> AIMatchPage:
     await _require_vip(db, user_id)
-    await _consume_ai_quota(db, user_id, "match", settings.ai_daily_match_limit)
-    viewer = await _viewer_context(db, user_id)
-    rows = await _fetch_rows(db, user_id, DiscoveryFilters(page=1, page_size=20), plaza=True, respect_preferences=False)
-    scored: list[tuple[float, dict[str, Any], dict[str, float]]] = []
-    for row in rows:
-        breakdown = _breakdown(viewer, row, match_type)
-        score = round(sum(breakdown.values()) / max(1, len(breakdown)), 2)
-        scored.append((score, row, breakdown))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    start = (page - 1) * page_size
-    selected = scored[start:start + page_size]
-    items: list[AIMatchItem] = []
-    for score, row, breakdown in selected:
-        explanation = await complete([{"role": "system", "content": "根据给定分项生成简短、客观的JSON，不夸大成功概率。输出 reason(string), suggestions(array[string])。"}, {"role": "user", "content": f"MATCH_EXPLAIN type={match_type} score={score} breakdown={json.dumps(breakdown, ensure_ascii=False)}"}], json_mode=True)
-        data = parse_json(explanation)
-        items.append(AIMatchItem(user_id=int(row["user_id"]), nickname=row.get("nickname"), avatar=row.get("avatar"), match_type=match_type, match_score=score, score_breakdown=breakdown, match_reason=str(data.get("reason") or "资料存在一定匹配点"), suggestions=[str(x) for x in data.get("suggestions", []) if isinstance(x, str)][:3]))
-    return AIMatchPage(match_type=match_type, items=items, page=page, page_size=page_size, total=len(scored), has_more=start + page_size < len(scored))
+    quota_key = await _consume_ai_quota(db, user_id, "match", settings.ai_daily_match_limit)
+    try:
+        viewer = await _viewer_context(db, user_id)
+        rows = await _fetch_rows(db, user_id, DiscoveryFilters(page=1, page_size=20), plaza=True, respect_preferences=False)
+        scored: list[tuple[float, dict[str, Any], dict[str, float]]] = []
+        for row in rows:
+            breakdown = _breakdown(viewer, row, match_type)
+            score = round(sum(breakdown.values()) / max(1, len(breakdown)), 2)
+            scored.append((score, row, breakdown))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        start = (page - 1) * page_size
+        selected = scored[start:start + page_size]
+        items: list[AIMatchItem] = []
+        for score, row, breakdown in selected:
+            explanation = await complete([{"role": "system", "content": "根据给定分项生成简短、客观的JSON，不夸大成功概率。输出 reason(string), suggestions(array[string])。"}, {"role": "user", "content": f"MATCH_EXPLAIN type={match_type} score={score} breakdown={json.dumps(breakdown, ensure_ascii=False)}"}], json_mode=True)
+            data = parse_json(explanation)
+            items.append(AIMatchItem(user_id=int(row["user_id"]), nickname=row.get("nickname"), avatar=row.get("avatar"), match_type=match_type, match_score=score, score_breakdown=breakdown, match_reason=str(data.get("reason") or "资料存在一定匹配点"), suggestions=[str(x) for x in data.get("suggestions", []) if isinstance(x, str)][:3]))
+        return AIMatchPage(match_type=match_type, items=items, page=page, page_size=page_size, total=len(scored), has_more=start + page_size < len(scored))
+    except Exception:
+        await _refund_ai_quota_safely(quota_key)
+        raise
 

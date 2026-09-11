@@ -21,6 +21,18 @@ propagates deletes/withdrawals asynchronously (projection invalidation + stale
 marking of derived search/compat results).  ``--consumers --once`` runs a single
 round; ``--consumers --dry-run`` prints ``claimed=0 applied=0 superseded=0
 duplicate=0 skipped=0`` without touching the database.
+
+常驻主循环（:func:`_run_forever`）另外按 ``ai_voice_audio_cleanup_interval_seconds``
+节流执行语音临时音频过期清理（:func:`_run_voice_audio_cleanup_round` →
+``app.services.voice.cleanup``）：扫描 ``upload_dir/voice/tts`` 与
+``upload_dir/tts``，删除超过 ``ai_voice_audio_retention_hours`` 的音频文件。
+同时按 ``ai_memory_state_ttl_cleanup_interval_seconds`` 节流执行 Memory State
+TTL 过期清理（:func:`_run_memory_state_ttl_cleanup_round` →
+``app.services.ai.memory.derivations.run_memory_state_ttl_cleanup``）：每批使用
+独立 AsyncSession、批次独立提交、异常显式回滚，失败绝不污染业务任务轮次。
+另按 ``ai_retention_cleanup_interval_seconds`` 清理已过期的 voice transcript、
+最小 generation audit 和终态 derivation outbox 行；活跃 outbox 事件仍只由
+``--consumers`` 的重试/死信状态机处理。
 """
 
 from __future__ import annotations
@@ -31,6 +43,7 @@ import logging
 import os
 import socket
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -41,6 +54,7 @@ from app.schemas.ai_common import AiTaskStatus
 from app.services.ai.audit import emit_ai_metric
 from app.services.ai.profile import extract_profile_turn
 from app.services.ai.journey import extract_journey_candidates
+from app.services.ai.task_events import TERMINAL_TASK_STATUSES, notify_task_event
 from app.services.ai.tasks import (
     AiTaskRecord,
     claim_tasks,
@@ -68,6 +82,32 @@ def _now() -> datetime:
 
 def _worker_id() -> str:
     return f"worker-{socket.gethostname()}-{os.getpid()}"
+
+
+async def _notify_task_terminal(record: Any) -> None:
+    """Wake task watchers after the owning terminal transaction has committed.
+
+    调用点都在 ``finish_in_session`` / ``finalize_handler`` 成功返回（即
+    commit 完成）之后；非终态（not_applied / retry_wait 等）不发布。发布
+    是 best-effort，Redis 不可用时静默跳过，等待方退回轮询。
+    """
+    status = getattr(record, "status", None)
+    status_name = getattr(status, "value", None)
+    if status_name is None and status is not None:
+        status_name = str(status)
+    if status_name not in TERMINAL_TASK_STATUSES:
+        return
+    await notify_task_event(str(record.task_id), str(status_name))
+
+
+async def _notify_reaped_tasks(recovered: list[str]) -> None:
+    """Publish wake-ups for reaper-recovered tasks (retry_wait or terminal failed).
+
+    reaper 恢复只返回 task_id；无论回到 retry_wait 还是终态 failed，唤醒都
+    无害——订阅方重读数据库后自行判断，未到终态就继续等待。
+    """
+    for task_id in recovered:
+        await notify_task_event(str(task_id))
 
 
 def _heartbeat_interval() -> float:
@@ -281,7 +321,7 @@ async def _process(
             started.task_id,
         )
         try:
-            await finish_in_session(
+            failed_record = await finish_in_session(
                 lambda finalize_db: fail_task(
                     finalize_db,
                     started.task_id,
@@ -294,6 +334,8 @@ async def _process(
             logger.exception(
                 "ai_worker_no_handler_fail_failed task_id=%s", started.task_id
             )
+            return "failed"
+        await _notify_task_terminal(failed_record)
         return "failed"
     try:
         heartbeat_result = await _run_with_heartbeat(
@@ -310,15 +352,26 @@ async def _process(
             started.task_id,
             type(exc).__name__,
         )
-        await finish_in_session(
-            lambda finalize_db: fail_task(
-                finalize_db,
-                started.task_id,
-                worker_id,
-                error_code="AI_TEMPORARILY_UNAVAILABLE",
-                retryable=True,
+        try:
+            failed_record = await finish_in_session(
+                lambda finalize_db: fail_task(
+                    finalize_db,
+                    started.task_id,
+                    worker_id,
+                    error_code="AI_TEMPORARILY_UNAVAILABLE",
+                    retryable=True,
+                )
             )
-        )
+        except Exception:
+            logger.exception(
+                "ai_worker_fail_record_failed task_id=%s", started.task_id
+            )
+            emit_ai_metric("retry_rate", 1, {"task_type": started.task_type})
+            return "failed"
+        # fail_task 对 retryable 任务写的是 retry_wait（非终态），只有
+        # 重试耗尽/不可重试时才是终态 failed；_notify_task_terminal 自行
+        # 过滤，非终态不发布。
+        await _notify_task_terminal(failed_record)
         emit_ai_metric("retry_rate", 1, {"task_type": started.task_type})
         return "failed"
     # _run_with_heartbeat returns either a bare outcome (no session_provider)
@@ -337,15 +390,23 @@ async def _process(
         # business writes are discarded.
         if finalize_handler is not None:
             await finalize_handler()
-        await finish_in_session(
-            lambda finalize_db: fail_task(
-                finalize_db,
-                started.task_id,
-                worker_id,
-                error_code="AI_TEMPORARILY_UNAVAILABLE",
-                retryable=True,
+        try:
+            failed_record = await finish_in_session(
+                lambda finalize_db: fail_task(
+                    finalize_db,
+                    started.task_id,
+                    worker_id,
+                    error_code="AI_TEMPORARILY_UNAVAILABLE",
+                    retryable=True,
+                )
             )
-        )
+        except Exception:
+            logger.exception(
+                "ai_worker_fail_record_failed task_id=%s", started.task_id
+            )
+            emit_ai_metric("retry_rate", 1, {"task_type": started.task_type})
+            return "failed"
+        await _notify_task_terminal(failed_record)
         emit_ai_metric("retry_rate", 1, {"task_type": started.task_type})
         return "failed"
     result_ref, revisions = outcome
@@ -363,13 +424,15 @@ async def _process(
         )
 
     if finalize_handler is None:
-        await finish_in_session(
+        completed_record = await finish_in_session(
             lambda finalize_db: complete_task(
                 finalize_db, started.task_id, worker_id, result_ref, revisions
             )
         )
+        await _notify_task_terminal(completed_record)
     else:
-        await finalize_handler(complete_in_handler)
+        completed_record = await finalize_handler(complete_in_handler)
+        await _notify_task_terminal(completed_record)
     return "completed"
 
 
@@ -394,6 +457,8 @@ async def _run_round(worker_id: str, batch_size: int) -> tuple[int, int, int]:
     if reaped:
         logger.info("ai_worker_reaped count=%d", len(reaped))
         emit_ai_metric("lease_reclaimed", len(reaped), {"worker_id": worker_id})
+        # 恢复（retry_wait 或终态 failed）后唤醒等待方；重读数据库决定去留。
+        await _notify_reaped_tasks(reaped)
 
     # 批次3 #24：retry_wait 积压仪表。每轮按 task_type 统计重试积压并计入
     # task_retry_backlog（超过 ai_metrics_backlog_warn_threshold 时由
@@ -519,19 +584,257 @@ async def _run_cleanup_round(worker_id: str, batch_size: int) -> dict[str, int]:
         return stats
 
 
+async def _run_voice_audio_cleanup_round() -> dict[str, int]:
+    """One voice-audio cleanup round: delete expired TTS audio under upload_dir.
+
+    Task 1（语音文件清理）：调用 :func:`app.services.voice.cleanup.\
+cleanup_expired_voice_audio`，扫描 ``upload_dir/voice/tts`` 与
+    ``upload_dir/tts``，删除超过 ``ai_voice_audio_retention_hours`` 的临时
+    音频（retention 与 voice_transcript retention 分开配置）。纯文件系统
+    操作，不触碰数据库；越界路径在 cleanup 内被拒绝。统计进入日志；有
+    删除失败时打点 ``voice_audio_cleanup_failed`` 供告警，下一轮自动重试。
+    """
+    from app.services.voice.cleanup import cleanup_expired_voice_audio
+
+    round_started = time.monotonic()
+    stats = await cleanup_expired_voice_audio()
+    # Task 17：清理耗时指标（秒），供运行手册性能基线与告警。
+    emit_ai_metric(
+        "voice_audio_cleanup_duration_seconds",
+        time.monotonic() - round_started,
+        {"worker_id": _worker_id()},
+    )
+    payload = {
+        "scanned": stats.scanned,
+        "deleted": stats.deleted,
+        "failed": stats.failed,
+        "skipped": stats.skipped,
+    }
+    logger.info(
+        "voice_audio_cleanup_round scanned=%d deleted=%d failed=%d skipped=%d",
+        stats.scanned,
+        stats.deleted,
+        stats.failed,
+        stats.skipped,
+    )
+    # Task 17：清理文件数与失败数进入指标序列（不只日志）。
+    emit_ai_metric(
+        "voice_audio_cleanup_deleted",
+        float(stats.deleted),
+        {"worker_id": _worker_id()},
+    )
+    if stats.failed:
+        emit_ai_metric(
+            "voice_audio_cleanup_failed",
+            float(stats.failed),
+            {"worker_id": _worker_id()},
+        )
+    return payload
+
+
+async def _run_memory_state_ttl_cleanup_round() -> dict[str, int]:
+    """One memory-state TTL cleanup round（Batch-1 Task 2）.
+
+    调用 :func:`app.services.ai.memory.derivations.run_memory_state_ttl_cleanup`：
+    每个批次从 ``session_factory`` 领取全新独立 AsyncSession（绝不复用业务/
+    消费会话），批次内独立提交、异常显式回滚，受单批行数 / 单轮批次数 /
+    单轮墙钟时间三重上限约束。统计进入日志；成功打点
+    ``memory_state_ttl_cleanup_success``（值=本轮过期 State 数），批次失败
+    打点 ``memory_state_ttl_cleanup_failed``（值=失败批次数）；清理失败绝不
+    影响业务任务轮次，下一轮按间隔自动重试。
+    """
+    if session_factory is None:
+        raise RuntimeError("数据库驱动未安装，无法运行 AI Worker 记忆状态清理")
+    from app.services.ai.memory.derivations import run_memory_state_ttl_cleanup
+
+    stats = await run_memory_state_ttl_cleanup(
+        session_factory,
+        now=_now(),
+        batch_size=settings.ai_memory_state_ttl_batch_size,
+        max_batches=settings.ai_memory_state_ttl_max_batches,
+        time_budget_seconds=settings.ai_memory_state_ttl_time_budget_seconds,
+    )
+    logger.info(
+        "memory_state_ttl_cleanup_round expired=%d batches=%d failed_batches=%d "
+        "truncated=%s",
+        stats.expired,
+        stats.batches,
+        stats.failed_batches,
+        stats.truncated,
+    )
+    worker_id = _worker_id()
+    if stats.failed_batches:
+        emit_ai_metric(
+            "memory_state_ttl_cleanup_failed",
+            float(stats.failed_batches),
+            {"worker_id": worker_id},
+        )
+    else:
+        emit_ai_metric(
+            "memory_state_ttl_cleanup_success",
+            float(stats.expired),
+            {"worker_id": worker_id},
+        )
+    return {
+        "expired": stats.expired,
+        "batches": stats.batches,
+        "failed_batches": stats.failed_batches,
+        "truncated": int(stats.truncated),
+    }
+
+
+async def _run_retention_cleanup_round() -> dict[str, int]:
+    """Run the bounded transcript/audit/terminal-outbox retention cleanup.
+
+    This is intentionally separate from the State TTL round: State expiry must
+    append a ledger event, while transcript/audit and terminal outbox records
+    are transient operational data.  The service owns a fresh session and
+    explicit rollback; this wrapper exposes per-category counts in structured
+    worker logs without disturbing task execution.
+    """
+    if session_factory is None:
+        raise RuntimeError("数据库驱动未安装，无法运行 AI retention 清理")
+    from app.services.ai.memory.derivations import run_retention_cleanup
+
+    stats = await run_retention_cleanup(
+        session_factory,
+        now=_now(),
+        batch_size=settings.ai_retention_cleanup_batch_size,
+        voice_transcript_retention_hours=settings.ai_voice_transcript_retention_hours,
+        outbox_succeeded_retention_hours=(
+            settings.ai_derivation_outbox_succeeded_retention_hours
+        ),
+        outbox_dead_letter_retention_hours=(
+            settings.ai_derivation_outbox_dead_letter_retention_hours
+        ),
+        generation_audit_retention_hours=settings.ai_generation_audit_retention_hours,
+    )
+    payload = {
+        "voice_transcripts": stats.voice_transcripts,
+        "generation_audits": stats.generation_audits,
+        "outbox_succeeded": stats.outbox_succeeded,
+        "outbox_dead_letters": stats.outbox_dead_letters,
+    }
+    logger.info("ai_retention_cleanup_round %s", payload)
+    # Task 17：retention 清理计数进入指标序列（按类别打点）。
+    worker_id = _worker_id()
+    emit_ai_metric(
+        "retention_cleanup_deleted",
+        float(stats.voice_transcripts + stats.generation_audits
+              + stats.outbox_succeeded + stats.outbox_dead_letters),
+        {"worker_id": worker_id},
+    )
+    return payload
+
+
+async def _maybe_run_retention_cleanup(last_cleanup_at: float) -> float:
+    """Throttle retention cleanup; failures are isolated until the next interval."""
+    if time.monotonic() - last_cleanup_at < settings.ai_retention_cleanup_interval_seconds:
+        return last_cleanup_at
+    try:
+        await _run_retention_cleanup_round()
+    except Exception:
+        logger.exception("ai_retention_cleanup_round_failed")
+    return time.monotonic()
+
+
+async def _maybe_run_memory_state_ttl_cleanup(last_cleanup_at: float) -> float:
+    """按 ``ai_memory_state_ttl_cleanup_interval_seconds`` 节流执行 TTL 清理。
+
+    距上次执行不足间隔：不执行，只打点 ``memory_state_ttl_cleanup_skipped``
+    （重复执行单独计量），返回 ``last_cleanup_at`` 原值。到期则执行清理轮次：
+    失败只记日志并打点失败指标，绝不向上抛——最后返回本次执行时刻
+    （无论成败都重置节流窗口，与语音清理的 ``finally`` 语义一致）。
+    """
+    if time.monotonic() - last_cleanup_at < (
+        settings.ai_memory_state_ttl_cleanup_interval_seconds
+    ):
+        emit_ai_metric(
+            "memory_state_ttl_cleanup_skipped",
+            1.0,
+            {"worker_id": _worker_id()},
+        )
+        return last_cleanup_at
+    try:
+        await _run_memory_state_ttl_cleanup_round()
+    except Exception:
+        emit_ai_metric(
+            "memory_state_ttl_cleanup_failed",
+            1.0,
+            {"worker_id": _worker_id()},
+        )
+        logger.exception("memory_state_ttl_cleanup_round_failed")
+    return time.monotonic()
+
+
 async def _run_forever(worker_id: str, batch_size: int, idle_seconds: float) -> None:
-    while True:
-        try:
-            claimed, completed, failed = await _run_round(worker_id, batch_size)
-            logger.info(
-                "ai_worker_round claimed=%d completed=%d failed=%d",
-                claimed,
-                completed,
-                failed,
+    # Task 1：语音临时音频过期清理挂在现有主循环上（复用定时任务机制，不新增
+    # 调度器），按 ai_voice_audio_cleanup_interval_seconds 节流。首轮立即执行；
+    # 清理失败只记日志并计入指标，绝不影响业务任务轮次，下一轮按间隔重试。
+    # Task 2：Memory State TTL 过期清理同机制接入（_maybe_run_memory_state_
+    # ttl_cleanup 内部负责节流、skip/failed 指标与异常隔离）。
+    last_voice_cleanup_at = float("-inf")
+    last_memory_state_cleanup_at = float("-inf")
+    # Unlike the local-file and State maintenance jobs, retention opens a DB
+    # session.  Start after one configured interval so a worker boot does not
+    # compete with schema/bootstrap recovery; thereafter the normal interval
+    # gate controls each run.
+    last_retention_cleanup_at = time.monotonic()
+    retention_cleanup_task: asyncio.Task[float] | None = None
+    try:
+        while True:
+            try:
+                claimed, completed, failed = await _run_round(worker_id, batch_size)
+                logger.info(
+                    "ai_worker_round claimed=%d completed=%d failed=%d",
+                    claimed,
+                    completed,
+                    failed,
+                )
+            except Exception:
+                logger.exception("ai_worker_round_failed")
+            if time.monotonic() - last_voice_cleanup_at >= (
+                settings.ai_voice_audio_cleanup_interval_seconds
+            ):
+                try:
+                    await _run_voice_audio_cleanup_round()
+                except Exception:
+                    logger.exception("voice_audio_cleanup_round_failed")
+                finally:
+                    last_voice_cleanup_at = time.monotonic()
+            last_memory_state_cleanup_at = await _maybe_run_memory_state_ttl_cleanup(
+                last_memory_state_cleanup_at
             )
-        except Exception:
-            logger.exception("ai_worker_round_failed")
-        await asyncio.sleep(idle_seconds)
+            # Retention uses a real DB session and may wait for an unavailable
+            # database.  Keep exactly one scheduled round in flight so this
+            # maintenance I/O cannot stall the business task loop or multiply
+            # connection attempts on every short idle tick.
+            if retention_cleanup_task is not None and retention_cleanup_task.done():
+                last_retention_cleanup_at = retention_cleanup_task.result()
+                retention_cleanup_task = None
+            if (
+                retention_cleanup_task is None
+                and time.monotonic() - last_retention_cleanup_at
+                >= settings.ai_retention_cleanup_interval_seconds
+            ):
+                retention_cleanup_task = asyncio.create_task(
+                    _maybe_run_retention_cleanup(last_retention_cleanup_at)
+                )
+            await asyncio.sleep(idle_seconds)
+    finally:
+        if retention_cleanup_task is not None and not retention_cleanup_task.done():
+            retention_cleanup_task.cancel()
+            try:
+                await retention_cleanup_task
+            except asyncio.CancelledError:
+                pass
+        # Task 16：worker 关闭时排空审计队列（尽力把剩余事件写完）。
+        from app.services.ai.audit import shutdown_audit_flusher
+
+        try:
+            await shutdown_audit_flusher()
+        except Exception:  # noqa: BLE001 - shutdown is best-effort
+            logger.warning("ai_audit_flusher_shutdown_failed", exc_info=True)
 
 
 async def _run_cleanup_forever(
@@ -544,6 +847,23 @@ async def _run_cleanup_forever(
         except Exception:
             logger.exception("ai_worker_cleanup_round_failed")
         await asyncio.sleep(idle_seconds)
+
+
+async def _run_task_once_with_retention(
+    worker_id: str, batch_size: int
+) -> tuple[int, int, int]:
+    """Run one task round, then exactly one isolated retention round.
+
+    ``--once`` without ``--consumers`` is the deterministic operator entrypoint
+    for database retention. Retention failures are logged but do not turn a
+    completed business-task round into a failed command.
+    """
+    result = await _run_round(worker_id, batch_size)
+    try:
+        await _run_retention_cleanup_round()
+    except Exception:
+        logger.exception("ai_retention_cleanup_once_failed")
+    return result
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -608,7 +928,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.once:
-            claimed, completed, failed = asyncio.run(_run_round(worker_id, args.batch_size))
+            claimed, completed, failed = asyncio.run(
+                _run_task_once_with_retention(worker_id, args.batch_size)
+            )
             print(f"claimed={claimed} completed={completed} failed={failed}")
             return 0
         asyncio.run(_run_forever(worker_id, args.batch_size, args.idle_seconds))

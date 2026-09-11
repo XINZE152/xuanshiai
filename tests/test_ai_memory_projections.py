@@ -94,13 +94,25 @@ class FakeProjectionSession:
         self.commits += 1
         self._snapshot = self.store.snapshot()
 
+    async def flush(self) -> None:
+        return None
+
     async def rollback(self) -> None:
         self.rollbacks += 1
         if self._snapshot is not None:
             self.store.restore(self._snapshot)
 
-    async def execute(self, statement: object, params: dict[str, Any] | None = None) -> Any:
+    async def execute(
+        self, statement: object, params: dict[str, Any] | list[dict[str, Any]] | None = None
+    ) -> Any:
         sql = str(statement)
+        if isinstance(params, list):
+            # Task 15：executemany——逐行分派同一 SQL，合并 rowcount。
+            rowcount = 0
+            for single in params:
+                result = await self.execute(statement, single)
+                rowcount += getattr(result, "rowcount", 1)
+            return _WriteResult(rowcount=rowcount)
         values = dict(params or {})
         self.calls.append((sql, values))
         return self._route(sql, values)
@@ -114,6 +126,19 @@ class FakeProjectionSession:
             nxt = store.owner_sequences.get(int(v["owner_user_id"]))
             return _MappingResult([{"next_seq": nxt}] if nxt is not None else [])
         if "FROM ai_consent_grant" in sql:
+            if "user_id IN (" in sql:
+                # read_active_batch（Task 14）：批量 consent 读取。
+                owner_ids = {
+                    int(value)
+                    for key, value in v.items()
+                    if key.startswith("owner")
+                }
+                rows = [
+                    dict(consent, user_id=uid)
+                    for uid, consent in store.consents.items()
+                    if uid in owner_ids and consent is not None
+                ]
+                return _MappingResult(rows)
             consent = store.consents.get(int(v["user_id"]))
             rows = [consent] if consent is not None else []
             return _MappingResult(rows)
@@ -202,6 +227,24 @@ class FakeProjectionSession:
                 and row["status"] == "active"
             ]
             return _MappingResult(rows)
+        if (
+            "FROM ai_memory_projection_grant" in sql
+            and "owner_user_id IN (" in sql
+        ):
+            # read_active_batch（Task 14）：批量 grant 读取（含非 active，
+            # 由服务端按 status 过滤）。
+            owner_ids = {
+                int(value) for key, value in v.items() if key.startswith("owner")
+            }
+            rows = [
+                dict(row)
+                for row in store.grants.values()
+                if row["owner_user_id"] in owner_ids
+                and row["function_key"] == str(v["function_key"])
+                and row["purpose"] == str(v["purpose"])
+                and row["data_category"] == str(v["data_category"])
+            ]
+            return _MappingResult(rows)
         if "FROM ai_memory_projection_grant" in sql:
             key = (
                 int(v["owner_user_id"]),
@@ -233,6 +276,26 @@ class FakeProjectionSession:
                     continue
                 seen.append(owner)
             return _MappingResult([{"user_id": uid} for uid in seen[: int(v["limit"])]])
+        if (
+            "FROM ai_memory_projection WHERE" in sql
+            and "owner_user_id IN (" in sql
+            and "function_key = :function_key" in sql
+        ):
+            # read_active_batch（Task 14）：按 owner IN 列表批量读 active 投影。
+            owner_ids = {
+                int(value) for key, value in v.items() if key.startswith("owner")
+            }
+            rows = [
+                dict(row)
+                for rows in store.projections.values()
+                for row in rows
+                if row["owner_user_id"] in owner_ids
+                and row["status"] == "active"
+                and row["function_key"] == str(v["function_key"])
+                and row["purpose"] == str(v["purpose"])
+                and row["data_category"] == str(v["data_category"])
+            ]
+            return _MappingResult(rows)
         if (
             "FROM ai_memory_projection WHERE" in sql
             and "function_key = :function_key" not in sql

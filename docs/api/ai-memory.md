@@ -6,6 +6,7 @@
 > | --- | --- | --- |
 > | 2026-09-05 | v1.0 | 记忆内核核心 v1：列表、确认、纠正、删除（墓碑）、解除墓碑。本期为 Shadow 阶段，不切换任何下游读取。 |
 > | 2026-09-07 | v1.1 | `items[].revision` 正式公开为写操作乐观锁版本；分页 cursor 绑定当前用户、subject/status 筛选并在 15 分钟后过期。旧 cursor 不能跨版本复用。 |
+> | 2026-09-09 | v1.2 | 统一写操作 Idempotency-Key 的 trim、长度与空白/控制字符校验；补充单个投影授权撤销契约。 |
 
 ### 错误码速查
 
@@ -127,7 +128,7 @@
 | 位置 | 参数 | 类型 | 必填 | 校验规则 | 业务含义 |
 | --- | --- | --- | --- | --- | --- |
 | path | claim_id | string | 是 | 1–64 | 条目 ID |
-| header | Idempotency-Key | string | 是 | 1–128 | 幂等键；同一 key 重试返回同一结果 |
+| header | Idempotency-Key | string | 是 | 首尾空白 trim 后 1–128；不得含内部空白或控制字符 | 幂等键；同一 key 重试返回同一结果 |
 | body | expected_revision | int | 是 | ≥1 | 客户端持有的乐观锁版本（列表返回的 `revision`） |
 | body | importance | float | 是 | 0–1 | 用户确认的重要度 |
 | body | constraint_type | string | 否 | ≤32 | 硬约束/偏好类型标注 |
@@ -187,7 +188,7 @@
 | 位置 | 参数 | 类型 | 必填 | 校验规则 | 业务含义 |
 | --- | --- | --- | --- | --- | --- |
 | path | claim_id | string | 是 | 1–64 | 条目 ID |
-| header | Idempotency-Key | string | 是 | 1–128 | 幂等键 |
+| header | Idempotency-Key | string | 是 | 首尾空白 trim 后 1–128；不得含内部空白或控制字符 | 幂等键 |
 | body | expected_revision | int | 是 | ≥1 | 乐观锁版本 |
 | body | value | any | 是 | 按 subject 白名单校验 | 纠正后的值 |
 | body | importance | float | 否 | 0–1 | 顺带更新重要度（不改变 importance_confirmed） |
@@ -237,7 +238,7 @@
 | 位置 | 参数 | 类型 | 必填 | 校验规则 | 业务含义 |
 | --- | --- | --- | --- | --- | --- |
 | path | claim_id | string | 是 | 1–64 | 条目 ID |
-| header | Idempotency-Key | string | 是 | 1–128 | 幂等键 |
+| header | Idempotency-Key | string | 是 | 首尾空白 trim 后 1–128；不得含内部空白或控制字符 | 幂等键 |
 | body | reason | string | 否 | ≤200 | 删除原因（可空） |
 
 ### 请求体示例
@@ -290,7 +291,7 @@
 | 位置 | 参数 | 类型 | 必填 | 校验规则 | 业务含义 |
 | --- | --- | --- | --- | --- | --- |
 | path | suppression_id | string | 是 | 1–64 | 墓碑 ID |
-| header | Idempotency-Key | string | 是 | 1–128 | 幂等键 |
+| header | Idempotency-Key | string | 是 | 首尾空白 trim 后 1–128；不得含内部空白或控制字符 | 幂等键 |
 
 ### 请求体示例
 
@@ -320,6 +321,51 @@
 | HTTP | 错误码 | 触发条件 | 前端处理建议 |
 | --- | --- | --- | --- |
 | 404 | `MEMORY_SUPPRESSION_NOT_FOUND` | 不存在或他人墓碑 | 刷新墓碑列表 |
+
+## 6. 撤销单个投影授权
+
+`POST /api/v1/ai/memory/grants/{grant_id}/revoke`
+
+### 基本信息
+
+- **用途**：撤销当前登录用户的单个投影授权，并立即使对应 active 投影失效。
+- **是否登录**：是。
+- **成功状态码**：200。
+
+### 请求参数
+
+| 位置 | 参数 | 类型 | 必填 | 校验规则 | 业务含义 |
+| --- | --- | --- | --- | --- | --- |
+| path | grant_id | string | 是 | 1–96 | 当前用户拥有的投影授权 ID |
+| header | Idempotency-Key | string | 是 | 首尾空白 trim 后 1–128；不得含内部空白或控制字符 | 统一写操作输入门禁 |
+
+### 请求体示例
+
+无请求体。非法示例：缺少 `Idempotency-Key` 或使用 `key value` → 422。
+
+### 返回参数
+
+| 字段 | 类型 | 必返 | 业务含义 |
+| --- | --- | --- | --- |
+| grant_id | string | 是 | 被撤销的授权 ID |
+| status | string | 是 | `revoked` 或 `already_revoked` |
+| function_key | string | 是 | 授权功能标识 |
+| purpose | string | 是 | 授权用途 |
+| data_category | string | 是 | 授权数据类别 |
+| invalidated_projections | int | 是 | 本次失效的 active 投影数量 |
+
+### 使用方法与业务规则
+
+- 仅能撤销自己的授权；不存在或他人授权返回 404，不泄露存在性。
+- `Idempotency-Key` 在本端点只作为统一输入门禁，不建立独立操作账本，也不按 key 承诺回放或冲突语义。
+- 撤销状态机天然幂等：首次返回 `revoked` 并使投影失效；任何后续重复撤销（无论 key 是否相同）返回 `already_revoked`，不会再次递增 privacy revision 或再次失效。
+
+### 错误
+
+| HTTP | 错误码 | 触发条件 | 前端处理建议 |
+| --- | --- | --- | --- |
+| 404 | `MEMORY_GRANT_NOT_FOUND` | 授权不存在或属于他人 | 刷新授权列表 |
+| 422 | `AI_INPUT_INVALID` | Idempotency-Key 缺失、长度非法、含内部空白或控制字符 | 生成合法新 key 后重试 |
 
 ## 8. 状态流转与兼容策略
 

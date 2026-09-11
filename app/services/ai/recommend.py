@@ -332,8 +332,15 @@ _MEMORY_POOL_DISCOVERY_SQL = (
 async def _load_memory_candidate_pool(
     db: AsyncSession, viewer_id: int, limit: int
 ) -> list[dict[str, Any]]:
+    """memory 模式候选池（Task 14 批量化）：双维度各一次批量读取。
+
+    授权纪律与旧路径一致：候选人资料只允许来自候选人本人的
+    compatibility_features 记忆投影；grant/consent 快照/policy revision
+    任一门失败（或无本人画像投影）的候选人不进入池（不扩大数据范围）。
+    """
     from app.schemas.ai_common import ProjectionKind
-    from app.services.ai.features import read_memory_fields_for_kind
+    from app.services.ai.features import memory_dimension_for_kind
+    from app.services.ai.memory.projections import MemoryProjectionService
 
     owners = (
         await db.execute(
@@ -347,24 +354,39 @@ async def _load_memory_candidate_pool(
             },
         )
     ).mappings().all()
+    owner_ids = [
+        int(row["user_id"])
+        for row in owners
+        if int(row["user_id"]) != int(viewer_id)
+    ]
+    if not owner_ids:
+        return []
+    service = MemoryProjectionService(db)
+    profiles = await service.read_active_batch(
+        owner_user_ids=owner_ids,
+        **memory_dimension_for_kind(ProjectionKind.PERSONAL_COMPATIBILITY),
+    )
+    preferences = await service.read_active_batch(
+        owner_user_ids=owner_ids,
+        **memory_dimension_for_kind(ProjectionKind.IDEAL_PARTNER_PREFERENCE),
+    )
     pool: list[dict[str, Any]] = []
-    for row in owners:
-        user_id = int(row["user_id"])
-        if user_id == int(viewer_id):
-            continue
-        profile = await read_memory_fields_for_kind(
-            db, user_id=user_id, projection_kind=ProjectionKind.PERSONAL_COMPATIBILITY
-        )
+    for user_id in owner_ids:
+        profile = profiles.get(user_id)
         if profile is None:
-            continue  # 无本人画像投影的候选人不进入池（不扩大数据范围）
-        preference = await read_memory_fields_for_kind(
-            db, user_id=user_id, projection_kind=ProjectionKind.IDEAL_PARTNER_PREFERENCE
-        )
+            continue  # 无本人画像投影（或门禁失败 fail closed）不进入池
+        preference = preferences.get(user_id)
         pool.append(
             {
                 "user_id": user_id,
-                "profile_fields": profile["fields"],
-                "preference_fields": (preference or {}).get("fields") or {},
+                "profile_fields": {
+                    str(entry["field_key"]): entry["value"]
+                    for entry in profile.get("entries") or ()
+                },
+                "preference_fields": {
+                    str(entry["field_key"]): entry["value"]
+                    for entry in (preference or {}).get("entries") or ()
+                },
                 "source_hash": profile["projection_input_hash"],
                 "source_revision": None,
                 "source": "memory_projection",
@@ -689,6 +711,10 @@ async def materialize_recommendations(
             )
         ).scalar_one()
         generation = int(generation_row)
+        # Task 15：批量 INSERT（executemany）。单事务失败整体回滚（调用方
+        # 持有事务）；generation 单调递增 + 随后的 supersede UPDATE 保证
+        # 重试不产生重复行、旧版本不覆盖新版本。
+        insert_params: list[dict[str, Any]] = []
         for rank_no, (candidate, card, engine) in enumerate(
             scored[: settings.ai_recommendation_top_n], start=1
         ):
@@ -708,8 +734,7 @@ async def materialize_recommendations(
                     if card.score_detail is not None
                     else None
                 )
-            await db.execute(
-                text(_RECOMMEND_INSERT),
+            insert_params.append(
                 {
                     "snapshot_id": snapshot_id,
                     "viewer": int(viewer_id),
@@ -726,8 +751,9 @@ async def materialize_recommendations(
                     "algorithm_version": RECOMMEND_ALGORITHM_VERSION,
                     "source_hash": inputs["source_hash"] or "",
                     "expires_at": expires_at,
-                },
+                }
             )
+        await db.execute(text(_RECOMMEND_INSERT), insert_params)
         await db.execute(
             text(
                 "UPDATE ai_recommendation_snapshot SET status = 'superseded', "

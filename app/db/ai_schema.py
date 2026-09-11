@@ -137,7 +137,8 @@ AI_TABLES = {
             PRIMARY KEY (`id`),
             UNIQUE KEY `uk_ai_generation_audit_request_id` (`request_id`),
             KEY `idx_ai_generation_audit_task` (`task_id`, `created_at`),
-            KEY `idx_ai_generation_audit_scene` (`scene`, `created_at`)
+            KEY `idx_ai_generation_audit_scene` (`scene`, `created_at`),
+            KEY `idx_ai_generation_audit_retention_batch` (`created_at`, `id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI Provider 调用最小审计，不存原始 prompt/response'
     """,
     # ============ M04 AI 画像（§10.2）============
@@ -523,7 +524,8 @@ AI_TABLES = {
             `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (`id`),
             UNIQUE KEY `uk_voice_transcript_task` (`task_id`),
-            KEY `idx_voice_transcript_owner` (`owner_user_id`, `created_at`)
+            KEY `idx_voice_transcript_owner` (`owner_user_id`, `created_at`),
+            KEY `idx_voice_transcript_retention` (`created_at`, `id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='语音转写结果'
     """,
     # ============ Phase 4 P4-01：投影准入位（search/compat/recommend 硬过滤）============
@@ -1020,6 +1022,17 @@ AI_TASK10_REQUIRED_COLUMNS: dict[str, dict[str, str]] = {
     },
 }
 
+# Retention scans filter and order by these columns.  The id/event_id suffix
+# makes each bounded batch deterministic while retaining index-order reads.
+AI_RETENTION_INDEXES: dict[str, dict[str, tuple[str, ...]]] = {
+    "voice_transcript": {
+        "idx_voice_transcript_retention": ("created_at", "id"),
+    },
+    "ai_generation_audit": {
+        "idx_ai_generation_audit_retention_batch": ("created_at", "id"),
+    },
+}
+
 
 def ensure_ai_legacy_columns(cursor: Any) -> None:
     """Add Task 2's additive AI columns during legacy bootstrap.
@@ -1039,6 +1052,7 @@ def ensure_ai_legacy_columns(cursor: Any) -> None:
                 cursor.execute(
                     f"ALTER TABLE `{table_name}` ADD COLUMN {column_def}"
                 )
+
 
     for table_name, required_columns in AI_TASK10_REQUIRED_COLUMNS.items():
         try:
@@ -1091,6 +1105,22 @@ def ensure_ai_legacy_columns(cursor: Any) -> None:
     except Exception:  # noqa: BLE001 - legacy bootstrap is best effort
         # The reviewed migration reports and classifies any incompatible data.
         return
+
+
+def ensure_ai_retention_indexes(cursor: Any) -> None:
+    """Idempotently add Task9 cleanup indexes to databases created before them."""
+    for table_name, required_indexes in AI_RETENTION_INDEXES.items():
+        try:
+            cursor.execute(f"SHOW INDEX FROM `{table_name}`")
+            existing = {str(row["Key_name"]) for row in cursor.fetchall()}
+        except Exception:  # noqa: BLE001, S112 - legacy bootstrap is best effort
+            continue
+        for index_name, columns in required_indexes.items():
+            if index_name not in existing:
+                column_sql = ", ".join(f"`{column}`" for column in columns)
+                cursor.execute(
+                    f"ALTER TABLE `{table_name}` ADD KEY `{index_name}` ({column_sql})"
+                )
 
 
 def ensure_ai_consent_unique_key(cursor: Any) -> None:

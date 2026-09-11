@@ -32,6 +32,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import queue
+import threading
 from collections import defaultdict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -201,10 +203,15 @@ def _audit_row(event: GenerationAuditEvent) -> tuple[str, tuple[Any, ...]]:
 def _persist_audit_row_sync(event: GenerationAuditEvent) -> None:
     """Best-effort synchronous write; never raises.
 
-    Runs inside a worker thread (via :func:`asyncio.to_thread`) from
-    :func:`record_generation_audit` so the blocking ``pymysql.connect`` call
-    never stalls the event loop.
+    Runs inside the audit flusher thread (via :func:`asyncio.to_thread` from
+    :func:`_audit_flusher_loop`) so the blocking ``pymysql`` calls never stall
+    the event loop.  The per-thread connection is cached and ping-refreshed;
+    on any failure it is discarded (next write reconnects) and the event is
+    counted as lost — audit is best-effort and never blocks the business path.
+    Raw prompts, original answers and raw provider responses are never part
+    of the row.
     """
+    global _audit_lost_count
     params = _db_connect_params()
     if params is None:
         logger.debug("ai_audit_skip_unparseable_db_url request_id=%s", event.request_id)
@@ -213,29 +220,216 @@ def _persist_audit_row_sync(event: GenerationAuditEvent) -> None:
         import pymysql
 
         statement, values = _audit_row(event)
-        with pymysql.connect(**params) as conn:
-            with conn.cursor() as cur:
-                cur.execute(statement, values)
-            conn.commit()
+        conn = _thread_local_connection(params)
+        try:
+            # 缓存连接可能被服务端 wait_timeout 掐断：先 ping 探活，失败
+            # 就弃置重建（pymysql 已弃用 ping(reconnect=True) 参数）。
+            conn.ping()
+        except Exception:  # noqa: BLE001
+            _discard_thread_connection()
+            conn = _thread_local_connection(params)
+        with conn.cursor() as cur:
+            cur.execute(statement, values)
+        conn.commit()
     except Exception:
+        _discard_thread_connection()
         logger.warning(
             "ai_audit_write_failed request_id=%s error_code=%s",
             event.request_id,
             event.error_code,
             exc_info=True,
         )
+        global _audit_lost_count
+        _audit_lost_count += 1
+        emit_ai_metric("audit_lost", 1, {"reason": "write_failed"})
+
+
+_AUDIT_THREAD_LOCAL = threading.local()
+
+
+def _thread_local_connection(params: dict[str, Any]):
+    """Return (and cache) a per-thread pymysql connection."""
+    import pymysql
+
+    conn = getattr(_AUDIT_THREAD_LOCAL, "conn", None)
+    if conn is None:
+        conn = pymysql.connect(**params)
+        _AUDIT_THREAD_LOCAL.conn = conn
+    return conn
+
+
+def _discard_thread_connection() -> None:
+    conn = getattr(_AUDIT_THREAD_LOCAL, "conn", None)
+    _AUDIT_THREAD_LOCAL.conn = None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ----------------------------------------------------------------------
+# Task 16：有界异步审计队列 + 后台 flusher
+# ----------------------------------------------------------------------
+
+#: 队列上限。满时丢最旧事件（保新），并计 audit_lost 指标——审计是
+#: best-effort 旁路，绝不反压阻塞业务主链路。
+_AUDIT_QUEUE_MAX = 2048
+_AUDIT_QUEUE: "queue.SimpleQueue[GenerationAuditEvent]" = queue.SimpleQueue()
+_AUDIT_QUEUE_LOCK = threading.Lock()
+_AUDIT_QUEUE_SIZE = 0
+#: flusher 批量上限与空队列等待时长。
+_AUDIT_FLUSH_BATCH = 64
+_AUDIT_FLUSH_IDLE_SECONDS = 2.0
+_flusher_task: asyncio.Task[None] | None = None
+_flusher_loop: asyncio.AbstractEventLoop | None = None
+_audit_lost_count = 0
+
+
+def _enqueue_audit_event(event: GenerationAuditEvent) -> bool:
+    """Best-effort enqueue; drops the OLDEST queued event when full."""
+    global _AUDIT_QUEUE_SIZE, _audit_lost_count
+    with _AUDIT_QUEUE_LOCK:
+        if _AUDIT_QUEUE_SIZE >= _AUDIT_QUEUE_MAX:
+            # 丢最旧（SimpleQueue 无出队窥视，用 get_nowait 腾位）。
+            try:
+                _AUDIT_QUEUE.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                _AUDIT_QUEUE_SIZE -= 1
+                _audit_lost_count += 1
+                emit_ai_metric("audit_lost", 1, {"reason": "queue_full"})
+        _AUDIT_QUEUE.put_nowait(event)
+        _AUDIT_QUEUE_SIZE += 1
+    return True
+
+
+def _drain_audit_batch() -> list[GenerationAuditEvent]:
+    """Pop up to _AUDIT_FLUSH_BATCH events; non-blocking."""
+    global _AUDIT_QUEUE_SIZE
+    batch: list[GenerationAuditEvent] = []
+    while len(batch) < _AUDIT_FLUSH_BATCH:
+        try:
+            batch.append(_AUDIT_QUEUE.get_nowait())
+        except queue.Empty:
+            break
+    with _AUDIT_QUEUE_LOCK:
+        _AUDIT_QUEUE_SIZE = max(0, _AUDIT_QUEUE_SIZE - len(batch))
+    return batch
+
+
+async def _audit_flusher_loop() -> None:
+    """Background flusher: batch-drain the queue and write via to_thread.
+
+    取消时立即退出；剩余事件的排空由 :func:`shutdown_audit_flusher` 负责
+    （在取消处理器内继续 await 会被外层取消二次打断，不可靠）。
+    """
+    while True:
+        await asyncio.sleep(0.05 if not _AUDIT_QUEUE.empty() else _AUDIT_FLUSH_IDLE_SECONDS)
+        batch = _drain_audit_batch()
+        if not batch:
+            continue
+        for event in batch:
+            try:
+                await asyncio.to_thread(_persist_audit_row_sync, event)
+            except Exception:  # noqa: BLE001 - persist never raises, belt & braces
+                logger.warning(
+                    "ai_audit_flusher_unhandled request_id=%s",
+                    event.request_id,
+                    exc_info=True,
+                )
+                global _audit_lost_count
+                _audit_lost_count += 1
+                emit_ai_metric("audit_lost", 1, {"reason": "flusher_unhandled"})
+
+
+def _ensure_audit_flusher() -> None:
+    """Start the flusher task on the running loop (idempotent, loop-aware)."""
+    global _flusher_task, _flusher_loop
+    if _flusher_task is not None and not _flusher_task.done():
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if _flusher_loop is loop:
+            return
+        # 旧 loop 的残留任务（测试环境多 loop）：弃用并在新 loop 重启。
+        _flusher_task = None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _flusher_loop = loop
+    _flusher_task = loop.create_task(_audit_flusher_loop())
+
+
+async def shutdown_audit_flusher(timeout: float = 5.0) -> None:
+    """Stop the flusher and drain remaining events (worker/API shutdown).
+
+    取消 flusher 后在当前协程里把剩余队列写完（限时）。单条失败即放弃
+    该条（计入丢失路径由 _persist_audit_row_sync 自己处理）。
+    """
+    global _flusher_task
+    task = _flusher_task
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            pass
+    _flusher_task = None
+
+    async def _drain_all() -> None:
+        while True:
+            batch = _drain_audit_batch()
+            if not batch:
+                return
+            for event in batch:
+                try:
+                    await asyncio.to_thread(_persist_audit_row_sync, event)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - single-event failure is terminal
+                    logger.warning(
+                        "ai_audit_shutdown_drain_failed request_id=%s",
+                        event.request_id,
+                        exc_info=True,
+                    )
+
+    try:
+        await asyncio.wait_for(_drain_all(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "ai_audit_shutdown_drain_timeout remaining=%d",
+            audit_queue_depth(),
+        )
+
+
+def audit_queue_depth() -> int:
+    """Current queued event count (metrics/runbook)."""
+    with _AUDIT_QUEUE_LOCK:
+        return _AUDIT_QUEUE_SIZE
+
+
+def audit_lost_total() -> int:
+    """Cumulative dropped/failed audit events since process start."""
+    return _audit_lost_count
 
 
 async def record_generation_audit(event: GenerationAuditEvent) -> None:
     """Record one generation audit event without blocking the event loop.
 
     Always logs the minimal non-sensitive metadata; then best-effort persists a
-    row into ``ai_generation_audit``.  The synchronous DB write is offloaded to
-    a worker thread via :func:`asyncio.to_thread` so the blocking
+    row into ``ai_generation_audit`` via a bounded async queue drained by a
+    background flusher task (Task 16).  The synchronous DB write is offloaded
+    to a worker thread via :func:`asyncio.to_thread` so the blocking
     ``pymysql.connect`` call never stalls the event loop.  Raw prompts,
-    original answers and raw provider responses are never part of the row.  Any
-    write failure is caught and recorded as a local warning so business keeps
-    running.
+    original answers and raw provider responses are never part of the row.
+    Queue overflow drops the oldest event and counts ``audit_lost``; any write
+    failure is caught and recorded as a local warning so business keeps
+    running.  When no flusher can be started (e.g. no running loop) the event
+    is written inline via :func:`asyncio.to_thread` as before.
     """
     if not settings.ai_audit_enabled:
         return
@@ -256,6 +450,10 @@ async def record_generation_audit(event: GenerationAuditEvent) -> None:
         bool(event.usage_cost),
         event.display_eligible,
     )
+    _ensure_audit_flusher()
+    if _flusher_task is not None and not _flusher_task.done():
+        _enqueue_audit_event(event)
+        return
     try:
         await asyncio.to_thread(_persist_audit_row_sync, event)
     except Exception:
@@ -274,6 +472,8 @@ async def record_generation_audit(event: GenerationAuditEvent) -> None:
 #: 429/5xx、stale rate、fallback rate、撤回传播延迟、outbox 积压和清理积压。
 #: 批次3 #24 追加：task_retry（单次进入 retry_wait 计数）与
 #: task_retry_backlog（retry_wait 积压量，按 task_type 维度）。
+#: 批次1 Task 2 追加：memory_state_ttl_cleanup_{success,failed,skipped}
+#: （Memory State TTL 定时清理的成功/失败/重复执行节流）。
 KNOWN_METRICS = frozenset({
     "queue_age",
     "lease_reclaimed",
@@ -288,6 +488,21 @@ KNOWN_METRICS = frozenset({
     "deletion_propagation_seconds",
     "outbox_backlog",
     "purge_backlog",
+    "voice_audio_cleanup_failed",
+    "memory_state_ttl_cleanup_success",
+    "memory_state_ttl_cleanup_failed",
+    "memory_state_ttl_cleanup_skipped",
+    # 批次三 Task 11：Redis pub/sub 不可用时 WebSocket 退回轮询的计数。
+    "websocket_fallback",
+    # 批次四 Task 16：审计丢失（队列满丢弃 / 写入失败）计数。
+    "audit_lost",
+    # 批次四 Task 17：运行手册告警指标（清理计数/耗时、provider 超时、
+    # quota 退款失败）。
+    "voice_audio_cleanup_deleted",
+    "voice_audio_cleanup_duration_seconds",
+    "retention_cleanup_deleted",
+    "provider_timeout",
+    "quota_refund_failure",
 })
 
 #: 积压类指标超过阈值时打印本地告警（queue/backlog 告警语义）。

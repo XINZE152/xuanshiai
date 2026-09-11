@@ -127,7 +127,7 @@ def test_archive_awaits_async_sql_repository() -> None:
 
 def test_archive_aggregates_personal_published_and_ideal_partner_draft() -> None:
     repo = _FakeRepo()
-    repo.consents[(9001, "profile_text_extract", "v1")] = True
+    repo.consents[(9001, "profile_text_extract", "profile-text-v1")] = True
     repo.revisions[(9001, "personal")] = {
         "revision_id": 11,
         "revision_no": 1,
@@ -237,7 +237,7 @@ def test_active_draft_with_no_preview_returns_none_preview() -> None:
 def test_fallback_available_requires_real_assets() -> None:
     """仅 consent 不算 fallback;必须 revision 或 draft 实际存在。"""
     repo = _FakeRepo()
-    repo.consents[(5001, "profile_text_extract", "v1")] = True
+    repo.consents[(5001, "profile_text_extract", "profile-text-v1")] = True
     out = _await(build_archive(user_id=5001, repo=repo))
     assert out.personal.consent_active is True
     assert out.ideal_partner.consent_active is True

@@ -43,6 +43,7 @@ from app.services.ai.memory.service import (
     MemoryClaimStateDenied,
     MemoryRevisionConflict,
     MemoryService,
+    normalize_idempotency_key,
 )
 from app.services.revisions import RevisionKind, increment_revision_and_enqueue
 
@@ -267,11 +268,12 @@ class MemoryGrantRevokeResponse(BaseModel):
 
 
 def _require_idempotency_key(idempotency_key: str | None) -> str:
-    if not idempotency_key or not idempotency_key.strip():
+    try:
+        return normalize_idempotency_key(idempotency_key)
+    except ValueError:
         raise _error_response(
-            "AI_INPUT_INVALID", "缺少 Idempotency-Key 头", 422
+            "AI_INPUT_INVALID", "Idempotency-Key 必须为 1-128 个字符且不得包含空白或控制字符", 422
         )
-    return idempotency_key.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -532,10 +534,12 @@ async def revoke_memory_grant(
     返回 already_revoked，不重复失效。
     """
 
-    _require_idempotency_key(idempotency_key)
+    key = _require_idempotency_key(idempotency_key)
     service = MemoryService(db)
     try:
-        result = await service.revoke_projection_grant(current.id, grant_id)
+        result = await service.revoke_projection_grant(
+            current.id, grant_id, idempotency_key=key
+        )
     except MemoryClaimNotFound as exc:
         await db.rollback()
         raise _error_response("MEMORY_GRANT_NOT_FOUND", str(exc), 404)

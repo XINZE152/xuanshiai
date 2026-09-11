@@ -229,6 +229,38 @@ async def test_real_moxiang_candidates_can_be_confirmed_published_and_projected(
     assert published.task_id
     await real_db_session.commit()
 
+    # 模拟发布事务已提交、但迟到的候选处理仍把旧候选标为 active 的并发窗口。
+    # 邀请流程必须以已持久化的 session 终态为准，绝不能把 published 覆盖回
+    # building；真实并发下另一个事务会在 session 行锁释放后看到同一终态。
+    await real_db_session.execute(
+        text(
+            "UPDATE ai_profile_candidate SET status = 'active' "
+            "WHERE session_id = :session_id"
+        ),
+        {"session_id": session.session_id},
+    )
+    late_invite = await maybe_create_build_invite(
+        real_db_session,
+        session_id=session.session_id,
+        user_id=FULL_FLOW_USER_ID,
+        subject="personal",
+    )
+    assert late_invite is None
+    persisted_session = (
+        await real_db_session.execute(
+            text(
+                "SELECT status, active_status, journey_stage FROM ai_profile_session "
+                "WHERE session_id = :session_id"
+            ),
+            {"session_id": session.session_id},
+        )
+    ).mappings().one()
+    assert dict(persisted_session) == {
+        "status": "published",
+        "active_status": 0,
+        "journey_stage": "published",
+    }
+
     claimed, completed, failed = await ai_worker._run_round(
         "it-moxiang-full-projection", 5
     )

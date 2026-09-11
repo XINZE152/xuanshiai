@@ -353,6 +353,14 @@ class FakeCache:
     async def set(self, key: str, value: str, ex: int | None = None):
         self.data[key] = value
 
+    async def incr(self, key: str):
+        value = int(self.data.get(key, "0") or 0) + 1
+        self.data[key] = str(value)
+        return value
+
+    async def expire(self, key: str, seconds: int):
+        return key in self.data
+
     async def delete(self, *keys: str):
         for key in keys:
             self.data.pop(key, None)
@@ -570,10 +578,13 @@ async def test_persona_cache_isolation_and_invalidation(monkeypatch) -> None:
     assert context is not None and context.is_empty
     assert len(cache.data) == 2
     # 撤权事件到达后，target 维度的缓存键全部清除。
-    await consumers_mod.invalidate_persona_memory_cache(
+    generation = await consumers_mod.invalidate_persona_memory_cache(
         target_user_id=OWNER_ID, cache=cache
     )
-    assert not cache.data
+    assert generation == 1
+    assert any(key.startswith(consumers_mod.PERSONA_CACHE_PREFIX) for key in cache.data)
+    rebuilt = await adapter.build_public_context(43, OWNER_ID, purpose="session_context")
+    assert rebuilt.is_empty
 
 
 async def test_persona_cache_rejects_malformed_or_nonpublic_cached_shape(monkeypatch) -> None:
