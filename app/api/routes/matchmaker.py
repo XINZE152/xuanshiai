@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentUser, get_current_admin, get_current_user
 from app.db.session import get_db
 from app.schemas.matchmaker import (
-    MatchmakerAdminServiceRequestUpdate,
     MatchmakerCard,
     MatchmakerContactResponse,
     MatchmakerContactExchangeCreate,
@@ -27,8 +26,6 @@ from app.schemas.matchmaker import (
     MatchmakerServiceRequestUpdate, MatchmakerRatingCreate, MatchmakerRatingPage, MatchmakerRatingResponse,
 )
 from app.services.matchmaker import (
-    admin_list_service_requests,
-    admin_update_service_request,
     admin_create_service_product,
     create_service_request,
     create_service_order,
@@ -245,27 +242,3 @@ async def exchange_contacts(
     db: AsyncSession = Depends(get_db),
 ) -> MatchmakerContactExchangeContactsResponse:
     return await get_contact_exchange_contacts(db, current, exchange_id)
-
-
-admin_router = APIRouter(prefix="/admin/matchmaker/service-requests")
-
-
-@admin_router.get("", response_model=MatchmakerServiceRequestPage, summary="管理员查询牵线服务申请")
-async def admin_requests(
-    status: int | None = Query(None, ge=0, le=3),
-    page: int = Query(1, ge=1, le=1000),
-    page_size: int = Query(20, ge=1, le=50),
-    admin: CurrentUser = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
-) -> MatchmakerServiceRequestPage:
-    return await admin_list_service_requests(db, page, page_size, status)
-
-
-@admin_router.patch("/{service_id}", response_model=MatchmakerServiceRequestResponse, summary="管理员分配或处理牵线服务申请")
-async def admin_update_request(
-    service_id: int = Path(..., ge=1),
-    body: MatchmakerAdminServiceRequestUpdate = ...,
-    admin: CurrentUser = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
-) -> MatchmakerServiceRequestResponse:
-    return await admin_update_service_request(db, admin.id, service_id, body)

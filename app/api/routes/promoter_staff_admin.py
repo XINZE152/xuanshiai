@@ -63,7 +63,7 @@ async def promoter_statistics(
 
 @router.get("/user-candidates", response_model=list[PromoterUserCandidate], summary="搜索可绑定的普通用户")
 async def promoter_user_candidates(
-    keyword: str = Query(..., min_length=2, max_length=100),
+    keyword: str = Query(..., min_length=1, max_length=100),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[PromoterUserCandidate]:

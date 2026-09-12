@@ -149,6 +149,15 @@ class DatabaseManager:
             logger.error(f"❌ 数据库初始化失败: {e}")
             raise
 
+    @staticmethod
+    def _named_columns(columns: dict) -> dict:
+        """给 {字段名: 类型定义} 字典补上 `字段名` 前缀。
+
+        _ensure_table_columns 的 SQL 模板是 `ALTER TABLE ... ADD COLUMN {column_def}`，
+        要求定义自带 `字段名` 前缀；新式字典（键=字段名，值=纯类型定义）需先经过本方法。
+        """
+        return {name: f"`{name}` {definition}" for name, definition in columns.items()}
+
     def _ensure_table_columns(self, cursor, table_name: str, required_columns: dict):
         """
         确保表的必需字段存在，如果不存在则添加
@@ -219,6 +228,11 @@ class DatabaseManager:
                 "marriage_fail_reason": "`marriage_fail_reason` varchar(255) DEFAULT NULL",
                 "marriage_submitted_at": "`marriage_submitted_at` datetime DEFAULT NULL",
                 "marriage_reviewed_at": "`marriage_reviewed_at` datetime DEFAULT NULL",
+                # 会员认证：实名/学历/房产认证审核所需字段
+                "face_method": "`face_method` varchar(32) DEFAULT NULL COMMENT '验证方式 动作活检/照片比对'",
+                "face_vendor": "`face_vendor` varchar(64) DEFAULT NULL COMMENT '人脸服务商'",
+                "face_score": "`face_score` decimal(5,2) DEFAULT NULL COMMENT '人脸比对得分'",
+                "id_card_issued": "`id_card_issued` varchar(64) DEFAULT NULL COMMENT '身份证发证机关'",
             },
             "user_profile": {
                 "weight": "`weight` int DEFAULT NULL COMMENT '体重kg'",
@@ -317,6 +331,8 @@ class DatabaseManager:
                 "action": "`action` varchar(32) NOT NULL DEFAULT 'none' COMMENT 'none|hide_content|restore_content|dismiss'",
                 "reviewed_by": "`reviewed_by` bigint unsigned DEFAULT NULL COMMENT '原举报审核人'",
                 "reviewed_at": "`reviewed_at` datetime DEFAULT NULL COMMENT '举报审核时间'",
+                # 线上行为：举报页需要展示提交人 IP
+                "submit_ip": "`submit_ip` varchar(64) DEFAULT NULL COMMENT '提交人IP'",
             },
             "paper_plane": {
                 "moderation_status": "`moderation_status` tinyint NOT NULL DEFAULT '1' COMMENT '1正常 2下架（与 lifecycle status 分离）'",
@@ -407,17 +423,6 @@ class DatabaseManager:
                 "status": "`status` tinyint NOT NULL DEFAULT '1' COMMENT '1生效中 2已过期 3已撤销'",
                 "pay_status": "`pay_status` tinyint NOT NULL DEFAULT '0' COMMENT '0未支付 1已支付'",
                 "pay_method": "`pay_method` varchar(32) DEFAULT NULL COMMENT '支付方式'",
-            },
-            # 会员认证：补齐实名/学历/房产认证审核所需字段
-            "user_auth": {
-                "face_method": "`face_method` varchar(32) DEFAULT NULL COMMENT '验证方式 动作活检/照片比对'",
-                "face_vendor": "`face_vendor` varchar(64) DEFAULT NULL COMMENT '人脸服务商'",
-                "face_score": "`face_score` decimal(5,2) DEFAULT NULL COMMENT '人脸比对得分'",
-                "id_card_issued": "`id_card_issued` varchar(64) DEFAULT NULL COMMENT '身份证发证机关'",
-            },
-            # 线上行为：举报页需要展示提交人 IP
-            "user_report": {
-                "submit_ip": "`submit_ip` varchar(64) DEFAULT NULL COMMENT '提交人IP'",
             },
         }
 
@@ -3200,6 +3205,10 @@ class DatabaseManager:
         # M7 活动报名（offline_activity 补字段 + activity_signup 补字段）+ 商家/短视频分类种子
         self._ensure_m7_columns(cursor)
 
+        # M10 账号注销申请 + 平台工单反馈（旧库幂等补齐）
+        # 两张表已由 BUSINESS_TABLES 中 CREATE TABLE IF NOT EXISTS 直接创建，
+        # 这里仅做兜底（库内已有表时跳过）。
+
         # 旧库的 ai_feature_projection 不会由 CREATE TABLE IF NOT EXISTS 补齐
         # Task 9 新增列（版本向量/可见性/失效原因等），与上面同模式幂等补列
         # （SHOW COLUMNS→ALTER TABLE ADD COLUMN；表不存在时由 helper 静默跳过）。
@@ -3291,29 +3300,29 @@ class DatabaseManager:
             },
         }
         for table_name, required in columns.items():
-            self._ensure_table_columns(cursor, f"`{table_name}`", required)
+            self._ensure_table_columns(cursor, f"`{table_name}`", self._named_columns(required))
         self._ensure_optional_index(
             cursor, "customer_lead", "idx_customer_lead_promoter", "(`promoter_id`)"
         )
 
     def _ensure_m5_columns(self, cursor) -> None:
         """M5 分店管理补充字段（旧库幂等补齐）。"""
-        self._ensure_table_columns(cursor, "`organization`", {
+        self._ensure_table_columns(cursor, "`organization`", self._named_columns({
             "link_url": "varchar(255) DEFAULT NULL COMMENT '分站访问链接'",
             "sort_order": "int NOT NULL DEFAULT 0 COMMENT '显示排序，数字越大越靠前'",
             "qr_code": "varchar(500) DEFAULT NULL COMMENT '分站链接/二维码图片地址'",
-        })
+        }))
 
     def _ensure_m6_columns(self, cursor) -> None:
         """M6 合伙红娘补充字段与种子（旧库幂等补齐）。"""
-        self._ensure_table_columns(cursor, "`partner_team`", {
+        self._ensure_table_columns(cursor, "`partner_team`", self._named_columns({
             "level_id": "tinyint unsigned NOT NULL DEFAULT 1 COMMENT '合伙级别：1 初级 / 2 中级 / 3 战略合伙人（固定 3 种）'",
-        })
+        }))
         # commission_entry 支持后台手工录入：order_id 放开为可空 + 补 source/remark
-        self._ensure_table_columns(cursor, "`commission_entry`", {
+        self._ensure_table_columns(cursor, "`commission_entry`", self._named_columns({
             "source": "varchar(16) NOT NULL DEFAULT 'order' COMMENT 'order 订单产生 / manual 后台手工录入'",
             "remark": "varchar(255) DEFAULT NULL COMMENT '后台手工录入备注'",
-        })
+        }))
         try:
             cursor.execute("ALTER TABLE `commission_entry` MODIFY COLUMN `order_id` bigint unsigned DEFAULT NULL")
             logger.info("✅ commission_entry.order_id 已放开为可空（支持手工录入分成）")
@@ -3335,7 +3344,7 @@ class DatabaseManager:
     def _ensure_m7_columns(self, cursor) -> None:
         """M7 活动报名 / 商家联盟 / 短视频补充字段与种子（旧库幂等补齐）。"""
         # 活动（offline_activity）按后台 UI 补字段
-        self._ensure_table_columns(cursor, "`offline_activity`", {
+        self._ensure_table_columns(cursor, "`offline_activity`", self._named_columns({
             "organizer": "varchar(128) DEFAULT NULL COMMENT '活动发起（主办方）'",
             "time_text": "varchar(128) DEFAULT NULL COMMENT '活动时间显示文本（UI 自由文本）'",
             "cover_small": "varchar(255) DEFAULT NULL COMMENT '封面小图'",
@@ -3363,9 +3372,9 @@ class DatabaseManager:
             "notify_phones": "varchar(128) DEFAULT NULL COMMENT '报名短信通知手机号，逗号分隔'",
             "online": "tinyint NOT NULL DEFAULT 1 COMMENT '上线 1是 0否'",
             "audit_status": "varchar(16) NOT NULL DEFAULT 'approved' COMMENT 'pending待审/approved通过/rejected未通过'",
-        })
+        }))
         # 活动报名（activity_signup）补会员资料快照与运营字段
-        self._ensure_table_columns(cursor, "`activity_signup`", {
+        self._ensure_table_columns(cursor, "`activity_signup`", self._named_columns({
             "gender": "varchar(8) DEFAULT NULL COMMENT '男/女'",
             "age": "int DEFAULT NULL",
             "height": "int DEFAULT NULL COMMENT '身高cm'",
@@ -3383,7 +3392,7 @@ class DatabaseManager:
             "checked_in": "tinyint NOT NULL DEFAULT 0 COMMENT '是否已签到'",
             "in_crm": "tinyint NOT NULL DEFAULT 0 COMMENT '是否已入库会员CRM'",
             "promoter_id": "bigint unsigned DEFAULT NULL COMMENT '推广红娘 users.id'",
-        })
+        }))
         self._ensure_optional_index(cursor, "activity_signup", "idx_activity_signup_promoter", "(`promoter_id`)")
         self._ensure_optional_index(cursor, "offline_activity", "idx_offline_activity_online", "(`online`, `sort_order`)")
         # 商家分类种子

@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
 from app.db.session import get_db
 from app.schemas.organization_admin import (
-    AssignmentAdminPage,
     AssignmentAdminItem,
     StoreAdminCreate,
     StoreAdminItem,
@@ -26,7 +25,6 @@ from app.services.organization_admin import (
     delete_store_admin,
     end_assignment,
     get_store_admin,
-    list_assignments,
     list_store_members,
     list_stores_admin,
     remove_store_member,
@@ -108,12 +106,6 @@ async def store_report_summary_route(store_id: int = Path(..., ge=1), _: Current
 @router.get("/stores/{store_id}/report/monthly", response_model=StoreReportMonthly, summary="分店月度报表")
 async def store_report_monthly_route(store_id: int = Path(..., ge=1), months: int = Query(6, ge=1, le=24), _: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> StoreReportMonthly:
     return await store_report_monthly(db, store_id, months)
-
-
-@router.get("/assignments", response_model=AssignmentAdminPage, operation_id="matchmaker_admin_assignments_page")
-async def assignments(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), search: str | None = Query(None, max_length=128), _: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
-    items, total = await list_assignments(db, page, page_size, search)
-    return AssignmentAdminPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
 @router.post("/assignments/{assignment_id}/end", response_model=AssignmentAdminItem)

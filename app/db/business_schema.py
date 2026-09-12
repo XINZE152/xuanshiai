@@ -1316,4 +1316,51 @@ BUSINESS_TABLES = {
             KEY `idx_video_homepage_deleted` (`deleted_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='短视频会员主页'
     """,
+    # ============================================
+    # M10：账号注销申请 + 平台工单反馈
+    # ============================================
+    "user_cancellation": """
+        CREATE TABLE IF NOT EXISTS `user_cancellation` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `user_id` bigint unsigned NOT NULL COMMENT '申请注销的会员 ID',
+            `requested_ip` varchar(64) DEFAULT NULL COMMENT '申请时的 IP 地址',
+            `reason` varchar(500) DEFAULT NULL COMMENT '注销原因（前台展示）',
+            `status` varchar(16) NOT NULL DEFAULT 'pending' COMMENT 'pending 待处理 / approved 已批准（已注销）/ cancelled 已取消注销',
+            `has_member_profile` tinyint NOT NULL DEFAULT 0 COMMENT '是否关联会员资料 0否 1是',
+            `has_promoter_link` tinyint NOT NULL DEFAULT 0 COMMENT '是否关联推广红娘 0否 1是',
+            `has_partner_link` tinyint NOT NULL DEFAULT 0 COMMENT '是否关联合伙红娘 0否 1是',
+            `has_matchmaker_link` tinyint NOT NULL DEFAULT 0 COMMENT '是否关联服务红娘 0否 1是',
+            `reviewed_by` bigint unsigned DEFAULT NULL COMMENT '处理人（matchmaker_admin_account.id）',
+            `reviewed_at` datetime DEFAULT NULL COMMENT '处理时间',
+            `review_note` varchar(500) DEFAULT NULL COMMENT '后台批注',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_user_cancellation_user_pending` (`user_id`, `status`),
+            KEY `idx_user_cancellation_status` (`status`, `created_at`),
+            KEY `idx_user_cancellation_reviewer` (`reviewed_by`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员账号注销申请'
+    """,
+    "admin_ticket": """
+        CREATE TABLE IF NOT EXISTS `admin_ticket` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `ticket_no` varchar(32) NOT NULL COMMENT '工单号（年月日+6位序号）',
+            `submitter_user_id` bigint unsigned DEFAULT NULL COMMENT '提交人 user_id（后台管理员）；空表示平台创建',
+            `submitter_name` varchar(64) DEFAULT NULL COMMENT '提交人姓名快照',
+            `feedback_type` varchar(16) NOT NULL DEFAULT '咨询' COMMENT 'BUG / 咨询 / 建议',
+            `title` varchar(128) NOT NULL COMMENT '工单标题',
+            `content` text NOT NULL COMMENT '工单内容',
+            `status` varchar(16) NOT NULL DEFAULT '待处理' COMMENT '待处理 / 处理中 / 已处理',
+            `reply_content` text DEFAULT NULL COMMENT '回复内容',
+            `replied_by` bigint unsigned DEFAULT NULL COMMENT '回复人 matchmaker_admin_account.id',
+            `replied_at` datetime DEFAULT NULL COMMENT '回复时间',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_admin_ticket_no` (`ticket_no`),
+            KEY `idx_admin_ticket_status` (`status`, `created_at`),
+            KEY `idx_admin_ticket_submitter` (`submitter_user_id`, `created_at`),
+            KEY `idx_admin_ticket_type` (`feedback_type`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='平台管理端工单反馈'
+    """,
 }
