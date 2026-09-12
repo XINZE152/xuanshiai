@@ -116,8 +116,8 @@ async def report(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_
 
 @admin_router.get("/daily-report", response_model=list[FinanceDailyRow], summary="查询按日收入/退款统计报表")
 async def daily_report(
-    start_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
-    end_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
+    start_date: str | None = Query(None, max_length=10, description="开始日期 YYYY-MM-DD（兼容前端空字符串）"),
+    end_date: str | None = Query(None, max_length=10, description="结束日期 YYYY-MM-DD（兼容前端空字符串）"),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[FinanceDailyRow]:
@@ -130,8 +130,8 @@ async def admin_orders(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     status: int | None = Query(None, ge=0, le=3), user_id: int | None = Query(None, ge=1),
     order_no: str | None = Query(None, min_length=1, max_length=64),
-    start_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
-    end_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
+    start_time: str | None = Query(None, max_length=10, description="开始日期 YYYY-MM-DD（兼容前端空字符串）"),
+    end_time: str | None = Query(None, max_length=10, description="结束日期 YYYY-MM-DD（兼容前端空字符串）"),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> PaymentOrderAdminPage:
@@ -144,8 +144,8 @@ async def admin_withdrawals(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     status: str | None = Query(None, max_length=32),
     account_id: int | None = Query(None, ge=1),
-    start_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
-    end_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
+    start_time: str | None = Query(None, max_length=10, description="开始日期 YYYY-MM-DD（兼容前端空字符串）"),
+    end_time: str | None = Query(None, max_length=10, description="结束日期 YYYY-MM-DD（兼容前端空字符串）"),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> WithdrawalAdminPage:
@@ -158,8 +158,8 @@ async def admin_ledger(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     account_type: str | None = Query(None, max_length=32),
     account_id: int | None = Query(None, ge=1),
-    start_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
-    end_time: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
+    start_time: str | None = Query(None, max_length=10, description="开始日期 YYYY-MM-DD（兼容前端空字符串）"),
+    end_time: str | None = Query(None, max_length=10, description="结束日期 YYYY-MM-DD（兼容前端空字符串）"),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> LedgerEntryPage:
@@ -191,8 +191,8 @@ async def admin_commission_entries(
     page_size: int = Query(20, ge=1, le=100),
     matchmaker_id: int | None = Query(None, ge=1, description="按红娘 user_id 筛选"),
     rule_id: int | None = Query(None, ge=1, description="按 commission_rule.id 筛选"),
-    start_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
-    end_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
+    start_date: str | None = Query(None, max_length=10, description="开始日期 YYYY-MM-DD（兼容前端空字符串）"),
+    end_date: str | None = Query(None, max_length=10, description="结束日期 YYYY-MM-DD（兼容前端空字符串）"),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> CommissionEntryDetailPage:
@@ -218,8 +218,8 @@ async def admin_store_commission_entries(
     store_id: int | None = Query(None, ge=1, description="按分店 organization.id 筛选"),
     matchmaker_id: int | None = Query(None, ge=1, description="按订单归属红娘筛选"),
     rule_id: int | None = Query(None, ge=1, description="按 commission_rule.id 筛选"),
-    start_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开始日期 YYYY-MM-DD"),
-    end_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="结束日期 YYYY-MM-DD"),
+    start_date: str | None = Query(None, max_length=10, description="开始日期 YYYY-MM-DD（兼容前端空字符串）"),
+    end_date: str | None = Query(None, max_length=10, description="结束日期 YYYY-MM-DD（兼容前端空字符串）"),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> StoreCommissionEntryPage:
@@ -251,8 +251,8 @@ async def admin_store_commission_export(
     store_id: int | None = Query(None, ge=1),
     matchmaker_id: int | None = Query(None, ge=1),
     rule_id: int | None = Query(None, ge=1),
-    start_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    end_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    start_date: str | None = Query(None, max_length=10),
+    end_date: str | None = Query(None, max_length=10),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> Response:

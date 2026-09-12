@@ -1,11 +1,13 @@
 """Versioned configuration snapshots for the administration console."""
 
+import asyncio
 import json
 import re
 from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.admin_config import AdminConfigAuditItem, AdminConfigAuditPage, AdminConfigSnapshot, AdminConfigUpdate
@@ -512,32 +514,93 @@ def _snapshot(row: Any, *, mask_sensitive: bool = True) -> AdminConfigSnapshot:
 
 
 async def ensure_defaults(db: AsyncSession) -> None:
-    for namespace, (name, description, config, sensitive_keys) in DEFAULT_CONFIGS.items():
-        await db.execute(text("""INSERT IGNORE INTO admin_config_snapshot
-            (namespace, name, description, version, config_json, sensitive_keys_json)
-            VALUES (:namespace, :name, :description, 1, :config_json, :sensitive_keys_json)"""), {
-            "namespace": namespace, "name": name, "description": description,
-            "config_json": json.dumps(config, ensure_ascii=False),
-            "sensitive_keys_json": json.dumps(sensitive_keys, ensure_ascii=False),
-        })
-        existing = (await db.execute(
-            text("SELECT config_json FROM admin_config_snapshot WHERE namespace=:namespace"),
-            {"namespace": namespace},
-        )).mappings().first()
-        if existing:
+    """确保 DEFAULT_CONFIGS 中所有 namespace 在 DB 存在，并补齐缺失字段。
+
+    并发安全设计（修复 MySQL 1213 死锁）：
+    1. **GET_LOCK 串行化**：获取 MySQL 命名锁 `ensure_admin_config_defaults`（5s 超时），
+       所有并发请求被强制串行执行。避免两个事务同时 INSERT 同一 namespace 触发死锁。
+    2. **SELECT 一次** 全部已存在 namespace，避免 50+ 次单条 SELECT。
+    3. **ON DUPLICATE KEY UPDATE** 替代 INSERT IGNORE — 行为更确定，死锁概率更低。
+    4. **死锁重试**：捕获 1213 异常最多 3 次（指数退避），兜底网络抖动。
+    5. 锁失败 → 降级：直接 SELECT 已存在行，不阻塞请求。
+    """
+    lock_acquired = False
+    try:
+        result = (await db.execute(
+            text("SELECT GET_LOCK('ensure_admin_config_defaults', 5)")
+        )).scalar()
+        lock_acquired = bool(result)
+    except Exception:
+        lock_acquired = False
+
+    try:
+        for attempt in range(3):
             try:
-                current = json.loads(existing["config_json"])
-            except (TypeError, json.JSONDecodeError):
-                current = {}
-            if isinstance(current, dict):
-                missing = {key: value for key, value in config.items() if key not in current}
-                if missing:
-                    current.update(missing)
+                existing_rows = (await db.execute(
+                    text("SELECT namespace, config_json FROM admin_config_snapshot")
+                )).mappings().all()
+                existing_map = {row["namespace"]: row["config_json"] for row in existing_rows}
+
+                inserts: list[dict[str, Any]] = []
+                updates: list[dict[str, Any]] = []
+                for namespace, (name, description, config, sensitive_keys) in DEFAULT_CONFIGS.items():
+                    if namespace not in existing_map:
+                        inserts.append({
+                            "namespace": namespace,
+                            "name": name,
+                            "description": description,
+                            "config_json": json.dumps(config, ensure_ascii=False),
+                            "sensitive_keys_json": json.dumps(sensitive_keys, ensure_ascii=False),
+                        })
+                        continue
+                    try:
+                        current = json.loads(existing_map[namespace] or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        current = {}
+                    if isinstance(current, dict):
+                        missing = {key: value for key, value in config.items() if key not in current}
+                        if missing:
+                            current.update(missing)
+                            updates.append({
+                                "namespace": namespace,
+                                "config_json": json.dumps(current, ensure_ascii=False),
+                            })
+
+                # ON DUPLICATE KEY UPDATE 占位（namespace=VALUES(namespace)）—— 比 INSERT IGNORE
+                # 死锁概率低，行为更确定。
+                for params in inserts:
+                    await db.execute(text("""INSERT INTO admin_config_snapshot
+                        (namespace, name, description, version, config_json, sensitive_keys_json)
+                        VALUES (:namespace, :name, :description, 1, :config_json, :sensitive_keys_json)
+                        ON DUPLICATE KEY UPDATE namespace = VALUES(namespace)"""), params)
+                for params in updates:
                     await db.execute(
-                        text("UPDATE admin_config_snapshot SET config_json=:config_json WHERE namespace=:namespace"),
-                        {"namespace": namespace, "config_json": json.dumps(current, ensure_ascii=False)},
+                        text("""UPDATE admin_config_snapshot SET config_json = :config_json
+                            WHERE namespace = :namespace"""),
+                        params,
                     )
-    await db.commit()
+                if inserts or updates:
+                    await db.commit()
+                return
+            except OperationalError as exc:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                if "1213" in str(exc) and attempt < 2:
+                    await asyncio.sleep(0.1 * (2 ** attempt))
+                    continue
+                raise
+    finally:
+        if lock_acquired:
+            try:
+                await db.execute(text("SELECT RELEASE_LOCK('ensure_admin_config_defaults')"))
+                await db.commit()
+            except Exception:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
 
 async def get_config(db: AsyncSession, namespace: str) -> AdminConfigSnapshot:
