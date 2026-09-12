@@ -32,7 +32,7 @@ async def test_run_round_claims_next_task_only_after_previous_finishes(
     tasks = [
         SimpleNamespace(
             task_id=f"task-{index}",
-            task_type="moxiang_candidate_extract",
+            task_type="profile_extract",
             created_at=datetime.now(UTC).replace(tzinfo=None),
         )
         for index in (1, 2)
@@ -60,7 +60,7 @@ async def test_run_round_claims_next_task_only_after_previous_finishes(
         return "completed"
 
     monkeypatch.setattr(worker_mod, "session_factory", _SessionFactory())
-    monkeypatch.setattr(worker_mod, "TASK_HANDLERS", {"moxiang_candidate_extract": object()})
+    monkeypatch.setattr(worker_mod, "TASK_HANDLERS", {"profile_extract": object()})
     monkeypatch.setattr(worker_mod, "reap_expired_leases", fake_reap)
     monkeypatch.setattr(worker_mod, "claim_tasks", fake_claim)
     monkeypatch.setattr(worker_mod, "_process", fake_process)

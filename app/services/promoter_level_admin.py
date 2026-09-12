@@ -24,13 +24,23 @@ def _dt(value: Any):
     return value if hasattr(value, "isoformat") else value
 
 
+def _num(value: Any) -> str:
+    """数字展示口径：去尾零且绝不使用科学计数法（Decimal.normalize 会产生 4E+1）。"""
+    if value is None:
+        return "0"
+    text_value = format(Decimal(str(value)), "f")
+    if "." in text_value:
+        text_value = text_value.rstrip("0").rstrip(".")
+    return text_value or "0"
+
+
 def _auto_split_label(row: dict[str, Any]) -> str:
     mode = row.get("auto_split_mode")
     if mode == "auto_rate":
         rate = row.get("auto_split_rate")
         if rate is None:
             return "按同比自动计算"
-        return f"按同比自动计算：{Decimal(str(rate))}%"
+        return f"按同比自动计算：{_num(rate)}%"
     return "自定义固定金额"
 
 

@@ -238,3 +238,95 @@ class CommissionEntryDetailOptions(BaseModel):
 
     matchmakers: list[MatchmakerOption] = Field(default_factory=list)
     events: list[EventOption] = Field(default_factory=list)
+
+
+# ------------------------- M5 分店分成明细 -------------------------
+class StoreCommissionEntryItem(BaseModel):
+    """分店线上分成明细单条：beneficiary_type='store'，金额以 str 序列化。"""
+
+    id: int
+    created_at: datetime
+    store_id: int
+    store_name: str
+    matchmaker_id: int | None = None
+    matchmaker_name: str | None = None
+    consumer_id: int | None = None
+    consumer_name: str | None = None
+    event_name: str
+    order_id: int
+    order_no: str | None = None
+    consumer_amount: Decimal
+    commission_amount: Decimal
+    status: str
+
+
+class StoreCommissionEntryPage(BaseModel):
+    items: list[StoreCommissionEntryItem]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
+
+
+class StoreOption(BaseModel):
+    """分店切换下拉项。"""
+
+    id: int
+    name: str
+    status: int
+
+
+class StoreCommissionOptions(BaseModel):
+    """分店分成明细页筛选下拉：门店 / 红娘 / 事件。"""
+
+    stores: list[StoreOption] = Field(default_factory=list)
+    matchmakers: list[MatchmakerOption] = Field(default_factory=list)
+    events: list[EventOption] = Field(default_factory=list)
+
+
+class StoreCommissionSummary(BaseModel):
+    """分店分成 4 张统计卡。"""
+
+    total_amount: Decimal = Decimal("0")
+    current_month_amount: Decimal = Decimal("0")
+    previous_month_amount: Decimal = Decimal("0")
+    pending_amount: Decimal = Decimal("0")
+
+
+# ------------------------- M9 财务-发放积分 -------------------------
+class CreditGrantTargetType:
+    """发放积分目标类型；保留 class 以便 Python 类型提示与 Literal 校验并存。"""
+
+    ALL = "all"
+    MEMBER = "member"
+    VERIFIED = "verified"
+    MATCHMAKER_TEAM = "matchmaker_team"
+
+
+class CreditGrantRequest(BaseModel):
+    """后台「积分明细-发放积分」弹窗入参。"""
+
+    target_type: Literal["all", "member", "verified", "matchmaker_team"] = Field(
+        description="all=全部注册用户；member=指定会员；verified=已实名认证会员；matchmaker_team=红娘团队"
+    )
+    user_ids: list[int] | None = Field(default=None, description="target_type=member 时必填")
+    amount: int = Field(gt=0, le=1_000_000, description="每人发放积分数，正整数")
+    reason: str = Field(min_length=1, max_length=20, description="发放理由，不超过 20 字")
+
+    @model_validator(mode="after")
+    def validate_member_targets(self) -> "CreditGrantRequest":
+        if self.target_type == "member":
+            if not self.user_ids:
+                raise ValueError("指定会员发放必须传入 user_ids")
+            if len(self.user_ids) > 5000:
+                raise ValueError("单次发放最多 5000 名会员")
+        return self
+
+
+class CreditGrantResult(BaseModel):
+    """发放积分结果汇总。"""
+
+    granted_count: int = Field(description="实际发放的账户数（去重后）")
+    total_amount: int = Field(description="总发放积分数 = granted_count * amount")
+    sample_ledger_ids: list[int] = Field(default_factory=list, description="前 10 条 ledger.id 样本")
+    target_user_ids: list[int] = Field(default_factory=list, description="实际命中的 user_id 列表")

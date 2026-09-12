@@ -49,8 +49,8 @@ def _make_task(
         id=1,
         task_id=task_id,
         owner_user_id=owner,
-        task_type="moxiang_candidate_extract",
-        scene="moxiang_candidate_extract",
+        task_type="profile_extract",
+        scene="profile_extract",
         idempotency_key="key-1",
         request_digest="hash-1",
         status=status,
@@ -205,7 +205,7 @@ def _build_process_patches(
     task: AiTaskRecord,
 ):
     return (
-        patch("app.workers.ai_worker.TASK_HANDLERS", {"moxiang_candidate_extract": fake_handler}),
+        patch("app.workers.ai_worker.TASK_HANDLERS", {"profile_extract": fake_handler}),
         patch("app.workers.ai_worker.complete_task", side_effect=fake_complete_task),
         patch("app.workers.ai_worker.start_task", return_value=task),
     )
@@ -471,7 +471,7 @@ async def test_handler_self_commit_then_none_does_not_rollback_closed_savepoint(
         return _make_task(task_id=task_id, status=AiTaskStatus.FAILED)
 
     with (
-        patch("app.workers.ai_worker.TASK_HANDLERS", {"moxiang_candidate_extract": fake_handler}),
+        patch("app.workers.ai_worker.TASK_HANDLERS", {"profile_extract": fake_handler}),
         patch("app.workers.ai_worker.start_task", return_value=task),
         patch("app.workers.ai_worker.fail_task", side_effect=fake_fail_task),
     ):

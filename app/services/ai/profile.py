@@ -1,15 +1,17 @@
-"""AI 画像（墨相师）会话地基与发布链：master 会话、草稿确认、发布、历史与删除。
+"""M04 AI 画像会话、回答、受控结构化抽取、确认、发布、历史与删除（Task 7+8，统一方案 §7）。
 
-> **命名说明：墨相师（Moxiang）就是 AI 画像功能的产品更名。** 旧的对话式画像
-> 文字问答流（M04 ``create_profile_session``/``submit_profile_turn``/
-> ``extract_profile_turn`` 题库问答链路）已于 2026-09-11 删除，画像建构统一
-> 走墨相师旅程（``app/services/ai/journey.py``，任务 ``moxiang_candidate_extract``）。
-> 本模块保留两侧共同的地基与发布链事实源：
+本模块是 M04 文字会话、抽取、草稿确认/发布/历史/删除边界的事实源：
 
-- master 会话（``create_master_session``/``load_owned_session``/
-  ``load_owned_active_session``）：墨相师 WS 与 ``/ai/moxiang/*`` 共用的会话
-  创建/复用/授权快照/revision 向量逻辑；``_insert_turn`` 落 turn，幂等键防重。
-- ``persist_master_assistant_reply``：墨相师助手回复落库。
+- ``create_profile_session`` 只允许同一 ``user_id + subject`` 存在一个活动会话
+  （已存在则回放/复用）；创建前校验 ``profile_text_extract`` 授权并快照当前
+  revision 向量与授权信息。
+- ``submit_profile_turn`` 先过 ``moderate_text`` 内容审核（reject 拒绝入库、
+  replace 用脱敏文本；幂等回放不重复审核），再把（脱敏后）turn 落库（抽取失败
+  不删原文），以 ``profile_extract`` 任务入队；同 ``client_turn_id`` 重复提交
+  只回放原 turn，不创建第二个任务。
+- ``extract_profile_turn`` 是 Worker 注册的 ``profile_extract`` handler：只调用
+  ``AIGateway.structured_extract``，结果只写成 ``suggested`` 状态的草稿字段，
+  绝不产生已发布字段或认证字段；schema-invalid/timeout 只改变任务状态。
 - ``confirm_profile_draft`` 逐项 confirm/replace/reject/delete，每个 action 都
   携带旧 revision（不匹配抛 ``409 DRAFT_VERSION_CONFLICT``）；replace 重新过
   字段 Schema 与来源约束，delete 只标记字段不可见。
@@ -22,15 +24,16 @@
 - ``delete_ai_profile`` / ``delete_ai_profile_field`` 在同一事务内先写
   invalidated_at/不可读标记（草稿、活动会话、已发布投影引用、search result、
   compatibility snapshot）并递增 privacy/对应主体 revision、写 outbox 删除事件，
-  再 enqueue cleanup task；同步响应前草稿与派生结果已不可读。
-- Worker handler：``profile_projection_handler``（投影构建）、
-  ``generate_profile_narrative_handler``（叙事层生成，``profile_narrative``）、
-  ``cleanup_handler``（物理清理）。
+  再 enqueue cleanup task；同步响应前草稿与派生结果已不可读。异步物理清理由
+  Task 9/10/11 的消费者实现（本任务只注册占位 handler）。
 
-事务纪律：本模块函数**不**调用 ``commit()``——调用方（路由或 Worker）控制事务；
-自提交例外是 ``_mark_stale``：必须在抛出 ``PROFILE_SESSION_STALE`` 前自行提交
-stale 状态变更（异常路径下 get_db 上下文退出会回滚未提交事务，不提交则 stale
-永不落库，同 user+subject 将无法重新创建会话）。原回答与密钥永不进入日志或
+与 Task 6 的任务状态机一致，本模块函数**不**调用 ``commit()``——调用方（路由
+或 Worker）控制事务；自提交例外有二：``_mark_stale`` 必须在抛出
+``PROFILE_SESSION_STALE`` 前自行提交 stale 状态变更（异常路径下 get_db 上下文
+退出会回滚未提交事务，不提交则 stale 永不落库，同 user+subject 将无法重新创建
+会话）；``_fail_extract_session`` 在 extract handler 终态失败时自行提交会话
+FAILED + fail_task（worker 对返回 None 的 handler 会回滚其事务，不提交则
+FAILED 落不了库，会话将永远停留在 extracting）。原回答与密钥永不进入日志或
 错误响应。
 """
 
@@ -40,6 +43,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import uuid
 from dataclasses import dataclass, field as dc_field
 from datetime import UTC, datetime, timedelta
@@ -53,6 +57,7 @@ from app.core.config import settings
 from app.schemas.ai_common import AI_FIELD_ALLOWLIST, AiTaskStatus, ProjectionKind
 from app.schemas.ai_profile import (
     PROFILE_ENTRY_CATEGORIES,
+    PROFILE_ENTRY_CATEGORY_LABELS,
     PROFILE_ENTRY_CONTENT_MAX_LENGTH,
     ProfileFieldConfirmationStatus,
     ProfileFieldPatchAction,
@@ -65,7 +70,9 @@ from app.schemas.ai_profile import (
 )
 from app.services.ai.base import (
     AITaskContext,
+    ExtractedField,
     NarrativeRequest,
+    StructuredExtractRequest,
 )
 from app.services.ai.features import (
     ProjectionBuildError,
@@ -77,6 +84,7 @@ from app.services.ai.gateway import AIGateway
 from app.services.ai.memory.consent_producers import run_projection_producer_safely
 from app.services.ai.prompts.profile_narrative import serialize_fields_for_prompt
 from app.services.ai.tasks import AiTaskRecord, TaskError, enqueue_task, fail_task
+from app.services.content_filter import moderate_text
 from app.services.derivation_outbox import purge_ai_resources, run_cleanup_for_user
 from app.services.revisions import (
     RevisionKind,
@@ -94,7 +102,7 @@ PROFILE_CONSENT_SCOPE = "profile_text_extract"
 
 # 画像叙事层（narrative）版本常量——发布后生成人格画像解读成品。
 NARRATIVE_SCHEMA_VERSION = "profile-narrative-v1"
-NARRATIVE_PROMPT_VERSION = "profile-narrative-prompt-v5"
+NARRATIVE_PROMPT_VERSION = "profile-narrative-prompt-v4"
 _NARRATIVE_TASK_TYPE = "profile_narrative"
 # 叙事层重新生成（regenerate）每日上限：24h 窗口内 profile_narrative 任务数。
 _NARRATIVE_REGENERATE_DAILY_LIMIT = 5
@@ -116,7 +124,117 @@ _ACTIVE_FOR_TURNS = frozenset(
         ProfileSessionStatus.PAUSED,
     }
 )
+_PAUSEABLE = frozenset(
+    {
+        ProfileSessionStatus.DRAFT,
+        ProfileSessionStatus.EXTRACTING,
+        ProfileSessionStatus.AWAITING_CONFIRMATION,
+    }
+)
+_RESUMABLE = frozenset(
+    {
+        ProfileSessionStatus.PAUSED,
+        ProfileSessionStatus.DRAFT,
+        ProfileSessionStatus.EXTRACTING,
+        ProfileSessionStatus.AWAITING_CONFIRMATION,
+    }
+)
 
+# 会话状态合法迁移（统一方案 §7.2；执行计划 §3.1）。pause/resume 不改变已保存
+# turn；发布/删除后历史只读。Task 8 负责 published 路径。
+_SESSION_TRANSITIONS: dict[ProfileSessionStatus, set[ProfileSessionStatus]] = {
+    ProfileSessionStatus.DRAFT: {
+        ProfileSessionStatus.EXTRACTING,
+        # WP-P5：语音抽取结果同步落库后直接进入待确认（无异步任务中转，
+        # 与文字模式"提交→任务→待确认"两段式不同，这里一步到位）。
+        ProfileSessionStatus.AWAITING_CONFIRMATION,
+        ProfileSessionStatus.PAUSED,
+        ProfileSessionStatus.CANCELLED,
+        ProfileSessionStatus.STALE,
+    },
+    ProfileSessionStatus.EXTRACTING: {
+        ProfileSessionStatus.AWAITING_CONFIRMATION,
+        # WP-P4：update 会话澄清回路——追问已写入 assistant turn，会话回到
+        # draft 等用户答复（build 路径不会走到这条边）。
+        ProfileSessionStatus.DRAFT,
+        ProfileSessionStatus.PAUSED,
+        ProfileSessionStatus.CANCELLED,
+        ProfileSessionStatus.STALE,
+        ProfileSessionStatus.FAILED,
+    },
+    ProfileSessionStatus.AWAITING_CONFIRMATION: {
+        ProfileSessionStatus.EXTRACTING,
+        ProfileSessionStatus.PAUSED,
+        ProfileSessionStatus.CANCELLED,
+        ProfileSessionStatus.STALE,
+    },
+    ProfileSessionStatus.PAUSED: {
+        ProfileSessionStatus.DRAFT,
+        ProfileSessionStatus.AWAITING_CONFIRMATION,
+        ProfileSessionStatus.CANCELLED,
+        ProfileSessionStatus.STALE,
+    },
+    ProfileSessionStatus.PUBLISHED: set(),
+    ProfileSessionStatus.FAILED: set(),
+    ProfileSessionStatus.CANCELLED: set(),
+    ProfileSessionStatus.STALE: set(),
+}
+
+# 缺失字段 → 追问问题字典（固定文案，不诱导敏感信息；§7.5 示例对齐）。
+# Task6 Step2：每个问题补稳定 ``field_key``（属于 AI_FIELD_ALLOWLIST），前端据
+# 此映射到 typed field 编辑器，不依赖问题文案或顺序。加法字段，保留 id/text。
+_PROFILE_QUESTION_BANK: dict[str, ProfileQuestion] = {
+    "interest_tags": ProfileQuestion(
+        id="interest_lifestyle_v1",
+        text="最近让你投入的事情是什么？",
+        field_key="interest_tags",
+    ),
+    "city_code": ProfileQuestion(
+        id="city_residence_v1",
+        text="你现在生活在哪座城市？",
+        field_key="city_code",
+    ),
+    "marriage_status": ProfileQuestion(
+        id="marriage_status_v1",
+        text="你目前的婚姻状态是？",
+        field_key="marriage_status",
+    ),
+    "education_level": ProfileQuestion(
+        id="education_v1",
+        text="你的最高学历是？",
+        field_key="education_level",
+    ),
+    "height_cm": ProfileQuestion(
+        id="height_v1",
+        text="你的身高是多少？",
+        field_key="height_cm",
+    ),
+    "income_band": ProfileQuestion(
+        id="income_v1",
+        text="你的收入大概在什么范围？",
+        field_key="income_band",
+    ),
+    "occupation_group": ProfileQuestion(
+        id="occupation_v1",
+        text="你从事什么职业？",
+        field_key="occupation_group",
+    ),
+    "lifestyle_tags": ProfileQuestion(
+        id="lifestyle_v1",
+        text="你平时的生活方式有什么特点？",
+        field_key="lifestyle_tags",
+    ),
+    "relationship_goal": ProfileQuestion(
+        id="relationship_goal_v1",
+        text="你对这段关系的期待是什么？",
+        field_key="relationship_goal",
+    ),
+    "age": ProfileQuestion(
+        id="age_v1",
+        text="你今年多大了？",
+        field_key="age",
+    ),
+}
 
 _SESSION_COLUMNS = (
     "session_id, user_id, subject, input_mode, session_kind, status, active_status, "
@@ -341,6 +459,67 @@ class ProfileTurn:
 
 
 @dataclass(frozen=True)
+class TurnSubmission:
+    """202 turn+task result; ``replayed=True`` means no second task was created."""
+
+    turn_id: str
+    session_id: str
+    client_turn_id: str
+    turn_no: int
+    answer_text: str
+    created_at: datetime | None
+    replayed: bool
+    task_id: str | None
+    task_status: str | None
+    stage: str | None
+    poll_after_ms: int
+    expires_at: datetime | None
+
+    @classmethod
+    def accepted(cls, turn: ProfileTurn, task: AiTaskRecord) -> TurnSubmission:
+        return cls(
+            turn_id=turn.turn_id,
+            session_id=turn.session_id,
+            client_turn_id=turn.client_turn_id,
+            turn_no=turn.turn_no,
+            answer_text=turn.answer_text,
+            created_at=turn.created_at,
+            replayed=False,
+            task_id=task.task_id,
+            task_status=task.status.value,
+            stage=task.stage,
+            poll_after_ms=1000,
+            expires_at=task.lease_until,
+        )
+
+    @classmethod
+    def replay(cls, turn: ProfileTurn) -> TurnSubmission:
+        return cls(
+            turn_id=turn.turn_id,
+            session_id=turn.session_id,
+            client_turn_id=turn.client_turn_id,
+            turn_no=turn.turn_no,
+            answer_text=turn.answer_text,
+            created_at=turn.created_at,
+            replayed=True,
+            task_id=None,
+            task_status=None,
+            stage=None,
+            poll_after_ms=0,
+            expires_at=None,
+        )
+
+
+@dataclass(frozen=True)
+class CleanupTaskSubmission:
+    """202 soft-delete result: session hidden synchronously, cleanup enqueued."""
+
+    task_id: str
+    status: AiTaskStatus
+    cleanup_requested: bool = True
+
+
+@dataclass(frozen=True)
 class ProfileDraftField:
     """One ai_profile_draft_field row surfaced to the confirm/publish boundary.
 
@@ -388,7 +567,6 @@ class ProfileDraft:
     operation_history: dict[str, Any] = dc_field(default_factory=dict)
     session_id: str | None = None
     fields: tuple[ProfileDraftField, ...] = ()
-    synced_profile_fields: tuple[str, ...] = ()
     expires_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -420,7 +598,6 @@ class TaskSubmission:
     replayed: bool
     revision: PublishedRevision | None
     narrative_task_id: str | None = None
-    synced_profile_fields: tuple[str, ...] = ()
 
     @classmethod
     def accepted(
@@ -428,7 +605,6 @@ class TaskSubmission:
         task: AiTaskRecord,
         revision: PublishedRevision,
         narrative_task_id: str | None = None,
-        synced_profile_fields: tuple[str, ...] | list[str] = (),
     ) -> TaskSubmission:
         return cls(
             task_id=task.task_id,
@@ -436,15 +612,11 @@ class TaskSubmission:
             replayed=False,
             revision=revision,
             narrative_task_id=narrative_task_id,
-            synced_profile_fields=tuple(synced_profile_fields),
         )
 
     @classmethod
     def replay(
-        cls,
-        task: AiTaskRecord,
-        narrative_task_id: str | None = None,
-        synced_profile_fields: tuple[str, ...] | list[str] = (),
+        cls, task: AiTaskRecord, narrative_task_id: str | None = None
     ) -> TaskSubmission:
         return cls(
             task_id=task.task_id,
@@ -452,7 +624,6 @@ class TaskSubmission:
             replayed=True,
             revision=None,
             narrative_task_id=narrative_task_id,
-            synced_profile_fields=tuple(synced_profile_fields),
         )
 
 
@@ -509,6 +680,41 @@ def hash_narrative_request(revision_id: int, subject: str) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def assert_session_transition(source: ProfileSessionStatus, target: ProfileSessionStatus) -> None:
+    """Raise ``ValueError`` unless the session state move is legal (§7.2)."""
+    if target not in _SESSION_TRANSITIONS.get(source, set()):
+        raise ValueError(
+            f"illegal profile_session transition: {source.value} -> {target.value}"
+        )
+
+
+def next_profile_question(session: ProfileSession) -> ProfileQuestion | None:
+    """Return the first missing-field question; never repeats confirmed or skipped fields.
+
+    The question bank is ordered and fixed; the result is real coverage of the
+    frozen allowlist, never a timer-based fake progress. Skipped fields stay
+    unanswered (progress unchanged) and are not asked again in this session.
+    WP-P4：update 会话无题库推进，恒返回 None（澄清追问由 assistant turn 承担）。
+    设计 Task 6：master 会话同款——墨相师对话建构不走题库问答，信息由对话
+    自然收集，current_question 恒 None。
+    """
+    if session.session_kind in ("update", "master"):
+        return None
+    skipped = session.skipped_keys
+    for field_key, question in _PROFILE_QUESTION_BANK.items():
+        if field_key not in session.field_keys and field_key not in skipped:
+            return question
+    return None
+
+
+def progress_value(confirmed_keys: frozenset[str]) -> float:
+    """Confirmed-field coverage over the frozen allowlist (0..1)."""
+    if not AI_FIELD_ALLOWLIST:
+        return 0.0
+    return len(confirmed_keys) / len(AI_FIELD_ALLOWLIST)
+
+
+# ----------------------------------------------------------------------
 # 内部辅助：SQL 读取/写入（不 commit，由调用方控制事务）
 # ----------------------------------------------------------------------
 
@@ -713,8 +919,7 @@ def _session_from_row(
         skipped_keys=_parse_skipped_keys(row.get("skipped_field_keys")),
         created=created,
     )
-    # 题库问答流已删（画像建构走墨相师旅程），current_question 恒为 None。
-    object.__setattr__(session, "current_question", None)
+    object.__setattr__(session, "current_question", next_profile_question(session))
     return session
 
 
@@ -767,6 +972,31 @@ async def _mark_stale(db: AsyncSession, session_id: str) -> None:
     await db.commit()
 
 
+async def _fail_extract_session(db: AsyncSession, session_id: str) -> None:
+    """Mark a session failed after a terminal extraction failure and commit.
+
+    与 ``_mark_stale`` 同款自提交例外（第二个）：extract handler 终态失败时，
+    会话状态必须立即固化——worker 对返回 None 的 handler 会回滚其事务
+    （``_process`` 的 ``finalize_handler(False)``），若不在此处 commit，FAILED
+    写入会被丢弃，会话将永远停留在 extracting。``WHERE status='extracting'``
+    保证幂等：会话已因新 turn 回到 extracting 时不误伤，已 failed 时重复调用
+    为 no-op。同事务内的 ``fail_task(retryable=False)`` 一并被固化，使 worker
+    的重记撞状态守卫成为 no-op，避免不可重试失败被硬编码 ``retryable=True``
+    推入重试循环。``active_status=0`` + ``ended_at`` 与 ``_mark_stale`` 的终态
+    语义一致：失败会话释放 active 唯一槽，用户下次 ensureSession 建新会话。
+    """
+    await db.execute(
+        text(
+            "UPDATE ai_profile_session SET status = 'failed', "
+            "active_status = 0, ended_at = UTC_TIMESTAMP(), "
+            "updated_at = UTC_TIMESTAMP() "
+            "WHERE session_id = :session_id AND status = 'extracting'"
+        ),
+        {"session_id": session_id},
+    )
+    await db.commit()
+
+
 async def _reuse_active_session(
     db: AsyncSession,
     row: dict[str, Any],
@@ -792,6 +1022,223 @@ async def _reuse_active_session(
         confirmed_keys=confirmed_keys,
         draft_id=draft_id,
     )
+
+
+async def _update_session_status(
+    db: AsyncSession, session_id: str, status: ProfileSessionStatus
+) -> None:
+    await db.execute(
+        text(
+            "UPDATE ai_profile_session SET status = :status, "
+            "updated_at = UTC_TIMESTAMP() WHERE session_id = :session_id"
+        ),
+        {"status": status.value, "session_id": session_id},
+    )
+
+
+# ----------------------------------------------------------------------
+# 会话与回答
+# ----------------------------------------------------------------------
+
+
+async def create_profile_session(
+    db: AsyncSession,
+    owner_user_id: int,
+    subject: ProfileSubject,
+    consent_version: str,
+    idempotency_key: str,
+) -> ProfileSession:
+    """Create or reuse the single active session for ``user_id + subject``.
+
+    校验 ``profile_text_extract`` 授权；已存在活动会话时回放/复用（同
+    user+subject 只保留一个活动 session）。写 ai_profile_session（session_id、
+    subject、status=draft、授权与版本快照、expires_at）。不 commit。
+    """
+    subject_value = subject.value if isinstance(subject, ProfileSubject) else str(subject)
+    if subject_value not in {ProfileSubject.PERSONAL.value, ProfileSubject.IDEAL_PARTNER.value}:
+        raise AIInputError("subject must be personal or ideal_partner")
+    consent = await _load_consent_grant(
+        db, owner_user_id, PROFILE_CONSENT_SCOPE, consent_version
+    )
+    if consent is None:
+        raise AIConsentRequired()
+    revision = await _load_revision_vector(db, owner_user_id)
+    consent_snapshot = _consent_snapshot(consent)
+    existing = await _find_active_session(db, owner_user_id, subject_value)
+    if existing is not None:
+        return await _reuse_active_session(
+            db, existing, revision=revision, consent_snapshot=consent_snapshot
+        )
+
+    session_id = uuid.uuid4().hex
+    expires_at = _now_utc() + timedelta(days=settings.ai_profile_session_expire_days)
+    policy_revision = consent_snapshot.get("policy_revision") or PROFILE_POLICY_REVISION
+    try:
+        await db.execute(
+            text(
+                "INSERT INTO ai_profile_session "
+                "(session_id, user_id, subject, input_mode, session_kind, status, active_status, "
+                " consent_version, policy_revision, current_question_id, "
+                " profile_revision, preference_revision, expires_at, created_at, updated_at) "
+                "VALUES (:session_id, :user_id, :subject, 'text', 'build', 'draft', 1, "
+                " :consent_version, :policy_revision, NULL, "
+                " :profile_revision, :preference_revision, :expires_at, "
+                " UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+            ),
+            {
+                "session_id": session_id,
+                "user_id": owner_user_id,
+                "subject": subject_value,
+                "consent_version": consent_version,
+                "policy_revision": policy_revision,
+                "profile_revision": revision.profile,
+                "preference_revision": revision.preference,
+                "expires_at": expires_at,
+            },
+        )
+    except IntegrityError:
+        # 并发首次创建同 user+subject：唯一键 uk_ai_profile_session_active
+        # 冲突（两个请求都通过了前置检查）。仿 enqueue_task 的
+        # IntegrityError→回读回放模式：回滚本请求事务后回读既有活动会话复用，
+        # 不产生第二个 session；回读仍无 → 原样上抛。rollback 只作用于本请求
+        # 事务，不会误回滚赢家已提交的会话。
+        await db.rollback()
+        existing = await _find_active_session(db, owner_user_id, subject_value)
+        if existing is None:
+            raise
+        return await _reuse_active_session(
+            db, existing, revision=revision, consent_snapshot=consent_snapshot
+        )
+    row = {
+        "session_id": session_id,
+        "user_id": owner_user_id,
+        "subject": subject_value,
+        "input_mode": "text",
+        "session_kind": "build",
+        "status": ProfileSessionStatus.DRAFT.value,
+        "active_status": 1,
+        "consent_version": consent_version,
+        "policy_revision": policy_revision,
+        "current_question_id": None,
+        "profile_revision": revision.profile,
+        "preference_revision": revision.preference,
+        "expires_at": expires_at,
+        "ended_at": None,
+        "created_at": _now_utc(),
+        "updated_at": _now_utc(),
+    }
+    return _session_from_row(
+        row,
+        revision=revision,
+        consent_snapshot=consent_snapshot,
+        field_keys=frozenset(),
+        confirmed_keys=frozenset(),
+    )
+
+
+async def create_update_session(
+    db: AsyncSession,
+    owner_user_id: int,
+    subject: ProfileSubject,
+    desired_text: str,
+    consent_version: str,
+    idempotency_key: str,
+) -> tuple[ProfileSession, TurnSubmission]:
+    """WP-P4：对话式追加会话——用户陈述新期望，AI 澄清后产出 entry patch。
+
+    与 build 会话共用 ``uk_ai_profile_session_active`` 唯一活动槽位：同
+    (user_id, subject) 已有活动会话（无论 build/update）时拒绝
+    ``AI_INPUT_INVALID``（提示先完成/放弃），绝不静默关闭用户会话。update
+    会话不重答全量题（无题库推进），首句陈述作为 turn 落库并复用
+    ``profile_extract`` 任务通道（handler 按 session_kind 走澄清式分支）。
+    不 commit。
+    """
+    subject_value = subject.value if isinstance(subject, ProfileSubject) else str(subject)
+    if subject_value not in {ProfileSubject.PERSONAL.value, ProfileSubject.IDEAL_PARTNER.value}:
+        raise AIInputError("subject must be personal or ideal_partner")
+    normalized = normalize_profile_answer(desired_text)
+    consent = await _load_consent_grant(
+        db, owner_user_id, PROFILE_CONSENT_SCOPE, consent_version
+    )
+    if consent is None:
+        raise AIConsentRequired()
+    existing = await _find_active_session(db, owner_user_id, subject_value)
+    if existing is not None:
+        raise AIInputError(
+            "已有进行中的画像会话，请先完成或放弃后再发起新的更新"
+        )
+    revision = await _load_revision_vector(db, owner_user_id)
+    consent_snapshot = _consent_snapshot(consent)
+    session_id = uuid.uuid4().hex
+    expires_at = _now_utc() + timedelta(days=settings.ai_profile_session_expire_days)
+    policy_revision = consent_snapshot.get("policy_revision") or PROFILE_POLICY_REVISION
+    try:
+        await db.execute(
+            text(
+                "INSERT INTO ai_profile_session "
+                "(session_id, user_id, subject, input_mode, session_kind, status, "
+                " active_status, consent_version, policy_revision, current_question_id, "
+                " profile_revision, preference_revision, expires_at, created_at, updated_at) "
+                "VALUES (:session_id, :user_id, :subject, 'text', :session_kind, 'draft', 1, "
+                " :consent_version, :policy_revision, NULL, "
+                " :profile_revision, :preference_revision, :expires_at, "
+                " UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+            ),
+            {
+                "session_id": session_id,
+                "user_id": owner_user_id,
+                "subject": subject_value,
+                "session_kind": "update",
+                "consent_version": consent_version,
+                "policy_revision": policy_revision,
+                "profile_revision": revision.profile,
+                "preference_revision": revision.preference,
+                "expires_at": expires_at,
+            },
+        )
+    except IntegrityError:
+        # 并发创建同 user+subject：唯一槽位冲突——与 build 创建不同，update
+        # 语义下并发竞争失败直接拒绝（不回放他人会话，避免跨语义复用）。
+        await db.rollback()
+        raise AIInputError("已有进行中的画像会话，请先完成或放弃后再发起新的更新")
+    row = {
+        "session_id": session_id,
+        "user_id": owner_user_id,
+        "subject": subject_value,
+        "input_mode": "text",
+        "session_kind": "update",
+        "status": ProfileSessionStatus.DRAFT.value,
+        "active_status": 1,
+        "consent_version": consent_version,
+        "policy_revision": policy_revision,
+        "current_question_id": None,
+        "profile_revision": revision.profile,
+        "preference_revision": revision.preference,
+        "expires_at": expires_at,
+        "ended_at": None,
+        "created_at": _now_utc(),
+        "updated_at": _now_utc(),
+    }
+    session = _session_from_row(
+        row,
+        revision=revision,
+        consent_snapshot=consent_snapshot,
+        field_keys=frozenset(),
+        confirmed_keys=frozenset(),
+    )
+    # 首句陈述复用既有 turn 通道（原文先落库、审核、幂等、抽取任务）。
+    submission = await submit_profile_turn(
+        db,
+        session_id,
+        owner_user_id,
+        f"update-{idempotency_key or uuid.uuid4().hex[:16]}",
+        normalized,
+        idempotency_key or f"update-turn-{session_id[:16]}",
+    )
+    # submit 已把会话推进到 extracting；重读返回最新状态（frozen 快照在
+    # submit 前构建，直接返回会误导调用方）。
+    session = await load_owned_session(db, session_id, owner_user_id)
+    return session, submission
 
 
 async def create_master_session(
@@ -914,6 +1361,99 @@ async def persist_master_assistant_reply(
         return
     session = await load_owned_active_session(db, session_id, user_id)
     await _insert_assistant_turn(db, session, reply_text.strip())
+
+
+async def update_session_input_mode(
+    db: AsyncSession,
+    session_id: str,
+    owner_user_id: int,
+    input_mode: str,
+) -> ProfileSession:
+    """WP-P5：双模式互切——同一会话内切换 text/voice。
+
+    属主校验 + 活动状态校验后更新 ``input_mode``（列已存在，零迁移）。
+    进度、草稿与已确认字段自然延续（同一行状态机）。paused 会话也允许
+    切换（恢复后按新模式继续）；终态会话 404。不 commit。
+    """
+    if input_mode not in {"text", "voice"}:
+        raise AIInputError("input_mode 只能是 text 或 voice")
+    session = await load_owned_active_session(db, session_id, owner_user_id)
+    if session.input_mode == input_mode:
+        return session
+    await db.execute(
+        text(
+            "UPDATE ai_profile_session SET input_mode = :input_mode, "
+            "updated_at = UTC_TIMESTAMP() WHERE session_id = :session_id"
+        ),
+        {"input_mode": input_mode, "session_id": session_id},
+    )
+    reloaded = await load_owned_session(db, session_id, owner_user_id)
+    return reloaded
+
+
+async def persist_voice_extract_result(
+    db: AsyncSession,
+    session_id: str,
+    owner_user_id: int,
+    transcript: str,
+    client_turn_id: str,
+    result: Any,
+) -> str:
+    """WP-P5：把语音抽取结果写入与文字模式相同的画像状态机。
+
+    转写原文作为 user turn 落库（source_type='voice_transcript'，与文字模式
+    同表同审核）；抽取结果复用 ``_write_draft`` 同一草稿写入路径（structured
+    字段 + entry 条目 + 来源证据 + 草稿滚动），会话推进 awaiting_confirmation。
+    空结果（无字段无条目）时与 build 抽取的 fallback tag 语义对齐：当前问题
+    是标签字段时把转写记为 suggested 候选。幂等：同 client_turn_id 已存在则
+    直接回放该草稿定位（不重复落库）。不 commit——调用方（WS finish）持有
+    事务边界。
+    """
+    session = await load_owned_active_session(db, session_id, owner_user_id)
+    existing = await find_turn_by_client_id(db, session_id, client_turn_id)
+    if existing is not None:
+        draft_id = await _load_active_draft_id_for_session(db, session_id)
+        return draft_id or ""
+    normalized = normalize_profile_answer(transcript)
+    moderation = await moderate_text(db, normalized, field="画像语音转写")
+    if moderation.action == "reject":
+        raise AIInputError("转写内容包含违规信息，已忽略本轮抽取")
+    if moderation.action == "replace" and moderation.display_content:
+        normalized = moderation.display_content
+    try:
+        turn = await _insert_turn(
+            db, session_id, owner_user_id, client_turn_id, normalized,
+            source_type="voice_transcript",
+        )
+    except IntegrityError:
+        # 并发重连重复 finish：回读已有 turn，不产生第二份草稿。
+        turn = await find_turn_by_client_id(db, session_id, client_turn_id)
+        if turn is None:
+            raise
+        draft_id = await _load_active_draft_id_for_session(db, session_id)
+        return draft_id or ""
+    # 空结果（无字段无条目）时与 build 抽取的 fallback tag 语义对齐：
+    # 当前问题是标签字段时把转写记为 suggested 候选；仍为空则不建草稿。
+    if not getattr(result, "fields", ()) and not getattr(result, "entries", ()):
+        fallback = _fallback_tag_field(session, turn)
+        if fallback is not None:
+            result = result.model_copy(update={"fields": (fallback,)})
+    if not getattr(result, "fields", ()) and not getattr(result, "entries", ()):
+        return ""
+    draft_id = await _write_draft(db, session, turn, result)
+    # 语音落库一步到位进入待确认：DRAFT（正常路径）或 EXTRACTING（同会话
+    # 还有未完成的文字抽取任务时）均为合法来源边。
+    if session.status in (
+        ProfileSessionStatus.DRAFT,
+        ProfileSessionStatus.EXTRACTING,
+    ):
+        assert_session_transition(
+            session.status, ProfileSessionStatus.AWAITING_CONFIRMATION
+        )
+        await _update_session_status(
+            db, session_id, ProfileSessionStatus.AWAITING_CONFIRMATION
+        )
+    return draft_id
 
 
 async def load_owned_session(
@@ -1061,12 +1601,98 @@ async def _insert_turn(
     )
 
 
-def _display_value(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, (list, tuple)):
-        return ", ".join(str(item) for item in value)
-    return str(value)
+async def submit_profile_turn(
+    db: AsyncSession,
+    session_id: str,
+    owner_user_id: int,
+    client_turn_id: str,
+    answer_text: str,
+    idempotency_key: str,
+) -> TurnSubmission:
+    """Persist the original answer first, then enqueue a ``profile_extract`` task.
+
+    同 ``client_turn_id`` 重复提交回放原 turn 且不再创建第二个 task；原文先落库，
+    抽取失败不删原文。不 commit。
+    """
+    normalized = normalize_profile_answer(answer_text)
+    session = await load_owned_active_session(db, session_id, owner_user_id)
+    existing = await find_turn_by_client_id(db, session_id, client_turn_id)
+    if existing is not None:
+        return TurnSubmission.replay(existing)
+
+    # 前置内容审核（Task 9）:违规文本不落库、不进 LLM prompt（与 community
+    # 模块一致）。置于幂等回放分支之后——已落库 turn 的重放不因词库事后收紧
+    # 被拒,回放语义优先;审核在首次落库前完成,replace 用审核后的脱敏文本
+    # 替代原文,后续 hash_request/抽取 prompt 使用的均为脱敏文本。
+    # ``manual_review`` 不拦截（与 community 一致,走人工审核队列）。
+    moderation = await moderate_text(db, normalized, field="画像回答")
+    if moderation.action == "reject":
+        raise AIInputError("回答内容包含违规信息,请修改后重试")
+    if moderation.action == "replace" and moderation.display_content:
+        normalized = moderation.display_content
+
+    try:
+        turn = await _insert_turn(db, session_id, owner_user_id, client_turn_id, normalized)
+    except IntegrityError:
+        # 并发同 client_turn_id：唯一键 uk_ai_profile_turn_session_client 冲突
+        # （check-then-insert 的非原子窗口）。回滚后回读原 turn 回放，不创建
+        # 第二个 task。rollback 只作用于本请求事务——赢家的 turn 已在其自身
+        # 事务中落库，绝不会被本请求的回滚误删；enqueue_task 内部的 rollback
+        # 也不会到达这里（冲突发生在 turn 层，早于 task 入队）。
+        await db.rollback()
+        existing = await find_turn_by_client_id(db, session_id, client_turn_id)
+        if existing is None:
+            raise
+        return TurnSubmission.replay(existing)
+
+    task = await enqueue_task(
+        db=db,
+        owner_user_id=owner_user_id,
+        task_type="profile_extract",
+        idempotency_key=idempotency_key,
+        request_hash=hash_request(session_id, client_turn_id, normalized),
+        revisions=session.revision_vector,
+        consent=session.consent_snapshot,
+    )
+    # 受控摘要：只记录定位 session/turn 的引用，不含原文。
+    await db.execute(
+        text(
+            "UPDATE ai_task SET payload_summary = :payload_summary, "
+            "source_revision_json = :source_revision_json, "
+            "consent_snapshot_json = :consent_snapshot_json, "
+            "updated_at = UTC_TIMESTAMP() WHERE task_id = :task_id"
+        ),
+        {
+            "payload_summary": json.dumps(
+                {
+                    "session_id": session_id,
+                    "turn_id": turn.turn_id,
+                    "client_turn_id": client_turn_id,
+                    "subject": session.subject.value,
+                },
+                ensure_ascii=False,
+            ),
+            "source_revision_json": json.dumps(
+                session.revision_vector.as_dict(), ensure_ascii=False
+            ),
+            "consent_snapshot_json": json.dumps(
+                session.consent_snapshot, ensure_ascii=False
+            ),
+            "task_id": task.task_id,
+        },
+    )
+    if session.status is ProfileSessionStatus.DRAFT or (
+        session.status is ProfileSessionStatus.AWAITING_CONFIRMATION
+    ):
+        assert_session_transition(session.status, ProfileSessionStatus.EXTRACTING)
+        await _update_session_status(db, session_id, ProfileSessionStatus.EXTRACTING)
+    await db.flush()
+    return TurnSubmission.accepted(turn=turn, task=task)
+
+
+# ----------------------------------------------------------------------
+# 抽取（Worker handler）与草稿写入
+# ----------------------------------------------------------------------
 
 
 def _content_hash(field_key: str, subject: str, value: Any, source_turn_ids: tuple[str, ...]) -> str:
@@ -1084,6 +1710,14 @@ def _content_hash(field_key: str, subject: str, value: Any, source_turn_ids: tup
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _incoming_extract_fields(result: Any) -> tuple[Any, ...]:
+    return tuple(getattr(result, "fields", ()) or ())
+
+
+def _incoming_extract_entries(result: Any) -> tuple[Any, ...]:
+    return tuple(getattr(result, "entries", ()) or ())
+
+
 def validate_entry_content(content: Any) -> str:
     """entry 正文校验：1..200 字非空白文本，超限/类型错误 AI_INPUT_INVALID。
 
@@ -1098,6 +1732,513 @@ def validate_entry_content(content: Any) -> str:
             f"entry content 长度须为 1..{PROFILE_ENTRY_CONTENT_MAX_LENGTH} 字"
         )
     return normalized
+
+
+def _fallback_tag_field(session: ProfileSession, turn: ProfileTurn) -> ExtractedField | None:
+    """口语化回答抽不出字段时，把本轮所问的标签字段写成 suggested。"""
+    question = session.current_question
+    if question is None or question.field_key not in _TAG_LIST_FIELDS:
+        return None
+    answer = (turn.answer_text or "").strip()
+    if not answer:
+        return None
+    return ExtractedField(
+        field_key=question.field_key,
+        subject=session.subject,
+        value=(answer,),
+        source_quote=answer,
+        source_span=answer,
+        confidence=0.4,
+        needs_confirmation=True,
+        confirmation_status=ProfileFieldConfirmationStatus.SUGGESTED.value,
+        schema_version=PROFILE_SCHEMA_VERSION,
+        prompt_version=PROFILE_PROMPT_VERSION,
+        policy_revision=session.policy_revision or PROFILE_POLICY_REVISION,
+    )
+
+
+async def _copy_unreplaced_draft_fields(
+    db: AsyncSession,
+    *,
+    source_draft_id: str,
+    target_draft_id: str,
+    replaced_keys: set[str],
+) -> None:
+    rows = await _load_draft_field_rows(db, source_draft_id)
+    for row in rows:
+        field_key = str(row["field_key"])
+        if field_key in replaced_keys:
+            continue
+        await db.execute(
+            text(
+                "INSERT INTO ai_profile_draft_field "
+                "(draft_id, field_key, subject, field_kind, category, content, "
+                " replaces_field_key, value_json, display_value, source_type, "
+                " source_turn_ids, source_span, confidence, visibility, consent_scope, schema_version, "
+                " prompt_version, content_hash, confirmation_status, created_at, updated_at) "
+                "VALUES (:draft_id, :field_key, :subject, :field_kind, :category, :content, "
+                " :replaces_field_key, :value_json, :display_value, "
+                " :source_type, :source_turn_ids, :source_span, :confidence, :visibility, "
+                " :consent_scope, :schema_version, :prompt_version, :content_hash, "
+                " :confirmation_status, UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+            ),
+            {
+                "draft_id": target_draft_id,
+                "field_key": field_key,
+                "subject": row.get("subject"),
+                "field_kind": row.get("field_kind") or "structured",
+                "category": row.get("category"),
+                "content": row.get("content"),
+                "replaces_field_key": row.get("replaces_field_key"),
+                "value_json": (
+                    row.get("value_json")
+                    if isinstance(row.get("value_json"), str)
+                    else json.dumps(row.get("value_json") or row.get("value"), ensure_ascii=False)
+                ),
+                "display_value": row.get("display_value"),
+                "source_type": row.get("source_type") or "user_answer",
+                "source_turn_ids": (
+                    row.get("source_turn_ids")
+                    if isinstance(row.get("source_turn_ids"), str)
+                    else json.dumps(list(row.get("source_turn_ids") or []), ensure_ascii=False)
+                ),
+                "source_span": row.get("source_span"),
+                "confidence": float(row.get("confidence") or 0.0),
+                "visibility": row.get("visibility") or "self",
+                "consent_scope": row.get("consent_scope") or PROFILE_CONSENT_SCOPE,
+                "schema_version": row.get("schema_version") or PROFILE_SCHEMA_VERSION,
+                "prompt_version": row.get("prompt_version") or PROFILE_PROMPT_VERSION,
+                "content_hash": row.get("content_hash"),
+                "confirmation_status": row.get("confirmation_status") or "suggested",
+            },
+        )
+
+
+async def _write_draft(
+    db: AsyncSession,
+    session: ProfileSession,
+    turn: ProfileTurn,
+    result: Any,
+) -> str:
+    """Persist one suggested draft with full source evidence; returns draft_id."""
+    draft_id = uuid.uuid4().hex
+    consent_snapshot = session.consent_snapshot or {}
+    await db.execute(
+        text(
+            "INSERT INTO ai_profile_draft "
+            "(draft_id, user_id, subject, session_id, status, expected_revision, "
+            " consent_snapshot_json, policy_revision, prompt_version, schema_version, "
+            " expires_at, created_at, updated_at) "
+            "VALUES (:draft_id, :user_id, :subject, :session_id, 'draft', 0, "
+            " :consent_snapshot_json, :policy_revision, :prompt_version, :schema_version, "
+            " NULL, UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+        ),
+        {
+            "draft_id": draft_id,
+            "user_id": session.owner_user_id,
+            "subject": session.subject.value,
+            "session_id": session.session_id,
+            "consent_snapshot_json": json.dumps(consent_snapshot, ensure_ascii=False),
+            "policy_revision": session.policy_revision or PROFILE_POLICY_REVISION,
+            "prompt_version": PROFILE_PROMPT_VERSION,
+            "schema_version": PROFILE_SCHEMA_VERSION,
+        },
+    )
+    source_turn_ids = (turn.turn_id,)
+    consent_scope = consent_snapshot.get("scope") or PROFILE_CONSENT_SCOPE
+    written_keys: set[str] = set()
+    for field in _incoming_extract_fields(result):
+        value = getattr(field, "value", None)
+        # 主体隔离在字段标签层强制：写草稿字段一律以会话 subject 为准，忽略
+        # provider 返回的 subject（mock provider 恒返回 personal，若信任它，
+        # ideal_partner 会话的草稿字段会被错标成 personal）。不一致时记录但
+        # 不改变会话 subject。
+        subject = session.subject.value
+        provider_subject = getattr(field, "subject", None)
+        if provider_subject and provider_subject != subject:
+            logger.warning(
+                "ai_draft_field_subject_overridden session_id=%s field_key=%s "
+                "provider_subject=%s forced_subject=%s",
+                session.session_id,
+                field.field_key,
+                provider_subject,
+                subject,
+            )
+        # 认证字段不在 allowlist，Schema/网关已拒绝；此处再做一道兜底。
+        if field.field_key not in AI_FIELD_ALLOWLIST:
+            continue
+        await db.execute(
+            text(
+                "INSERT INTO ai_profile_draft_field "
+                "(draft_id, field_key, subject, value_json, display_value, source_type, "
+                " source_turn_ids, source_span, confidence, visibility, consent_scope, schema_version, "
+                " prompt_version, content_hash, confirmation_status, created_at, updated_at) "
+                "VALUES (:draft_id, :field_key, :subject, :value_json, :display_value, "
+                " 'user_answer', :source_turn_ids, :source_span, :confidence, :visibility, "
+                " :consent_scope, :schema_version, :prompt_version, :content_hash, "
+                " 'suggested', UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+            ),
+            {
+                "draft_id": draft_id,
+                "field_key": field.field_key,
+                "subject": subject,
+                "value_json": json.dumps(value, ensure_ascii=False),
+                "display_value": _display_value(value),
+                "source_turn_ids": json.dumps(list(source_turn_ids), ensure_ascii=False),
+                "source_span": getattr(field, "source_span", None)
+                or getattr(field, "source_quote", None),
+                "confidence": float(field.confidence),
+                "visibility": "self",
+                "consent_scope": consent_scope,
+                "schema_version": getattr(field, "schema_version", None) or PROFILE_SCHEMA_VERSION,
+                "prompt_version": PROFILE_PROMPT_VERSION,
+                "content_hash": _content_hash(field.field_key, subject, value, source_turn_ids),
+            },
+        )
+        written_keys.add(field.field_key)
+    # WP-P1：条目候选写入。entry 的 field_key 在写入层生成（provider 不产出），
+    # 形如 entry_{category}_{8hex}，满足 (draft_id, field_key) 唯一键；
+    # value_json 恒 NULL，正文在 content，门槛/进度不消费（_load_field_keys 过滤）。
+    for entry in _incoming_extract_entries(result):
+        subject = session.subject.value
+        content = validate_entry_content(getattr(entry, "content", None))
+        category = getattr(entry, "category", "")
+        if category not in PROFILE_ENTRY_CATEGORIES:
+            raise AIInputError("entry category 非法")
+        entry_key = f"entry_{category}_{uuid.uuid4().hex[:8]}"
+        entry_turn_ids = (turn.turn_id,)
+        await db.execute(
+            text(
+                "INSERT INTO ai_profile_draft_field "
+                "(draft_id, field_key, subject, field_kind, category, content, "
+                " value_json, display_value, source_type, "
+                " source_turn_ids, source_span, confidence, visibility, consent_scope, "
+                " schema_version, prompt_version, content_hash, confirmation_status, "
+                " created_at, updated_at) "
+                "VALUES (:draft_id, :field_key, :subject, 'entry', :category, :content, "
+                " NULL, :display_value, 'user_answer', :source_turn_ids, :source_span, "
+                " :confidence, 'self', :consent_scope, :schema_version, :prompt_version, "
+                " :content_hash, 'suggested', UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+            ),
+            {
+                "draft_id": draft_id,
+                "field_key": entry_key,
+                "subject": subject,
+                "category": category,
+                "content": content,
+                "display_value": content,
+                "source_turn_ids": json.dumps(list(entry_turn_ids), ensure_ascii=False),
+                "source_span": getattr(entry, "source_span", None)
+                or getattr(entry, "source_quote", None),
+                "confidence": float(entry.confidence),
+                "consent_scope": consent_scope,
+                "schema_version": getattr(entry, "schema_version", None)
+                or PROFILE_SCHEMA_VERSION,
+                "prompt_version": PROFILE_PROMPT_VERSION,
+                "content_hash": _content_hash(entry_key, subject, content, entry_turn_ids),
+            },
+        )
+    previous_draft_id = session.draft_id
+    if previous_draft_id:
+        await _copy_unreplaced_draft_fields(
+            db,
+            source_draft_id=previous_draft_id,
+            target_draft_id=draft_id,
+            replaced_keys=written_keys,
+        )
+    return draft_id
+
+
+def _display_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
+
+async def extract_profile_turn(
+    db: AsyncSession, task: AiTaskRecord, worker_id: str
+) -> tuple[str, RevisionVector] | None:
+    """Worker handler for ``task_type == "profile_extract"``.
+
+    只调用 ``AIGateway.structured_extract``；结果只写 ``suggested`` 草稿字段，
+    不产生已发布字段。失败（schema-invalid/timeout/…）只改变任务状态并返回
+    ``None``；成功时推进会话状态 ``extracting -> awaiting_confirmation`` 并返回
+    ``(result_ref, revisions)`` 交给 Worker 的 ``complete_task`` 版本复核。
+    """
+    payload = task.payload_summary or {}
+    session_id = payload.get("session_id")
+    turn_id = payload.get("turn_id")
+    if not session_id or not turn_id:
+        await fail_task(
+            db, task.task_id, worker_id,
+            error_code="AI_FEATURE_DISABLED", retryable=False,
+        )
+        # payload 残缺是终态失败：session_id 可定位时同样自提交置 FAILED，
+        # 否则该会话将永远停在 extracting（payload 完全没有 session_id 时
+        # 无会话可标记，跳过）。
+        if session_id:
+            await _fail_extract_session(db, str(session_id))
+        return None
+
+    session = await load_owned_session(db, str(session_id), task.owner_user_id)
+    turn = await find_turn_by_client_id(db, session.session_id, str(payload.get("client_turn_id") or ""))
+    if turn is None or turn.turn_id != str(turn_id):
+        await fail_task(
+            db, task.task_id, worker_id,
+            error_code="AI_INPUT_INVALID", retryable=False,
+        )
+        # turn 定位失败同样是终态失败：自提交置 FAILED，避免会话卡在 extracting。
+        await _fail_extract_session(db, session.session_id)
+        return None
+
+    context = AITaskContext(
+        task_id=task.task_id,
+        request_id=uuid.uuid4().hex,
+        scene="profile_extract",
+        provider=settings.ai_provider_name,
+        model=settings.ai_model_name,
+        prompt_version=PROFILE_PROMPT_VERSION,
+        schema_version=PROFILE_SCHEMA_VERSION,
+        input_revision=task.source_revision_json or {},
+    )
+
+    if session.session_kind == "master":
+        # 新旅程由 moxiang_candidate_extract 写入私有候选池；这里仅为尚未
+        # 执行退役迁移的旧任务保留终态审计，绝不再生成确认式草稿。
+        await fail_task(
+            db,
+            task.task_id,
+            worker_id,
+            error_code="AI_LEGACY_MOXIANG_RETIRED",
+            retryable=False,
+        )
+        return None
+
+    if session.session_kind == "update":
+        # WP-P4：update 会话走澄清式分支——prompt 换澄清契约，输入带会话
+        # 全部用户陈述与已发布条目摘要（含 field_key，供 modify 定位）。
+        dialogue = await _load_session_dialogue(db, session.session_id)
+        entry_rows = await _load_published_entry_rows(
+            db, int(session.owner_user_id), session.subject.value
+        )
+        request = StructuredExtractRequest(
+            subject=session.subject.value,
+            turn_texts=tuple(dialogue),
+            consent_version=session.consent_version,
+            policy_revision=session.policy_revision or PROFILE_POLICY_REVISION,
+            session_kind="update",
+            entry_digest=_entry_digest_with_keys(entry_rows),
+        )
+        gateway = AIGateway(timeout_seconds=settings.ai_gateway_timeout_seconds)
+        outcome = await gateway.structured_extract(context, request)
+        if outcome.result is None:
+            await fail_task(
+                db, task.task_id, worker_id,
+                error_code=outcome.error_code or "AI_TEMPORARILY_UNAVAILABLE",
+                retryable=outcome.retryable,
+            )
+            if not outcome.retryable:
+                await _fail_extract_session(db, session.session_id)
+            return None
+        return await _handle_update_extract(db, session, turn, outcome, task, worker_id)
+
+    request = StructuredExtractRequest(
+        subject=session.subject.value,
+        turn_texts=(turn.answer_text,),
+        consent_version=session.consent_version,
+        policy_revision=session.policy_revision or PROFILE_POLICY_REVISION,
+        target_field_key=(
+            session.current_question.field_key if session.current_question else None
+        ),
+    )
+    gateway = AIGateway(timeout_seconds=settings.ai_gateway_timeout_seconds)
+    outcome = await gateway.structured_extract(context, request)
+    if outcome.result is None:
+        # 只改任务状态（fail_task/retry_wait），不产生草稿字段。
+        await fail_task(
+            db, task.task_id, worker_id,
+            error_code=outcome.error_code or "AI_TEMPORARILY_UNAVAILABLE",
+            retryable=outcome.retryable,
+        )
+        # 不可重试的终态失败：自提交把会话从 extracting 推进到 failed，并连同
+        # 上面的 fail_task(retryable=False) 一起固化——worker 对返回 None 的
+        # handler 会回滚其事务，不在此处 commit 则 FAILED 永远落不了库，前端
+        # 会一直显示"提取中"；fail_task 不固化则 worker 的重记（硬编码
+        # retryable=True）会把它推进重试循环。可重试的失败由 worker 退避后
+        # 重试，会话状态不动。extracting 守卫由 helper 的 WHERE 条件承担。
+        if not outcome.retryable:
+            await _fail_extract_session(db, session.session_id)
+        return None
+
+    expected_subject = session.subject
+    expected_policy_revision = session.policy_revision or PROFILE_POLICY_REVISION
+    try:
+        fields = tuple(outcome.result.fields)
+        if outcome.result.schema_version != PROFILE_SCHEMA_VERSION:
+            raise ValueError("provider result schema version does not match")
+        for field in fields:
+            # Revalidate at the worker boundary as well as in Pydantic.  A
+            # provider adapter can return a model created with ``model_construct``
+            # or another bypass, so the draft writer must never silently filter
+            # an unknown/authentication field.
+            if not isinstance(field.subject, ProfileSubject):
+                raise TypeError("provider subject is not typed")
+            if field.subject is not expected_subject:
+                raise ValueError("provider subject does not match session")
+            if field.schema_version != PROFILE_SCHEMA_VERSION:
+                raise ValueError("provider schema version does not match")
+            if field.prompt_version != PROFILE_PROMPT_VERSION:
+                raise ValueError("provider prompt version does not match")
+            if field.policy_revision != expected_policy_revision:
+                raise ValueError("provider policy revision does not match")
+            field.value = normalize_profile_extracted_value(
+                field.subject, field.field_key, field.value
+            )
+            if isinstance(field.confidence, bool):
+                raise TypeError("provider confidence must be numeric")
+            confidence = float(field.confidence)
+            if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+                raise ValueError("provider confidence is outside the allowed range")
+            source_span = getattr(field, "source_span", None)
+            source_quote = getattr(field, "source_quote", None)
+            if source_span is not None and not isinstance(source_span, str):
+                raise ValueError("provider source span must be text")
+            if source_quote is not None and not isinstance(source_quote, str):
+                raise ValueError("provider source quote must be text")
+            if source_span is not None and source_quote is not None and source_span != source_quote:
+                raise ValueError("provider source evidence does not agree")
+            if field.confirmation_status != ProfileFieldConfirmationStatus.SUGGESTED.value:
+                raise ValueError("provider confirmation status is not suggested")
+            if not field.needs_confirmation:
+                raise ValueError("provider field does not require confirmation")
+        # entry 与 structured 字段同一套边界复核纪律：provider 适配器可能用
+        # model_construct 绕过校验，写入层绝不静默放行非法条目。
+        entries = tuple(outcome.result.entries)
+        for entry in entries:
+            if not isinstance(entry.subject, ProfileSubject):
+                raise TypeError("provider subject is not typed")
+            if entry.subject is not expected_subject:
+                raise ValueError("provider subject does not match session")
+            if entry.schema_version != PROFILE_SCHEMA_VERSION:
+                raise ValueError("provider schema version does not match")
+            if entry.prompt_version != PROFILE_PROMPT_VERSION:
+                raise ValueError("provider prompt version does not match")
+            if entry.policy_revision != expected_policy_revision:
+                raise ValueError("provider policy revision does not match")
+            if entry.category not in PROFILE_ENTRY_CATEGORIES:
+                raise ValueError("provider entry category is not in the allowlist")
+            validate_entry_content(entry.content)
+            if isinstance(entry.confidence, bool):
+                raise TypeError("provider confidence must be numeric")
+            confidence = float(entry.confidence)
+            if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+                raise ValueError("provider confidence is outside the allowed range")
+            entry_span = getattr(entry, "source_span", None)
+            entry_quote = getattr(entry, "source_quote", None)
+            if entry_span is not None and not isinstance(entry_span, str):
+                raise ValueError("provider source span must be text")
+            if entry_quote is not None and not isinstance(entry_quote, str):
+                raise ValueError("provider source quote must be text")
+            if (
+                entry_span is not None
+                and entry_quote is not None
+                and entry_span != entry_quote
+            ):
+                raise ValueError("provider source evidence does not agree")
+            if entry.confirmation_status != ProfileFieldConfirmationStatus.SUGGESTED.value:
+                raise ValueError("provider entry confirmation status is not suggested")
+            if not entry.needs_confirmation:
+                raise ValueError("provider entry does not require confirmation")
+        if not fields and not entries:
+            fallback = _fallback_tag_field(session, turn)
+            if fallback is None:
+                raise ValueError("provider returned no extractable fields")
+            fields = (fallback,)
+            extract_result = outcome.result.model_copy(update={"fields": fields})
+        else:
+            extract_result = outcome.result
+    except (AttributeError, TypeError, ValueError):
+        # Provider provenance must describe this exact session.  Do not rewrite
+        # a foreign subject or accept fabricated version evidence into a draft.
+        await fail_task(
+            db, task.task_id, worker_id,
+            error_code="AI_INPUT_INVALID", retryable=False,
+        )
+        # 伪造来源/版本证据是终态失败：自提交置 FAILED 并固化 fail_task。
+        await _fail_extract_session(db, session.session_id)
+        return None
+
+    draft_id = await _write_draft(db, session, turn, extract_result)
+    if session.status is ProfileSessionStatus.EXTRACTING:
+        assert_session_transition(
+            session.status, ProfileSessionStatus.AWAITING_CONFIRMATION
+        )
+        await _update_session_status(
+            db, session.session_id, ProfileSessionStatus.AWAITING_CONFIRMATION
+        )
+    return f"profile-draft:{draft_id}", session.revision_vector
+
+
+# ----------------------------------------------------------------------
+# WP-P4：update 会话澄清分支（assistant turn / entry patch 草稿）
+# ----------------------------------------------------------------------
+
+
+async def _load_session_dialogue(db: AsyncSession, session_id: str) -> list[str]:
+    """按序读取会话内全部用户陈述（澄清式 prompt 的对话输入）。"""
+    result = await db.execute(
+        text(
+            "SELECT answer_text FROM ai_profile_turn "
+            "WHERE session_id = :session_id AND role = 'user' ORDER BY turn_no"
+        ),
+        {"session_id": session_id},
+    )
+    return [str(row["answer_text"]) for row in result.mappings().all()]
+
+
+async def _load_published_entry_rows(
+    db: AsyncSession, owner_user_id: int, subject: str
+) -> list[dict[str, Any]]:
+    """读取该维度最近已发布 revision 的条目行（field_key/category/content）。
+
+    只取最新 revision：被后续发布替换的旧条目不再是合法的 modify 目标
+    （历史条目按 append-only 语义保留原位，改写永远作用于当前版本）。
+    """
+    latest = await _first_row(
+        await db.execute(
+            text(
+                "SELECT id FROM ai_profile_revision "
+                "WHERE user_id = :user_id AND subject = :subject "
+                "ORDER BY revision_no DESC, id DESC LIMIT 1"
+            ),
+            {"user_id": owner_user_id, "subject": subject},
+        )
+    )
+    if latest is None:
+        return []
+    result = await db.execute(
+        text(
+            "SELECT field_key, category, content FROM ai_profile_revision_field "
+            "WHERE revision_id = :revision_id AND field_kind = 'entry' ORDER BY id"
+        ),
+        {"revision_id": int(latest["id"])},
+    )
+    return [dict(row) for row in result.mappings().all()]
+
+
+def _entry_digest_with_keys(rows: list[dict[str, Any]]) -> str | None:
+    """把已发布条目行折成「field_key｜分类：内容」摘要，供 modify patch 定位。"""
+    lines: list[str] = []
+    for row in rows:
+        content = str(row.get("content") or "").strip()
+        if not content:
+            continue
+        category = str(row.get("category") or "")
+        label = PROFILE_ENTRY_CATEGORY_LABELS.get(category, category)
+        lines.append(f"{row.get('field_key')}｜{label}：{content}")
+    return "\n".join(lines) or None
 
 
 async def _insert_assistant_turn(
@@ -1154,6 +2295,395 @@ async def _insert_assistant_turn(
     )
 
 
+def _validate_entry_patches(
+    patches: tuple[Any, ...],
+    expected_subject: ProfileSubject,
+    expected_policy_revision: str,
+    existing_entry_keys: set[str],
+) -> None:
+    """entry patch 边界复核（update/master 共用纪律，设计 Task 6 抽出）。
+
+    provider 适配器可能用 ``model_construct`` 绕过校验，写入层绝不静默放行
+    非法条目：伪造证据/白名单外分类是终态失败。逐条校验语义与错误文案与
+    从 ``_handle_update_extract`` 抽出前完全一致（update 分支行为零变化）。
+    """
+    for patch in patches:
+        if not isinstance(patch.subject, ProfileSubject):
+            raise TypeError("provider subject is not typed")
+        if patch.subject is not expected_subject:
+            raise ValueError("provider subject does not match session")
+        if patch.schema_version != PROFILE_SCHEMA_VERSION:
+            raise ValueError("provider schema version does not match")
+        if patch.prompt_version != PROFILE_PROMPT_VERSION:
+            raise ValueError("provider prompt version does not match")
+        if patch.policy_revision != expected_policy_revision:
+            raise ValueError("provider policy revision does not match")
+        if patch.category not in PROFILE_ENTRY_CATEGORIES:
+            raise ValueError("provider patch category is not in the allowlist")
+        validate_entry_content(patch.content)
+        if patch.action == "modify" and not patch.replaces_field_key:
+            raise ValueError("modify patch requires replaces_field_key")
+        if (
+            patch.action == "modify"
+            and str(patch.replaces_field_key) not in existing_entry_keys
+        ):
+            raise ValueError("modify patch replaces_field_key does not exist")
+        if patch.action == "add" and patch.replaces_field_key:
+            raise ValueError("add patch must not carry replaces_field_key")
+        if isinstance(patch.confidence, bool):
+            raise TypeError("provider confidence must be numeric")
+        confidence = float(patch.confidence)
+        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            raise ValueError("provider confidence is outside the allowed range")
+        patch_span = getattr(patch, "source_span", None)
+        patch_quote = getattr(patch, "source_quote", None)
+        if patch_span is not None and not isinstance(patch_span, str):
+            raise ValueError("provider source span must be text")
+        if patch_quote is not None and not isinstance(patch_quote, str):
+            raise ValueError("provider source quote must be text")
+        if (
+            patch_span is not None
+            and patch_quote is not None
+            and patch_span != patch_quote
+        ):
+            raise ValueError("provider source evidence does not agree")
+
+
+async def _handle_update_extract(
+    db: AsyncSession,
+    session: ProfileSession,
+    turn: ProfileTurn,
+    outcome: Any,
+    task: AiTaskRecord,
+    worker_id: str,
+) -> tuple[str, RevisionVector] | None:
+    """update 会话澄清分支（WP-P4）。
+
+    澄清追问 → 写 assistant turn，会话回 draft 等用户答复；patch 候选 →
+    以最近已发布 revision 为底稿（旧字段 confirmed）建更新草稿，patch 以
+    suggested entry 行落草稿（add 直增 / modify 带 replaces_field_key，旧行
+    不动——追加不覆盖是硬约束），会话推进 awaiting_confirmation。
+    版本/证据/分类复核纪律与 build 分支一致；伪造证据是终态失败。不 commit。
+    """
+    expected_subject = session.subject
+    expected_policy_revision = session.policy_revision or PROFILE_POLICY_REVISION
+    result = outcome.result
+    try:
+        if result.schema_version != PROFILE_SCHEMA_VERSION:
+            raise ValueError("provider result schema version does not match")
+        question = result.clarifying_question
+        if question is not None and not str(question).strip():
+            question = None
+        patches = tuple(result.patches)
+        existing_entry_keys = {
+            str(row.get("field_key"))
+            for row in await _load_published_entry_rows(
+                db, int(session.owner_user_id), session.subject.value
+            )
+        }
+        _validate_entry_patches(
+            patches, expected_subject, expected_policy_revision, existing_entry_keys
+        )
+        if patches and question:
+            raise ValueError("provider must not return both question and patches")
+        if not patches and not question:
+            raise ValueError("provider returned neither clarifying question nor patches")
+    except (AttributeError, TypeError, ValueError):
+        await fail_task(
+            db, task.task_id, worker_id,
+            error_code="AI_INPUT_INVALID", retryable=False,
+        )
+        await _fail_extract_session(db, session.session_id)
+        return None
+
+    if question:
+        await _insert_assistant_turn(db, session, str(question).strip())
+        if session.status is ProfileSessionStatus.EXTRACTING:
+            assert_session_transition(session.status, ProfileSessionStatus.DRAFT)
+            await _update_session_status(
+                db, session.session_id, ProfileSessionStatus.DRAFT
+            )
+        return f"profile-update:question:{session.session_id}", session.revision_vector
+
+    draft_id = await _write_update_draft(db, session, turn, patches)
+    if session.status is ProfileSessionStatus.EXTRACTING:
+        assert_session_transition(
+            session.status, ProfileSessionStatus.AWAITING_CONFIRMATION
+        )
+        await _update_session_status(
+            db, session.session_id, ProfileSessionStatus.AWAITING_CONFIRMATION
+        )
+    return f"profile-draft:{draft_id}", session.revision_vector
+
+
+async def _write_update_draft(
+    db: AsyncSession,
+    session: ProfileSession,
+    turn: ProfileTurn,
+    patches: tuple[Any, ...],
+) -> str:
+    """以最近已发布 revision 为底稿建更新草稿；patch 以 suggested entry 落草稿。
+
+    底稿字段（structured + entry）复制为 ``confirmed``——已发布内容无需二次
+    确认，发布新 revision 才不会丢失旧字段；patch 行 ``suggested``，由用户
+    经既有 PATCH 草稿流程确认。旧行永不删除/改写（追加不覆盖）。不 commit。
+    """
+    subject = session.subject.value
+    consent_snapshot = session.consent_snapshot or {}
+    consent_scope = consent_snapshot.get("scope") or PROFILE_CONSENT_SCOPE
+    draft_id = uuid.uuid4().hex
+    await db.execute(
+        text(
+            "INSERT INTO ai_profile_draft "
+            "(draft_id, user_id, subject, session_id, status, expected_revision, "
+            " consent_snapshot_json, policy_revision, prompt_version, schema_version, "
+            " expires_at, created_at, updated_at) "
+            "VALUES (:draft_id, :user_id, :subject, :session_id, 'draft', 0, "
+            " :consent_snapshot_json, :policy_revision, :prompt_version, :schema_version, "
+            " NULL, UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+        ),
+        {
+            "draft_id": draft_id,
+            "user_id": session.owner_user_id,
+            "subject": subject,
+            "session_id": session.session_id,
+            "consent_snapshot_json": json.dumps(consent_snapshot, ensure_ascii=False),
+            "policy_revision": session.policy_revision or PROFILE_POLICY_REVISION,
+            "prompt_version": PROFILE_PROMPT_VERSION,
+            "schema_version": PROFILE_SCHEMA_VERSION,
+        },
+    )
+    latest = await _first_row(
+        await db.execute(
+            text(
+                "SELECT id FROM ai_profile_revision "
+                "WHERE user_id = :user_id AND subject = :subject "
+                "ORDER BY revision_no DESC, id DESC LIMIT 1"
+            ),
+            {"user_id": session.owner_user_id, "subject": subject},
+        )
+    )
+    if latest is not None:
+        base_rows = (
+            await db.execute(
+                text(
+                    "SELECT field_key, subject, field_kind, category, content, "
+                    "replaces_field_key, value_json, display_value, confidence, "
+                    "source_type, source_turn_ids, source_span, content_hash, "
+                    "schema_version, prompt_version "
+                    "FROM ai_profile_revision_field WHERE revision_id = :revision_id"
+                ),
+                {"revision_id": int(latest["id"])},
+            )
+        ).mappings().all()
+        for row in base_rows:
+            value_json = row.get("value_json")
+            await db.execute(
+                text(
+                    "INSERT INTO ai_profile_draft_field "
+                    "(draft_id, field_key, subject, field_kind, category, content, "
+                    " replaces_field_key, value_json, display_value, source_type, "
+                    " source_turn_ids, source_span, confidence, visibility, consent_scope, "
+                    " schema_version, prompt_version, content_hash, confirmation_status, "
+                    " created_at, updated_at) "
+                    "VALUES (:draft_id, :field_key, :subject, :field_kind, :category, :content, "
+                    " :replaces_field_key, :value_json, :display_value, :source_type, "
+                    " :source_turn_ids, :source_span, :confidence, 'self', :consent_scope, "
+                    " :schema_version, :prompt_version, :content_hash, 'confirmed', "
+                    " UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+                ),
+                {
+                    "draft_id": draft_id,
+                    "field_key": str(row["field_key"]),
+                    "subject": subject,
+                    "field_kind": str(row.get("field_kind") or "structured"),
+                    "category": row.get("category"),
+                    "content": row.get("content"),
+                    "replaces_field_key": row.get("replaces_field_key"),
+                    "value_json": (
+                        value_json
+                        if isinstance(value_json, str)
+                        else json.dumps(_maybe_json(value_json), ensure_ascii=False)
+                    ),
+                    "display_value": row.get("display_value"),
+                    "source_type": str(row.get("source_type") or "user_answer"),
+                    "source_turn_ids": row.get("source_turn_ids"),
+                    "source_span": row.get("source_span"),
+                    "confidence": float(row.get("confidence") or 0.0),
+                    "consent_scope": consent_scope,
+                    "schema_version": str(row.get("schema_version") or PROFILE_SCHEMA_VERSION),
+                    "prompt_version": row.get("prompt_version"),
+                    "content_hash": str(row.get("content_hash") or ""),
+                },
+            )
+    patch_turn_ids = (turn.turn_id,)
+    for patch in patches:
+        content = validate_entry_content(patch.content)
+        entry_key = f"entry_{patch.category}_{uuid.uuid4().hex[:8]}"
+        await db.execute(
+            text(
+                "INSERT INTO ai_profile_draft_field "
+                "(draft_id, field_key, subject, field_kind, category, content, "
+                " replaces_field_key, value_json, display_value, source_type, "
+                " source_turn_ids, source_span, confidence, visibility, consent_scope, "
+                " schema_version, prompt_version, content_hash, confirmation_status, "
+                " created_at, updated_at) "
+                "VALUES (:draft_id, :field_key, :subject, 'entry', :category, :content, "
+                " :replaces_field_key, NULL, :display_value, 'user_answer', "
+                " :source_turn_ids, :source_span, :confidence, 'self', :consent_scope, "
+                " :schema_version, :prompt_version, :content_hash, 'suggested', "
+                " UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+            ),
+            {
+                "draft_id": draft_id,
+                "field_key": entry_key,
+                "subject": subject,
+                "category": patch.category,
+                "content": content,
+                "replaces_field_key": (
+                    str(patch.replaces_field_key) if patch.replaces_field_key else None
+                ),
+                "display_value": content,
+                "source_turn_ids": json.dumps(list(patch_turn_ids), ensure_ascii=False),
+                "source_span": getattr(patch, "source_span", None)
+                or getattr(patch, "source_quote", None),
+                "confidence": float(patch.confidence),
+                "consent_scope": consent_scope,
+                "schema_version": PROFILE_SCHEMA_VERSION,
+                "prompt_version": PROFILE_PROMPT_VERSION,
+                "content_hash": _content_hash(entry_key, subject, content, patch_turn_ids),
+            },
+        )
+    return draft_id
+
+
+# ----------------------------------------------------------------------
+# 暂停 / 恢复 / 软删除
+# ----------------------------------------------------------------------
+
+
+async def skip_profile_question(
+    db: AsyncSession,
+    session_id: str,
+    owner_user_id: int,
+    field_key: str,
+    idempotency_key: str,
+) -> ProfileSession:
+    """Skip the current interview question without confirming a field.
+
+    跳过不写草稿、不计入 confirmed 覆盖度；同一会话内该字段不再追问。
+    重复跳过当前已跳过字段时幂等返回当前会话。不 commit。
+    """
+    del idempotency_key
+    session = await load_owned_active_session(db, session_id, owner_user_id)
+    if session.current_question is None:
+        raise AIInputError("当前没有可跳过的问题")
+    if field_key not in AI_FIELD_ALLOWLIST:
+        raise AIInputError("field_key 不在允许的画像字段内")
+    if session.current_question.field_key != field_key:
+        raise AIInputError("只能跳过当前问题")
+    if field_key in session.skipped_keys:
+        return session
+    skipped = sorted(session.skipped_keys | {field_key})
+    await db.execute(
+        text(
+            "UPDATE ai_profile_session SET skipped_field_keys = :skipped_field_keys, "
+            "updated_at = UTC_TIMESTAMP() WHERE session_id = :session_id"
+        ),
+        {
+            "session_id": session_id,
+            "skipped_field_keys": json.dumps(skipped, ensure_ascii=False),
+        },
+    )
+    return await load_owned_session(db, session_id, owner_user_id)
+
+
+async def pause_profile_session(
+    db: AsyncSession, session_id: str, owner_user_id: int
+) -> ProfileSession:
+    """Pause a session only from draft/extracting/awaiting_confirmation.
+
+    重复暂停返回当前状态；stale 会话 409，已结束会话按 404 处理。
+    """
+    session = await load_owned_session(db, session_id, owner_user_id)
+    if session.status is ProfileSessionStatus.STALE:
+        raise ProfileSessionStale()
+    if session.status in _STALE_STATUSES:
+        raise ProfileSessionNotFound()
+    if _is_expired(session.expires_at):
+        await _mark_stale(db, session_id)
+        raise ProfileSessionStale()
+    if session.status is ProfileSessionStatus.PAUSED:
+        return session
+    if session.status not in _PAUSEABLE:
+        raise ProfileSessionNotFound()
+    assert_session_transition(session.status, ProfileSessionStatus.PAUSED)
+    await _update_session_status(db, session_id, ProfileSessionStatus.PAUSED)
+    return await load_owned_session(db, session_id, owner_user_id)
+
+
+async def resume_profile_session(
+    db: AsyncSession, session_id: str, owner_user_id: int
+) -> ProfileSession:
+    """Resume a paused session; stale or expired sessions are 409.
+
+    非 stale/cancelled 均可恢复；恢复不改变已保存 turn。暂停前的真实状态无法在
+    冻结的 session 表上持久化，因此恢复到 draft（有草稿字段则 awaiting_confirmation）。
+    """
+    session = await load_owned_session(db, session_id, owner_user_id)
+    if session.status is ProfileSessionStatus.STALE:
+        raise ProfileSessionStale()
+    if session.status is ProfileSessionStatus.CANCELLED:
+        raise ProfileSessionNotFound()
+    if _is_expired(session.expires_at):
+        await _mark_stale(db, session_id)
+        raise ProfileSessionStale()
+    if session.status is ProfileSessionStatus.PAUSED:
+        target = (
+            ProfileSessionStatus.AWAITING_CONFIRMATION
+            if session.field_keys
+            else ProfileSessionStatus.DRAFT
+        )
+        assert_session_transition(session.status, target)
+        await _update_session_status(db, session_id, target)
+    return await load_owned_session(db, session_id, owner_user_id)
+
+
+async def delete_profile_session(
+    db: AsyncSession,
+    session_id: str,
+    owner_user_id: int,
+    idempotency_key: str,
+) -> CleanupTaskSubmission:
+    """Soft-delete a session synchronously and enqueue a ``cleanup`` task.
+
+    软删除幂等：会话先隐藏（active_status=0），重复删除回放同一 cleanup task
+    （同 key）。已发布 revision 不隐式删除（Task 8 处理清理与删除传播）。
+    """
+    session = await load_owned_session(db, session_id, owner_user_id)
+    await db.execute(
+        text(
+            "UPDATE ai_profile_session SET status = 'cancelled', active_status = 0, "
+            "ended_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() "
+            "WHERE session_id = :session_id"
+        ),
+        {"session_id": session_id},
+    )
+    task = await enqueue_task(
+        db=db,
+        owner_user_id=owner_user_id,
+        task_type="cleanup",
+        idempotency_key=idempotency_key,
+        request_hash=hash_request(session_id, "delete", ""),
+        revisions=session.revision_vector,
+        consent=None,
+    )
+    return CleanupTaskSubmission(
+        task_id=task.task_id, status=task.status
+    )
+
+
+# ----------------------------------------------------------------------
 # Task 8：草稿读取、字段确认、confirmed-only 发布、历史与删除传播
 # ----------------------------------------------------------------------
 
@@ -1417,7 +2947,6 @@ def _draft_response_payload(draft: ProfileDraft) -> dict[str, Any]:
         "schema_version": draft.schema_version,
         "consent_snapshot": draft.consent_snapshot,
         "session_id": draft.session_id,
-        "synced_profile_fields": list(draft.synced_profile_fields),
         "fields": [
             {
                 "field_key": item.field_key,
@@ -1485,7 +3014,6 @@ def _draft_from_response_payload(
         operation_history=fallback.operation_history,
         session_id=payload.get("session_id") or fallback.session_id,
         fields=fields,
-        synced_profile_fields=tuple(payload.get("synced_profile_fields") or ()),
         expires_at=fallback.expires_at,
         created_at=fallback.created_at,
         updated_at=fallback.updated_at,
@@ -1780,29 +3308,6 @@ async def confirm_profile_draft(
         )
     await _forward_draft_actions_to_memory(db, draft, actions)
     updated = await load_owned_draft(db, draft_id, owner_user_id)
-    synced_fields: list[str] = []
-    if draft.subject == "personal" and settings.ai_profile_sync_enabled:
-        confirmed_action_keys = {
-            a.field_key
-            for a in actions
-            if a.action in (ProfileFieldPatchAction.CONFIRM, ProfileFieldPatchAction.REPLACE)
-        }
-        if confirmed_action_keys:
-            fields_to_sync = {
-                f.field_key: f.value
-                for f in updated.fields
-                if f.field_key in confirmed_action_keys and f.field_kind == "structured"
-            }
-            if fields_to_sync:
-                from app.services.profile import sync_ai_confirmed_fields_to_profile
-
-                synced_fields = await sync_ai_confirmed_fields_to_profile(
-                    db, owner_user_id, fields_to_sync
-                )
-    if synced_fields:
-        import dataclasses
-
-        updated = dataclasses.replace(updated, synced_profile_fields=tuple(synced_fields))
     if idempotency_key:
         history = dict(updated.operation_history or {"operations": {}})
         operations = dict(history.get("operations") or {})
@@ -2306,22 +3811,7 @@ async def publish_profile_draft(
         revisions=published_vector,
         consent=draft.consent_snapshot or None,
     )
-    synced_fields: list[str] = []
-    if draft.subject == "personal" and settings.ai_profile_sync_enabled:
-        fields_to_sync = {
-            f.field_key: f.value
-            for f in fields
-            if f.field_kind == "structured"
-        }
-        if fields_to_sync:
-            from app.services.profile import sync_ai_confirmed_fields_to_profile
-
-            synced_fields = await sync_ai_confirmed_fields_to_profile(
-                db, owner_user_id, fields_to_sync
-            )
-    return TaskSubmission.accepted(
-        task, revision, narrative_task.task_id, synced_profile_fields=synced_fields
-    )
+    return TaskSubmission.accepted(task, revision, narrative_task.task_id)
 
 
 async def _enqueue_narrative_task(
@@ -2423,7 +3913,7 @@ async def restore_profile_revision(
     旧 revision 只读、不更新旧行；新草稿字段回填 ``suggested``（再由用户确认后
     发布）。新草稿 ``expected_revision=0``，可正常走 confirm → publish 流程。
 
-    consent 校验与会话创建路径一致：恢复前必须有有效
+    consent 校验与 ``create_profile_session`` 一致：恢复前必须有有效
     ``profile_text_extract`` 授权（revoked_at IS NULL），否则抛
     ``AIConsentRequired``，不允许用已撤销授权的快照静默创建草稿。
     """
@@ -2451,7 +3941,7 @@ async def restore_profile_revision(
     now = _now_utc()
     consent = await _load_latest_consent(db, owner_user_id, PROFILE_CONSENT_SCOPE)
     if consent is None:
-        # consent 已撤销或不存在时禁止恢复（与会话创建路径一致），
+        # consent 已撤销或不存在时禁止恢复（与 ``create_profile_session`` 一致），
         # 不允许用已撤销授权的快照静默创建草稿（缺陷 14）。
         raise AIConsentRequired()
     consent_snapshot = _consent_snapshot(consent)
@@ -3354,7 +4844,7 @@ async def generate_profile_narrative_handler(
 
     result = outcome.result
 
-    # 5. Worker 边界复核（三道校验末道）
+    # 5. Worker 边界复核（与 extract_profile_turn 一致的三道校验末道）
     try:
         if result.schema_version != NARRATIVE_SCHEMA_VERSION:
             raise ValueError("narrative schema version does not match")
@@ -3369,9 +4859,6 @@ async def generate_profile_narrative_handler(
         # subject 一致性：personal 画像不应返回 ideal_weights
         if subject_value == ProfileSubject.PERSONAL.value and result.ideal_weights:
             raise ValueError("personal narrative must not have ideal_weights")
-        # ideal_partner 剥离 emotional_insight（仅 personal 主体生成）
-        if subject_value == ProfileSubject.IDEAL_PARTNER.value and result.emotional_insight is not None:
-            result = result.model_copy(update={"emotional_insight": None})
     except (AttributeError, TypeError, ValueError):
         await fail_task(
             db, task.task_id, worker_id,
@@ -3473,32 +4960,7 @@ async def confirm_profile_narrative(
         ),
         {"user_id": user_id, "subject": subject},
     )
-    confirmed = bool(result.rowcount)
-    if confirmed and subject == "personal" and settings.ai_profile_sync_enabled:
-        try:
-            from app.services.profile import sync_ai_confirmed_fields_to_profile
-
-            summary_row = (
-                await db.execute(
-                    text(
-                        "SELECT summary_text FROM ai_profile_summary "
-                        "WHERE user_id = :user_id AND subject = 'personal' "
-                        "ORDER BY created_at DESC LIMIT 1"
-                    ),
-                    {"user_id": user_id},
-                )
-            ).mappings().first()
-            if summary_row and summary_row.get("summary_text"):
-                raw_data = json.loads(str(summary_row["summary_text"]))
-                if isinstance(raw_data, dict) and raw_data.get("insight"):
-                    insight_str = str(raw_data["insight"]).strip()
-                    if insight_str:
-                        await sync_ai_confirmed_fields_to_profile(
-                            db, user_id, {"self_intro": insight_str}
-                        )
-        except Exception as e:
-            logger.warning("confirm_profile_narrative self_intro sync failed: %s", e)
-    return confirmed
+    return bool(result.rowcount)
 
 
 async def request_narrative_regenerate(

@@ -400,7 +400,7 @@ async def grant_consent(
         {"user_id": user_id, "scope": scope},
     )
     # 缺陷40：捕获 INSERT 唯一键冲突（并发重复授予），回滚后回读既有操作记录，
-    # 与会话创建的 IntegrityError→回读模式一致。
+    # 与 create_profile_session 的 IntegrityError→回读模式一致。
     try:
         await db.execute(
             text(

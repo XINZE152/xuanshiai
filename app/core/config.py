@@ -142,16 +142,6 @@ class Settings(BaseSettings):
     # 良配对齐：默认 7/10 ≈ 67%，"无需完成全部题目，进度 67% 左右可提前
     # 建构画像"。进度提示与发布硬门槛共用此值，避免两套数字漂移。
     ai_profile_min_fields: int = Field(default=7, ge=1, le=20)
-    # Dual-Sync 门禁：墨相师对话确认字段是否反哺用户基础资料（PRODUCT.md「Dual-Sync」）。
-    # 默认关闭；开启需在 .env 设 AI_PROFILE_SYNC_ENABLED=true。关闭时确认/发布照常，
-    # 仅跳过反哺写入，响应 synced_profile_fields 恒为空。
-    ai_profile_sync_enabled: bool = False
-    # 墨相特质名片外显门禁：是否把已确认的个人画像特质（心性称号 + 特质标签）
-    # 装配进「他人可见」的 ProfileResponse（GET /users/{id}/profile 等公开路径）。
-    # 默认关闭——PRODUCT.md 既有纪律为「不向他人暴露对方画像原文」，故公开外显
-    # 需显式开启；关闭时公开响应恒为空值，本人查看自己不受影响。
-    # 注意：依恋风格（attachment_style）为心理推断，任何情况下都不进入公开响应。
-    ai_profile_public_badge_enabled: bool = False
     # 匹配度外显灰度（方案 WP-C2 / 决策 D6）：off=影子运行不外显（现状）；
     # bucket=按 viewer 稳定哈希放量 ai_compatibility_display_bucket_pct%；
     # on=全量外显。仅改变 ai_compatibility_snapshot.display_eligible 的写入值，
@@ -427,7 +417,6 @@ class Settings(BaseSettings):
                 self.ai_recommend_enabled,
                 self.ai_voice_enabled,
                 self.ai_moxiang_journey_enabled,
-                self.ai_profile_public_badge_enabled,
             )
         )
         if not any_ai_enabled:

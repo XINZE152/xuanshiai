@@ -328,6 +328,7 @@ def _revisions_changed(stored: dict[str, Any] | None, current: Any) -> bool:
 
 
 _TASK_FEATURES = {
+    "profile_extract": AiFeature.PROFILE,
     "moxiang_candidate_extract": AiFeature.PROFILE,
     "profile_projection": AiFeature.PROFILE,
     "search_parse": AiFeature.SEARCH,

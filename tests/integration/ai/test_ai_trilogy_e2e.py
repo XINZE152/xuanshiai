@@ -25,15 +25,11 @@ from app.services.ai.compatibility import (
 from app.services.ai.consents import grant_consent, list_consents
 from app.services.ai.profile import (
     confirm_profile_draft,
-    create_master_session,
+    create_profile_session,
     confirm_profile_narrative,
     load_published_narrative,
     publish_profile_draft,
-)
-from app.services.ai.journey import (
-    maybe_create_build_invite,
-    resolve_journey_invite,
-    submit_journey_turn,
+    submit_profile_turn,
 )
 from app.services.ai.search import confirm_search_draft, read_materialized_search_results
 from app.services.ai.tasks import claim_tasks
@@ -206,39 +202,34 @@ async def _publish_subject_via_real_session(
     subject: ProfileSubject,
 ) -> None:
     async with factory() as db:
-        session = await create_master_session(db, user_id, subject, PROFILE_SCOPE[1])
-        for index, answer in enumerate(
-            (
-                "我住杭州，周末喜欢旅行和看展。",
-                "我从事互联网技术工作，也喜欢户外活动。",
-                "我想认真交往，以结婚为目标。",
-                "我目前未婚，本科学历，身高一米七二。",
-            ),
-            start=1,
-        ):
-            submission = await submit_journey_turn(
-                db,
-                session_id=session.session_id,
-                owner_user_id=user_id,
-                client_turn_id=f"turn-{user_id}-{subject.value}-{index}",
-                answer_text=answer,
-            )
-            assert submission.task_id
-            await db.commit()
+        session = await create_profile_session(
+            db,
+            user_id,
+            subject,
+            PROFILE_SCOPE[1],
+            f"session-{user_id}-{subject.value}",
+        )
+        accepted = await submit_profile_turn(
+            db,
+            session.session_id,
+            user_id,
+            f"turn-{user_id}-{subject.value}",
+            "按固定 mock 夹具生成可确认字段。",
+            f"extract-{user_id}-{subject.value}",
+        )
+        assert accepted.task_id
+        await db.commit()
 
     await _run_worker_round(factory, f"worker-extract-{user_id}-{subject.value}")
 
     async with factory() as db:
-        # 旅程候选达到阈值后建档邀请 → 接受 → 生成待确认草稿（等价 WS 轮询行为）。
-        invite = await maybe_create_build_invite(
-            db, session_id=session.session_id, user_id=user_id, subject=subject.value
-        )
-        assert invite is not None, "mock 候选必须触发建档邀请"
-        _, draft_id = await resolve_journey_invite(
-            db,
-            invite_id=invite.invite_id,
-            user_id=user_id,
-            resolution="accepted",
+        draft_id = await db.scalar(
+            text(
+                "SELECT draft_id FROM ai_profile_draft "
+                "WHERE user_id = :user_id AND subject = :subject "
+                "ORDER BY created_at DESC LIMIT 1"
+            ),
+            {"user_id": user_id, "subject": subject.value},
         )
         assert draft_id
         draft = await db.execute(

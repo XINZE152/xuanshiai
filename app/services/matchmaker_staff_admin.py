@@ -90,6 +90,7 @@ SELECT_STAFF = """SELECT u.id, u.avatar, u.nickname, u.phone, u.created_at, u.up
     a.id account_id, a.username,
     o.id store_id, COALESCE(o.display_name, o.name) store_name,
     (SELECT COUNT(*) FROM matchmaker_service s WHERE s.matchmaker_id = u.id AND s.status = 2) success_count,
+    (SELECT COUNT(*) FROM matchmaker_menu_permission mmp WHERE mmp.matchmaker_user_id = u.id) menu_permission_count,
     (SELECT COALESCE(SUM(e.amount), 0) FROM commission_entry e WHERE e.beneficiary_type = 'service_matchmaker' AND e.beneficiary_id = u.id AND e.status <> 'REVERSED') commission_amount
     FROM users u JOIN user_matchmaker_apply ma ON ma.user_id = u.id AND ma.application_type = 'service_matchmaker' AND ma.status = 1
     LEFT JOIN matchmaker_profile p ON p.user_id = u.id
@@ -127,6 +128,7 @@ async def list_staff(
     store_id: int | None,
     level_id: int | None,
     locked: bool | None,
+    in_store: bool | None = None,
 ) -> MatchmakerStaffPage:
     conditions = ["1=1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
@@ -144,6 +146,9 @@ async def list_staff(
     if locked is not None:
         conditions.append("p.locked = :locked")
         params["locked"] = int(locked)
+    if in_store is not None:
+        # in_store=True 只返回已挂靠门店的分店红娘；False 只返回未挂门店的总店红娘
+        conditions.append("om.id IS NOT NULL" if in_store else "om.id IS NULL")
     scope = admin.scope_condition(organization_column="o.id", params=params, user_column="u.id")
     conditions.append(scope)
     where = " AND ".join(conditions)

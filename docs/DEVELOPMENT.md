@@ -297,9 +297,7 @@ logs/        本地日志目录
 
 规则正文预留在 `PROJECT_RULES.md`，由项目负责人持续补充。
 
-## 十、AI 功能（墨相师·画像/搜索/匹配度）运行说明
-
-> 命名说明：墨相师（Moxiang）就是 AI 画像功能的产品更名；旧对话式画像 REST 问答接口与 `profile_extract` 任务已于 2026-09-11 删除，画像建构统一走墨相师旅程（WS `/voice/moxiang-master` + `/ai/moxiang/*`）。
+## 十、AI 功能（画像/搜索/匹配度）运行说明
 
 AI 功能一期全部默认关闭。开发/测试环境可通过 `.env` 打开开关并使用 `mock` Provider；生产环境在 `ai_policy_approved`、`ai_provider_approved`、`ai_retention_policy_version` 未全部满足且 Provider 非 mock 之前，应用配置校验会失败，对外恒返回 `503 AI_FEATURE_DISABLED`（retryable=false），普通资料编辑与手工筛选不受影响。
 
@@ -308,7 +306,7 @@ AI 功能一期全部默认关闭。开发/测试环境可通过 `.env` 打开�
 | 配置项 | 用途 | 默认值 |
 | --- | --- | --- |
 | `AI_MASTER_ENABLED` | AI 总开关 | `false` |
-| `AI_PROFILE_ENABLED` | AI 画像（墨相师）模块开关 | `false` |
+| `AI_PROFILE_ENABLED` | AI 画像模块开关 | `false` |
 | `AI_SEARCH_ENABLED` | AI 搜索模块开关 | `false` |
 | `AI_COMPATIBILITY_SHADOW_ENABLED` | 匹配度 shadow 模块开关 | `false` |
 | `AI_POLICY_APPROVED` | 合规批准标记（生产启用前置） | `false` |
@@ -336,9 +334,8 @@ uv run python -m app.workers.ai_worker
 uv run python -m app.workers.ai_worker --batch-size 20
 ```
 
-- 业务 handler 在导入时全部显式注册：`moxiang_candidate_extract`（墨相师旅程
-  候选抽取）/ `search_parse` / `search_execute` / `compatibility` /
-  `profile_projection`（发布后投影重建）/ `profile_narrative`（叙事层生成）/
+- 业务 handler 在导入时全部显式注册：`profile_extract` / `search_parse` /
+  `search_execute` / `compatibility` / `profile_projection`（发布后投影重建）/
   `cleanup`（删除/撤回物理清理）。独立 `python -m app.workers.ai_worker`
   进程即可处理全部 `ai_task` 业务任务，不依赖路由导入的副作用注册。
 - 没有已注册业务 handler 时 Worker 绝不触碰数据库（`--once` 非 dry-run 也是纯只读空转）。

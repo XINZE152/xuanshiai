@@ -7,11 +7,7 @@
   `session_ready` 和聊天内即时确认候选已删除；客户端改处理 `journey_ready`、
   `extraction_status`、`journey_progress`。
 - 新进度是六维理解覆盖度，不是已确认或已发布资料数。正式建档、确认和发布仍复用
-  原邀请、确认卡和发布能力（REST 契约见 [`AI画像.md`](AI画像.md)）。
-- **2026-09-11，命名与范围声明：墨相师（Moxiang）就是 AI 画像功能的产品更名。**
-  旧对话式画像 REST 问答入口（`/ai/profile-sessions*` 9 个接口）与
-  `profile_extract` 任务已删除，画像建构统一走本 WS 的 `moxiang_journey` 旅程；
-  草稿确认/发布/历史/叙事仍走 [`AI画像.md`](AI画像.md) 的发布链 REST。
+  原邀请、确认卡和发布能力。
 
 ## 1. 连接与鉴权
 

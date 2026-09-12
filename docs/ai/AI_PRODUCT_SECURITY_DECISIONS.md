@@ -11,5 +11,3 @@
 - 生产启用是功能门禁：必须同时具备 `ai_policy_approved`、`ai_provider_approved` 和有效的 `ai_retention_policy_version`，生产 provider 非 mock，并取得合规批准与 Provider 批准。
 - 合规、Provider 或保留策略未批准，或任一生产启用门禁未满足时返回 HTTP 503 AI_FEATURE_DISABLED（retryable=false）。
 - 普通日志不得写入手机号、身份证、精确位置、原始 IP、原始 prompt、原始 Provider 响应、隐藏资料或凭据。
-- 2026-09 决策：墨相师对话反哺基础资料（Dual-Sync）严格挂点在服务端（confirm_draft、publish_draft、confirm_narrative）。认证保护优先：若 user_auth.education_verified == 2，决不可通过 AI 反哺覆盖学历；基础资料严格只补空、不覆盖已有值；仅 personal 主体生效，ideal_partner 伴侣字段严格隔离。
-- 2026-09 决策：墨相海报与情感透视（依恋四型、相处闪光点、安全边界、知遇寄语）执行严格脱敏铁律，海报只渲染白名单脱敏字段，绝不允许渲染用户真实姓名、手机号、微信号、公司名或精确地理位置。

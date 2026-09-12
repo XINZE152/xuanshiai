@@ -19,7 +19,7 @@
 
 | scope | consent_version | 用途 |
 |---|---|---|
-| `profile_text_extract` | `profile-text-v1` | 画像文字抽取（墨相师旅程，原 M04 问答抽取已删除） |
+| `profile_text_extract` | `profile-text-v1` | M04 画像文字抽取 |
 | `search_parse` | `search-parse-v1` | M03 搜索条件解析 |
 | `compatibility_shadow` | `compatibility-shadow-v1` | M06 兼容度 shadow 计算 |
 
@@ -186,7 +186,7 @@ Content-Type: application/json
 ### 调用顺序
 1. `GET /consents` → 获取 `privacy_revision`
 2. `PUT /consents/{scope}` → 授予（使用对应 scope 的 `consent_version`）
-3. 使用 AI 功能（墨相师·画像/搜索/匹配度）
+3. 使用 AI 功能（画像/搜索/匹配度）
 4. `DELETE /consents/{scope}` → 撤回（响应返回前数据不可读）
 
 ### 幂等与防重

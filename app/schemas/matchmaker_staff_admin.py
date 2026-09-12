@@ -45,6 +45,7 @@ class MatchmakerStaffItem(BaseModel):
     commission_amount: Decimal = Decimal("0.00")
     locked: bool = False
     visible: bool = True
+    menu_permission_count: int = 0
     description: str | None = None
     slogan: str | None = None
     sort: int = 0

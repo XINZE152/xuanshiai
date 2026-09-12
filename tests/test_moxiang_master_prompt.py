@@ -342,14 +342,23 @@ def test_extract_prompt_cue_words_cover_colloquial_speech() -> None:
 
 
 def test_category_whitelist_shared_and_colloquial() -> None:
-    """category 白名单两处共用同一常量（_UPDATE_SYSTEM_HEADER 随问答流删除），且带口语线索词。"""
+    """category 白名单三处共用同一常量，且带口语线索词。"""
     from app.services.ai.prompts import profile_extract
 
     shared = profile_extract._CATEGORY_WHITELIST
     assert shared in profile_extract._ENTRY_GUIDE
+    assert shared in profile_extract._UPDATE_SYSTEM_HEADER
     assert shared in profile_extract._MASTER_SYSTEM_HEADER
     for cue in ("社恐", "慢热", "夜猫子", "点外卖", "考公考编"):
         assert cue in shared
+
+
+def test_update_prompt_accepts_colloquial_preference_markers() -> None:
+    """愿遇之相偏好确认词组要收口语变体（我喜欢/吃这一套/找对象就得找）。"""
+    from app.services.ai.prompts.profile_extract import _UPDATE_SYSTEM_HEADER
+
+    for cue in ("我喜欢", "我吃这一套", "找对象就得找"):
+        assert cue in _UPDATE_SYSTEM_HEADER
 
 
 def test_journey_dimension_status_rendering() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
@@ -20,6 +21,8 @@ from app.schemas.finance import (
     CommissionEntryDetailPage,
     CommissionRuleCreate,
     CommissionRuleResponse,
+    CreditGrantRequest,
+    CreditGrantResult,
     EventOption,
     FinanceOrderCreate,
     FinanceReportRow,
@@ -36,6 +39,11 @@ from app.schemas.finance import (
     LedgerEntryResponse,
     PaymentOrderAdminPage,
     WithdrawalAdminPage,
+    StoreCommissionEntryItem,
+    StoreCommissionEntryPage,
+    StoreCommissionOptions,
+    StoreCommissionSummary,
+    StoreOption,
 )
 from app.services.matchmaker import activate_paid_service_order
 from app.services.runtime_config import withdrawal_policy
@@ -477,6 +485,108 @@ async def admin_list_ledger(db: AsyncSession, page: int, page_size: int, account
 
 
 # ============================================
+# M9-A 后台「积分明细-发放积分」service
+# ============================================
+# 目标解析：
+#   all              → users.status=1 全部账号
+#   member           → user_ids（入参校验非空）
+#   verified         → users JOIN user_auth WHERE ua.realname_status=2
+#   matchmaker_team  → user_role.role_code IN ('service_matchmaker','promoter') status=1
+# 行为：
+#   - 分批 500 写 account_ledger(CREDIT, AVAILABLE, source_type='admin_grant')
+#   - 单条 idempotency_key = 'credit-grant:<admin.id>:<user_id>:<amount>:<reason>' 防重
+#   - 单条 business_audit_log(actor_user_id, action='finance.credit_grant',
+#     resource_type='finance', reason, after_json)
+#   - 返回：granted_count / total_amount / sample_ledger_ids / target_user_ids
+# 注意：
+#   - 积分（amount）字段是整数（积分名称/比例由 finance 配置域决定，本表只记积分）。
+#   - AVAILABLE 状态：直接到账，不进 PENDING 队列（区别于 commission）。
+#   - 不动 payment_order、不写 commission_entry、不触发分账。
+
+
+async def _resolve_credit_targets(db: AsyncSession, target_type: str, user_ids: list[int] | None) -> list[int]:
+    if target_type == "member":
+        return list({int(uid) for uid in (user_ids or []) if int(uid) > 0})
+    if target_type == "all":
+        rows = await db.execute(text("SELECT id FROM users WHERE status = 1 ORDER BY id"))
+        return [int(r[0]) for r in rows.all()]
+    if target_type == "verified":
+        rows = await db.execute(
+            text(
+                """SELECT u.id FROM users u
+                   JOIN user_auth ua ON ua.user_id = u.id
+                   WHERE u.status = 1 AND ua.realname_status = 2
+                   ORDER BY u.id"""
+            )
+        )
+        return [int(r[0]) for r in rows.all()]
+    if target_type == "matchmaker_team":
+        rows = await db.execute(
+            text(
+                """SELECT DISTINCT ur.user_id FROM user_role ur
+                   WHERE ur.role_code IN ('service_matchmaker', 'promoter') AND ur.status = 1
+                   ORDER BY ur.user_id"""
+            )
+        )
+        return [int(r[0]) for r in rows.all()]
+    raise HTTPException(422, detail=f"不支持的发放目标类型：{target_type}")
+
+
+async def admin_grant_credits(db: AsyncSession, admin: CurrentUser, request: CreditGrantRequest) -> CreditGrantResult:
+    targets = await _resolve_credit_targets(db, request.target_type, request.user_ids)
+    if not targets:
+        raise HTTPException(404, detail="发放目标为空，请检查 target_type 或 user_ids")
+    batch_size = 500
+    ledger_ids: list[int] = []
+    for offset in range(0, len(targets), batch_size):
+        batch = targets[offset : offset + batch_size]
+        for user_id in batch:
+            result = await db.execute(
+                text(
+                    """INSERT INTO account_ledger
+                       (account_type, account_id, direction, amount, state, source_type, source_id, idempotency_key)
+                       VALUES ('user', :user_id, 'CREDIT', :amount, 'AVAILABLE', 'admin_grant', :source_id, :key)"""
+                ),
+                {
+                    "user_id": user_id,
+                    "amount": request.amount,
+                    "source_id": admin.id,
+                    "key": f"credit-grant:{admin.id}:{user_id}:{request.amount}:{request.reason}",
+                },
+            )
+            ledger_ids.append(int(result.lastrowid or 0))
+    # 单条 audit_log（前端/财务对账只需要一次总览）
+    await db.execute(
+        text(
+            """INSERT INTO business_audit_log
+               (actor_user_id, action, resource_type, resource_id, reason, after_json)
+               VALUES (:admin_id, 'finance.credit_grant', 'finance', NULL, :reason, :after_json)"""
+        ),
+        {
+            "admin_id": admin.id,
+            "reason": request.reason,
+            "after_json": json.dumps(
+                {
+                    "target_type": request.target_type,
+                    "granted_count": len(targets),
+                    "amount_per_user": request.amount,
+                    "total_amount": len(targets) * request.amount,
+                    "ledger_ids": ledger_ids[:10],
+                },
+                ensure_ascii=False,
+            ),
+        },
+    )
+    await db.commit()
+    return CreditGrantResult(
+        granted_count=len(targets),
+        total_amount=len(targets) * request.amount,
+        sample_ledger_ids=ledger_ids[:10],
+        target_user_ids=targets,
+    )
+
+
+# ============================================
 # 后台「红娘线上分成明细」页 service
 # ============================================
 # 字段策略：
@@ -599,4 +709,249 @@ async def admin_list_commission_options(db: AsyncSession) -> CommissionEntryDeta
         matchmakers=[MatchmakerOption(**dict(row)) for row in matchmaker_rows],
         events=[EventOption(**dict(row)) for row in event_rows],
     )
+
+
+# ------------------------- M5 分店分成明细 -------------------------
+_STORE_BENEFICIARY_TYPE = "store"
+
+
+def _store_entry_item(row: dict) -> StoreCommissionEntryItem:
+    payload = dict(row)
+    payload["created_at"] = _dt(row["created_at"])
+    payload["store_id"] = int(row["store_id"])
+    payload["store_name"] = row.get("store_name") or f"分店#{payload['store_id']}"
+    payload["matchmaker_id"] = int(row["matchmaker_id"]) if row.get("matchmaker_id") else None
+    payload["matchmaker_name"] = row.get("matchmaker_name")
+    payload["consumer_id"] = int(row["consumer_id"]) if row.get("consumer_id") else None
+    payload["consumer_name"] = row.get("consumer_name")
+    payload["event_name"] = row.get("event_name") or row.get("product_name") or "其他事件"
+    payload["order_id"] = int(row["order_id"])
+    payload["order_no"] = row.get("order_no")
+    payload["consumer_amount"] = Decimal(str(row["base_amount"]))
+    payload["commission_amount"] = Decimal(str(row["amount"]))
+    return StoreCommissionEntryItem(**payload)
+
+
+async def admin_list_store_commission_entries(
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    store_id: int | None = None,
+    matchmaker_id: int | None = None,
+    rule_id: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> StoreCommissionEntryPage:
+    """分店线上分成明细：beneficiary_type='store'，beneficiary_id=organization.id。"""
+    where = [f"ce.beneficiary_type = '{_STORE_BENEFICIARY_TYPE}'"]
+    params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    if store_id is not None:
+        where.append("ce.beneficiary_id = :store_id")
+        params["store_id"] = store_id
+    if matchmaker_id is not None:
+        # 通过订单所属会员的生效归属反查红娘（分店成员）
+        where.append(
+            "EXISTS (SELECT 1 FROM resource_assignment ra WHERE ra.user_id = po.user_id "
+            "AND ra.status = 1 AND ra.matchmaker_id = :matchmaker_id)"
+        )
+        params["matchmaker_id"] = matchmaker_id
+    if rule_id is not None:
+        where.append("ce.rule_id = :rule_id")
+        params["rule_id"] = rule_id
+    if start_date:
+        where.append("ce.created_at >= :start_date")
+        params["start_date"] = f"{start_date} 00:00:00"
+    if end_date:
+        where.append("ce.created_at < DATE_ADD(:end_date, INTERVAL 1 DAY)")
+        params["end_date"] = f"{end_date} 00:00:00"
+    clause = " AND ".join(where)
+
+    rows = (
+        await db.execute(
+            text(f"""SELECT ce.id, ce.created_at, ce.beneficiary_id store_id,
+                ce.order_id, ce.base_amount, ce.amount, ce.status, ce.rule_id,
+                COALESCE(o.display_name, o.name) store_name,
+                ra.matchmaker_id, m.nickname matchmaker_name,
+                po.order_no, po.user_id AS consumer_id, po.product_name,
+                c.nickname AS consumer_name,
+                COALESCE(rule.name, po.product_name) AS event_name
+                FROM commission_entry ce
+                LEFT JOIN organization o ON o.id = ce.beneficiary_id AND o.org_type = 'store'
+                LEFT JOIN payment_order po ON po.id = ce.order_id
+                LEFT JOIN users c ON c.id = po.user_id
+                LEFT JOIN resource_assignment ra ON ra.user_id = po.user_id AND ra.status = 1
+                LEFT JOIN users m ON m.id = ra.matchmaker_id
+                LEFT JOIN commission_rule rule ON rule.id = ce.rule_id
+                WHERE {clause}
+                ORDER BY ce.created_at DESC, ce.id DESC
+                LIMIT :limit OFFSET :offset"""),
+            params,
+        )
+    ).mappings().all()
+
+    total = int(
+        (
+            await db.execute(
+                text(f"""SELECT COUNT(*) FROM commission_entry ce
+                    LEFT JOIN payment_order po ON po.id = ce.order_id WHERE {clause}"""),
+                {key: value for key, value in params.items() if key not in ("limit", "offset")},
+            )
+        ).scalar()
+        or 0
+    )
+    return StoreCommissionEntryPage(
+        items=[_store_entry_item(dict(row)) for row in rows],
+        page=page,
+        page_size=page_size,
+        total=total,
+        has_more=page * page_size < total,
+    )
+
+
+async def admin_store_commission_options(db: AsyncSession) -> StoreCommissionOptions:
+    """分店分成明细筛选下拉：门店列表 + 产生过分成的红娘 + 启用分成规则。"""
+    store_rows = (
+        await db.execute(
+            text("""SELECT id, COALESCE(display_name, name) name, status
+                FROM organization WHERE org_type = 'store' ORDER BY sort_order DESC, id DESC""")
+        )
+    ).mappings().all()
+    matchmaker_rows = (
+        await db.execute(
+            text(
+                """SELECT DISTINCT m.id, COALESCE(m.nickname, CONCAT('红娘#', m.id)) AS name, m.avatar
+                   FROM commission_entry ce
+                   JOIN payment_order po ON po.id = ce.order_id
+                   JOIN resource_assignment ra ON ra.user_id = po.user_id AND ra.status = 1
+                   JOIN users m ON m.id = ra.matchmaker_id
+                   WHERE ce.beneficiary_type = :kind
+                   ORDER BY m.id DESC"""
+            ),
+            {"kind": _STORE_BENEFICIARY_TYPE},
+        )
+    ).mappings().all()
+    event_rows = (
+        await db.execute(
+            text("""SELECT id, name, beneficiary_type FROM commission_rule
+                WHERE status = 1 ORDER BY beneficiary_type, priority DESC, id DESC""")
+        )
+    ).mappings().all()
+    return StoreCommissionOptions(
+        stores=[StoreOption(**dict(row)) for row in store_rows],
+        matchmakers=[MatchmakerOption(**dict(row)) for row in matchmaker_rows],
+        events=[EventOption(**dict(row)) for row in event_rows],
+    )
+
+
+async def admin_store_commission_summary(db: AsyncSession, store_id: int | None = None) -> StoreCommissionSummary:
+    """分店分成 4 张统计卡：累计分得 / 本月分成 / 上月分成 / 待结算余额。"""
+    where = ["ce.beneficiary_type = :kind", "ce.status <> 'REVERSED'"]
+    params: dict[str, object] = {"kind": _STORE_BENEFICIARY_TYPE}
+    if store_id is not None:
+        where.append("ce.beneficiary_id = :store_id")
+        params["store_id"] = store_id
+    clause = " AND ".join(where)
+    row = (
+        await db.execute(
+            text(f"""SELECT
+                COALESCE(SUM(ce.amount), 0) total_amount,
+                COALESCE(SUM(CASE WHEN ce.created_at >= DATE_FORMAT(UTC_TIMESTAMP(), '%%Y-%%m-01')
+                    THEN ce.amount ELSE 0 END), 0) current_month_amount,
+                COALESCE(SUM(CASE WHEN ce.created_at >= DATE_FORMAT(DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MONTH), '%%Y-%%m-01')
+                    AND ce.created_at < DATE_FORMAT(UTC_TIMESTAMP(), '%%Y-%%m-01')
+                    THEN ce.amount ELSE 0 END), 0) previous_month_amount,
+                COALESCE(SUM(CASE WHEN ce.status = 'PENDING' THEN ce.amount ELSE 0 END), 0) pending_amount
+                FROM commission_entry ce WHERE {clause}"""),
+            params,
+        )
+    ).mappings().one()
+    return StoreCommissionSummary(
+        total_amount=Decimal(str(row["total_amount"])),
+        current_month_amount=Decimal(str(row["current_month_amount"])),
+        previous_month_amount=Decimal(str(row["previous_month_amount"])),
+        pending_amount=Decimal(str(row["pending_amount"])),
+    )
+
+
+_STORE_ENTRY_EXPORT_HEADERS = [
+    "ID", "时间", "分店名称", "红娘", "消费会员", "分成/奖励事件", "消费金额", "分成金额", "状态",
+]
+
+
+async def build_store_commission_export(
+    db: AsyncSession,
+    store_id: int | None = None,
+    matchmaker_id: int | None = None,
+    rule_id: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> bytes:
+    """导出分店线上分成明细为 .xlsx（当前筛选条件的全量数据）。"""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
+
+    where = [f"ce.beneficiary_type = '{_STORE_BENEFICIARY_TYPE}'"]
+    params: dict[str, object] = {}
+    if store_id is not None:
+        where.append("ce.beneficiary_id = :store_id")
+        params["store_id"] = store_id
+    if matchmaker_id is not None:
+        where.append(
+            "EXISTS (SELECT 1 FROM resource_assignment ra WHERE ra.user_id = po.user_id "
+            "AND ra.status = 1 AND ra.matchmaker_id = :matchmaker_id)"
+        )
+        params["matchmaker_id"] = matchmaker_id
+    if rule_id is not None:
+        where.append("ce.rule_id = :rule_id")
+        params["rule_id"] = rule_id
+    if start_date:
+        where.append("ce.created_at >= :start_date")
+        params["start_date"] = f"{start_date} 00:00:00"
+    if end_date:
+        where.append("ce.created_at < DATE_ADD(:end_date, INTERVAL 1 DAY)")
+        params["end_date"] = f"{end_date} 00:00:00"
+    clause = " AND ".join(where)
+    rows = (
+        await db.execute(
+            text(f"""SELECT ce.id, ce.created_at, ce.beneficiary_id store_id,
+                ce.order_id, ce.base_amount, ce.amount, ce.status,
+                COALESCE(o.display_name, o.name) store_name,
+                m.nickname matchmaker_name, c.nickname consumer_name, po.product_name,
+                COALESCE(rule.name, po.product_name) AS event_name
+                FROM commission_entry ce
+                LEFT JOIN organization o ON o.id = ce.beneficiary_id AND o.org_type = 'store'
+                LEFT JOIN payment_order po ON po.id = ce.order_id
+                LEFT JOIN users c ON c.id = po.user_id
+                LEFT JOIN resource_assignment ra ON ra.user_id = po.user_id AND ra.status = 1
+                LEFT JOIN users m ON m.id = ra.matchmaker_id
+                LEFT JOIN commission_rule rule ON rule.id = ce.rule_id
+                WHERE {clause}
+                ORDER BY ce.created_at DESC, ce.id DESC"""),
+            params,
+        )
+    ).mappings().all()
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "分店分成明细"
+    sheet.append(_STORE_ENTRY_EXPORT_HEADERS)
+    for row in rows:
+        sheet.append([
+            int(row["id"]),
+            _dt(row["created_at"]).strftime("%Y-%m-%d %H:%M:%S"),
+            row.get("store_name") or f"分店#{row['store_id']}",
+            row.get("matchmaker_name") or "",
+            row.get("consumer_name") or "",
+            row.get("event_name") or row.get("product_name") or "其他事件",
+            float(Decimal(str(row["base_amount"]))),
+            float(Decimal(str(row["amount"]))),
+            row.get("status") or "",
+        ])
+    for index, width in enumerate((10, 20, 20, 16, 16, 24, 14, 14, 12), start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 

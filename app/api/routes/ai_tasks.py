@@ -39,8 +39,8 @@ class TaskDetailResponse(TaskPollState):
 
     ``result_payload`` carries task-type-specific result data (e.g.
     ``voice_transcribe`` returns ``{"transcript": "..."}``); it is ``None``
-    for task types whose result is consumed elsewhere (e.g.
-    ``moxiang_candidate_extract`` writes candidates fetched separately).  Only allowlisted keys from
+    for task types whose result is consumed elsewhere (e.g. ``profile_extract``
+    writes to a draft fetched separately).  Only allowlisted keys from
     ``payload_summary`` are surfaced — never raw audio or secrets.
     """
 

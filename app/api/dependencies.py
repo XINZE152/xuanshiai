@@ -133,6 +133,8 @@ class CurrentMatchmakerAdmin:
             "matchmaker.apportion.read": {"matchmaker.apportion.read", "matchmaker.apportion.write"},
             "commission.read": {"commission.read", "commission.write"},
             "message.read": {"message.read", "message.manage", "message.moderate"},
+            "merchant.read": {"merchant.read", "merchant.manage"},
+            "video.read": {"video.read", "video.manage"},
         }
         allowed = aliases.get(permission, {permission})
         if "*" not in self.permissions and not (allowed & self.permissions):
@@ -178,6 +180,13 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
         return "matchmaker.manage" if method != "GET" else "matchmaker.read"
     if "/promoter-levels" in path:
         return "matchmaker.manage" if method != "GET" else "matchmaker.read"
+    # 合伙红娘：/partner-levels 与 /partner-relations 均不含 "/partners" 子串，顺序无冲突
+    if "/partner-levels" in path:
+        return "matchmaker.manage" if method != "GET" else "matchmaker.read"
+    if "/partner-relations" in path:
+        return "matchmaker.manage" if method != "GET" else "matchmaker.read"
+    if "/partners" in path:
+        return "matchmaker.manage" if method != "GET" else "matchmaker.read"
     if "/offline-vips" in path:
         return "matchmaker.member.manage" if method != "GET" else "matchmaker.member.read"
     if "/service-products" in path:
@@ -194,6 +203,15 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
         return "finance.write" if method != "GET" else "finance.read"
     if "/activities" in path:
         return "community.activity.manage" if method != "GET" else "community.activity.read"
+    # M7：活动报名（互选活动 / 活动报名）
+    if "/mutual-" in path or "/activity-signups" in path:
+        return "community.activity.manage" if method != "GET" else "community.activity.read"
+    # M7：商家联盟（商家/商品/订单/商家分类）
+    if "/merchant" in path:
+        return "merchant.manage" if method != "GET" else "merchant.read"
+    # M7：短视频（视频/评论/打赏/红包/会员主页）
+    if "/short-video" in path or "/video-red-packets" in path:
+        return "video.manage" if method != "GET" else "video.read"
     if "/messages" in path or "/announcements" in path:
         return "message.manage" if method != "GET" else "message.read"
     if "/community" in path or "/reports" in path or "/media/" in path:

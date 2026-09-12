@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import math
 import os
 import shutil
@@ -12,7 +11,7 @@ import uuid
 from datetime import date
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import aiofiles
 from fastapi import HTTPException, UploadFile
@@ -22,19 +21,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.profile_tags import (
-    ALL_TAG_OPTIONS,
-    CUSTOM_TAG_CATEGORY_KEY,
-    TAG_CATEGORIES,
-    TAG_CATALOG_REVISION,
-    custom_tags,
-    personal_tags,
-    split_personal_tags,
-)
+from app.core.profile_tags import CUSTOM_TAG_CATEGORY_KEY, TAG_CATEGORIES, TAG_CATALOG_REVISION, custom_tags, personal_tags, split_personal_tags, ALL_TAG_OPTIONS
 from app.services.content_filter import moderate_text
 from app.services.regions import region_display
-
-logger = logging.getLogger(__name__)
 from app.schemas.admin import MediaReviewRequest, MediaReviewResponse
 from app.schemas.auth import (
     CompletionItemResponse,
@@ -231,65 +220,6 @@ async def _get_media(db: AsyncSession, user_id: int, media_type: str | None = No
     return [_media_response(row) for row in result.mappings().all()]
 
 
-# 叙事层仅在这些状态下才可对外展示：published 为历史行兼容值，confirmed 为
-# 用户确认后的当前值。pending_confirmation 表示「AI 已生成、用户尚未确认」，
-# 按 PRODUCT.md「用户确认后才作为正式画像叙事」不得展示。
-_MOXIANG_NARRATIVE_VISIBLE_STATUSES = frozenset({"published", "confirmed"})
-
-
-def _moxiang_badge_visible(*, public: bool) -> bool:
-    """墨相特质是否可装配进该次响应。
-
-    本人查看（public=False）只需 AI 画像功能开启；他人可见的公开路径还需
-    显式打开 ``ai_profile_public_badge_enabled``——产品既有纪律为不向他人
-    暴露画像内容，故公开外显默认关闭。
-    """
-    # app.services.ai 包在导入期会拉起 discovery，而 discovery 又导入本模块，
-    # 故沿用本文件其它 AI 调用的延迟导入写法，避免循环导入。
-    from app.services.ai.flags import AiFeature, is_ai_feature_enabled
-
-    if not is_ai_feature_enabled(AiFeature.PROFILE, settings):
-        return False
-    if public:
-        return bool(settings.ai_profile_public_badge_enabled)
-    return True
-
-
-def extract_moxiang_badge(
-    narrative: dict[str, Any] | None, *, include_emotional_insight: bool
-) -> dict[str, Any]:
-    """从叙事层成品中取出可展示的墨相特质字段。
-
-    状态非 published/confirmed（含未确认与脏数据）时不返回任何内容，避免把
-    用户尚未确认的 AI 推断印上个人资料。``include_emotional_insight`` 仅在
-    本人查看时为 True：依恋风格是心理推断，不进入他人可见的响应。
-    """
-    badge: dict[str, Any] = {
-        "moxiang_persona_title": None,
-        "moxiang_persona_tags": [],
-        "moxiang_attachment_style": None,
-    }
-    if not isinstance(narrative, dict):
-        return badge
-    if str(narrative.get("status") or "") not in _MOXIANG_NARRATIVE_VISIBLE_STATUSES:
-        return badge
-    ndata = narrative.get("data")
-    if not isinstance(ndata, dict):
-        return badge
-    title = str(ndata.get("persona_title") or "").strip()
-    badge["moxiang_persona_title"] = title or None
-    raw_tags = ndata.get("persona_tags")
-    if isinstance(raw_tags, (list, tuple)):
-        badge["moxiang_persona_tags"] = [
-            str(tag).strip() for tag in raw_tags if str(tag).strip()
-        ]
-    if include_emotional_insight:
-        insight = ndata.get("emotional_insight")
-        if isinstance(insight, dict) and insight.get("attachment_style"):
-            badge["moxiang_attachment_style"] = str(insight["attachment_style"]).strip()
-    return badge
-
-
 async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> dict[str, Any]:
     result = await db.execute(
         text("""SELECT u.id AS user_id, u.nickname, u.gender, u.birthday, u.is_married, u.avatar,
@@ -345,23 +275,6 @@ async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> d
     data["residence_display"] = region_display(
         data.get("residence_province_code"), data.get("residence_city_code"), data.get("residence_district_code")
     )
-    # 附带已确认的个人画像特质（知遇墨相）。门禁见 _moxiang_badge_visible：
-    # 功能关闭或公开路径未开外显时恒为空值，本人查看自己不受影响。
-    data["moxiang_persona_title"] = None
-    data["moxiang_persona_tags"] = []
-    data["moxiang_attachment_style"] = None
-    if _moxiang_badge_visible(public=public):
-        try:
-            from app.services.ai.profile import load_published_narrative
-
-            narrative = await load_published_narrative(db, user_id, "personal")
-            data.update(
-                extract_moxiang_badge(
-                    narrative, include_emotional_insight=not public
-                )
-            )
-        except Exception as e:
-            logger.debug("load_published_narrative in get_profile failed: %s", e)
     if public:
         # Public profile responses must not expose exact location or income by default.
         for field in ("income", "hometown_province_code", "hometown_city_code", "hometown_district_code", "residence_province_code", "residence_city_code", "residence_district_code"):
@@ -943,230 +856,3 @@ async def review_media(db: AsyncSession, media_id: int, request: MediaReviewRequ
     await recalculate_completion(db, int(row["user_id"]))
     await db.commit()
     return MediaReviewResponse(media_id=media_id, user_id=int(row["user_id"]), status=request.status, reason=request.reason)
-
-
-_AI_SYNC_CURRENT_SQL = """
-    SELECT u.is_married,
-           p.height, p.occupation, p.education_level, p.tags,
-           p.residence_province_code, p.residence_city_code,
-           p.interest_tags, p.self_intro,
-           COALESCE(ua.education_verified, 0) AS education_verified
-    FROM users u
-    LEFT JOIN user_profile p ON p.user_id = u.id
-    LEFT JOIN user_auth ua ON ua.user_id = u.id
-    WHERE u.id = :user_id
-"""
-
-_AI_SYNC_MARRIAGE_MAP = {"single": 1, "divorced": 2, "widowed": 3}
-# AI 学历 1..6（初中及以下..博士）-> 基础资料 1..5（高中及以下..博士），语义对齐防错位。
-_AI_SYNC_EDU_MAP = {1: 1, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
-# 与前端 utils/profile-field-display.uts 的 OCCUPATION_GROUP_LABELS 口径一致（双源，改动需互相同步）。
-_AI_SYNC_OCCUPATION_LABELS = {
-    "technology": "互联网/技术",
-    "education": "教育",
-    "healthcare": "医疗",
-    "finance": "金融",
-    "public_service": "公职",
-    "other": "其他",
-}
-
-
-def _tags_column_empty(value: Any) -> bool:
-    """user_profile.tags 列（tag_selections 镜像/历史标签 JSON）是否为空。
-
-    interest_tags 反哺绝不能连带覆盖该列（update_profile 的历史行为会把
-    interest_tags 镜像写进 tags，毁掉用户手动配置的扩展标签分类）。
-    """
-    if value is None:
-        return True
-    if isinstance(value, (bytes, bytearray)):
-        value = value.decode("utf-8")
-    stripped = str(value).strip()
-    if stripped in ("", "[]", "{}", "null"):
-        return True
-    if _json_list(value):
-        return False
-    return not _json_dict(value)
-
-
-def compute_ai_sync_writes(
-    current: Mapping[str, Any],
-    field_dict: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
-    """Dual-Sync 纯计算：AI 确认字段 + 基础资料现值 -> 待写入列值。
-
-    只补空、绝不覆盖已有值；认证事实保护：education_verified == 2 时绝不碰学历。
-    返回 (users 表写入, user_profile 表写入, 已同步字段名列表)。
-    口径映射规范见 PRODUCT.md「墨相师对话反哺基础资料（Dual-Sync）」。
-    """
-
-    users_writes: dict[str, Any] = {}
-    profile_writes: dict[str, Any] = {}
-    synced_fields: list[str] = []
-
-    # 1. city_code (6位) -> residence_province_code + residence_city_code
-    if "city_code" in field_dict and field_dict["city_code"]:
-        code_str = str(field_dict["city_code"]).strip()
-        if len(code_str) == 6 and code_str.isdigit():
-            prov = code_str[:2] + "0000"
-            city = code_str[:4] + "00"
-            need_prov = not current.get("residence_province_code")
-            need_city = not current.get("residence_city_code")
-            if need_prov:
-                profile_writes["residence_province_code"] = prov
-            if need_city:
-                profile_writes["residence_city_code"] = city
-            if need_prov or need_city:
-                synced_fields.append("residence_city_code")
-
-    # 2. height_cm -> user_profile.height (140 <= height <= 220)
-    if "height_cm" in field_dict and field_dict["height_cm"] is not None:
-        try:
-            h_val = int(field_dict["height_cm"])
-            if 140 <= h_val <= 220 and current.get("height") is None:
-                profile_writes["height"] = h_val
-                synced_fields.append("height")
-        except (ValueError, TypeError):
-            pass
-
-    # 3. marriage_status -> users.is_married
-    if "marriage_status" in field_dict and field_dict["marriage_status"]:
-        m_str = str(field_dict["marriage_status"]).strip().lower()
-        if m_str in _AI_SYNC_MARRIAGE_MAP and (
-            current.get("is_married") is None or current.get("is_married") not in (1, 2, 3)
-        ):
-            users_writes["is_married"] = _AI_SYNC_MARRIAGE_MAP[m_str]
-            synced_fields.append("is_married")
-
-    # 4. education_level -> user_profile.education_level（语义映射，防口径错位）
-    if "education_level" in field_dict and field_dict["education_level"] is not None:
-        if current.get("education_verified") != 2 and current.get("education_level") is None:
-            try:
-                edu_val = int(field_dict["education_level"])
-                if edu_val in _AI_SYNC_EDU_MAP:
-                    profile_writes["education_level"] = _AI_SYNC_EDU_MAP[edu_val]
-                    synced_fields.append("education_level")
-            except (ValueError, TypeError):
-                pass
-
-    # 5. occupation_group -> user_profile.occupation
-    if "occupation_group" in field_dict and field_dict["occupation_group"]:
-        occ_str = str(field_dict["occupation_group"]).strip()
-        occ_label = _AI_SYNC_OCCUPATION_LABELS.get(occ_str)
-        if occ_label and (not current.get("occupation") or not str(current.get("occupation")).strip()):
-            profile_writes["occupation"] = occ_label
-            synced_fields.append("occupation")
-
-    # 6. interest_tags -> user_profile.interest_tags（与系统标签求交集，>=3 才写）。
-    #    仅当既有兴趣标签不足 3 个且 tags 列为空时才写；绝不连带覆盖 tags 列。
-    if "interest_tags" in field_dict and field_dict["interest_tags"]:
-        curr_interest = _json_list(current.get("interest_tags"))
-        if len(curr_interest) < 3 and _tags_column_empty(current.get("tags")):
-            raw_tags = field_dict["interest_tags"]
-            if isinstance(raw_tags, (list, tuple, set)):
-                valid_tags: list[str] = []
-                seen_tags: set[str] = set()
-                for t in raw_tags:
-                    t_str = str(t).strip()
-                    if t_str in ALL_TAG_OPTIONS and t_str not in seen_tags:
-                        seen_tags.add(t_str)
-                        valid_tags.append(t_str)
-                if len(valid_tags) >= 3:
-                    profile_writes["interest_tags"] = _json_value(valid_tags[:5])
-                    synced_fields.append("interest_tags")
-
-    # 7. self_intro -> user_profile.self_intro（narrative confirm 补空，截断至 500 字）
-    if "self_intro" in field_dict and field_dict["self_intro"]:
-        curr_intro = str(current.get("self_intro") or "").strip()
-        if not curr_intro:
-            intro_str = str(field_dict["self_intro"]).strip()[:500]
-            if intro_str:
-                profile_writes["self_intro"] = intro_str
-                synced_fields.append("self_intro")
-
-    return users_writes, profile_writes, synced_fields
-
-
-async def sync_ai_confirmed_fields_to_profile(
-    db: AsyncSession,
-    user_id: int,
-    fields: dict[str, Any] | list[Any],
-) -> list[str]:
-    """将 AI 提取并经确认的结构化字段反哺同步到用户基础资料（只补空，绝不覆盖已有值）。
-
-    事务契约：本函数【不 commit】。所有写入包在 SAVEPOINT（begin_nested）里，
-    与调用方（confirm_draft / publish_draft / confirm_narrative）的外层事务
-    同生共死；savepoint 内任何失败只回滚本函数的写入并记日志，外层事务保持
-    健康，确认/发布主调用链不受影响。复用 update_profile 是禁止的——它自带
-    commit 且会把 interest_tags 镜像覆盖进 tags 列。
-
-    映射规则见 compute_ai_sync_writes 与 PRODUCT.md「Dual-Sync」一节。
-    """
-    try:
-        field_dict: dict[str, Any] = {}
-        if isinstance(fields, dict):
-            field_dict = dict(fields)
-        elif isinstance(fields, (list, tuple)):
-            for item in fields:
-                if hasattr(item, "field_key"):
-                    k = getattr(item, "field_key")
-                    v = getattr(item, "value", None)
-                    if v is None and hasattr(item, "value_json"):
-                        v = getattr(item, "value_json")
-                    field_dict[k] = v
-                elif isinstance(item, dict) and "field_key" in item:
-                    field_dict[item["field_key"]] = item.get("value", item.get("value_json"))
-
-        async with db.begin_nested():
-            result = await db.execute(text(_AI_SYNC_CURRENT_SQL), {"user_id": user_id})
-            current = result.mappings().first()
-            if not current:
-                return []
-            users_writes, profile_writes, synced_fields = compute_ai_sync_writes(current, field_dict)
-            if not users_writes and not profile_writes:
-                return []
-
-            if users_writes:
-                assignments = ", ".join(f"{key} = :{key}" for key in users_writes)
-                await db.execute(
-                    text(f"UPDATE users SET {assignments}, updated_at = UTC_TIMESTAMP() WHERE id = :user_id"),
-                    {**users_writes, "user_id": user_id},
-                )
-            if profile_writes:
-                columns = ["user_id", *profile_writes.keys()]
-                placeholders = ", ".join(f":{column}" for column in columns)
-                updates = ", ".join(f"{column} = VALUES({column})" for column in profile_writes)
-                await db.execute(
-                    text(
-                        f"INSERT INTO user_profile ({', '.join(columns)}) "
-                        f"VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {updates}"
-                    ),
-                    {"user_id": user_id, **profile_writes},
-                )
-            await recalculate_completion(db, user_id)
-            await increment_revision_and_enqueue(
-                db,
-                user_id,
-                RevisionKind.PROFILE,
-                tuple(users_writes) + tuple(profile_writes),
-                "profile_updated",
-                50,
-            )
-            # 反哺抬高了 user_revision_state.profile_revision，把本人活跃 AI 会话的
-            # 基线一并抬到新值，避免会话在后续消息中被误判为 stale（自杀）。
-            await db.execute(
-                text("""
-                    UPDATE ai_profile_session
-                    SET profile_revision = COALESCE(
-                        (SELECT profile_revision FROM user_revision_state WHERE user_id = :user_id),
-                        profile_revision
-                    ),
-                    updated_at = UTC_TIMESTAMP()
-                    WHERE user_id = :user_id AND active_status = 1
-                """),
-                {"user_id": user_id},
-            )
-        return synced_fields
-    except Exception as e:
-        logger.warning("sync_ai_confirmed_fields_to_profile failed for user_id=%s: %s", user_id, e, exc_info=True)
-        return []

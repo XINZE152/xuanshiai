@@ -1,8 +1,5 @@
 # 墨相师旅程状态转换（Task 8）
 
-> **命名说明（2026-09-11）：墨相师（Moxiang）就是 AI 画像功能的产品更名。**
-> 对话式画像 REST 问答接口删除后，本状态机是画像建构的唯一状态轴。
-
 ## 两条状态轴
 
 `ai_profile_session.journey_stage` 是发布进度轴，固定为 `chatting → building → ready → published`。

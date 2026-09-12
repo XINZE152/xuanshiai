@@ -15,8 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.schemas.ai_common import AiConsentGrantRequest
 from app.schemas.ai_profile import ProfileSubject
 from app.services.ai.consents import grant_consent
-from app.services.ai.journey import extract_journey_candidates, submit_journey_turn
-from app.services.ai.profile import create_master_session
+from app.services.ai.profile import (
+    create_profile_session,
+    extract_profile_turn,
+    submit_profile_turn,
+)
 from app.services.ai.tasks import (
     AiTaskRecord,
     AiTaskStatus,
@@ -40,7 +43,6 @@ async def _clean(db: AsyncSession, user_id: int) -> None:
     for statement in (
         "DELETE FROM ai_profile_draft_field WHERE draft_id IN (SELECT draft_id FROM ai_profile_draft WHERE user_id = :user_id)",
         "DELETE FROM ai_profile_draft WHERE user_id = :user_id",
-        "DELETE FROM ai_profile_candidate WHERE user_id = :user_id",
         "DELETE FROM ai_profile_turn WHERE user_id = :user_id",
         "DELETE FROM ai_profile_session WHERE user_id = :user_id",
         "DELETE FROM ai_profile_summary WHERE user_id = :user_id",
@@ -81,18 +83,19 @@ async def _seed_user_and_task(
         0,
     )
     await db.commit()
-    session = await create_master_session(
-        db, user_id, ProfileSubject.PERSONAL, CONSENT_VERSION
+    session = await create_profile_session(
+        db, user_id, ProfileSubject.PERSONAL, CONSENT_VERSION, f"fence-session-{user_id}"
     )
-    submission = await submit_journey_turn(
+    accepted = await submit_profile_turn(
         db,
-        session_id=session.session_id,
-        owner_user_id=user_id,
-        client_turn_id=f"fence-turn-{user_id}",
-        answer_text="我住杭州，周末喜欢旅行和看展，也想认真结婚。",
+        session.session_id,
+        user_id,
+        f"fence-turn-{user_id}",
+        "按固定 mock 夹具生成可确认字段。",
+        f"fence-extract-{user_id}",
     )
     await db.commit()
-    return session.session_id, str(submission.task_id)
+    return session.session_id, str(accepted.task_id)
 
 
 async def _claim_and_start(
@@ -122,7 +125,7 @@ async def test_consent_revoked_after_compute_leaves_no_draft(
     started = await _claim_and_start(factory, "worker-a")
 
     async with factory() as handler_db:
-        result = await extract_journey_candidates(handler_db, started, "worker-a")
+        result = await extract_profile_turn(handler_db, started, "worker-a")
         assert result is not None
         result_ref, revisions = result
         # Provider 已计算完成、草稿尚未持久化：此刻另一会话撤权。
@@ -147,11 +150,11 @@ async def test_consent_revoked_after_compute_leaves_no_draft(
         await handler_db.rollback()
 
     async with factory() as check_db:
-        candidate_count = await check_db.scalar(
-            text("SELECT COUNT(*) FROM ai_profile_candidate WHERE user_id = :user_id"),
+        draft_count = await check_db.scalar(
+            text("SELECT COUNT(*) FROM ai_profile_draft WHERE user_id = :user_id"),
             {"user_id": user_id},
         )
-        assert int(candidate_count or 0) == 0, "撤权后不得新增候选"
+        assert int(draft_count or 0) == 0, "撤权后不得新增 draft"
         task_status = await check_db.scalar(
             text("SELECT status FROM ai_task WHERE task_id = :task_id"),
             {"task_id": task_id},
@@ -175,7 +178,7 @@ async def test_worker_killed_after_compute_yields_single_business_result(
 
     # 计算完成、finalize 前 Worker 被杀：handler 会话整体回滚，无任何持久化。
     async with factory() as handler_db:
-        result = await extract_journey_candidates(handler_db, started, "worker-a")
+        result = await extract_profile_turn(handler_db, started, "worker-a")
         assert result is not None
         await handler_db.rollback()
 
@@ -198,7 +201,7 @@ async def test_worker_killed_after_compute_yields_single_business_result(
     assert restarted.task_id == task_id
 
     async with factory() as handler_db:
-        result = await extract_journey_candidates(handler_db, restarted, "worker-b")
+        result = await extract_profile_turn(handler_db, restarted, "worker-b")
         assert result is not None
         result_ref, revisions = result
         async with factory() as finalize_db:
@@ -210,17 +213,27 @@ async def test_worker_killed_after_compute_yields_single_business_result(
         await handler_db.commit()
 
     async with factory() as check_db:
-        candidate_hashes = (
+        drafts = (
             await check_db.execute(
                 text(
-                    "SELECT content_hash FROM ai_profile_candidate "
+                    "SELECT draft_id FROM ai_profile_draft "
                     "WHERE user_id = :user_id AND session_id = :session_id"
                 ),
                 {"user_id": user_id, "session_id": session_id},
             )
         ).scalars().all()
-        assert candidate_hashes, "恢复后应持久化候选业务结果"
-        assert len(candidate_hashes) == len(set(candidate_hashes)), "候选出现重复"
+        assert len(drafts) == 1, f"恢复后应只有一份业务结果，实际 drafts={drafts}"
+        field_keys = (
+            await check_db.execute(
+                text(
+                    "SELECT field_key FROM ai_profile_draft_field "
+                    "WHERE draft_id = :draft_id ORDER BY field_key"
+                ),
+                {"draft_id": drafts[0]},
+            )
+        ).scalars().all()
+        assert field_keys
+        assert len(field_keys) == len(set(field_keys)), "草稿字段出现重复"
         task_status = await check_db.scalar(
             text("SELECT status FROM ai_task WHERE task_id = :task_id"),
             {"task_id": task_id},

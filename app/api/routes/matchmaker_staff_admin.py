@@ -50,12 +50,13 @@ async def list_matchmakers(
     store_id: int | None = Query(None, ge=1),
     commission_level_id: int | None = Query(None, ge=1),
     locked: bool | None = Query(None),
+    in_store: bool | None = Query(None, description="true 仅分店红娘 / false 仅总店红娘 / 不传 全部"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> MatchmakerStaffPage:
     _guard(current)
     return await service.list_staff(
-        db, current, page, page_size, keyword, store_id, commission_level_id, locked
+        db, current, page, page_size, keyword, store_id, commission_level_id, locked, in_store
     )
 
 

@@ -19,12 +19,10 @@ client = TestClient(app)
 _PATH = "/api/v1/ai/profile-sessions/{session_id}/turns"
 
 
-def test_history_get_is_registered_without_legacy_turn_submission_post() -> None:
-    """历史 GET 保留；提交回答的 POST 已随问答链路删除（2026-09-11）。"""
+def test_history_get_is_registered_alongside_turn_submission_post() -> None:
     operation = client.get("/openapi.json").json()["paths"][_PATH]
 
-    assert "get" in operation
-    assert "post" not in operation
+    assert {"get", "post"}.issubset(operation)
     query_parameters = {
         item["name"]: item for item in operation["get"].get("parameters", [])
     }

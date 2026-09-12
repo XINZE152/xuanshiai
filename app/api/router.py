@@ -12,6 +12,9 @@ from app.api.routes import (
     ai_moxiang,
     ai_memory,
     activity_admin,
+    merchant_admin,
+    mutual_selection_admin,
+    short_video_admin,
     admin,
     admin_home,
     admin_config,
@@ -69,6 +72,8 @@ from app.api.routes import (
     commission_level_admin,
     promoter_staff_admin,
     promoter_level_admin,
+    partner_admin,
+    partner_level_admin,
     social,
     users,
     voice,
@@ -135,6 +140,18 @@ api_router.include_router(member_media_admin.router, tags=["管理后台"])
 api_router.include_router(member_behavior_admin.router, tags=["管理后台"])
 api_router.include_router(activity_admin.router, tags=["管理后台"])
 api_router.include_router(activity_admin.signup_router, tags=["管理后台"])
+api_router.include_router(mutual_selection_admin.router, tags=["管理后台"])
+api_router.include_router(mutual_selection_admin.record_router, tags=["管理后台"])
+api_router.include_router(merchant_admin.router, tags=["管理后台"])
+api_router.include_router(merchant_admin.category_router, tags=["管理后台"])
+api_router.include_router(merchant_admin.product_router, tags=["管理后台"])
+api_router.include_router(merchant_admin.order_router, tags=["管理后台"])
+api_router.include_router(short_video_admin.video_router, tags=["管理后台"])
+api_router.include_router(short_video_admin.category_router, tags=["管理后台"])
+api_router.include_router(short_video_admin.comment_router, tags=["管理后台"])
+api_router.include_router(short_video_admin.tip_router, tags=["管理后台"])
+api_router.include_router(short_video_admin.packet_router, tags=["管理后台"])
+api_router.include_router(short_video_admin.homepage_router, tags=["管理后台"])
 api_router.include_router(member_follow_up_admin.router, tags=["管理后台"])
 api_router.include_router(offline_vip_admin.router, tags=["管理后台"])
 api_router.include_router(reward_rule_admin.router, tags=["红娘后台"])
@@ -142,6 +159,9 @@ api_router.include_router(apportion_config_admin.router, tags=["红娘后台"])
 api_router.include_router(commission_level_admin.router, tags=["红娘后台"])
 api_router.include_router(promoter_staff_admin.router, tags=["红娘后台"])
 api_router.include_router(promoter_level_admin.router, tags=["红娘后台"])
+api_router.include_router(partner_admin.router, tags=["红娘后台"])
+api_router.include_router(partner_admin.relation_router, tags=["红娘后台"])
+api_router.include_router(partner_level_admin.router, tags=["红娘后台"])
 api_router.include_router(matchmaker.admin_router, tags=["管理后台"])
 api_router.include_router(meeting.admin_router, tags=["管理后台"])
 api_router.include_router(promotion_order_admin.router, tags=["管理后台"])
