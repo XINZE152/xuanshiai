@@ -12,11 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentUser
 from app.schemas.meeting import (
     MeetingFeedbackCreate,
+    MeetingDirectCreate,
     MeetingRecordResponse,
     MeetingRequestCreate,
     MatchmakerMeetingRequestCreate,
     MeetingRequestResponse,
     MeetingScheduleCreate,
+    MeetingStatistics,
     MeetingStatusUpdate,
     MeetingRecordAdminPage,
     MeetingRequestAdminPage,
@@ -174,19 +176,90 @@ async def schedule_meeting(db: AsyncSession, admin: CurrentUser, request_id: int
     if row["status"] != "ACCEPTED":
         raise HTTPException(409, detail="只有双方接受的约见申请才能安排约会")
     result = await db.execute(text("""INSERT INTO meeting_record
-        (request_id, organizer_id, organization_id, scheduled_at, location)
-        VALUES (:request_id, :organizer_id, :organization_id, :scheduled_at, :location)"""), {
+        (request_id, organizer_id, organization_id, scheduled_at, location, member_visible, sms_remind)
+        VALUES (:request_id, :organizer_id, :organization_id, :scheduled_at, :location, :member_visible, :sms_remind)"""), {
         "request_id": request_id, "organizer_id": request.organizer_id,
         "organization_id": request.organization_id, "scheduled_at": request.scheduled_at,
-        "location": request.location,
+        "location": request.location, "member_visible": int(request.member_visible),
+        "sms_remind": int(request.sms_remind),
     })
     meeting_id = int(result.lastrowid)
     await db.execute(text("UPDATE meeting_request SET status = 'ACCEPTED', updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"id": request_id})
     await db.commit()
     result = await db.execute(text("""SELECT id, request_id, organizer_id, organization_id,
-        scheduled_at, location, status, cancel_reason, created_at, updated_at
+        scheduled_at, location, status, cancel_reason, member_visible, sms_remind, created_at, updated_at
         FROM meeting_record WHERE id = :id"""), {"id": meeting_id})
     return _record_response(result.mappings().one())
+
+
+_ADMIN_RECORD_SELECT = """SELECT mr.id, mr.request_id, mr.organizer_id, mr.organization_id,
+    mr.scheduled_at, mr.location, mr.status, mr.cancel_reason, mr.member_visible, mr.sms_remind,
+    mr.created_at, mr.updated_at,
+    rq.user_id AS from_user_id, uf.nickname AS from_nickname,
+    rq.target_user_id AS to_user_id, ut.nickname AS to_nickname,
+    uo.nickname AS organizer_name,
+    (SELECT COUNT(*) FROM meeting_feedback f WHERE f.meeting_id = mr.id) AS feedback_count
+    FROM meeting_record mr
+    LEFT JOIN meeting_request rq ON rq.id = mr.request_id
+    LEFT JOIN users uf ON uf.id = rq.user_id
+    LEFT JOIN users ut ON ut.id = rq.target_user_id
+    LEFT JOIN users uo ON uo.id = mr.organizer_id"""
+
+
+async def admin_meeting_statistics(db: AsyncSession) -> MeetingStatistics:
+    """约会管理顶部统计：总安排/总成功 + 本月已安排/待见面/已见面/未见面。"""
+    row = (await db.execute(text("""SELECT
+        COUNT(*) AS total_arranged,
+        SUM(status IN ('CHECKED_IN', 'COMPLETED')) AS total_met,
+        SUM(YEAR(scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(scheduled_at) = MONTH(UTC_TIMESTAMP())) AS month_arranged,
+        SUM(YEAR(scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(scheduled_at) = MONTH(UTC_TIMESTAMP())
+            AND status IN ('SCHEDULED', 'REMINDED')) AS month_waiting,
+        SUM(YEAR(scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(scheduled_at) = MONTH(UTC_TIMESTAMP())
+            AND status IN ('CHECKED_IN', 'COMPLETED')) AS month_met,
+        SUM(YEAR(scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(scheduled_at) = MONTH(UTC_TIMESTAMP())
+            AND status IN ('NO_SHOW', 'CANCELLED')) AS month_not_met
+        FROM meeting_record"""))).mappings().one()
+    keys = ("total_arranged", "total_met", "month_arranged", "month_waiting", "month_met", "month_not_met")
+    return MeetingStatistics(**{key: int(row[key] or 0) for key in keys})
+
+
+async def admin_create_meeting(db: AsyncSession, body: MeetingDirectCreate, actor_id: int) -> MeetingRecordResponse:
+    """约会管理-添加约会：自动建立约见申请（ACCEPTED）并写入约会记录。"""
+    if body.from_user_id == body.to_user_id:
+        raise HTTPException(422, detail="约会双方不能为同一会员")
+    members = await db.execute(
+        text("SELECT id FROM users WHERE id IN (:from_id, :to_id) AND status = 1"),
+        {"from_id": body.from_user_id, "to_id": body.to_user_id},
+    )
+    if len(members.all()) != 2:
+        raise HTTPException(404, detail="男方或女方会员不存在")
+    if not await db.scalar(text("SELECT 1 FROM users WHERE id = :id AND status = 1"), {"id": body.organizer_id}):
+        raise HTTPException(404, detail="服务红娘不存在")
+    request_result = await db.execute(text("""INSERT INTO meeting_request
+        (user_id, target_user_id, matchmaker_id, organization_id, status, note)
+        VALUES (:from_id, :to_id, :organizer_id, :organization_id, 'ACCEPTED', '后台添加约会记录')"""), {
+        "from_id": body.from_user_id, "to_id": body.to_user_id,
+        "organizer_id": body.organizer_id, "organization_id": body.organization_id,
+    })
+    request_id = int(request_result.lastrowid)
+    location = (body.location or "").strip() or "待确定"
+    scheduled_at = body.scheduled_at or datetime.now()
+    record_status = "COMPLETED" if body.met else "SCHEDULED"
+    result = await db.execute(text("""INSERT INTO meeting_record
+        (request_id, organizer_id, organization_id, scheduled_at, location, status, member_visible, sms_remind)
+        VALUES (:request_id, :organizer_id, :organization_id, :scheduled_at, :location, :status,
+                :member_visible, :sms_remind)"""), {
+        "request_id": request_id, "organizer_id": body.organizer_id,
+        "organization_id": body.organization_id, "scheduled_at": scheduled_at,
+        "location": location, "status": record_status,
+        "member_visible": int(body.member_visible), "sms_remind": int(body.sms_remind),
+    })
+    meeting_id = int(result.lastrowid)
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id)
+        VALUES (:actor, 'meeting.create', 'meeting_record', :id)"""), {"actor": actor_id, "id": meeting_id})
+    await db.commit()
+    return await admin_get_meeting(db, meeting_id)
 
 
 async def create_feedback(db: AsyncSession, current: CurrentUser, meeting_id: int, request: MeetingFeedbackCreate) -> None:
@@ -208,12 +281,16 @@ async def create_feedback(db: AsyncSession, current: CurrentUser, meeting_id: in
     await db.commit()
 
 
-async def admin_list_requests(db: AsyncSession, page: int, page_size: int, status: str | None = None, search: str | None = None, matchmaker_id: int | None = None, from_date: str | None = None, to_date: str | None = None) -> MeetingRequestAdminPage:
+async def admin_list_requests(db: AsyncSession, page: int, page_size: int, status: str | None = None, search: str | None = None, matchmaker_id: int | None = None, from_date: str | None = None, to_date: str | None = None, status_group: str | None = None) -> MeetingRequestAdminPage:
     where = ["1 = 1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
     if status:
         where.append("r.status = :status")
         params["status"] = status
+    elif status_group == "pending":
+        where.append("r.status IN ('SUBMITTED', 'CONTACTED')")
+    elif status_group == "done":
+        where.append("r.status IN ('ACCEPTED', 'DECLINED', 'CLOSED')")
     if search:
         where.append("(u.nickname LIKE CONCAT('%', :search, '%') OR t.nickname LIKE CONCAT('%', :search, '%') OR r.user_id = :search_id OR r.target_user_id = :search_id)")
         params["search"] = search
@@ -243,26 +320,54 @@ async def admin_list_requests(db: AsyncSession, page: int, page_size: int, statu
     return MeetingRequestAdminPage(items=[_request_response(row) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
-async def admin_list_meetings(db: AsyncSession, page: int, page_size: int, status: str | None = None) -> MeetingRecordAdminPage:
+async def admin_list_meetings(
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    status: str | None = None,
+    search: str | None = None,
+    organizer_id: int | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    met: str | None = None,
+) -> MeetingRecordAdminPage:
     where = ["1 = 1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
     if status:
-        where.append("status = :status")
+        where.append("mr.status = :status")
         params["status"] = status
+    if organizer_id:
+        where.append("mr.organizer_id = :organizer_id")
+        params["organizer_id"] = organizer_id
+    if met == "met":
+        where.append("mr.status IN ('CHECKED_IN', 'COMPLETED')")
+    elif met == "wait":
+        where.append("mr.status IN ('SCHEDULED', 'REMINDED')")
+    if search:
+        where.append("(uf.nickname LIKE CONCAT('%', :search, '%') OR ut.nickname LIKE CONCAT('%', :search, '%')"
+                     " OR uf.phone LIKE CONCAT('%', :search, '%') OR ut.phone LIKE CONCAT('%', :search, '%')"
+                     " OR rq.user_id = :search_id OR rq.target_user_id = :search_id)")
+        params["search"] = search
+        params["search_id"] = int(search) if search.isdigit() else 0
+    if from_date:
+        where.append("mr.scheduled_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        where.append("mr.scheduled_at < DATE_ADD(:to_date, INTERVAL 1 DAY)")
+        params["to_date"] = to_date
     clause = " AND ".join(where)
-    rows = await db.execute(text(f"""SELECT id, request_id, organizer_id, organization_id,
-        scheduled_at, location, status, cancel_reason, created_at, updated_at
-        FROM meeting_record WHERE {clause} ORDER BY scheduled_at DESC, id DESC
-        LIMIT :limit OFFSET :offset"""), params)
-    total = int((await db.execute(text(f"SELECT COUNT(*) FROM meeting_record WHERE {clause}"),
+    rows = await db.execute(text(f"{_ADMIN_RECORD_SELECT} WHERE {clause} ORDER BY mr.scheduled_at DESC, mr.id DESC LIMIT :limit OFFSET :offset"), params)
+    total = int((await db.execute(text(f"""SELECT COUNT(*) FROM meeting_record mr
+        LEFT JOIN meeting_request rq ON rq.id = mr.request_id
+        LEFT JOIN users uf ON uf.id = rq.user_id
+        LEFT JOIN users ut ON ut.id = rq.target_user_id
+        WHERE {clause}"""),
         {key: value for key, value in params.items() if key not in ("limit", "offset")})).scalar() or 0)
     return MeetingRecordAdminPage(items=[_record_response(row) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
 async def admin_get_meeting(db: AsyncSession, meeting_id: int) -> MeetingRecordResponse:
-    row = (await db.execute(text("""SELECT id, request_id, organizer_id, organization_id,
-        scheduled_at, location, status, cancel_reason, created_at, updated_at
-        FROM meeting_record WHERE id = :id"""), {"id": meeting_id})).mappings().first()
+    row = (await db.execute(text(f"{_ADMIN_RECORD_SELECT} WHERE mr.id = :id"), {"id": meeting_id})).mappings().first()
     if not row:
         raise HTTPException(404, detail="约见记录不存在")
     return _record_response(row)

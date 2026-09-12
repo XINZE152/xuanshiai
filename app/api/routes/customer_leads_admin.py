@@ -1,14 +1,16 @@
 """Customer lead management routes."""
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, File, Form, Path, Query, Response, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
 from app.db.session import get_db
-from app.schemas.customer_lead_admin import CustomerLead, CustomerLeadAbandonment, CustomerLeadAbandonRequest, CustomerLeadBatchImportRequest, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadBatchImportResult, CustomerLeadFollowUp, CustomerLeadFollowUpCreate, CustomerLeadPage, CustomerLeadRestoreRequest, CustomerLeadStatistics, CustomerLeadUpdate
-from app.services.customer_lead_admin import abandon_lead, add_follow_up, assign_lead, batch_import_leads, create_lead, get_lead, lead_statistics, list_abandonments, list_follow_ups, list_leads, restore_lead, update_lead
+from app.schemas.customer_lead_admin import CustomerLead, CustomerLeadAbandonment, CustomerLeadAbandonRequest, CustomerLeadBatchImportRequest, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadBatchImportResult, CustomerLeadFollowUp, CustomerLeadFollowUpCreate, CustomerLeadImportSummary, CustomerLeadOptions, CustomerLeadPage, CustomerLeadRestoreRequest, CustomerLeadStatistics, CustomerLeadUpdate
+from app.services.customer_lead_admin import abandon_lead, add_follow_up, assign_lead, batch_import_leads, build_import_template, create_lead, get_lead, import_leads_file, lead_options, lead_statistics, list_abandonments, list_follow_ups, list_leads, restore_lead, update_lead
 
 router = APIRouter(prefix="/admin/customer-leads")
+
+_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 @router.get("", response_model=CustomerLeadPage, summary="查询客源线索")
@@ -29,6 +31,22 @@ async def lead_stats(current: CurrentMatchmakerAdmin = Depends(get_current_match
     return await lead_statistics(db)
 
 
+@router.get("/options", response_model=CustomerLeadOptions, summary="客源线索下拉字典")
+async def lead_dict(current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> CustomerLeadOptions:
+    current.require("customer_lead.manage")
+    return await lead_options(db)
+
+
+@router.get("/import-template", summary="下载客源批量导入模板")
+async def lead_import_template(current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin)) -> Response:
+    current.require("customer_lead.manage")
+    return Response(
+        content=build_import_template(),
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="customer-lead-import-template.xlsx"'},
+    )
+
+
 @router.get("/abandoned", response_model=list[CustomerLeadAbandonment], summary="查询弃海客源")
 async def abandoned_list(current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[CustomerLeadAbandonment]:
     current.require("customer_lead.manage")
@@ -39,6 +57,34 @@ async def abandoned_list(current: CurrentMatchmakerAdmin = Depends(get_current_m
 async def abandonment_list(current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[CustomerLeadAbandonment]:
     current.require("customer_lead.manage")
     return await list_abandonments(db, False)
+
+
+@router.post("/import", response_model=CustomerLeadImportSummary, summary="上传 Excel 批量导入客源线索")
+async def lead_import(
+    file: UploadFile = File(..., description="按模板填写的 .xlsx 文件"),
+    audit_status: str = Form("active", pattern="^(active|pending)$", description="本次导入的审核状态：active 有效 / pending 待核"),
+    default_source: str = Form("批量导入", max_length=64, description="留空或不匹配时的默认来源"),
+    default_matchmaker_id: int | None = Form(None, description="默认分派红娘用户ID"),
+    default_promoter_id: int | None = Form(None, description="默认推广红娘用户ID"),
+    default_tags: str = Form("", max_length=255, description="默认标签，英文逗号分隔"),
+    dup_mode: str = Form("skip", pattern="^(skip|append)$", description="昵称/联系方式重复处理：skip 不导入 / append 仍然导入"),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CustomerLeadImportSummary:
+    current.require("customer_lead.manage")
+    tags = [item.strip() for item in default_tags.split(",") if item.strip()]
+    return await import_leads_file(
+        db,
+        current.account.id,
+        await file.read(),
+        file.filename or "",
+        audit_status=audit_status,
+        default_source=default_source or "批量导入",
+        default_matchmaker_id=default_matchmaker_id,
+        default_promoter_id=default_promoter_id,
+        default_tags=tags,
+        dup_mode=dup_mode,
+    )
 
 
 @router.get("/{lead_id}", response_model=CustomerLead, summary="查询客源线索详情")

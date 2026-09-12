@@ -332,7 +332,9 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
     "tools_customer_leads": (
         "客源线索功能配置", "客源线索-功能配置：线索分配、跟进与保护规则。",
         {"auto_assign": False, "protect_days": 30, "follow_up_tip": "",
-         "abandon_days": 15, "daily_new_limit": 10}, [],
+         "abandon_days": 15, "daily_new_limit": 10,
+         # 客源线索-功能配置页面字段（与前端 UI 一一对应）
+         "name_prefix": "客源", "link_promoter_on_convert": True, "show_converted_in_lead": True}, [],
     ),
     "tools_interactive_function": (
         "互动消息功能设置", "运营工具-互动消息：消息类型开关与频率限制。",

@@ -40,6 +40,22 @@ class MeetingScheduleCreate(BaseModel):
     organization_id: int | None = Field(default=None, ge=1)
     scheduled_at: datetime
     location: str = Field(min_length=1, max_length=255)
+    member_visible: bool = Field(default=True, description="会员端是否可见")
+    sms_remind: bool = Field(default=True, description="是否发送约会短信提醒")
+
+
+class MeetingDirectCreate(BaseModel):
+    """约会管理-添加约会：直接指定双方与服务红娘，无需先有约见申请。"""
+
+    from_user_id: int = Field(ge=1, description="男方会员ID（提交人）")
+    to_user_id: int = Field(ge=1, description="女方会员ID（被约见人）")
+    organizer_id: int = Field(ge=1, description="本次约见服务红娘用户ID")
+    organization_id: int | None = Field(default=None, ge=1)
+    scheduled_at: datetime | None = Field(default=None, description="见面时间，留空表示待确定")
+    location: str | None = Field(default=None, max_length=255, description="见面地点，留空表示待确定")
+    member_visible: bool = True
+    sms_remind: bool = True
+    met: bool = Field(default=False, description="是否已见面；true 计为服务成功")
 
 
 class MeetingRecordResponse(BaseModel):
@@ -51,8 +67,27 @@ class MeetingRecordResponse(BaseModel):
     location: str
     status: Literal["SCHEDULED", "REMINDED", "CHECKED_IN", "COMPLETED", "CANCELLED", "NO_SHOW"]
     cancel_reason: str | None
+    member_visible: int = 1
+    sms_remind: int = 1
     created_at: datetime
     updated_at: datetime
+    from_user_id: int | None = None
+    from_nickname: str | None = None
+    to_user_id: int | None = None
+    to_nickname: str | None = None
+    organizer_name: str | None = None
+    feedback_count: int = 0
+
+
+class MeetingStatistics(BaseModel):
+    """约会管理顶部 6 张统计卡。"""
+
+    total_arranged: int = 0
+    total_met: int = 0
+    month_arranged: int = 0
+    month_waiting: int = 0
+    month_met: int = 0
+    month_not_met: int = 0
 
 
 class MeetingStatusUpdate(BaseModel):
@@ -88,6 +123,8 @@ class MeetingRecordAdminUpdate(BaseModel):
     location: str | None = Field(default=None, min_length=1, max_length=255)
     status: Literal["SCHEDULED", "REMINDED", "CHECKED_IN", "COMPLETED", "CANCELLED", "NO_SHOW"] | None = None
     cancel_reason: str | None = Field(default=None, max_length=255)
+    member_visible: bool | None = None
+    sms_remind: bool | None = None
 
 
 class MeetingFeedbackAdminItem(BaseModel):

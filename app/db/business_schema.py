@@ -109,6 +109,8 @@ BUSINESS_TABLES = {
             `active_wechat` varchar(128) GENERATED ALWAYS AS (CASE WHEN `status` IN ('LOST','CLOSED') THEN NULL ELSE NULLIF(TRIM(`wechat`), '') END) STORED COMMENT '有效微信（弃海/关闭为NULL，唯一）',
             `matchmaker_id` bigint unsigned DEFAULT NULL,
             `organization_id` bigint unsigned DEFAULT NULL,
+            `promoter_id` bigint unsigned DEFAULT NULL COMMENT '推广红娘用户ID',
+            `audit_status` varchar(16) NOT NULL DEFAULT 'active' COMMENT 'active有效/pending待核',
             `next_follow_at` datetime DEFAULT NULL,
             `converted_user_id` bigint unsigned DEFAULT NULL,
             `remark` varchar(2000) DEFAULT NULL,
@@ -118,6 +120,7 @@ BUSINESS_TABLES = {
             PRIMARY KEY (`id`),
             UNIQUE KEY `uk_customer_lead_active_phone` (`active_phone`),
             UNIQUE KEY `uk_customer_lead_active_wechat` (`active_wechat`),
+            KEY `idx_customer_lead_promoter` (`promoter_id`),
             KEY `idx_customer_lead_status` (`status`, `created_at`),
             KEY `idx_customer_lead_matchmaker` (`matchmaker_id`, `status`),
             KEY `idx_customer_lead_phone` (`phone`)
@@ -412,6 +415,26 @@ BUSINESS_TABLES = {
             KEY `idx_promotion_attribution_promoter` (`promoter_id`, `status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员推广归属'
     """,
+    "promotion_order": """
+        CREATE TABLE IF NOT EXISTS `promotion_order` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `order_no` varchar(64) NOT NULL COMMENT '支付订单号',
+            `user_id` bigint unsigned NOT NULL COMMENT '购买推广人',
+            `product_name` varchar(128) NOT NULL COMMENT '推广套餐名称',
+            `amount` decimal(12,2) NOT NULL DEFAULT '0.00' COMMENT '订单金额',
+            `pay_status` varchar(16) NOT NULL DEFAULT 'unpaid' COMMENT 'unpaid未支付/paid已支付/refunded已退款',
+            `pay_method` varchar(32) DEFAULT NULL COMMENT 'wechat/alipay/balance/offline',
+            `status` varchar(16) NOT NULL DEFAULT 'pending' COMMENT 'pending待处理/processing推广中/done已完成/cancelled已取消',
+            `remark` varchar(500) DEFAULT NULL,
+            `paid_at` datetime DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_promotion_order_no` (`order_no`),
+            KEY `idx_promotion_order_user` (`user_id`, `created_at`),
+            KEY `idx_promotion_order_status` (`status`, `pay_status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='推广服务订单'
+    """,
     "partner_team": """
         CREATE TABLE IF NOT EXISTS `partner_team` (
             `id` bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -578,6 +601,8 @@ BUSINESS_TABLES = {
             `location` varchar(255) NOT NULL,
             `status` varchar(32) NOT NULL DEFAULT 'SCHEDULED' COMMENT 'SCHEDULED/REMINDED/CHECKED_IN/COMPLETED/CANCELLED/NO_SHOW',
             `cancel_reason` varchar(255) DEFAULT NULL,
+            `member_visible` tinyint NOT NULL DEFAULT 1 COMMENT '会员端是否可见 1是 0隐藏',
+            `sms_remind` tinyint NOT NULL DEFAULT 1 COMMENT '是否发送约会短信提醒 1是 0否',
             `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (`id`),

@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 LeadStatus = Literal["NEW", "CONTACTED", "INTENDED", "CONVERTED", "LOST", "CLOSED"]
+# 客源审核状态：active 有效 / pending 待核
+LeadAuditStatus = Literal["active", "pending"]
 
 
 def _strip_contact(value: object) -> object:
@@ -24,11 +26,23 @@ class CustomerLeadCreate(BaseModel):
     source: str = Field(min_length=1, max_length=64)
     intention_level: Literal[1, 2, 3] = 1
     remark: str | None = Field(default=None, max_length=2000)
+    promoter_id: int | None = Field(default=None, ge=1, description="推广红娘用户ID")
+    audit_status: LeadAuditStatus = "active"
+    tags: list[str] = Field(default_factory=list, max_length=20, description="客源标签名称")
 
     @field_validator("phone", "wechat", mode="before")
     @classmethod
     def normalize_contact(cls, value: object) -> object:
         return _strip_contact(value)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def normalize_tags(cls, value: object) -> object:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     @model_validator(mode="after")
     def require_contact(self) -> "CustomerLeadCreate":
@@ -45,6 +59,8 @@ class CustomerLeadUpdate(BaseModel):
     status: LeadStatus | None = None
     remark: str | None = Field(default=None, max_length=2000)
     next_follow_at: datetime | None = None
+    promoter_id: int | None = Field(default=None, ge=1)
+    audit_status: LeadAuditStatus | None = None
 
     @field_validator("phone", "wechat", mode="before")
     @classmethod
@@ -53,7 +69,7 @@ class CustomerLeadUpdate(BaseModel):
 
     @model_validator(mode="after")
     def require_update(self) -> "CustomerLeadUpdate":
-        if all(value is None for value in (self.name, self.phone, self.wechat, self.intention_level, self.status, self.remark, self.next_follow_at)):
+        if all(value is None for value in (self.name, self.phone, self.wechat, self.intention_level, self.status, self.remark, self.next_follow_at, self.promoter_id, self.audit_status)):
             raise ValueError("至少提供一个需要修改的字段")
         return self
 
@@ -95,8 +111,11 @@ class CustomerLead(BaseModel):
     source: str
     intention_level: Literal[1, 2, 3]
     status: LeadStatus
+    audit_status: LeadAuditStatus = "active"
     matchmaker_id: int | None
     organization_id: int | None
+    promoter_id: int | None = None
+    tags: list[str] = Field(default_factory=list)
     next_follow_at: datetime | None
     converted_user_id: int | None
     remark: str | None
@@ -160,3 +179,25 @@ class CustomerLeadBatchImportResult(BaseModel):
     skipped: int = 0
     failed: int = 0
     errors: list[str] = Field(default_factory=list)
+
+
+class CustomerLeadImportSummary(CustomerLeadBatchImportResult):
+    """文件导入结果：在批量导入结果上补充总行数，便于前端 Step 4 展示。"""
+
+    total: int = 0
+
+
+class CustomerLeadOption(BaseModel):
+    """下拉字典项：value 提交给后端，label 供前端展示。"""
+
+    value: str
+    label: str
+
+
+class CustomerLeadOptions(BaseModel):
+    """客源线索页面下拉字典（导入设置 / 筛选）。"""
+
+    sources: list[CustomerLeadOption] = Field(default_factory=list)
+    matchmakers: list[CustomerLeadOption] = Field(default_factory=list)
+    promoters: list[CustomerLeadOption] = Field(default_factory=list)
+    tags: list[CustomerLeadOption] = Field(default_factory=list)

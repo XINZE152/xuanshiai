@@ -3189,6 +3189,8 @@ class DatabaseManager:
         self._ensure_required_columns(cursor)
         self._ensure_admin_home_columns(cursor)
         self._ensure_member_crm_columns(cursor)
+        # M4 客源线索（promoter_id/audit_status）与会员服务（meeting_record.member_visible/sms_remind）
+        self._ensure_m4_columns(cursor)
 
         # 旧库的 ai_feature_projection 不会由 CREATE TABLE IF NOT EXISTS 补齐
         # Task 9 新增列（版本向量/可见性/失效原因等），与上面同模式幂等补列
@@ -3267,6 +3269,38 @@ class DatabaseManager:
                     f"ALTER TABLE `{table_name}` ADD COLUMN `{column_name}` {definition}"
                 )
                 logger.info("已为 %s 补充会员 CRM 字段 %s", table_name, column_name)
+
+    def _ensure_m4_columns(self, cursor) -> None:
+        """M4 客源线索 / 会员服务补充字段（旧库幂等补齐）。"""
+        columns = {
+            "customer_lead": {
+                "promoter_id": "bigint unsigned DEFAULT NULL COMMENT '推广红娘用户ID'",
+                "audit_status": "varchar(16) NOT NULL DEFAULT 'active' COMMENT 'active有效/pending待核'",
+            },
+            "meeting_record": {
+                "member_visible": "tinyint NOT NULL DEFAULT 1 COMMENT '会员端是否可见 1是 0隐藏'",
+                "sms_remind": "tinyint NOT NULL DEFAULT 1 COMMENT '是否发送约会短信提醒 1是 0否'",
+            },
+        }
+        for table_name, required in columns.items():
+            self._ensure_table_columns(cursor, f"`{table_name}`", required)
+        self._ensure_optional_index(
+            cursor, "customer_lead", "idx_customer_lead_promoter", "(`promoter_id`)"
+        )
+
+    def _ensure_optional_index(self, cursor, table_name: str, index_name: str, definition: str) -> None:
+        """幂等创建索引：表不存在或索引已存在时静默跳过。"""
+        try:
+            cursor.execute(f"SHOW TABLES LIKE %s", (table_name,))
+            if not cursor.fetchone():
+                return
+            cursor.execute(f"SHOW INDEX FROM `{table_name}` WHERE Key_name = %s", (index_name,))
+            if cursor.fetchone():
+                return
+            cursor.execute(f"ALTER TABLE `{table_name}` ADD KEY `{index_name}` {definition}")
+            logger.info(f"✅ 已添加索引 {table_name}.{index_name}")
+        except Exception as exc:  # 索引迁移失败不应阻断整体建表
+            logger.warning(f"⚠️ 添加索引 {table_name}.{index_name} 失败: {exc}")
 
     def _backfill_comment_roots(self, cursor) -> None:
         """Resolve legacy nested replies to their top-level root, one depth at a time."""

@@ -188,6 +188,8 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
         return "matchmaker.organization.manage" if method != "GET" else "matchmaker.organization.read"
     if "/meetings" in path:
         return "meeting.write" if method != "GET" else "meeting.read"
+    if "/promotion-orders" in path:
+        return "matchmaker.service.manage" if method != "GET" else "matchmaker.service.read"
     if "/finance" in path:
         return "finance.write" if method != "GET" else "finance.read"
     if "/activities" in path:
