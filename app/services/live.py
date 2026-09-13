@@ -11,10 +11,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser
+from app.core.config import settings
 from app.core.redis import redis_client
 from app.schemas.live import LiveSessionCreate
 from app.services.content_filter import assert_text_allowed
 from app.services.restrictions import ensure_user_allowed
+from app.services.live_provider import LiveProviderError
+from app.services.live_tencent import get_live_provider
 
 
 TRANSITIONS = {
@@ -161,6 +164,28 @@ async def transition_session(db: AsyncSession, session_id: int, actor_id: int, t
         raise HTTPException(409, detail="场次状态版本已变化，请刷新后重试")
     await db.execute(text("INSERT INTO live_state_transition (session_id, from_status, to_status, state_version, actor_user_id, reason) VALUES (:sid,:old,:new,:version,:actor,:reason)"), {"sid": session_id, "old": session["status"], "new": to_status, "version": version, "actor": actor_id, "reason": reason})
     await db.commit()
+    if to_status == "CLOSED" and settings.live_enabled and settings.live_provider == "tencent":
+        provider = get_live_provider()
+        try:
+            result = await provider.dismiss_room(sdk_app_id=settings.tencent_live_sdk_app_id, room_id=session_id)
+            await db.execute(text("""INSERT INTO live_provider_resource
+                (session_id,provider,sdk_app_id,room_id,status,last_request_id,closed_at)
+                VALUES (:sid,:provider,:app_id,:room_id,'CLOSED',:request_id,UTC_TIMESTAMP())
+                ON DUPLICATE KEY UPDATE status='CLOSED',last_error_code=NULL,last_request_id=:request_id,closed_at=UTC_TIMESTAMP()"""), {
+                "sid": session_id, "provider": result.provider, "app_id": result.sdk_app_id,
+                "room_id": result.room_id, "request_id": result.request_id,
+            })
+            await db.commit()
+        except LiveProviderError as exc:
+            await db.rollback()
+            await db.execute(text("""INSERT INTO live_provider_resource
+                (session_id,provider,sdk_app_id,room_id,status,last_error_code)
+                VALUES (:sid,'TENCENT',:app_id,:room_id,'ERROR',:error_code)
+                ON DUPLICATE KEY UPDATE status='ERROR',last_error_code=:error_code"""), {
+                "sid": session_id, "app_id": settings.tencent_live_sdk_app_id,
+                "room_id": session_id, "error_code": exc.code,
+            })
+            await db.commit()
     await publish_event(session_id, "session.status_changed", version, {"from_status": session["status"], "to_status": to_status})
     return await get_session(db, session_id)
 

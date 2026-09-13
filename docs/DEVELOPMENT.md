@@ -207,6 +207,12 @@ docker compose -f compose.ai-test.yml down -v --remove-orphans
 
 ## 五、测试与代码检查
 
+### 5.0 直播腾讯 Provider
+
+直播后端使用 `tencentcloud-sdk-python` 的服务端 SDK 访问腾讯云控制面；音视频媒体流仍由客户端 TRTC SDK 负责。开发/测试默认使用 `LIVE_PROVIDER=mock`，生产或 staging 必须使用 `LIVE_PROVIDER=tencent` 并配置 `TENCENT_LIVE_SDK_APP_ID`、`TENCENT_LIVE_SECRET_ID`、`TENCENT_LIVE_SECRET_KEY` 和 `TENCENT_LIVE_CALLBACK_SECRET`。不得提交 `.env` 或真实腾讯密钥。
+
+本地真实联调前先在腾讯控制台确认 TRTC 应用、CAM 最小权限和回调签名契约，再执行数据库初始化。未完成真实联调前，不得把 SDK 依赖安装成功等同于腾讯直播链路验收通过。
+
 运行全部测试：
 
 ```powershell

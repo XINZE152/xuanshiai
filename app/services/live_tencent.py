@@ -14,6 +14,14 @@ class LiveProviderUnavailable(Exception):
     pass
 
 
+def get_live_provider():
+    if settings.live_provider == "mock":
+        return None
+    from app.services.live_tencent_provider import TencentLiveProvider
+
+    return TencentLiveProvider()
+
+
 def generate_user_sig(user_id: str) -> tuple[int, str, int]:
     app_id = settings.tencent_live_sdk_app_id
     secret = settings.tencent_live_secret_key
