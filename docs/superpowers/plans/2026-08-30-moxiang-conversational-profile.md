@@ -1,5 +1,3 @@
-> **[2026-09-11 已废弃]** 本计划交付的对话式画像问答链路已删除；墨相师（Moxiang）即 AI 画像的产品更名。仅作历史资料保留。
-
 # 墨相师对话建构（Moxiang Conversational Profile）实施计划（已于 2026-09-02 被实时整理旅程替代）
 
 > 历史记录：本计划描述的 `profile_build`、确认式 `progress` 和 master

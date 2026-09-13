@@ -54,10 +54,10 @@ from app.services.ai.profile import (
     find_turn_by_client_id,
     hash_request,
     load_owned_active_session,
+    moderate_text,
     normalize_profile_answer,
 )
 from app.services.ai.tasks import AiTaskRecord, enqueue_task, fail_task
-from app.services.content_filter import moderate_text
 from app.services.revisions import RevisionVector
 
 
@@ -126,7 +126,7 @@ async def submit_journey_turn(
 ) -> JourneyTurnSubmission:
     """Persist one final turn and enqueue the dedicated candidate task.
 
-    The sequence mirrors the legacy QA turn pipeline (removed 2026-09-11) but avoids the
+    The sequence mirrors ``submit_profile_turn`` but intentionally avoids the
     legacy extracting/draft state transition.  A replay returns the original
     task through the task runtime's idempotency key and never inserts another
     turn or candidate task.

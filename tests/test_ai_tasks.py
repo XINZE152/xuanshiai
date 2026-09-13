@@ -312,7 +312,7 @@ class TaskStore:
             "id": self._next_id,
             "task_id": task_id,
             "owner_user_id": int(kwargs.pop("owner_user_id", 10)),
-            "task_type": str(kwargs.pop("task_type", "moxiang_candidate_extract")),
+            "task_type": str(kwargs.pop("task_type", "profile_extract")),
             "scene": str(kwargs.pop("scene", "profile_text_extract")),
             "idempotency_key": str(kwargs.pop("idempotency_key", "")),
             "request_digest": kwargs.pop("request_digest", None),
@@ -355,7 +355,7 @@ def task_store() -> TaskStore:
 def _enable_ai_features(monkeypatch: pytest.MonkeyPatch) -> None:
     """门禁复查无条件执行后，complete_task 会调用 require_ai_feature。
 
-    默认配置里 ai_profile_enabled=False，会导致 moxiang_candidate_extract 任务在完成
+    默认配置里 ai_profile_enabled=False，会导致 profile_extract 任务在完成
     时被判 feature disabled 而走 supersede（甚至 leased->superseded 非法转
     换）。本模块的完成类用例语义上假定 AI 功能开启，故统一打开三个 flag。
     """
@@ -419,7 +419,7 @@ async def test_enqueue_same_key_same_payload_replays_existing_task(task_store) -
     first = await enqueue_task(
         db,
         owner_user_id=10,
-        task_type="moxiang_candidate_extract",
+        task_type="profile_extract",
         idempotency_key="key-1",
         request_hash="digest-a",
         revisions=RevisionVector(profile=1, policy=1),
@@ -428,7 +428,7 @@ async def test_enqueue_same_key_same_payload_replays_existing_task(task_store) -
     second = await enqueue_task(
         db,
         owner_user_id=10,
-        task_type="moxiang_candidate_extract",
+        task_type="profile_extract",
         idempotency_key="key-1",
         request_hash="digest-a",
         revisions=RevisionVector(profile=1, policy=1),
@@ -446,7 +446,7 @@ async def test_enqueue_same_key_different_payload_raises_conflict(task_store) ->
     await enqueue_task(
         db,
         owner_user_id=10,
-        task_type="moxiang_candidate_extract",
+        task_type="profile_extract",
         idempotency_key="key-1",
         request_hash="digest-a",
     )
@@ -455,7 +455,7 @@ async def test_enqueue_same_key_different_payload_raises_conflict(task_store) ->
         await enqueue_task(
             db,
             owner_user_id=10,
-            task_type="moxiang_candidate_extract",
+            task_type="profile_extract",
             idempotency_key="key-1",
             request_hash="digest-b",
         )
@@ -473,7 +473,7 @@ async def test_twenty_concurrent_enqueues_create_one_task(task_store) -> None:
             enqueue_task(
                 db,
                 owner_user_id=10,
-                task_type="moxiang_candidate_extract",
+                task_type="profile_extract",
                 idempotency_key="shared-key",
                 request_hash="digest-a",
             )
@@ -491,7 +491,7 @@ async def test_enqueue_never_commits_the_callers_transaction(task_store) -> None
     await enqueue_task(
         db,
         owner_user_id=10,
-        task_type="moxiang_candidate_extract",
+        task_type="profile_extract",
         idempotency_key="key-c",
         request_hash="digest-a",
     )
@@ -680,7 +680,7 @@ async def test_worker_heartbeats_lease_while_handler_runs(
         return ("res:heartbeat", RevisionVector(profile=1, policy=1))
 
     monkeypatch.setattr(worker_mod, "_heartbeat_interval", lambda: 0.01)
-    worker_mod.TASK_HANDLERS["moxiang_candidate_extract"] = slow_handler
+    worker_mod.TASK_HANDLERS["profile_extract"] = slow_handler
     outcome = await worker_mod._process(db, task, "worker-1")
 
     final = await task_store.get(task.task_id)
@@ -1074,7 +1074,7 @@ def test_get_task_api_returns_poll_state_shape() -> None:
     row = {
         "task_id": "at-api-1",
         "owner_user_id": 10,
-        "task_type": "moxiang_candidate_extract",
+        "task_type": "profile_extract",
         "scene": "profile_text_extract",
         "idempotency_key": "k",
         "request_digest": "d",
@@ -1118,7 +1118,7 @@ def test_get_task_api_returns_safe_result_ref_when_succeeded() -> None:
     row = {
         "task_id": "at-api-2",
         "owner_user_id": 10,
-        "task_type": "moxiang_candidate_extract",
+        "task_type": "profile_extract",
         "scene": "profile_text_extract",
         "idempotency_key": "k",
         "request_digest": "d",
@@ -1156,7 +1156,7 @@ def test_get_task_api_hides_foreign_and_missing_tasks() -> None:
     row = {
         "task_id": "at-foreign",
         "owner_user_id": 20,
-        "task_type": "moxiang_candidate_extract",
+        "task_type": "profile_extract",
         "scene": "profile_text_extract",
         "idempotency_key": "k",
         "request_digest": "d",
@@ -1197,7 +1197,7 @@ def test_cancel_task_api_returns_202_cancel_requested() -> None:
     row = {
         "task_id": "at-cancel-1",
         "owner_user_id": 10,
-        "task_type": "moxiang_candidate_extract",
+        "task_type": "profile_extract",
         "scene": "profile_text_extract",
         "idempotency_key": "k",
         "request_digest": "d",
@@ -1238,7 +1238,7 @@ def test_cancel_task_api_returns_409_for_terminal_task() -> None:
     row = {
         "task_id": "at-cancel-2",
         "owner_user_id": 10,
-        "task_type": "moxiang_candidate_extract",
+        "task_type": "profile_extract",
         "scene": "profile_text_extract",
         "idempotency_key": "k",
         "request_digest": "d",

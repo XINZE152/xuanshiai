@@ -1,11 +1,13 @@
 """Versioned configuration snapshots for the administration console."""
 
+import asyncio
 import json
 import re
 from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.admin_config import AdminConfigAuditItem, AdminConfigAuditPage, AdminConfigSnapshot, AdminConfigUpdate
@@ -127,10 +129,34 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
          "daily_limit": 10, "send_interval_seconds": 60}, ["access_key", "access_secret"],
     ),
     "finance": (
-        "财务配置", "支付、提现、退款、自由收款和电子合同规则。",
-        {"payment_mode": "mock", "payment_channels": [], "withdrawal": {"enabled": False, "min_amount": "0.00"},
-         "refund": {"manual_review": True}, "free_payment": {"enabled": False}, "e_contract": {"enabled": False},
-         "commission_rules": []}, ["merchant_key", "private_key", "public_key"],
+        "财务配置", "支付、提现、退款、自由收款、电子合同与积分/余额/充值规则。",
+        # 字段与前端「财务管理-系统配置」页一一对应（M9-A 扩展）
+        {"payment_mode": "mock",
+         "payment_channels": [],
+         "point_name": "金币",                  # 积分名称
+         "point_ratio": 10,                     # 1元=10积分
+         "balance_name": "余额",                # 余额名称
+         "withdrawal": {
+             "enabled": False, "min_amount": "0.00",
+             "fee_mode": "none", "fee_rate": 1, "fee_threshold": "100",
+         },
+         "withdraw_methods": {
+             "auto_wechat": {"enabled": False, "min_amount": "1", "max_amount": "500"},
+             "manual_wechat": {"enabled": True, "min_amount": "1", "max_amount": "1000"},
+             "manual_bank": {"enabled": True, "min_amount": "1", "max_amount": "1000"},
+             "manual_alipay": {"enabled": True, "min_amount": "1", "max_amount": "1000"},
+         },
+         "recharge_packages": [
+             {"name": "积分充值套餐1", "amount": "1", "points": 10},
+             {"name": "积分充值套餐2", "amount": "200", "points": 2200},
+             {"name": "积分充值套餐3", "amount": "300", "points": 4000},
+             {"name": "积分充值套餐4", "amount": "400", "points": 6000},
+             {"name": "积分充值套餐5", "amount": "500", "points": 7500},
+             {"name": "积分充值套餐6", "amount": "600", "points": 9000},
+         ],
+         "refund": {"manual_review": True}, "free_payment": {"enabled": False},
+         "e_contract": {"enabled": False}, "commission_rules": []},
+        ["merchant_key", "private_key", "public_key"],
     ),
     "merchant": (
         "商家联盟配置", "商家入驻、审核、核销和佣金规则。",
@@ -213,8 +239,10 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
     ),
     # ---------------- 电子合同（财务管理-合同管理/模板/印章/合同配置） ----------------
     "econtract_config": (
-        "电子合同配置", "财务管理-合同配置页：电子合同关键键值配置。",
-        {"items": [
+        "电子合同配置", "财务管理-合同配置页：电子合同总开关与关键键值配置。",
+        # M9-A 扩展：前端「电子合同-合同配置」页需要腾讯电子签总开关 + 4 项键值
+        {"enabled": False,
+         "items": [
             {"id": 1, "key": "sign_expire_days", "name": "合同签署有效期（天）", "value": "7", "description": "超期未签署的合同自动置为已过期", "update_time": None},
             {"id": 2, "key": "expire_remind_days", "name": "到期提醒（天）", "value": "3", "description": "合同到期前 N 天提醒签署人", "update_time": None},
             {"id": 3, "key": "default_contract_type", "name": "默认合同类型", "value": "红娘服务协议", "description": "新发起合同的默认类型", "update_time": None},
@@ -293,21 +321,37 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
     ),
     # ---------------- 运营工具/活动/商家/短视频等（2026-09 对标补齐） ----------------
     "tools_active": (
-        "活动参数配置", "活动报名-参数配置：活动分类、报名设置与宣传图。",
-        {"categories": [], "banner_url": None, "signup_tip": "", "allow_cancel": True, "max_signups_per_user": 1}, [],
+        "活动参数配置", "活动报名-参数配置：活动分类、自定义栏目名称、默认图与用户协议须知。",
+        # 字段与前端「活动报名-参数配置」页一一对应
+        {"categories": ["专场活动", "会面小聚", "相亲大会", "政企联谊", "免费活动"],
+         "column_name": "同城活动", "default_image_wide": None, "default_image_square": None,
+         "agreement_html": ""}, [],
     ),
     "tools_active_alliance": (
         "活动运营方案", "活动报名-运营方案：富文本说明内容。",
         {"content_html": "", "enabled": True}, [],
     ),
     "tools_merchant_alliance": (
-        "商家联盟功能配置", "商家联盟-功能配置：商家/商品分类管理与联盟开关。",
-        {"categories": [], "enabled": True, "join_tip": ""}, [],
+        "商家联盟功能配置", "商家联盟-功能配置：栏目标题/描述、分享封面、宣传头图与购买须知。",
+        # 字段与前端「商家联盟-功能配置」页一一对应
+        {"title": "优选合作商城",
+         "description": "精选同城优质服务定制产品套餐，为您的约会提供愉快的消费",
+         "share_cover_mode": "default", "share_cover_url": None,
+         "banner_url": None, "banners": [],
+         "notice": "成功购买后请凭消费券号至消费二维码前往商家消费\n您的短信中将收到券号，可在\"订单-中查看订单和二维码\n消费过程中若遇到使用问题请及时联系我们介入沟通",
+         "view_url": "https://www.xuanshi.com/subpages/hezuo/index"}, [],
     ),
     "tools_short_video": (
-        "短视频参数配置", "短视频-参数配置：红包、评论、打赏与展示开关。",
-        {"red_packet_enabled": True, "comment_enabled": True, "tip_enabled": True,
-         "publish_review": False, "banner_url": None, "daily_publish_limit": 5}, [],
+        "短视频参数配置", "短视频-参数配置：审核开关、白名单、热门阈值、打赏范围、红包倒计时与发布协议。",
+        # 字段与前端「短视频-参数配置」页一一对应
+        {"column_name": "脱单加油站", "share_image_url": None,
+         "share_title": "脱单干货",
+         "share_summary": "了解我们，分享脱单干货和直播高光片段，回顾精彩活动，认识优质嘉宾",
+         "normal_post_review": True, "normal_comment_review": False,
+         "verified_post_review": True, "verified_comment_review": False,
+         "whitelist": "", "hot_view_threshold": 100, "new_video_days": 7,
+         "tip_min": 1, "tip_max": 100, "red_packet_countdown": 10,
+         "publish_agreement_html": ""}, [],
     ),
     "tools_free_pay": (
         "自由收款配置", "运营工具-自由收款：收款类目、收款项目与收款码。",
@@ -323,7 +367,9 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
     ),
     "tools_love_partner": (
         "合伙红娘功能配置", "合伙红娘-功能配置：加盟说明与开关。",
-        {"content_html": "", "enabled": True, "apply_tip": ""}, [],
+        # share_bonus：合伙人同时是自己团队中的推广红娘时，是否享有该推广红娘的
+        # 注册会员奖励与消费分成（前端功能配置页单选「享有/不享有」）。
+        {"content_html": "", "enabled": True, "apply_tip": "", "share_bonus": True}, [],
     ),
     "tools_partner_bonus": (
         "合伙红娘分成配置", "合伙红娘-分成配置：各级分成比例与奖励。",
@@ -338,30 +384,95 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
     ),
     "tools_interactive_function": (
         "互动消息功能设置", "运营工具-互动消息：消息类型开关与频率限制。",
-        {"like_enabled": True, "greet_enabled": True, "gift_notice_enabled": True,
-         "daily_push_limit": 20, "quiet_hours": ""}, [],
+        # 字段与前端「互动消息-功能设置」页一一对应
+        {"system_enabled": True,            # 开启「会员消息系统」总开关
+         "allow_unverified": False,         # 非实名认证会员是否允许使用消息功能
+         "allow_non_vip_send": True,        # 非 VIP 是否允许主动发送
+         "non_vip_daily_limit": 3,          # 非 VIP 每日条数（0 不限）
+         "vip_daily_limit": 10,             # VIP 每日条数（0 不限）
+         "allow_non_vip_reply": True,       # 非 VIP 是否允许回复
+         "max_before_reply": 2},            # 对方未回复前最多发送条数（0 不限）
+        [],
     ),
     "tools_interactive_content": (
         "互动消息内容设置", "运营工具-互动消息：各类消息文案模板。",
-        {"templates": []}, [],
+        # 字段与前端「互动消息-内容设置」页一一对应
+        {"templates": [
+            {"id": 1, "content": "你好，刚到你感觉很有眼缘，想简单聊两句互相了解下",
+             "reply_count": 2, "enabled": True, "show_up": False, "sort_order": 100},
+            {"id": 2, "content": "你看去过好多城市旅行，印象最好的目的地是哪里呀？",
+             "reply_count": 0, "enabled": True, "show_up": True, "sort_order": 90},
+            {"id": 3, "content": "你好，抱着认真找对象的心态，看你的规划和我很契合，想沟通了解下",
+             "reply_count": 0, "enabled": True, "show_up": True, "sort_order": 80},
+            {"id": 4, "content": "你好，我看到了你资料，感觉咱俩择偶要求各方面都很匹配，想跟你进一步了解下可以吗？",
+             "reply_count": 3, "enabled": False, "show_up": True, "sort_order": 70},
+            {"id": 5, "content": "你看过你的资料，觉得我们挺合拍的，希望我们能进一步了解更多",
+             "reply_count": 3, "enabled": True, "show_up": True, "sort_order": 60},
+        ]}, [],
     ),
     "tools_column_config": (
         "搭子社群栏目配置", "运营工具-搭子社群：栏目标题、描述与分享封面。",
-        {"title": "搭子社群", "description": "兴趣搭子、活动搭子，找同频的人。",
-         "share_cover_url": None, "categories": []}, [],
+        # 字段与前端「搭子社群-栏目配置」页一一对应
+        {"title": "找搭子",
+         "description": "年轻人的潮流新社交。放下手机，遇见真实的Ta",
+         "share_cover_mode": "system",         # system / custom
+         "share_cover_url": None,              # 自定义封面图（300x300）
+         "banner_mode": "system",              # system / custom
+         "banner_url": None,                   # 自定义首页头图（778x417）
+         "promotion_intro_html": "",           # 推广介绍（富文本）
+         "notice_html": "",                    # 入群须知（富文本）
+         "agreement_html": "",                 # 入群协议（富文本）
+         "hot_regions": []},                   # 热门区域 [{region, sort}]
+        [],
     ),
     "tools_good_news": (
         "红娘喜讯栏目配置", "运营工具-红娘喜讯：栏目标题、描述、分享封面、宣传头图、喜讯分类与祝福语。",
-        {"title": "红娘喜讯", "description": "Ta们都是在我们的介绍撮合下，从相识、到恋爱、到见父母、到订婚、到结婚生子！",
-         "share_cover_mode": "default", "share_cover_url": None, "banner_url": None,
-         "view_url": "/subpages/xixun/index",
-         "categories": ["牵手成功", "恋爱生活", "已见父母", "已订婚", "已领证", "已办婚礼", "婚后生活", "锦旗飘扬"],
-         "category_icons": [],
-         "blessings": []}, [],
+        # 字段与前端「红娘喜讯-栏目配置」页一一对应
+        {"title": "脱单喜讯",
+         "description": "脱单喜讯",
+         "share_cover_mode": "custom",         # system / custom
+         "share_cover_url": None,              # 自定义封面图（300x300）
+         "banner_url": None,                   # 宣传头图（698x240）
+         "view_url": "https://www.xuanshiai.com/subpages/xixun/index",
+         # 喜讯分类（顺序敏感，最后一项「锦旗飘扬」固定不可下移）
+         "categories": [
+             {"label": "牵手成功", "value": "牵手成功", "icon_url": None, "can_down": True, "sort_order": 100},
+             {"label": "恋爱生活", "value": "恋爱生活", "icon_url": None, "can_down": True, "sort_order": 90},
+             {"label": "已见父母", "value": "已见父母", "icon_url": None, "can_down": True, "sort_order": 80},
+             {"label": "已订婚",   "value": "已订婚",   "icon_url": None, "can_down": True, "sort_order": 70},
+             {"label": "已领证",   "value": "已领证",   "icon_url": None, "can_down": True, "sort_order": 60},
+             {"label": "已办婚礼", "value": "已办婚礼", "icon_url": None, "can_down": True, "sort_order": 50},
+             {"label": "婚后生活", "value": "婚后生活", "icon_url": None, "can_down": True, "sort_order": 40},
+             {"label": "锦旗飘飘", "value": "锦旗飘飘", "icon_url": None, "can_down": False, "sort_order": 30},
+         ],
+         "blessings": [
+             "恭喜这位孤寡青蛙成功上岸！从此下雨有人撑伞，吃火锅有人递纸。愿你们往后的日子，眼里有光，心里有爱，身边有彼此。",
+             "终于有人把你这个人间宝藏捡回家啦！祝你们在平淡生活里，也能把日子过成糖。",
+             "国家分配的CP终于到货了！祝您在这个看脸的世界里，不仅收获颜值，更收获满满的幸福。",
+             "叮！您的单身贵族体验卡已到期，系统自动为您续费双人甜蜜套餐。愿往后余生，酸甜苦辣都有他/她陪。",
+             "恭喜解锁人生新地图——恋爱副本！愿你们在这个快节奏的时代里，慢慢喜欢，慢慢相爱。",
+         ]},
+        [],
     ),
     "tools_branch": (
-        "分站配置", "分店管理-分站配置：分站列表与当前启用分站。",
-        {"current_site": "", "sites": []}, [],
+        "分站配置", "分店管理-分站配置：分站模式、分站列表与当前启用分站。",
+        {"mode": "all", "current_site": "", "sites": []}, [],
+    ),
+    "tools_sales_match": (
+        "销售匹配库功能配置", "运营工具-销售匹配库：头部宣传图、导航与功能控制、资料展示开关。",
+        {"show_banner": True,
+         "banner_url": None,
+         "nav_items": [
+             {"id": 1, "label": "嘉宾海选", "on": True},
+             {"id": 2, "label": "红娘推荐", "on": True},
+             {"id": 3, "label": "智能匹配", "on": True},
+             {"id": 4, "label": "眼缘人选", "on": True},
+         ],
+         "show_auth": True,
+         "show_intro": True,
+         "show_mate_req": True,
+         "show_material": True,
+         "show_person_intro": True}, [],
     ),
 }
 
@@ -403,32 +514,93 @@ def _snapshot(row: Any, *, mask_sensitive: bool = True) -> AdminConfigSnapshot:
 
 
 async def ensure_defaults(db: AsyncSession) -> None:
-    for namespace, (name, description, config, sensitive_keys) in DEFAULT_CONFIGS.items():
-        await db.execute(text("""INSERT IGNORE INTO admin_config_snapshot
-            (namespace, name, description, version, config_json, sensitive_keys_json)
-            VALUES (:namespace, :name, :description, 1, :config_json, :sensitive_keys_json)"""), {
-            "namespace": namespace, "name": name, "description": description,
-            "config_json": json.dumps(config, ensure_ascii=False),
-            "sensitive_keys_json": json.dumps(sensitive_keys, ensure_ascii=False),
-        })
-        existing = (await db.execute(
-            text("SELECT config_json FROM admin_config_snapshot WHERE namespace=:namespace"),
-            {"namespace": namespace},
-        )).mappings().first()
-        if existing:
+    """确保 DEFAULT_CONFIGS 中所有 namespace 在 DB 存在，并补齐缺失字段。
+
+    并发安全设计（修复 MySQL 1213 死锁）：
+    1. **GET_LOCK 串行化**：获取 MySQL 命名锁 `ensure_admin_config_defaults`（5s 超时），
+       所有并发请求被强制串行执行。避免两个事务同时 INSERT 同一 namespace 触发死锁。
+    2. **SELECT 一次** 全部已存在 namespace，避免 50+ 次单条 SELECT。
+    3. **ON DUPLICATE KEY UPDATE** 替代 INSERT IGNORE — 行为更确定，死锁概率更低。
+    4. **死锁重试**：捕获 1213 异常最多 3 次（指数退避），兜底网络抖动。
+    5. 锁失败 → 降级：直接 SELECT 已存在行，不阻塞请求。
+    """
+    lock_acquired = False
+    try:
+        result = (await db.execute(
+            text("SELECT GET_LOCK('ensure_admin_config_defaults', 5)")
+        )).scalar()
+        lock_acquired = bool(result)
+    except Exception:
+        lock_acquired = False
+
+    try:
+        for attempt in range(3):
             try:
-                current = json.loads(existing["config_json"])
-            except (TypeError, json.JSONDecodeError):
-                current = {}
-            if isinstance(current, dict):
-                missing = {key: value for key, value in config.items() if key not in current}
-                if missing:
-                    current.update(missing)
+                existing_rows = (await db.execute(
+                    text("SELECT namespace, config_json FROM admin_config_snapshot")
+                )).mappings().all()
+                existing_map = {row["namespace"]: row["config_json"] for row in existing_rows}
+
+                inserts: list[dict[str, Any]] = []
+                updates: list[dict[str, Any]] = []
+                for namespace, (name, description, config, sensitive_keys) in DEFAULT_CONFIGS.items():
+                    if namespace not in existing_map:
+                        inserts.append({
+                            "namespace": namespace,
+                            "name": name,
+                            "description": description,
+                            "config_json": json.dumps(config, ensure_ascii=False),
+                            "sensitive_keys_json": json.dumps(sensitive_keys, ensure_ascii=False),
+                        })
+                        continue
+                    try:
+                        current = json.loads(existing_map[namespace] or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        current = {}
+                    if isinstance(current, dict):
+                        missing = {key: value for key, value in config.items() if key not in current}
+                        if missing:
+                            current.update(missing)
+                            updates.append({
+                                "namespace": namespace,
+                                "config_json": json.dumps(current, ensure_ascii=False),
+                            })
+
+                # ON DUPLICATE KEY UPDATE 占位（namespace=VALUES(namespace)）—— 比 INSERT IGNORE
+                # 死锁概率低，行为更确定。
+                for params in inserts:
+                    await db.execute(text("""INSERT INTO admin_config_snapshot
+                        (namespace, name, description, version, config_json, sensitive_keys_json)
+                        VALUES (:namespace, :name, :description, 1, :config_json, :sensitive_keys_json)
+                        ON DUPLICATE KEY UPDATE namespace = VALUES(namespace)"""), params)
+                for params in updates:
                     await db.execute(
-                        text("UPDATE admin_config_snapshot SET config_json=:config_json WHERE namespace=:namespace"),
-                        {"namespace": namespace, "config_json": json.dumps(current, ensure_ascii=False)},
+                        text("""UPDATE admin_config_snapshot SET config_json = :config_json
+                            WHERE namespace = :namespace"""),
+                        params,
                     )
-    await db.commit()
+                if inserts or updates:
+                    await db.commit()
+                return
+            except OperationalError as exc:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                if "1213" in str(exc) and attempt < 2:
+                    await asyncio.sleep(0.1 * (2 ** attempt))
+                    continue
+                raise
+    finally:
+        if lock_acquired:
+            try:
+                await db.execute(text("SELECT RELEASE_LOCK('ensure_admin_config_defaults')"))
+                await db.commit()
+            except Exception:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
 
 async def get_config(db: AsyncSession, namespace: str) -> AdminConfigSnapshot:

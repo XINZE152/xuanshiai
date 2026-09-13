@@ -149,6 +149,15 @@ class DatabaseManager:
             logger.error(f"❌ 数据库初始化失败: {e}")
             raise
 
+    @staticmethod
+    def _named_columns(columns: dict) -> dict:
+        """给 {字段名: 类型定义} 字典补上 `字段名` 前缀。
+
+        _ensure_table_columns 的 SQL 模板是 `ALTER TABLE ... ADD COLUMN {column_def}`，
+        要求定义自带 `字段名` 前缀；新式字典（键=字段名，值=纯类型定义）需先经过本方法。
+        """
+        return {name: f"`{name}` {definition}" for name, definition in columns.items()}
+
     def _ensure_table_columns(self, cursor, table_name: str, required_columns: dict):
         """
         确保表的必需字段存在，如果不存在则添加
@@ -225,6 +234,7 @@ class DatabaseManager:
                 "house_fail_reason": "`house_fail_reason` varchar(255) DEFAULT NULL",
                 "house_submitted_at": "`house_submitted_at` datetime DEFAULT NULL",
                 "house_reviewed_at": "`house_reviewed_at` datetime DEFAULT NULL",
+                # 会员认证：实名/学历/房产认证审核所需字段
                 "face_method": "`face_method` varchar(32) DEFAULT NULL COMMENT '验证方式 动作活检/照片比对'",
                 "face_vendor": "`face_vendor` varchar(64) DEFAULT NULL COMMENT '人脸服务商'",
                 "face_score": "`face_score` decimal(5,2) DEFAULT NULL COMMENT '人脸比对得分'",
@@ -327,6 +337,8 @@ class DatabaseManager:
                 "action": "`action` varchar(32) NOT NULL DEFAULT 'none' COMMENT 'none|hide_content|restore_content|dismiss'",
                 "reviewed_by": "`reviewed_by` bigint unsigned DEFAULT NULL COMMENT '原举报审核人'",
                 "reviewed_at": "`reviewed_at` datetime DEFAULT NULL COMMENT '举报审核时间'",
+                # 线上行为：举报页需要展示提交人 IP
+                "submit_ip": "`submit_ip` varchar(64) DEFAULT NULL COMMENT '提交人IP'",
             },
             "paper_plane": {
                 "moderation_status": "`moderation_status` tinyint NOT NULL DEFAULT '1' COMMENT '1正常 2下架（与 lifecycle status 分离）'",
@@ -2365,6 +2377,8 @@ class DatabaseManager:
                     `type` varchar(64) DEFAULT NULL COMMENT '活动类型 1v1情感咨询/线下脱单局/竞争力评分等',
                     `city` varchar(64) DEFAULT NULL COMMENT '城市',
                     `address` varchar(255) DEFAULT NULL COMMENT '详细地址（报名后可见）',
+                    `organizer` varchar(128) DEFAULT NULL COMMENT '活动发起（主办方）',
+                    `time_text` varchar(128) DEFAULT NULL COMMENT '活动时间显示文本（UI 自由文本）',
                     `start_time` datetime NOT NULL,
                     `end_time` datetime NOT NULL,
                     `signup_deadline` datetime DEFAULT NULL COMMENT '报名截止时间',
@@ -3194,6 +3208,16 @@ class DatabaseManager:
         self._ensure_member_crm_columns(cursor)
         # M4 客源线索（promoter_id/audit_status）与会员服务（meeting_record.member_visible/sms_remind）
         self._ensure_m4_columns(cursor)
+        # M5 分店管理：organization 分站字段 + organization_member 菜单权限
+        self._ensure_m5_columns(cursor)
+        # M6 合伙红娘（partner_team.level_id 补列 + partner_level_config 3 级种子）
+        self._ensure_m6_columns(cursor)
+        # M7 活动报名（offline_activity 补字段 + activity_signup 补字段）+ 商家/短视频分类种子
+        self._ensure_m7_columns(cursor)
+
+        # M10 账号注销申请 + 平台工单反馈（旧库幂等补齐）
+        # 两张表已由 BUSINESS_TABLES 中 CREATE TABLE IF NOT EXISTS 直接创建，
+        # 这里仅做兜底（库内已有表时跳过）。
 
         # 旧库的 ai_feature_projection 不会由 CREATE TABLE IF NOT EXISTS 补齐
         # Task 9 新增列（版本向量/可见性/失效原因等），与上面同模式幂等补列
@@ -3286,10 +3310,111 @@ class DatabaseManager:
             },
         }
         for table_name, required in columns.items():
-            self._ensure_table_columns(cursor, f"`{table_name}`", required)
+            self._ensure_table_columns(cursor, f"`{table_name}`", self._named_columns(required))
         self._ensure_optional_index(
             cursor, "customer_lead", "idx_customer_lead_promoter", "(`promoter_id`)"
         )
+
+    def _ensure_m5_columns(self, cursor) -> None:
+        """M5 分店管理补充字段（旧库幂等补齐）。"""
+        self._ensure_table_columns(cursor, "`organization`", self._named_columns({
+            "link_url": "varchar(255) DEFAULT NULL COMMENT '分站访问链接'",
+            "sort_order": "int NOT NULL DEFAULT 0 COMMENT '显示排序，数字越大越靠前'",
+            "qr_code": "varchar(500) DEFAULT NULL COMMENT '分站链接/二维码图片地址'",
+        }))
+
+    def _ensure_m6_columns(self, cursor) -> None:
+        """M6 合伙红娘补充字段与种子（旧库幂等补齐）。"""
+        self._ensure_table_columns(cursor, "`partner_team`", self._named_columns({
+            "level_id": "tinyint unsigned NOT NULL DEFAULT 1 COMMENT '合伙级别：1 初级 / 2 中级 / 3 战略合伙人（固定 3 种）'",
+        }))
+        # commission_entry 支持后台手工录入：order_id 放开为可空 + 补 source/remark
+        self._ensure_table_columns(cursor, "`commission_entry`", self._named_columns({
+            "source": "varchar(16) NOT NULL DEFAULT 'order' COMMENT 'order 订单产生 / manual 后台手工录入'",
+            "remark": "varchar(255) DEFAULT NULL COMMENT '后台手工录入备注'",
+        }))
+        try:
+            cursor.execute("ALTER TABLE `commission_entry` MODIFY COLUMN `order_id` bigint unsigned DEFAULT NULL")
+            logger.info("✅ commission_entry.order_id 已放开为可空（支持手工录入分成）")
+        except Exception as e:  # 已是可空或权限不足时静默跳过
+            logger.debug(f"commission_entry.order_id 调整跳过: {e}")
+        # 合伙红娘分成配置（固定 3 种级别：1 初级 / 2 中级 / 3 战略合伙人）
+        cursor.execute("""
+            INSERT IGNORE INTO partner_level_config
+            (level_id, level_name, auto_split_mode, auto_split_rate,
+             promote_performance_threshold, promote_member_threshold,
+             register_reward_male, register_reward_female, promoter_join_reward,
+             consume_commission_mode, consume_commission_rate, share_bonus)
+            VALUES
+                (1, '初级合伙人', 'auto_rate', 35.0000, NULL, NULL, 1.00, 1.00, 0.00, 'auto_rate', 35.0000, 1),
+                (2, '中级合伙人', 'auto_rate', 40.0000, 10000.00, 100, 1.00, 1.00, 0.00, 'auto_rate', 40.0000, 1),
+                (3, '战略合伙人', 'auto_rate', 45.0000, 30000.00, 500, 1.00, 1.00, 0.00, 'auto_rate', 45.0000, 1)
+        """)
+
+    def _ensure_m7_columns(self, cursor) -> None:
+        """M7 活动报名 / 商家联盟 / 短视频补充字段与种子（旧库幂等补齐）。"""
+        # 活动（offline_activity）按后台 UI 补字段
+        self._ensure_table_columns(cursor, "`offline_activity`", self._named_columns({
+            "organizer": "varchar(128) DEFAULT NULL COMMENT '活动发起（主办方）'",
+            "time_text": "varchar(128) DEFAULT NULL COMMENT '活动时间显示文本（UI 自由文本）'",
+            "cover_small": "varchar(255) DEFAULT NULL COMMENT '封面小图'",
+            "fee_name": "varchar(64) NOT NULL DEFAULT '报名费' COMMENT '费用名称'",
+            "price_male": "decimal(10,2) NOT NULL DEFAULT 0.00 COMMENT '男生费用'",
+            "price_female": "decimal(10,2) NOT NULL DEFAULT 0.00 COMMENT '女生费用'",
+            "signup_mode": "varchar(24) NOT NULL DEFAULT 'anyone' COMMENT 'anyone 任何人 / member 相亲会员'",
+            "require_realname": "tinyint NOT NULL DEFAULT 0 COMMENT '报名必须实名认证'",
+            "limit_mode": "varchar(24) NOT NULL DEFAULT 'gender' COMMENT 'gender 限制男女人数 / total 仅限制总人数'",
+            "max_male": "int NOT NULL DEFAULT 0 COMMENT '男生名额上限，0 不限'",
+            "max_female": "int NOT NULL DEFAULT 0 COMMENT '女生名额上限，0 不限'",
+            "virtual_people": "int NOT NULL DEFAULT 0 COMMENT '显示报名总数基数'",
+            "virtual_female": "int NOT NULL DEFAULT 0 COMMENT '显示报名女生数基数'",
+            "hide_signup_count": "tinyint NOT NULL DEFAULT 0 COMMENT '隐藏报名数'",
+            "reward_promoter": "decimal(10,2) NOT NULL DEFAULT 0.00 COMMENT '推广红娘奖励'",
+            "reward_service": "decimal(10,2) NOT NULL DEFAULT 0.00 COMMENT '服务红娘奖励'",
+            "reward_partner": "decimal(10,2) NOT NULL DEFAULT 0.00 COMMENT '合伙红娘奖励'",
+            "reminder_html": "text COMMENT '活动提醒（报名成功页展示）'",
+            "service_wechat": "varchar(64) DEFAULT NULL COMMENT '客服微信'",
+            "service_qr": "varchar(255) DEFAULT NULL COMMENT '客服二维码'",
+            "virtual_views": "int NOT NULL DEFAULT 0 COMMENT '浏览人气'",
+            "sort_order": "int NOT NULL DEFAULT 0 COMMENT '显示排序，数字越大越靠前'",
+            "custom_share": "tinyint NOT NULL DEFAULT 0 COMMENT '自定义分享'",
+            "manager_ids": "varchar(255) DEFAULT NULL COMMENT '管理红娘 users.id 逗号分隔'",
+            "notify_phones": "varchar(128) DEFAULT NULL COMMENT '报名短信通知手机号，逗号分隔'",
+            "online": "tinyint NOT NULL DEFAULT 1 COMMENT '上线 1是 0否'",
+            "audit_status": "varchar(16) NOT NULL DEFAULT 'approved' COMMENT 'pending待审/approved通过/rejected未通过'",
+        }))
+        # 活动报名（activity_signup）补会员资料快照与运营字段
+        self._ensure_table_columns(cursor, "`activity_signup`", self._named_columns({
+            "gender": "varchar(8) DEFAULT NULL COMMENT '男/女'",
+            "age": "int DEFAULT NULL",
+            "height": "int DEFAULT NULL COMMENT '身高cm'",
+            "education": "varchar(32) DEFAULT NULL COMMENT '学历'",
+            "income": "varchar(32) DEFAULT NULL COMMENT '收入'",
+            "marriage_status": "varchar(32) DEFAULT NULL COMMENT '婚况'",
+            "company": "varchar(128) DEFAULT NULL COMMENT '单位'",
+            "avatar": "varchar(255) DEFAULT NULL COMMENT '头像'",
+            "id_card": "varchar(32) DEFAULT NULL COMMENT '身份证号'",
+            "is_member": "tinyint NOT NULL DEFAULT 0 COMMENT '是否会员'",
+            "is_realname": "tinyint NOT NULL DEFAULT 0 COMMENT '是否已实名'",
+            "signup_times": "int NOT NULL DEFAULT 1 COMMENT '第几次报名'",
+            "pay_status": "varchar(16) NOT NULL DEFAULT 'free' COMMENT 'free免费/paid已支付/unpaid未支付'",
+            "pay_amount": "decimal(10,2) NOT NULL DEFAULT 0.00 COMMENT '报名费金额'",
+            "checked_in": "tinyint NOT NULL DEFAULT 0 COMMENT '是否已签到'",
+            "in_crm": "tinyint NOT NULL DEFAULT 0 COMMENT '是否已入库会员CRM'",
+            "promoter_id": "bigint unsigned DEFAULT NULL COMMENT '推广红娘 users.id'",
+        }))
+        self._ensure_optional_index(cursor, "activity_signup", "idx_activity_signup_promoter", "(`promoter_id`)")
+        self._ensure_optional_index(cursor, "offline_activity", "idx_offline_activity_online", "(`online`, `sort_order`)")
+        # 商家分类种子
+        cursor.execute("""
+            INSERT IGNORE INTO merchant_category (name, sort, status)
+            VALUES ('推荐餐饮', 1, 1), ('新奇体验', 2, 1), ('休闲娱乐', 3, 1), ('生活服务', 4, 1), ('结婚', 5, 1)
+        """)
+        # 短视频分类种子
+        cursor.execute("""
+            INSERT IGNORE INTO short_video_category (name, sort, status)
+            VALUES ('关于我们', 1, 1), ('脱单干货', 2, 1), ('活动瞬间', 3, 1), ('优质嘉宾', 4, 1), ('直播切片', 5, 1)
+        """)
 
     def _ensure_optional_index(self, cursor, table_name: str, index_name: str, definition: str) -> None:
         """幂等创建索引：表不存在或索引已存在时静默跳过。"""

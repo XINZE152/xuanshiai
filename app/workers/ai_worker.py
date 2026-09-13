@@ -8,9 +8,8 @@ Run ``python -m app.workers.ai_worker --once --dry-run`` for a safe summary:
 runs a single real round.  Business handlers are registered in
 :data:`TASK_HANDLERS` keyed by ``ai_task.task_type``; :func:`register_business_handlers`
 runs at import time so a standalone ``python -m app.workers.ai_worker`` process
-can dispatch every business task type (``moxiang_candidate_extract`` /
-``search_parse`` / ``search_execute`` / ``compatibility`` /
-``profile_projection`` / ``cleanup``).
+can dispatch every business task type (``profile_extract`` / ``search_parse`` /
+``search_execute`` / ``compatibility`` / ``profile_projection`` / ``cleanup``).
 A handler has the signature ``async def handler(db, task, worker_id) ->
 (result_ref, revisions) | None`` — returning ``None`` records a retryable
 failure, returning a tuple completes the task after a version re-check in
@@ -53,6 +52,7 @@ from app.core.config import settings
 from app.db.session import session_factory
 from app.schemas.ai_common import AiTaskStatus
 from app.services.ai.audit import emit_ai_metric
+from app.services.ai.profile import extract_profile_turn
 from app.services.ai.journey import extract_journey_candidates
 from app.services.ai.task_events import TERMINAL_TASK_STATUSES, notify_task_event
 from app.services.ai.tasks import (
@@ -67,11 +67,11 @@ from app.services.ai.tasks import (
 
 logger = logging.getLogger(__name__)
 
-# 墨相师旅程候选抽取（原 profile_extract 问答链路已于 2026-09-11 删除）；
-# 其余业务 handler（search_parse/search_execute/compatibility/
-# profile_projection/narrative/cleanup）由文件底部的
+# Task 7 注册 profile_extract 业务 handler；其余业务 handler（search_parse/
+# search_execute/compatibility/profile_projection/cleanup）由文件底部的
 # register_business_handlers() 显式注册。key = ai_task.task_type。
 TASK_HANDLERS: dict[str, Callable[..., Awaitable[Any]]] = {
+    "profile_extract": extract_profile_turn,
     "moxiang_candidate_extract": extract_journey_candidates,
 }
 

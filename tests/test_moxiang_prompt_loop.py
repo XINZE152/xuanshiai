@@ -130,8 +130,8 @@ def test_state_dedup_duplicate_task_and_hash() -> None:
     snapshot = _fake_snapshot(
         {
             "ai_task": [
-                {"task_type": "moxiang_candidate_extract", "idempotency_key": "k1"},
-                {"task_type": "moxiang_candidate_extract", "idempotency_key": "k1"},
+                {"task_type": "profile_extract", "idempotency_key": "k1"},
+                {"task_type": "profile_extract", "idempotency_key": "k1"},
             ],
             "ai_profile_candidate": [
                 {"session_id": "s1", "content_hash": "h1"},

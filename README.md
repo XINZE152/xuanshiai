@@ -34,7 +34,7 @@ uv run uvicorn app.main:app --reload
 
 前端联调：小程序默认打测试服 `https://xhztest.xyz`；本机联调把 `xuanshiai-vue/api/config.uts` 的 `API_BASE_URL` 临时改为 `http://127.0.0.1:8000`。H5 冒烟常见端口是 `http://localhost:8080`（不是 `:5173`）。CORS 在 `.env` 的 `CORS_ORIGINS_RAW`。
 
-墨相师（AI 画像的产品更名）/ 搜索 / 匹配度 / 语音默认关闭；未批准时返回 `503 AI_FEATURE_DISABLED`。生产禁止 mock provider。
+AI 画像 / 搜索 / 匹配度 / 语音默认关闭；未批准时返回 `503 AI_FEATURE_DISABLED`。生产禁止 mock provider。
 
 ## 配置说明
 

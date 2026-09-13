@@ -1,22 +1,18 @@
-"""AI 画像（墨相师）路由 —— 画像发布链（统一方案 §7.5/§7.6）。
+"""M04 AI 画像路由（统一方案 §7.5/§7.6，执行计划 §3.2）。
 
-> **命名说明：墨相师（Moxiang）就是 AI 画像功能的产品更名。** 旧的对话式画像
-> REST 问答入口（``/profile-sessions`` 系列，M04 文字问答，含文字/语音双模式）
-> 已于 2026-09-11 删除，画像建构统一通过墨相师旅程完成（WS
-> ``/voice/moxiang-master`` 与 ``/ai/moxiang/*`` REST，契约见
-> ``docs/api/墨相师实时整理WebSocket.md``）。本模块保留的是画像发布链：
-> 墨相师旅程产出草稿后，确认、发布、版本历史、叙事层与删除传播仍走以下接口。
+前缀 `/api/v1/ai`（由 ``app/api/router.py`` 注册），共 15 个路径：
 
-前缀 `/api/v1/ai`（由 ``app/api/router.py`` 注册），共 13 个路径：
-
+- ``POST /profile-sessions``：201 创建/复用会话（要求 profile_text_extract 授权）
+- ``GET /profile-sessions/{session_id}``：200 仅本人
+- ``POST /profile-sessions/{session_id}/turns``：202 turn+task
+- ``POST /profile-sessions/{session_id}/skip-question``：200 跳过当前问题（不确认字段）
+- ``POST /profile-sessions/{session_id}/pause`` / ``resume``：200 会话状态
+- ``DELETE /profile-sessions/{session_id}``：202 cleanup task（软删除幂等）
 - ``GET /profile-drafts/{draft_id}``：200 字段草稿（仅本人）
 - ``PATCH /profile-drafts/{draft_id}``：200 新草稿 revision（乐观锁）
 - ``POST /profile-drafts/{draft_id}/publish``：202 publish task（confirmed-only）
-- ``POST /profile-drafts/{draft_id}/preview``：202 生成/复用成稿预览
-- ``GET /profile-previews/{preview_id}``：200 读取预览
 - ``GET /profile-revisions``：200 游标历史（仅本人，只读）
 - ``POST /profile-revisions/{revision_id}/restore``：201 新 draft（旧行只读）
-- ``GET /profiles/{subject}/fields``：200 最新发布画像字段
 - ``DELETE /profiles/{subject}``：202 cleanup task（同步隐藏 + 异步清理）
 - ``DELETE /profiles/{subject}/fields/{field_key}``：202 invalidation task
 - ``GET /profiles/{subject}/narrative``：200 最新叙事层（状态透传，WP-P3）
@@ -45,10 +41,19 @@ from app.schemas.ai_profile import (
     ProfileDraftPatchRequest,
     ProfileDraftRead,
     ProfileNarrativeRead,
+    ProfileProgress,
     ProfilePublishAccepted,
     ProfileRevisionPage,
+    ProfileSessionCreateRequest,
+    ProfileUpdateIntentAccepted,
+    ProfileUpdateIntentRequest,
     ProfilePublishedFieldsPage,
+    ProfileSessionModeRequest,
+    ProfileSessionRead,
+    ProfileSkipQuestionRequest,
     ProfileSubject,
+    ProfileTurnCreateRequest,
+    ProfileTurnSubmissionRead,
 )
 from app.services.ai.flags import AiFeature, AiFeatureDisabledError, require_ai_feature
 from app.services.ai.providers import sanitize_narrative_dimension_icon
@@ -60,17 +65,31 @@ from app.services.ai.profile import (
     ProfileDraft,
     ProfileDraftNotFound,
     ProfileRevisionNotFound,
+    ProfileSession,
+    ProfileSessionNotFound,
+    ProfileSessionStale,
     confirm_profile_draft,
     confirm_profile_narrative,
+    create_profile_session,
+    create_update_session,
     list_published_profile_fields,
+    update_session_input_mode,
     delete_ai_profile,
     delete_ai_profile_field,
+    delete_profile_session,
     list_profile_revisions,
     load_owned_draft,
+    load_owned_session,
     load_published_narrative,
+    min_confirmed_fields_to_publish,
+    pause_profile_session,
+    progress_value,
     publish_profile_draft,
     request_narrative_regenerate,
     restore_profile_revision,
+    resume_profile_session,
+    skip_profile_question,
+    submit_profile_turn,
 )
 from app.services.ai.tasks import TaskError
 
@@ -120,6 +139,44 @@ def _check_idempotency_key(idempotency_key: str | None) -> None:
         )
 
 
+def _to_session_read(session: ProfileSession) -> ProfileSessionRead:
+    # Task6 Step2：current_question 透传稳定 field_key（加法，保留 id/text）；
+    # draft_id 透传活动草稿 ID（无活动草稿为 None）。两者均为加法字段，旧客户端
+    # 忽略新字段不受影响。
+    current_question: dict[str, str] | None = None
+    if session.current_question is not None:
+        current_question = {
+            "id": session.current_question.id,
+            "text": session.current_question.text,
+            "field_key": session.current_question.field_key,
+        }
+    return ProfileSessionRead(
+        session_id=session.session_id,
+        subject=session.subject,
+        status=session.status,
+        input_mode=session.input_mode,
+        session_kind=session.session_kind,
+        progress=ProfileProgress(
+            basis="confirmed_field_coverage",
+            value=progress_value(session.confirmed_keys),
+            can_early_publish=(
+                len(session.confirmed_keys) >= min_confirmed_fields_to_publish()
+            ),
+            early_publish_hint=(
+                "已满足提前建构条件，可以直接生成画像啦"
+                if len(session.confirmed_keys) >= min_confirmed_fields_to_publish()
+                else ""
+            ),
+        ),
+        current_question=current_question,
+        draft_id=session.draft_id,
+        profile_revision=session.profile_revision,
+        preference_revision=session.preference_revision,
+        expires_at=session.expires_at,
+        created_at=session.created_at,
+    )
+
+
 def _to_draft_read(draft: ProfileDraft) -> ProfileDraftRead:
     from app.schemas.ai_profile import (
         ProfileDraftFieldRead,
@@ -158,10 +215,302 @@ def _to_draft_read(draft: ProfileDraft) -> ProfileDraftRead:
             )
             for field in draft.fields
         ],
-        synced_profile_fields=list(getattr(draft, "synced_profile_fields", ()) or ()),
         expires_at=draft.expires_at,
         created_at=draft.created_at,
         updated_at=draft.updated_at,
+    )
+
+
+@router.post(
+    "/profile-sessions",
+    response_model=ProfileSessionRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="创建或复用 AI 画像文字会话",
+)
+async def create_profile_session_route(
+    body: ProfileSessionCreateRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ProfileSessionRead:
+    """Create or reuse the single active session for user+subject."""
+    _require_profile_feature()
+    _check_idempotency_key(idempotency_key)
+    try:
+        session = await create_profile_session(
+            db, current.id, body.subject, body.consent_version, idempotency_key
+        )
+    except AIConsentRequired as exc:
+        raise _error_response(
+            exc.code, exc.message, exc.status_code
+        ) from exc
+    except AIInputError as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileSessionStale as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except TaskError as exc:
+        raise _error_response(
+            exc.code, exc.message, exc.status_code, retryable=exc.retryable
+        ) from exc
+    await db.commit()
+    return _to_session_read(session)
+
+
+@router.post(
+    "/profile-sessions/update-intent",
+    response_model=ProfileUpdateIntentAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="发起对话式画像更新（澄清式追问，产出条目 patch）",
+)
+async def create_update_session_route(
+    body: ProfileUpdateIntentRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ProfileUpdateIntentAccepted:
+    """WP-P4：陈述新期望 → 创建 update 会话 + 首轮澄清任务（异步）。
+
+    首轮澄清追问由 profile_extract 任务按 update 分支异步生成，前端轮询
+    会话 turns 读取 assistant 追问。已有活动会话时 400（先完成/放弃）。
+    """
+    _require_profile_feature()
+    _check_idempotency_key(idempotency_key)
+    try:
+        session, submission = await create_update_session(
+            db, current.id, body.subject, body.desired_text, body.consent_version,
+            idempotency_key or "",
+        )
+    except AIConsentRequired as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except AIInputError as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileSessionStale as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except TaskError as exc:
+        raise _error_response(
+            exc.code, exc.message, exc.status_code, retryable=exc.retryable
+        ) from exc
+    await db.commit()
+    return ProfileUpdateIntentAccepted(
+        session=_to_session_read(session),
+        task_id=submission.task_id,
+        turn_id=submission.turn_id,
+        status=submission.status,
+    )
+
+
+@router.post(
+    "/profile-sessions/{session_id}/mode",
+    response_model=ProfileSessionRead,
+    status_code=status.HTTP_200_OK,
+    summary="切换画像会话输入模式（text/voice，进度与已确认字段延续）",
+)
+async def update_session_mode_route(
+    session_id: str = Path(..., min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$"),
+    body: ProfileSessionModeRequest = Body(...),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProfileSessionRead:
+    """WP-P5：双模式互切——同一会话更新 input_mode（同一行状态机）。"""
+    _require_profile_feature()
+    try:
+        session = await update_session_input_mode(
+            db, session_id, current.id, body.input_mode
+        )
+    except AIInputError as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileSessionNotFound as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileSessionStale as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    await db.commit()
+    return _to_session_read(session)
+
+
+@router.get(
+    "/profile-sessions/{session_id}",
+    response_model=ProfileSessionRead,
+    status_code=status.HTTP_200_OK,
+    summary="查询本人的 AI 画像会话",
+)
+async def get_profile_session_route(
+    session_id: str = Path(..., min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$"),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProfileSessionRead:
+    """Return the session for the owner only; foreign/missing is a uniform 404."""
+    _require_profile_feature()
+    try:
+        session = await load_owned_session(db, session_id, current.id)
+    except ProfileSessionNotFound as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    return _to_session_read(session)
+
+
+@router.post(
+    "/profile-sessions/{session_id}/turns",
+    response_model=ProfileTurnSubmissionRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="提交一条文字回答并创建 profile_extract 任务",
+)
+async def submit_profile_turn_route(
+    session_id: str = Path(..., min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$"),
+    body: ProfileTurnCreateRequest = Body(...),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ProfileTurnSubmissionRead:
+    """Save the original answer first, then enqueue extraction (idempotent)."""
+    _require_profile_feature()
+    _check_idempotency_key(idempotency_key)
+    try:
+        submission = await submit_profile_turn(
+            db,
+            session_id,
+            current.id,
+            body.client_turn_id,
+            body.answer_text,
+            idempotency_key,
+        )
+    except AIInputError as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileSessionNotFound as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileSessionStale as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except AIConsentRequired as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except TaskError as exc:
+        raise _error_response(
+            exc.code, exc.message, exc.status_code, retryable=exc.retryable
+        ) from exc
+    await db.commit()
+    return ProfileTurnSubmissionRead(
+        turn_id=submission.turn_id,
+        session_id=submission.session_id,
+        client_turn_id=submission.client_turn_id,
+        turn_no=submission.turn_no,
+        role="user",
+        status="saved",
+        replayed=submission.replayed,
+        task_id=submission.task_id,
+        task_status=submission.task_status,
+        stage=submission.stage,
+        poll_after_ms=submission.poll_after_ms,
+        expires_at=submission.expires_at,
+    )
+
+
+@router.post(
+    "/profile-sessions/{session_id}/skip-question",
+    response_model=ProfileSessionRead,
+    status_code=status.HTTP_200_OK,
+    summary="跳过当前画像问题，不确认该字段",
+)
+async def skip_profile_question_route(
+    session_id: str = Path(..., min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$"),
+    body: ProfileSkipQuestionRequest = Body(...),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ProfileSessionRead:
+    """Skip the current question; progress is unchanged and the field is not asked again."""
+    _require_profile_feature()
+    _check_idempotency_key(idempotency_key)
+    try:
+        session = await skip_profile_question(
+            db, session_id, current.id, body.field_key, idempotency_key or ""
+        )
+    except AIInputError as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileSessionNotFound as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileSessionStale as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except AIConsentRequired as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    await db.commit()
+    return _to_session_read(session)
+
+
+@router.post(
+    "/profile-sessions/{session_id}/pause",
+    response_model=ProfileSessionRead,
+    status_code=status.HTTP_200_OK,
+    summary="暂停 AI 画像会话",
+)
+async def pause_profile_session_route(
+    session_id: str = Path(..., min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$"),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ProfileSessionRead:
+    """Pause only draft/extracting/awaiting_confirmation; repeats return current."""
+    _require_profile_feature()
+    _check_idempotency_key(idempotency_key)
+    try:
+        session = await pause_profile_session(db, session_id, current.id)
+    except ProfileSessionNotFound as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileSessionStale as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    await db.commit()
+    return _to_session_read(session)
+
+
+@router.post(
+    "/profile-sessions/{session_id}/resume",
+    response_model=ProfileSessionRead,
+    status_code=status.HTTP_200_OK,
+    summary="恢复 AI 画像会话",
+)
+async def resume_profile_session_route(
+    session_id: str = Path(..., min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$"),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ProfileSessionRead:
+    """Resume non stale/cancelled sessions; expired sessions return 409."""
+    _require_profile_feature()
+    _check_idempotency_key(idempotency_key)
+    try:
+        session = await resume_profile_session(db, session_id, current.id)
+    except ProfileSessionNotFound as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileSessionStale as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    await db.commit()
+    return _to_session_read(session)
+
+
+@router.delete(
+    "/profile-sessions/{session_id}",
+    response_model=CleanupTaskAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="软删除 AI 画像会话并创建清理任务",
+)
+async def delete_profile_session_route(
+    session_id: str = Path(..., min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$"),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> CleanupTaskAccepted:
+    """Soft-delete the session; published revisions are never implicitly deleted."""
+    _require_profile_feature()
+    _check_idempotency_key(idempotency_key)
+    try:
+        submission = await delete_profile_session(db, session_id, current.id, idempotency_key)
+    except ProfileSessionNotFound as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except TaskError as exc:
+        raise _error_response(
+            exc.code, exc.message, exc.status_code, retryable=exc.retryable
+        ) from exc
+    await db.commit()
+    return CleanupTaskAccepted(
+        task_id=submission.task_id,
+        status=submission.status,
+        cleanup_requested=True,
     )
 
 
@@ -348,7 +697,6 @@ async def publish_profile_draft_route(
         subject=ProfileSubject(revision.subject) if revision else None,
         field_count=len(revision.changed_field_keys) if revision else None,
         narrative_task_id=submission.narrative_task_id,
-        synced_profile_fields=list(getattr(submission, "synced_profile_fields", ()) or ()),
     )
 
 
@@ -636,7 +984,6 @@ async def get_profile_narrative_route(
         recent_change=data.get("recent_change"),
         history_observations=list(data.get("history_observations") or []),
         conclusion=str(data.get("conclusion") or ""),
-        emotional_insight=data.get("emotional_insight"),
     )
 
 
@@ -673,7 +1020,6 @@ async def confirm_profile_narrative_route(
         persona_title=str(data.get("persona_title") or ""),
         persona_tags=list(data.get("persona_tags") or []),
         insight=str(data.get("insight") or ""),
-        emotional_insight=data.get("emotional_insight"),
     )
 
 

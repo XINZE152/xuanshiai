@@ -34,7 +34,6 @@ from app.services.ai.base import (
     ModerationRequest,
     ModerationResult,
     NarrativeDimension,
-    NarrativeEmotionalInsight,
     NarrativeHistoryObservation,
     NarrativeIdealWeight,
     NarrativeRecentChange,
@@ -53,6 +52,7 @@ from app.services.ai.base import (
 from app.services.ai.prompts.profile_extract import (
     build_profile_extract_prompt,
     build_profile_master_extract_prompt,
+    build_profile_update_clarify_prompt,
 )
 from app.services.ai.prompts.compatibility_compare import build_compatibility_compare_prompt
 from app.services.ai.prompts.profile_narrative import build_profile_narrative_prompt
@@ -237,13 +237,6 @@ _NARRATIVE_FIXTURE_PERSONAL = NarrativeResult(
         ),
     ),
     conclusion="总的来说，你要的并不复杂——一份能彼此回应的关系，和一段能一起慢慢走远的路。",
-    emotional_insight=NarrativeEmotionalInsight(
-        attachment_style="secure",
-        attachment_summary="情绪沉着，期待细水长流的坦诚回应",
-        highlights=("温和包容，注重承诺践行", "尊重彼此边界，善于倾听"),
-        boundaries=("需要独处充电空间", "反感冷暴力或言行不一"),
-        master_message="知遇有言：心安处方能久长，愿遇一人懂你留白，亦惜你深情。",
-    ),
 )
 
 _NARRATIVE_FIXTURE_IDEAL_PARTNER = NarrativeResult(
@@ -714,88 +707,27 @@ def _normalize_narrative_payload(data: Any) -> Any:
             fixed.append(item)
         data["history_observations"] = fixed
     weights = data.get("ideal_weights")
-    if isinstance(weights, list):
-        normalized: list[Any] = []
-        for item in weights:
-            if (
-                isinstance(item, dict)
-                and "key" not in item
-                and isinstance(item.get("dimension"), str)
-                and item.get("weight") is not None
-            ):
-                label = item["dimension"]
-                normalized.append(
-                    {
-                        "key": _IDEAL_WEIGHT_KEY_BY_LABEL.get(label, label),
-                        "label": label,
-                        "percent": item["weight"],
-                    }
-                )
-            else:
-                normalized.append(item)
-        data["ideal_weights"] = normalized
-
-    ei = data.get("emotional_insight")
-    if isinstance(ei, dict):
-        style_raw = str(ei.get("attachment_style") or "").strip().lower()
-        style_map = {
-            "secure": "secure",
-            "anxious": "anxious",
-            "avoidant": "avoidant",
-            "fearful": "fearful",
-            "安全型": "secure",
-            "安全": "secure",
-            "焦虑型": "anxious",
-            "焦虑": "anxious",
-            "回避型": "avoidant",
-            "回避": "avoidant",
-            "恐惧型": "fearful",
-            "恐惧回避型": "fearful",
-            "混乱型": "fearful",
-        }
-        mapped_style = style_map.get(style_raw) or style_map.get(str(ei.get("attachment_style") or "").strip())
-
-        summary = str(ei.get("attachment_summary") or "").strip()[:60]
-
-        raw_highlights = ei.get("highlights")
-        highlights: list[str] = []
-        if isinstance(raw_highlights, (list, tuple)):
-            for h in raw_highlights:
-                if isinstance(h, str) and h.strip():
-                    highlights.append(h.strip()[:60])
-        elif isinstance(raw_highlights, str) and raw_highlights.strip():
-            highlights.append(raw_highlights.strip()[:60])
-
-        raw_boundaries = ei.get("boundaries")
-        boundaries: list[str] = []
-        if isinstance(raw_boundaries, (list, tuple)):
-            for b in raw_boundaries:
-                if isinstance(b, str) and b.strip():
-                    boundaries.append(b.strip()[:60])
-        elif isinstance(raw_boundaries, str) and raw_boundaries.strip():
-            boundaries.append(raw_boundaries.strip()[:60])
-
-        master_message = str(ei.get("master_message") or "").strip()[:80]
-
+    if not isinstance(weights, list):
+        return data
+    normalized: list[Any] = []
+    for item in weights:
         if (
-            mapped_style in {"secure", "anxious", "avoidant", "fearful"}
-            and summary
-            and len(highlights) >= 2
-            and len(boundaries) >= 1
-            and master_message
+            isinstance(item, dict)
+            and "key" not in item
+            and isinstance(item.get("dimension"), str)
+            and item.get("weight") is not None
         ):
-            data["emotional_insight"] = {
-                "attachment_style": mapped_style,
-                "attachment_summary": summary,
-                "highlights": highlights[:4],
-                "boundaries": boundaries[:3],
-                "master_message": master_message,
-            }
+            label = item["dimension"]
+            normalized.append(
+                {
+                    "key": _IDEAL_WEIGHT_KEY_BY_LABEL.get(label, label),
+                    "label": label,
+                    "percent": item["weight"],
+                }
+            )
         else:
-            data["emotional_insight"] = None
-    elif ei is not None:
-        data["emotional_insight"] = None
-
+            normalized.append(item)
+    data["ideal_weights"] = normalized
     return data
 
 
@@ -1088,6 +1020,8 @@ class _OpenAICompatProvider:
     async def structured_extract(
         self, request: StructuredExtractRequest
     ) -> StructuredExtractResult:
+        if request.session_kind == "update":
+            return await self._structured_extract_update(request)
         if request.session_kind == "master":
             return await self._structured_extract_master(request)
         prompt = build_profile_extract_prompt(
@@ -1149,6 +1083,53 @@ class _OpenAICompatProvider:
             schema_version=_PROFILE_SCHEMA_VERSION,
             fields=tuple(fields),
             entries=tuple(entries),
+        )
+
+    async def _structured_extract_update(
+        self, request: StructuredExtractRequest
+    ) -> StructuredExtractResult:
+        """update 会话澄清式抽取：产出 clarifying_question 或 entry patch。"""
+        prompt = build_profile_update_clarify_prompt(
+            request.subject,
+            request.turn_texts,
+            entry_digest=request.entry_digest,
+        )
+        data = await self._chat_json(prompt)
+        subject = ProfileSubject(request.subject)
+        patches_data = data.get("patches", []) if isinstance(data, dict) else []
+        patches: list[ExtractedPatch] = []
+        for item in patches_data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                patches.append(
+                    ExtractedPatch(
+                        action=item.get("action", ""),
+                        category=normalize_entry_category(item.get("category")),
+                        content=item.get("content", ""),
+                        replaces_field_key=item.get("replaces_field_key"),
+                        subject=subject,
+                        source_quote=item.get("source_quote"),
+                        confidence=_safe_confidence(item.get("confidence")),
+                        needs_confirmation=True,
+                        confirmation_status="suggested",
+                        schema_version=_PROFILE_SCHEMA_VERSION,
+                        prompt_version=_PROFILE_PROMPT_VERSION,
+                        policy_revision=request.policy_revision,
+                    )
+                )
+            except ValidationError:
+                _drop_invalid_extract_item("profile_update_patch", item)
+                continue
+        question = data.get("clarifying_question") if isinstance(data, dict) else None
+        if not isinstance(question, str) or not question.strip():
+            question = None
+        return StructuredExtractResult(
+            schema_version=_PROFILE_SCHEMA_VERSION,
+            fields=(),
+            entries=(),
+            clarifying_question=question,
+            patches=tuple(patches),
         )
 
     async def _structured_extract_master(

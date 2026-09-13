@@ -2,11 +2,6 @@
 
 接口前缀：`/api/v1/ai`。所有接口需要登录且需要有效会员；未登录返回 `401`，非会员返回 `403`。阶段一只处理文字，不包含图片美化、向量数据库或海报图片生成。
 
-> **范围澄清（2026-09-11）**：本文件的 `/ai/profile/polish`（资料润色）与
-> `/ai/profile/thoughtfulness`（用心度评审）是独立的 AI 工具接口，与已下线的
-> 对话式 AI 画像问答模块（`/ai/profile-sessions*`）无关。墨相师（Moxiang）就是
-> AI 画像功能的产品更名，画像建构契约见 [`AI画像.md`](AI画像.md)。
-
 ## 配置
 
 使用 OpenAI Chat Completions 兼容协议。测试环境可配置中转站 GPT，生产环境建议配置 DeepSeek：

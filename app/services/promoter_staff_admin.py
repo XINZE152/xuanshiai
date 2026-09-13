@@ -38,6 +38,7 @@ from app.schemas.promoter_staff_admin import (
     PromoterUserCandidate,
 )
 from app.services.matchmaker_admin_auth import _issue_session
+from app.services import user_candidates
 
 _APPLY_TYPE = "promoter"
 
@@ -222,21 +223,9 @@ async def list_promoters(
 async def search_user_candidates(
     db: AsyncSession, keyword: str, limit: int = 10
 ) -> list[PromoterUserCandidate]:
-    rows = await db.execute(
-        text(
-            """SELECT u.id, u.nickname, u.phone, u.avatar
-            FROM users u
-            WHERE u.status = 1
-              AND (u.nickname LIKE CONCAT('%', :keyword, '%') OR u.phone LIKE CONCAT('%', :keyword, '%'))
-              AND NOT EXISTS (
-                SELECT 1 FROM user_matchmaker_apply ma
-                WHERE ma.user_id = u.id AND ma.application_type = 'promoter'
-              )
-            ORDER BY u.id DESC LIMIT :limit"""
-        ),
-        {"keyword": keyword, "limit": limit},
-    )
-    return [PromoterUserCandidate(**dict(row)) for row in rows.mappings().all()]
+    """推广红娘候选人：排除已是推广红娘的用户（统一走 user_candidates 实现）。"""
+    rows = await user_candidates.search_user_candidates(db, keyword, "promoter", limit)
+    return [PromoterUserCandidate(**row) for row in rows]
 
 
 async def _resolve_user_id(
@@ -244,15 +233,12 @@ async def _resolve_user_id(
 ) -> int:
     user_id = body.user_id
     if user_id is None and body.lookup:
-        column = "nickname" if body.lookup_by == "nickname" else "phone"
-        user_id = (
-            await db.execute(
-                text(f"SELECT id FROM users WHERE {column} = :lookup AND status = 1 ORDER BY id DESC LIMIT 1"),
-                {"lookup": body.lookup.strip()},
-            )
-        ).scalar()
-        if user_id is None:
-            raise HTTPException(404, detail="未找到可绑定的普通用户")
+        user_id = await user_candidates.resolve_user_id(
+            db,
+            body.lookup,
+            body.lookup_by or "nickname",
+            not_found_detail="未找到匹配的普通用户，请从下拉列表中选择",
+        )
     if user_id is None:
         raise HTTPException(422, detail="请先选择或搜索要绑定的普通用户")
     return int(user_id)

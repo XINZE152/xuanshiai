@@ -244,7 +244,7 @@ async def test_exec_failed_retry_wait_does_not_publish(monkeypatch) -> None:
     monkeypatch.setattr("app.workers.ai_worker.fail_task", fake_fail_task)
     with patch(
         "app.workers.ai_worker.TASK_HANDLERS",
-        {"moxiang_candidate_extract": failing_handler},
+        {"profile_extract": failing_handler},
     ), patch("app.workers.ai_worker.start_task", return_value=task):
         from app.workers.ai_worker import _process
 

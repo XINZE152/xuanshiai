@@ -243,9 +243,6 @@ class ProfileResponse(BaseModel):
     photos: list[ProfileMediaResponse]
     video: ProfileMediaResponse | None
     completion_score: float
-    moxiang_persona_title: str | None = None
-    moxiang_persona_tags: list[str] = []
-    moxiang_attachment_style: str | None = None
 
 
 class NicknameUpdateResponse(BaseModel):

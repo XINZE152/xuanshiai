@@ -27,7 +27,7 @@ def _event(request_id: str = "audit-1", **kwargs: Any) -> GenerationAuditEvent:
     base: dict[str, Any] = {
         "request_id": request_id,
         "task_id": "task-1",
-        "scene": "moxiang_candidate_extract",
+        "scene": "profile_extract",
         "provider": "mock",
         "model": "mock-v1",
         "prompt_version": "p1",

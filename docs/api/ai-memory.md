@@ -381,6 +381,6 @@
 ### 8.3 兼容策略
 
 - 本期为 Shadow 阶段：本组接口全部为**新增**，不影响任何既有接口与前端；
-  Search / Compatibility / Recommend 仍读取既有画像投影（由墨相师发布链产出），不读取记忆内核。
+  Search / Compatibility / Recommend 仍读取既有画像投影，不读取记忆内核。
 - 所有响应只包含最小字段；完整 transcript 不进入任何响应、日志或事件 payload。
 - 后续若开放 Memory View 前端，仅在本组接口之上扩展，不修改既有字段语义。

@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, StrictInt, StrictStr, TypeAdapter, model_validator
 
@@ -297,6 +297,17 @@ class ProfileFieldPatchAction(str, Enum):
     DELETE = "delete"
 
 
+class ProfileProgress(BaseModel):
+    """Profile build progress basis (统一方案 §16: coverage, not completeness)."""
+
+    basis: str = "confirmed_field_coverage"
+    value: float = Field(default=0.0, ge=0.0, le=1.0)
+    # WP-P2 提前建构引导：确认字段覆盖达到可配置阈值（默认 7/10 ≈ 67%）
+    # 时为 True，并携带引导文案；阈值与发布硬门槛共用 settings.ai_profile_min_fields。
+    can_early_publish: bool = False
+    early_publish_hint: str = ""
+
+
 class ProfileQuestion(BaseModel):
     """One interview question whose id/text/field_key are frozen by the question bank.
 
@@ -308,6 +319,75 @@ class ProfileQuestion(BaseModel):
     id: str
     text: str
     field_key: str
+
+
+class ProfileSessionCreateRequest(BaseModel):
+    subject: ProfileSubject
+    consent_version: str = Field(..., min_length=1, max_length=32)
+    input_mode: Literal["text"] = "text"
+
+
+class ProfileSessionModeRequest(BaseModel):
+    """WP-P5：双模式互切入参。"""
+
+    input_mode: Literal["text", "voice"] = "text"
+
+
+class ProfileUpdateIntentRequest(BaseModel):
+    """WP-P4：对话式追加会话入参——自然语言期望 + 画像方向。"""
+
+    subject: ProfileSubject
+    desired_text: str = Field(..., min_length=1, max_length=2000)
+    consent_version: str = Field(..., min_length=1, max_length=32)
+
+
+class ProfileUpdateIntentAccepted(BaseModel):
+    """202 update-intent 结果：会话 + 首轮澄清任务（异步，轮询 turns/会话）。"""
+
+    session: ProfileSessionRead
+    task_id: str
+    turn_id: str
+    status: str = "queued"
+
+
+class ProfileTurnCreateRequest(BaseModel):
+    client_turn_id: str = Field(..., min_length=8, max_length=128)
+    answer_text: str = Field(..., min_length=1, max_length=2000)
+
+
+class ProfileSkipQuestionRequest(BaseModel):
+    """Skip the current interview question without confirming a field."""
+
+    field_key: str = Field(..., min_length=1, max_length=64)
+
+
+class ProfileSessionRead(BaseModel):
+    session_id: str
+    subject: ProfileSubject
+    status: ProfileSessionStatus
+    input_mode: str = "text"
+    # build=建构问答；update=对话式追加；master=墨相师对话建构。
+    session_kind: str = Field(default="build", pattern="^(build|update|master)$")
+    progress: ProfileProgress
+    current_question: dict[str, str] | None = None
+    # 加法字段（Task6 Step2）：当前会话的活动草稿 ID，供前端直接跳转草稿编辑器；
+    # 无活动草稿（如新建会话尚未抽取）为 ``None``。保留现有字段，不破坏旧契约。
+    draft_id: str | None = None
+    profile_revision: int = 0
+    preference_revision: int = 0
+    expires_at: datetime | None = None
+    created_at: datetime
+
+
+class ProfileTurnRead(BaseModel):
+    turn_id: str
+    session_id: str
+    client_turn_id: str
+    turn_no: int
+    role: str = "user"
+    answer_text: str
+    status: str = "saved"
+    created_at: datetime
 
 
 class ProfileDraftFieldRead(BaseModel):
@@ -336,7 +416,6 @@ class ProfileDraftRead(BaseModel):
     policy_revision: str
     schema_version: str = "profile-extract-v1"
     fields: list[ProfileDraftFieldRead] = Field(default_factory=list)
-    synced_profile_fields: list[str] = Field(default_factory=list)
     expires_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -424,7 +503,6 @@ class ProfilePublishAccepted(BaseModel):
     subject: ProfileSubject | None = None
     field_count: int | None = None
     narrative_task_id: str | None = None
-    synced_profile_fields: list[str] = Field(default_factory=list)
 
 
 class ProfileRevisionPage(BaseModel):
@@ -441,6 +519,27 @@ class ProfileFieldAllowlist(BaseModel):
     """Server-owned field dictionary used to guard AI extraction."""
 
     allowlist: frozenset[str] = AI_FIELD_ALLOWLIST
+
+
+class ProfileTurnSubmissionRead(BaseModel):
+    """202 turn+task shape returned by ``POST /profile-sessions/{id}/turns``.
+
+    ``replayed=True`` marks a duplicate ``client_turn_id``: the original turn is
+    returned and no second task is created (task fields are ``null``).
+    """
+
+    turn_id: str
+    session_id: str
+    client_turn_id: str
+    turn_no: int
+    role: str = "user"
+    status: str = "saved"
+    replayed: bool = False
+    task_id: str | None = None
+    task_status: AiTaskStatus | None = None
+    stage: str | None = None
+    poll_after_ms: int = Field(default=0, ge=0)
+    expires_at: datetime | None = None
 
 
 class CleanupTaskAccepted(BaseModel):
@@ -489,16 +588,6 @@ class ProfileNarrativeHistoryObservation(BaseModel):
     observation: str
 
 
-class ProfileEmotionalInsight(BaseModel):
-    """个人情感气质透视（仅 personal 主体生成）。"""
-
-    attachment_style: str = ""
-    attachment_summary: str = ""
-    highlights: list[str] = []
-    boundaries: list[str] = []
-    master_message: str = ""
-
-
 class ProfileNarrativeRead(BaseModel):
     """GET /ai/profiles/{subject}/narrative 响应。
 
@@ -520,5 +609,3 @@ class ProfileNarrativeRead(BaseModel):
     history_observations: list[ProfileNarrativeHistoryObservation] = []
     # 写在最后：整份画像的概括性收束（旧画像无此字段时为空串）。
     conclusion: str = ""
-    # 个人情感气质透视（仅 personal 生成，ideal_partner 为 None）。
-    emotional_insight: ProfileEmotionalInsight | None = None

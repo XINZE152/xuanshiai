@@ -87,7 +87,7 @@ AI_TABLES = {
             `task_id` varchar(64) NOT NULL COMMENT '对外任务ID',
             `owner_user_id` bigint unsigned DEFAULT NULL,
             `owner_tombstone` char(64) DEFAULT NULL,
-            `task_type` varchar(32) NOT NULL COMMENT 'moxiang_candidate_extract/search_parse/search_execute/compatibility/cleanup...',
+            `task_type` varchar(32) NOT NULL COMMENT 'profile_extract/search_parse/search_execute/compatibility/cleanup...',
             `scene` varchar(32) NOT NULL,
             `idempotency_key` varchar(128) NOT NULL,
             `request_digest` char(64) DEFAULT NULL COMMENT '请求摘要哈希，不存原文',

@@ -3,7 +3,7 @@ subject isolation, immutable history/restore and two-phase deletion.
 
 The four Step 1 tests are mirrored verbatim from the task brief.  The
 ``profile_store`` fixture extends the Task 7 in-memory fake store
-(``tests.ai_profile_fakes.ProfileStore``) with the Task 8 surface:
+(``tests.test_ai_profile_sessions.ProfileStore``) with the Task 8 surface:
 ``seed_draft`` (fields with ``confirmed``/``suggested`` status, draft revision),
 ``publish``, ``confirm_all``, ``published_field_keys``, ``personal_fact_keys``,
 ``preference_keys``, ``delete_profile``, ``readable_ai_results``,
@@ -43,13 +43,13 @@ from app.services.ai.profile import (
     restore_profile_revision,
 )
 from app.services.ai.tasks import TaskError
-from tests.ai_profile_fakes import (
+from tests.test_ai_profile_sessions import (
     FakeProfileSession,
     _MappingResult,
     _now,
     _WriteResult,
 )
-from tests.ai_profile_fakes import (
+from tests.test_ai_profile_sessions import (
     ProfileStore as Task7ProfileStore,
 )
 

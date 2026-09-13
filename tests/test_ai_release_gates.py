@@ -39,7 +39,7 @@ VERIFY_SCRIPT = PROJECT_ROOT / "scripts" / "verify_ai_release.py"
 
 REQUIRED_AI_PATHS = (
     "/api/v1/ai/tasks/{task_id}",
-    "/api/v1/ai/profile-drafts/{draft_id}",
+    "/api/v1/ai/profile-sessions",
     "/api/v1/ai/search-drafts",
     "/api/v1/ai/compatibility/{target_user_id}",
 )

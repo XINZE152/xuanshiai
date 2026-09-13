@@ -45,6 +45,7 @@ class MatchmakerStaffItem(BaseModel):
     commission_amount: Decimal = Decimal("0.00")
     locked: bool = False
     visible: bool = True
+    menu_permission_count: int = 0
     description: str | None = None
     slogan: str | None = None
     sort: int = 0
@@ -71,8 +72,15 @@ class MatchmakerStaffPage(BaseModel):
 class MatchmakerUserCandidate(BaseModel):
     id: int
     nickname: str | None = None
+    real_name: str | None = None
     phone: str | None = None
     avatar: str | None = None
+    wechat_bound: bool = False
+    is_service_matchmaker: bool = False
+    is_promoter: bool = False
+    has_team: bool = False
+    unavailable: bool = False
+    unavailable_reason: str | None = None
 
 
 class MatchmakerStaffCreate(BaseModel):

@@ -16,7 +16,7 @@ from app.services.ai.profile import (
     create_master_session,
     persist_master_assistant_reply,
 )
-from tests.ai_profile_fakes import ProfileStore
+from tests.test_ai_profile_sessions import ProfileStore
 
 
 @pytest.mark.asyncio

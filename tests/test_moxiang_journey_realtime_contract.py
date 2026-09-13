@@ -9,6 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ROUTE = REPO_ROOT / "app" / "api" / "routes" / "voice_moxiang.py"
 WORKER = REPO_ROOT / "app" / "workers" / "ai_worker.py"
 JOURNEY = REPO_ROOT / "app" / "services" / "ai" / "journey.py"
+PROFILE = REPO_ROOT / "app" / "services" / "ai" / "profile.py"
 LEGACY_RETIREMENT_MIGRATION = (
     REPO_ROOT / "migrations" / "ai" / "20260902_01_retire_legacy_moxiang_profile_extract_up.sql"
 )
@@ -81,3 +82,14 @@ def test_legacy_master_extract_tasks_are_audit_cancelled_before_deploy() -> None
     assert "profile_extract" in source
     assert "`session_kind` = 'master'" in source
     assert "`status` = 'cancelled'" in source
+
+
+def test_profile_extract_no_longer_has_a_master_draft_branch() -> None:
+    """The generic extractor must terminate a stray legacy master task safely."""
+    source = PROFILE.read_text(encoding="utf-8")
+    branch_start = source.index('if session.session_kind == "master":')
+    branch_end = source.index('if session.session_kind == "update":', branch_start)
+    branch = source[branch_start:branch_end]
+
+    assert "AI_LEGACY_MOXIANG_RETIRED" in branch
+    assert "_handle_master_extract" not in branch

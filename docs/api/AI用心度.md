@@ -2,7 +2,7 @@
 
 > 接口前缀：`/api/v1/ai/profile/thoughtfulness`
 > 契约对齐：小程序前端 `xuanshiai-vue/docs/ai-profile-thoughtfulness-api.md`（前端 `USE_MOCK=false` 后直连，无需改 UI）
-> 变更记录：2026-09-07 新增。2026-09-11 补充：本接口（含 `ai_profile_thoughtfulness` 表）属于独立的用心度评审功能，与已下线的对话式画像问答模块（`/ai/profile-sessions*`）无关；墨相师（Moxiang）即 AI 画像的产品更名。
+> 变更记录：2026-09-07 新增。
 
 ## 接口一：`GET /api/v1/ai/profile/thoughtfulness`
 

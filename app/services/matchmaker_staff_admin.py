@@ -13,6 +13,7 @@ from app.api.dependencies import CurrentMatchmakerAdmin
 from app.core.security import hash_password
 from app.schemas.matchmaker_admin import MatchmakerAdminAccount
 from app.services.matchmaker_admin_auth import _issue_session
+from app.services import user_candidates
 from app.schemas.matchmaker_staff_admin import (
     AdminMenuNode,
     CommissionLevelItem,
@@ -90,6 +91,7 @@ SELECT_STAFF = """SELECT u.id, u.avatar, u.nickname, u.phone, u.created_at, u.up
     a.id account_id, a.username,
     o.id store_id, COALESCE(o.display_name, o.name) store_name,
     (SELECT COUNT(*) FROM matchmaker_service s WHERE s.matchmaker_id = u.id AND s.status = 2) success_count,
+    (SELECT COUNT(*) FROM matchmaker_menu_permission mmp WHERE mmp.matchmaker_user_id = u.id) menu_permission_count,
     (SELECT COALESCE(SUM(e.amount), 0) FROM commission_entry e WHERE e.beneficiary_type = 'service_matchmaker' AND e.beneficiary_id = u.id AND e.status <> 'REVERSED') commission_amount
     FROM users u JOIN user_matchmaker_apply ma ON ma.user_id = u.id AND ma.application_type = 'service_matchmaker' AND ma.status = 1
     LEFT JOIN matchmaker_profile p ON p.user_id = u.id
@@ -101,21 +103,9 @@ SELECT_STAFF = """SELECT u.id, u.avatar, u.nickname, u.phone, u.created_at, u.up
 
 
 async def search_user_candidates(db: AsyncSession, keyword: str, limit: int = 10) -> list[MatchmakerUserCandidate]:
-    rows = await db.execute(
-        text(
-            """SELECT u.id, u.nickname, u.phone, u.avatar
-            FROM users u
-            WHERE u.status=1
-              AND (u.nickname LIKE CONCAT('%', :keyword, '%') OR u.phone LIKE CONCAT('%', :keyword, '%'))
-              AND NOT EXISTS (
-                SELECT 1 FROM user_matchmaker_apply ma
-                WHERE ma.user_id=u.id AND ma.application_type='service_matchmaker' AND ma.status=1
-              )
-            ORDER BY u.id DESC LIMIT :limit"""
-        ),
-        {"keyword": keyword, "limit": limit},
-    )
-    return [MatchmakerUserCandidate(**dict(row)) for row in rows.mappings().all()]
+    """服务红娘候选人：排除已是服务红娘的用户（统一走 user_candidates 实现）。"""
+    rows = await user_candidates.search_user_candidates(db, keyword, "service_matchmaker", limit)
+    return [MatchmakerUserCandidate(**row) for row in rows]
 
 
 async def list_staff(
@@ -127,6 +117,7 @@ async def list_staff(
     store_id: int | None,
     level_id: int | None,
     locked: bool | None,
+    in_store: bool | None = None,
 ) -> MatchmakerStaffPage:
     conditions = ["1=1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
@@ -144,6 +135,9 @@ async def list_staff(
     if locked is not None:
         conditions.append("p.locked = :locked")
         params["locked"] = int(locked)
+    if in_store is not None:
+        # in_store=True 只返回已挂靠门店的分店红娘；False 只返回未挂门店的总店红娘
+        conditions.append("om.id IS NOT NULL" if in_store else "om.id IS NULL")
     scope = admin.scope_condition(organization_column="o.id", params=params, user_column="u.id")
     conditions.append(scope)
     where = " AND ".join(conditions)
@@ -212,10 +206,12 @@ async def create_staff(
     await _validate_refs(db, body)
     user_id = body.user_id
     if user_id is None and body.lookup:
-        column = "nickname" if body.lookup_by == "nickname" else "phone"
-        user_id = (await db.execute(text(f"SELECT id FROM users WHERE {column}=:lookup AND status=1 ORDER BY id DESC LIMIT 1"), {"lookup": body.lookup.strip()})).scalar()
-        if user_id is None:
-            raise HTTPException(404, detail="未找到可绑定的普通用户")
+        user_id = await user_candidates.resolve_user_id(
+            db,
+            body.lookup,
+            body.lookup_by or "nickname",
+            not_found_detail="未找到匹配的普通用户，请从下拉列表中选择",
+        )
     if user_id is not None:
         user = (await db.execute(text("SELECT id FROM users WHERE id=:id AND status=1 FOR UPDATE"), {"id": user_id})).mappings().first()
         if not user:

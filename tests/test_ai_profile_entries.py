@@ -30,7 +30,7 @@ from app.services.ai.profile import (
     validate_entry_content,
 )
 from tests.test_ai_profile_publish import ProfileStore
-from tests.ai_profile_fakes import _now
+from tests.test_ai_profile_sessions import _now
 
 
 @pytest.fixture

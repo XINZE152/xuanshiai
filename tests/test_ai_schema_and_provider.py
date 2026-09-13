@@ -158,7 +158,7 @@ def _context(request_id: str = "req_test") -> AITaskContext:
     return AITaskContext(
         task_id="at_test",
         request_id=request_id,
-        scene="moxiang_candidate_extract",
+        scene="profile_extract",
         provider="mock",
         model="mock-model-v1",
         prompt_version="profile-extract-prompt-v1",
@@ -311,53 +311,3 @@ async def test_openai_compat_client_receives_timeout() -> None:
     )
     # AsyncOpenAI 把 timeout 存在 _client.timeout 或构造参数中
     assert client.timeout == 42.0
-
-
-def test_normalize_narrative_payload_emotional_insight() -> None:
-    from app.services.ai.providers import _normalize_narrative_payload
-
-    data = {
-        "persona_title": "测试",
-        "insight": "洞察",
-        "emotional_insight": {
-            "attachment_style": "安全型",
-            "attachment_summary": "情绪沉着稳定",
-            "highlights": ["优点一", "优点二", "优点三", "优点四", "优点五多余"],
-            "boundaries": ["边界一", "边界二", "边界三", "边界四多余"],
-            "master_message": "知遇寄语",
-            "unknown_extra_key": "should be stripped or ignored",
-        },
-    }
-    normalized = _normalize_narrative_payload(data)
-    ei = normalized["emotional_insight"]
-    assert ei is not None
-    assert ei["attachment_style"] == "secure"
-    assert ei["attachment_summary"] == "情绪沉着稳定"
-    assert len(ei["highlights"]) == 4
-    assert len(ei["boundaries"]) == 3
-    assert "unknown_extra_key" not in ei
-
-
-def test_normalize_narrative_payload_emotional_insight_fault_tolerant() -> None:
-    from app.services.ai.providers import _normalize_narrative_payload
-
-    # 不合法数据：缺少 highlight，应置 None，不报异常破坏主画像
-    data = {
-        "persona_title": "测试",
-        "insight": "洞察",
-        "emotional_insight": {
-            "attachment_style": "unknown_invalid_style",
-            "highlights": ["只有一条"],
-        },
-    }
-    normalized = _normalize_narrative_payload(data)
-    assert normalized["emotional_insight"] is None
-
-
-def test_narrative_fixtures_emotional_insight() -> None:
-    from app.services.ai.providers import _NARRATIVE_FIXTURE_PERSONAL, _NARRATIVE_FIXTURE_IDEAL_PARTNER
-
-    assert _NARRATIVE_FIXTURE_PERSONAL.emotional_insight is not None
-    assert _NARRATIVE_FIXTURE_PERSONAL.emotional_insight.attachment_style == "secure"
-    assert len(_NARRATIVE_FIXTURE_PERSONAL.emotional_insight.highlights) >= 2
-    assert _NARRATIVE_FIXTURE_IDEAL_PARTNER.emotional_insight is None

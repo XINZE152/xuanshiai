@@ -1,5 +1,3 @@
-> **[2026-09-11 历史存档]** 本计划产出的发布门槛已演进出新版本；其中问答会话链路已删除，发布链本身保留于墨相师（AI 画像）模块。
-
 # AI Profile Five-Field Publish Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

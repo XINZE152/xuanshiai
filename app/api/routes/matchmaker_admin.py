@@ -22,9 +22,7 @@ from app.services.matchmaker import (
     list_service_products,
 )
 from app.schemas.organization import ResourceAssignmentCreate, ResourceAssignmentResponse, StoreCreate, StoreMemberCreate, StoreMemberResponse, StoreResponse
-from app.schemas.meeting import MeetingRecordResponse, MeetingScheduleCreate
 from app.services.organization import add_store_member, assign_resource, create_store, get_store, list_stores
-from app.services.meeting import schedule_meeting
 from app.api.dependencies import CurrentUser
 from sqlalchemy import text
 
@@ -160,8 +158,3 @@ async def assignments(page: int = Query(1, ge=1, le=1000), page_size: int = Quer
     count = await db.execute(text(f"SELECT COUNT(*) FROM resource_assignment WHERE {where}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})
     total = int(count.scalar() or 0)
     return ResourceAssignmentPage(items=[ResourceAssignmentResponse(**dict(row)) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
-
-
-@router.post("/meetings/requests/{request_id}/schedule", response_model=MeetingRecordResponse, status_code=201, summary="安排约见")
-async def schedule_matchmaker_meeting(request_id: int = Path(..., ge=1), body: MeetingScheduleCreate = ..., current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MeetingRecordResponse:
-    return await schedule_meeting(db, _legacy_actor(current), request_id, body)

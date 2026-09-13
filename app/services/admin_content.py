@@ -62,6 +62,9 @@ ALLOWED_DOMAINS: frozenset[str] = frozenset(
         "community_group",
         "group_signup",
         "interactive_message",
+        "tweet_task",
+        "sms_broadcast",
+        "sms_send_record",
     }
 )
 
@@ -124,7 +127,7 @@ async def list_items(
     conditions = ["tenant_id = 1", "domain = :domain"]
     params: dict[str, Any] = {"domain": domain}
     if keyword:
-        conditions.append("(title LIKE :kw OR subtitle LIKE :kw)")
+        conditions.append("(title LIKE :kw OR subtitle LIKE :kw OR extra_json LIKE :kw)")
         params["kw"] = f"%{keyword}%"
     if status in (1, 2):
         conditions.append("status = :status")

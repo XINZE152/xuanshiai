@@ -89,14 +89,7 @@ _JSON_FORMAT_INSTRUCTION = (
     '  "ideal_weights": [],\n'
     '  "recent_change": null,\n'
     '  "history_observations": [],\n'
-    '  "conclusion": "一段写在最后的概括性总结，50-120字",\n'
-    '  "emotional_insight": {\n'
-    '    "attachment_style": "secure",\n'
-    '    "attachment_summary": "白话解释你的依恋风格在日常相处中的流露，不超过60字",\n'
-    '    "highlights": ["相处闪光点1", "相处闪光点2"],\n'
-    '    "boundaries": ["相处边界或雷区1"],\n'
-    '    "master_message": "知遇墨相师温情寄语，不超过80字"\n'
-    '  }\n'
+    '  "conclusion": "一段写在最后的概括性总结，50-120字"\n'
     "}\n\n"
     "字段说明：\n"
     "- persona_title：一句有画面感的概括。个人画像如\"慢热但真诚的长期主义者\"；"
@@ -128,15 +121,7 @@ _JSON_FORMAT_INSTRUCTION = (
     "写成「这段时间你……」的回顾口吻。没有历史数据返回空数组 []。\n"
     "- conclusion：写在最后的概括性总结，50-120字，第二人称。"
     "把标题、洞察、维度收拢成一个温柔的整体印象，不新增前面没提过的信息，"
-    "不承诺关系结果，不以建议、口号或行动号召结尾。\n"
-    "- emotional_insight：情感气质透视（仅个人画像 personal 时生成，理想型画像 ideal_partner 时必须为 null）。\n"
-    "  - attachment_style：依恋风格四型之一：secure（安全型）、anxious（焦虑型）、avoidant（回避型）、fearful（恐惧回避型）。\n"
-    "  - attachment_summary：结合字段以白话解释该依恋风格的日常体现，不超过60字。\n"
-    "  - highlights：相处闪光点，2-4条，每条不超过30字。\n"
-    "  - boundaries：相处边界/雷区，1-3条，每条不超过30字。\n"
-    "  - master_message：知遇墨相师寄语，不超过80字。\n"
-    "- 脱敏铁律：全篇绝不可出现用户真实姓名、手机号、微信号、联系方式、精确居住地址或所在公司名！"
-    "语言温柔克制，全篇使用第二人称「你」。"
+    "不承诺关系结果，不以建议、口号或行动号召结尾。"
 )
 
 
@@ -211,8 +196,8 @@ def build_profile_narrative_prompt(
         f"历史版本摘要：\n{history_block}\n\n"
         f"{_JSON_FORMAT_INSTRUCTION}\n\n"
         f"注意：首次发布时 recent_change 返回 null。"
-        f"写「你期望的另一半」时填 ideal_weights 且所有文案从「你」的视角出发，emotional_insight 必须为 null；"
-        f"写你自己时 ideal_weights 返回空数组，并务必提供 emotional_insight（严格遵守脱敏铁律）。"
+        f"写「你期望的另一半」时填 ideal_weights 且所有文案从「你」的视角出发；"
+        f"写你自己时 ideal_weights 返回空数组。"
     )
 
 
