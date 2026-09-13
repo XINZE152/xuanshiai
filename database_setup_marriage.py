@@ -219,6 +219,16 @@ class DatabaseManager:
                 "marriage_fail_reason": "`marriage_fail_reason` varchar(255) DEFAULT NULL",
                 "marriage_submitted_at": "`marriage_submitted_at` datetime DEFAULT NULL",
                 "marriage_reviewed_at": "`marriage_reviewed_at` datetime DEFAULT NULL",
+                "education_fail_reason": "`education_fail_reason` varchar(255) DEFAULT NULL",
+                "education_submitted_at": "`education_submitted_at` datetime DEFAULT NULL",
+                "education_reviewed_at": "`education_reviewed_at` datetime DEFAULT NULL",
+                "house_fail_reason": "`house_fail_reason` varchar(255) DEFAULT NULL",
+                "house_submitted_at": "`house_submitted_at` datetime DEFAULT NULL",
+                "house_reviewed_at": "`house_reviewed_at` datetime DEFAULT NULL",
+                "face_method": "`face_method` varchar(32) DEFAULT NULL COMMENT '验证方式 动作活检/照片比对'",
+                "face_vendor": "`face_vendor` varchar(64) DEFAULT NULL COMMENT '人脸服务商'",
+                "face_score": "`face_score` decimal(5,2) DEFAULT NULL COMMENT '人脸比对得分'",
+                "id_card_issued": "`id_card_issued` varchar(64) DEFAULT NULL COMMENT '身份证发证机关'",
             },
             "user_profile": {
                 "weight": "`weight` int DEFAULT NULL COMMENT '体重kg'",
@@ -407,13 +417,6 @@ class DatabaseManager:
                 "status": "`status` tinyint NOT NULL DEFAULT '1' COMMENT '1生效中 2已过期 3已撤销'",
                 "pay_status": "`pay_status` tinyint NOT NULL DEFAULT '0' COMMENT '0未支付 1已支付'",
                 "pay_method": "`pay_method` varchar(32) DEFAULT NULL COMMENT '支付方式'",
-            },
-            # 会员认证：补齐实名/学历/房产认证审核所需字段
-            "user_auth": {
-                "face_method": "`face_method` varchar(32) DEFAULT NULL COMMENT '验证方式 动作活检/照片比对'",
-                "face_vendor": "`face_vendor` varchar(64) DEFAULT NULL COMMENT '人脸服务商'",
-                "face_score": "`face_score` decimal(5,2) DEFAULT NULL COMMENT '人脸比对得分'",
-                "id_card_issued": "`id_card_issued` varchar(64) DEFAULT NULL COMMENT '身份证发证机关'",
             },
             # 线上行为：举报页需要展示提交人 IP
             "user_report": {
@@ -3274,12 +3277,12 @@ class DatabaseManager:
         """M4 客源线索 / 会员服务补充字段（旧库幂等补齐）。"""
         columns = {
             "customer_lead": {
-                "promoter_id": "bigint unsigned DEFAULT NULL COMMENT '推广红娘用户ID'",
-                "audit_status": "varchar(16) NOT NULL DEFAULT 'active' COMMENT 'active有效/pending待核'",
+                "promoter_id": "`promoter_id` bigint unsigned DEFAULT NULL COMMENT '推广红娘用户ID'",
+                "audit_status": "`audit_status` varchar(16) NOT NULL DEFAULT 'active' COMMENT 'active有效/pending待核'",
             },
             "meeting_record": {
-                "member_visible": "tinyint NOT NULL DEFAULT 1 COMMENT '会员端是否可见 1是 0隐藏'",
-                "sms_remind": "tinyint NOT NULL DEFAULT 1 COMMENT '是否发送约会短信提醒 1是 0否'",
+                "member_visible": "`member_visible` tinyint NOT NULL DEFAULT 1 COMMENT '会员端是否可见 1是 0隐藏'",
+                "sms_remind": "`sms_remind` tinyint NOT NULL DEFAULT 1 COMMENT '是否发送约会短信提醒 1是 0否'",
             },
         }
         for table_name, required in columns.items():

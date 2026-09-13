@@ -967,6 +967,23 @@ BUSINESS_TABLES = {
             KEY `idx_live_provider_session` (`session_id`, `received_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播云厂商回调事件'
     """,
+    "live_provider_resource": """
+        CREATE TABLE IF NOT EXISTS `live_provider_resource` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `session_id` bigint unsigned NOT NULL,
+            `provider` varchar(24) NOT NULL,
+            `sdk_app_id` bigint unsigned NOT NULL,
+            `room_id` bigint unsigned NOT NULL,
+            `status` varchar(24) NOT NULL DEFAULT 'UNKNOWN',
+            `last_error_code` varchar(128) DEFAULT NULL,
+            `last_request_id` varchar(128) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            `closed_at` datetime DEFAULT NULL,
+            PRIMARY KEY (`id`), UNIQUE KEY `uk_live_provider_resource_session` (`session_id`),
+            KEY `idx_live_provider_resource_status` (`provider`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='直播腾讯云房间资源状态'
+    """,
     "live_moderation_action": """
         CREATE TABLE IF NOT EXISTS `live_moderation_action` (
             `id` bigint unsigned NOT NULL AUTO_INCREMENT,
