@@ -3275,6 +3275,12 @@ class DatabaseManager:
                 "education": "varchar(64) DEFAULT NULL COMMENT '学历'",
                 "job": "varchar(128) DEFAULT NULL COMMENT '职业'",
                 "auth_status": "tinyint DEFAULT 0 COMMENT '整体认证状态'",
+                "education_fail_reason": "varchar(255) DEFAULT NULL COMMENT '学历认证失败原因'",
+                "education_submitted_at": "datetime DEFAULT NULL COMMENT '学历认证提交时间'",
+                "education_reviewed_at": "datetime DEFAULT NULL COMMENT '学历认证审核时间'",
+                "house_fail_reason": "varchar(255) DEFAULT NULL COMMENT '房产认证失败原因'",
+                "house_submitted_at": "datetime DEFAULT NULL COMMENT '房产认证提交时间'",
+                "house_reviewed_at": "datetime DEFAULT NULL COMMENT '房产认证审核时间'",
             },
         }
         for table_name, required in columns.items():

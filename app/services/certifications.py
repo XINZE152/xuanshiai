@@ -48,7 +48,7 @@ async def list_certification_reviews(db: AsyncSession, *, page: int, page_size: 
     return CertificationReviewPage(items=items[offset:offset + page_size], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 def _item(kind: str, row: dict, material: str | None) -> dict:
     status = int(row.get("status") or 0)
-    return {"kind": kind, "status": status, "material_submitted": bool(material),
+    return {"kind": kind, "status": status, "material_submitted": bool(material), "material": material,
             "submitted_at": row.get("submitted_at"), "reviewed_at": row.get("reviewed_at"),
             "fail_reason": row.get("fail_reason"),
             "next_action": "等待平台审核" if status == 1 else ("重新提交材料" if status == 3 else "提交认证材料")}

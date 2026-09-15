@@ -38,6 +38,10 @@ def test_ai_schema_contains_the_registered_fact_tables() -> None:
         "ai_search_draft", "ai_search_condition", "ai_search_snapshot",
         "ai_search_result", "ai_feature_projection", "ai_compatibility_snapshot",
         "ai_recommendation_snapshot", "voice_transcript",
+        "ai_memory_owner_sequence", "ai_memory_event", "ai_memory_observation",
+        "ai_memory_claim", "ai_memory_insight", "ai_memory_state",
+        "ai_memory_suppression", "ai_memory_projection_grant",
+        "ai_memory_projection",
     }
 
 

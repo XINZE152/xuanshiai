@@ -5,7 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.redis import redis_client
+from app.core.redis import get_daily_used
 from app.schemas.quotas import QuotaItem, QuotaSummary
 from app.services.membership import get_active_membership_row
 
@@ -52,9 +52,10 @@ async def summary(db: AsyncSession, user_id: int) -> QuotaSummary:
     )
     items: list[QuotaItem] = []
     for quota_code, daily_limit, redis_code in definitions:
-        used = int(await redis_client.get(f"discovery:{redis_code}:{user_id}:{date.today().isoformat()}") or 0)
+        key = f"discovery:{redis_code}:{user_id}:{date.today().isoformat()}"
         if quota_code == "paper_plane":
-            used = int(await redis_client.get(f"paper-plane:{user_id}:{date.today().isoformat()}") or 0)
+            key = f"paper-plane:{user_id}:{date.today().isoformat()}"
+        used = await get_daily_used(key)
         daily_remaining = max(0, daily_limit - used)
         extra = await _extra_remaining(db, user_id, quota_code)
         items.append(QuotaItem(quota_code=quota_code, daily_limit=daily_limit, daily_used=used, daily_remaining=daily_remaining, extra_remaining=extra, total_remaining=daily_remaining + extra))

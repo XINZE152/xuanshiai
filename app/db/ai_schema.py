@@ -649,6 +649,169 @@ AI_TABLES = {
             KEY `idx_ai_profile_preview_draft_status` (`draft_id`, `status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='墨相师独立画像预览(Phase 3 P3-01)'
     """,
+    # Memory Kernel Core：账本与当前视图必须与 API 一起初始化。旧库在
+    # CREATE TABLE IF NOT EXISTS 下会补齐缺失表；现有表的增量字段仍由迁移处理。
+    "ai_memory_owner_sequence": """
+        CREATE TABLE IF NOT EXISTS `ai_memory_owner_sequence` (
+            `owner_user_id` bigint unsigned NOT NULL,
+            `next_seq` bigint unsigned NOT NULL DEFAULT '1',
+            PRIMARY KEY (`owner_user_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆所有者序列'
+    """,
+    "ai_memory_event": """
+        CREATE TABLE IF NOT EXISTS `ai_memory_event` (
+            `event_id` varchar(64) NOT NULL,
+            `owner_user_id` bigint unsigned NOT NULL,
+            `server_seq` bigint unsigned NOT NULL,
+            `subject` varchar(24) NOT NULL,
+            `namespace` varchar(64) NOT NULL,
+            `node_type` varchar(24) NOT NULL,
+            `event_type` varchar(64) NOT NULL,
+            `payload_json` json NOT NULL,
+            `source_kind` varchar(32) NOT NULL,
+            `source_turn_id` varchar(128) DEFAULT NULL,
+            `source_ref` varchar(512) DEFAULT NULL,
+            `source_quote` varchar(512) DEFAULT NULL,
+            `causal_event_ids_json` json NOT NULL,
+            `consent_scope` varchar(64) NOT NULL,
+            `idempotency_key` varchar(128) NOT NULL,
+            `occurred_at` datetime NOT NULL,
+            PRIMARY KEY (`event_id`),
+            UNIQUE KEY `uk_ai_memory_event_owner_seq` (`owner_user_id`, `server_seq`),
+            UNIQUE KEY `uk_ai_memory_event_owner_idempotency` (`owner_user_id`, `idempotency_key`),
+            KEY `idx_ai_memory_event_owner_seq` (`owner_user_id`, `server_seq`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆事件账本'
+    """,
+    "ai_memory_observation": """
+        CREATE TABLE IF NOT EXISTS `ai_memory_observation` (
+            `observation_id` varchar(80) NOT NULL,
+            `owner_user_id` bigint unsigned NOT NULL,
+            `subject` varchar(24) NOT NULL,
+            `namespace` varchar(64) NOT NULL,
+            `canonical_key` varchar(255) NOT NULL,
+            `dimension` varchar(64) DEFAULT NULL,
+            `value_json` json DEFAULT NULL,
+            `confidence` decimal(5,4) DEFAULT NULL,
+            `fact_kind` varchar(32) DEFAULT NULL,
+            `status` varchar(24) NOT NULL,
+            `source_kind` varchar(32) NOT NULL,
+            `source_quote` varchar(512) DEFAULT NULL,
+            `last_event_id` varchar(64) NOT NULL,
+            `last_event_seq` bigint unsigned NOT NULL,
+            PRIMARY KEY (`observation_id`),
+            KEY `idx_ai_memory_observation_owner_key` (`owner_user_id`, `subject`, `namespace`, `canonical_key`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆观察视图'
+    """,
+    "ai_memory_claim": """
+        CREATE TABLE IF NOT EXISTS `ai_memory_claim` (
+            `claim_id` varchar(80) NOT NULL,
+            `owner_user_id` bigint unsigned NOT NULL,
+            `subject` varchar(24) NOT NULL,
+            `namespace` varchar(64) NOT NULL,
+            `canonical_key` varchar(255) NOT NULL,
+            `dimension` varchar(64) DEFAULT NULL,
+            `value_json` json DEFAULT NULL,
+            `confidence` decimal(5,4) DEFAULT NULL,
+            `stability` decimal(5,4) DEFAULT NULL,
+            `importance` decimal(5,4) DEFAULT NULL,
+            `constraint_type` varchar(32) DEFAULT NULL,
+            `importance_confirmed` tinyint NOT NULL DEFAULT '0',
+            `fact_kind` varchar(32) DEFAULT NULL,
+            `status` varchar(24) NOT NULL,
+            `source_kind` varchar(32) NOT NULL,
+            `last_event_id` varchar(64) NOT NULL,
+            `last_event_seq` bigint unsigned NOT NULL,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`claim_id`),
+            UNIQUE KEY `uk_ai_memory_claim_canonical` (`owner_user_id`, `subject`, `namespace`, `canonical_key`),
+            KEY `idx_ai_memory_claim_owner_seq` (`owner_user_id`, `last_event_seq`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆主张视图'
+    """,
+    "ai_memory_insight": """
+        CREATE TABLE IF NOT EXISTS `ai_memory_insight` (
+            `insight_id` varchar(80) NOT NULL,
+            `owner_user_id` bigint unsigned NOT NULL,
+            `subject` varchar(24) NOT NULL,
+            `namespace` varchar(64) NOT NULL,
+            `summary` varchar(200) NOT NULL,
+            `claim_ids_json` json NOT NULL,
+            `confidence` decimal(5,4) DEFAULT NULL,
+            `status` varchar(24) NOT NULL,
+            `last_event_id` varchar(64) NOT NULL,
+            `last_event_seq` bigint unsigned NOT NULL,
+            PRIMARY KEY (`insight_id`),
+            KEY `idx_ai_memory_insight_owner_seq` (`owner_user_id`, `last_event_seq`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆洞察视图'
+    """,
+    "ai_memory_state": """
+        CREATE TABLE IF NOT EXISTS `ai_memory_state` (
+            `state_id` varchar(80) NOT NULL,
+            `owner_user_id` bigint unsigned NOT NULL,
+            `subject` varchar(24) NOT NULL,
+            `namespace` varchar(64) NOT NULL,
+            `canonical_key` varchar(255) NOT NULL,
+            `value_json` json DEFAULT NULL,
+            `valid_until` datetime NOT NULL,
+            `confidence` decimal(5,4) DEFAULT NULL,
+            `status` varchar(24) NOT NULL,
+            `last_event_id` varchar(64) NOT NULL,
+            `last_event_seq` bigint unsigned NOT NULL,
+            PRIMARY KEY (`state_id`),
+            KEY `idx_ai_memory_state_owner_valid` (`owner_user_id`, `valid_until`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆状态视图'
+    """,
+    "ai_memory_suppression": """
+        CREATE TABLE IF NOT EXISTS `ai_memory_suppression` (
+            `suppression_id` varchar(80) NOT NULL,
+            `owner_user_id` bigint unsigned NOT NULL,
+            `subject` varchar(24) NOT NULL,
+            `namespace` varchar(64) NOT NULL,
+            `canonical_key` varchar(255) NOT NULL,
+            `reason` varchar(255) DEFAULT NULL,
+            `status` varchar(24) NOT NULL,
+            `last_event_id` varchar(64) NOT NULL,
+            `last_event_seq` bigint unsigned NOT NULL,
+            PRIMARY KEY (`suppression_id`),
+            UNIQUE KEY `uk_ai_memory_suppression_canonical` (`owner_user_id`, `subject`, `namespace`, `canonical_key`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆屏蔽视图'
+    """,
+    "ai_memory_projection_grant": """
+        CREATE TABLE IF NOT EXISTS `ai_memory_projection_grant` (
+            `grant_id` varchar(96) NOT NULL,
+            `owner_user_id` bigint unsigned NOT NULL,
+            `function_key` varchar(64) NOT NULL,
+            `purpose` varchar(64) NOT NULL,
+            `data_category` varchar(64) NOT NULL,
+            `status` varchar(24) NOT NULL,
+            `consent_snapshot_id` varchar(96) NOT NULL,
+            `policy_revision` varchar(96) NOT NULL,
+            `granted_at` datetime NOT NULL,
+            `revoked_at` datetime DEFAULT NULL,
+            PRIMARY KEY (`grant_id`),
+            UNIQUE KEY `uk_ai_memory_projection_grant_scope` (`owner_user_id`, `function_key`, `purpose`, `data_category`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆投影授权'
+    """,
+    "ai_memory_projection": """
+        CREATE TABLE IF NOT EXISTS `ai_memory_projection` (
+            `projection_id` varchar(96) NOT NULL,
+            `owner_user_id` bigint unsigned NOT NULL,
+            `function_key` varchar(64) NOT NULL,
+            `purpose` varchar(64) NOT NULL,
+            `data_category` varchar(64) NOT NULL,
+            `subject` varchar(24) NOT NULL,
+            `projection_version` bigint unsigned NOT NULL,
+            `projection_input_hash` char(64) NOT NULL,
+            `status` varchar(24) NOT NULL,
+            `invalidated_at` datetime DEFAULT NULL,
+            `invalidated_reason` varchar(128) DEFAULT NULL,
+            `entries_json` json NOT NULL,
+            `policy_revision` varchar(96) NOT NULL,
+            `consent_snapshot_id` varchar(96) NOT NULL,
+            `built_at` datetime NOT NULL,
+            PRIMARY KEY (`projection_id`),
+            KEY `idx_ai_memory_projection_owner_scope` (`owner_user_id`, `function_key`, `purpose`, `data_category`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆投影'
+    """,
 }
 
 AI_CONSENT_OPERATION_TABLE = """
