@@ -1,6 +1,6 @@
 # M9 死锁 + 422 修复说明
 
-> **修复日期**：2026-09-12  
+> **修复日期**：2026-09-12
 > **问题报告**：用户登录后台后，并发访问平台/系统配置域触发 MySQL 1213 死锁 + 多 namespace 404 + finance.orders 422 + credit-grants 404
 
 ## 1. MySQL 1213 死锁（核心问题）
@@ -45,7 +45,7 @@ async def ensure_defaults(db: AsyncSession) -> None:
         lock_acquired = bool(result)
     except Exception:
         lock_acquired = False  # 锁失败不阻塞，降级到 SELECT-only
-    
+
     try:
         for attempt in range(3):
             try:
@@ -54,7 +54,7 @@ async def ensure_defaults(db: AsyncSession) -> None:
                                 for row in (await db.execute(
                                     text("SELECT namespace, config_json FROM admin_config_snapshot")
                                 )).mappings().all()}
-                
+
                 inserts, updates = [], []
                 for namespace, (...) in DEFAULT_CONFIGS.items():
                     if namespace not in existing_map:
@@ -66,17 +66,17 @@ async def ensure_defaults(db: AsyncSession) -> None:
                         if missing:
                             current.update(missing)
                             updates.append({...})
-                
+
                 # 3. ON DUPLICATE KEY UPDATE 替代 INSERT IGNORE
                 for params in inserts:
                     await db.execute(text("""INSERT INTO admin_config_snapshot
                         (...) VALUES (...) ON DUPLICATE KEY UPDATE namespace = VALUES(namespace)"""), params)
-                
+
                 # 4. 字段合并独立 UPDATE
                 for params in updates:
                     await db.execute(text("""UPDATE admin_config_snapshot
                         SET config_json = :config_json WHERE namespace = :namespace"""), params)
-                
+
                 if inserts or updates:
                     await db.commit()
                 return
@@ -141,7 +141,7 @@ service 层（`admin_list_orders` 等）用 `if start_time:`（truthy 检查）�
 代码侧无需改动（M9 已交付）。**需用户在生产环境重启后端服务**：
 ```bash
 # 生产环境
-kill -TERM $(pgrep -f "uvicorn|hypercorn|gunicorn") 
+kill -TERM $(pgrep -f "uvicorn|hypercorn|gunicorn")
 cd /home/xuanshiai && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 &
 ```
 

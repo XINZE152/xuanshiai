@@ -11,17 +11,22 @@ class CertificationItem(BaseModel):
     kind: str
     status: int
     material_submitted: bool
-    material: str | None
+    material: str | None = None
     submitted_at: datetime | None
     reviewed_at: datetime | None
     fail_reason: str | None
     next_action: str
+    education: str | None = None
+    school: str | None = None
+    title: str | None = None
+    content: str | None = None
 
 
 class CertificationsResponse(BaseModel):
     education: CertificationItem
     house: CertificationItem
     marriage: CertificationItem
+    single_pledge: CertificationItem
 
 
 class CertificationReviewItem(BaseModel):

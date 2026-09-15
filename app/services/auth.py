@@ -298,8 +298,6 @@ async def accept_agreement(db: AsyncSession, user_id: int, agreement_type: str, 
     if not current or version != current:
         raise HTTPException(409, detail="协议版本不是当前发布版本")
     await db.execute(text("INSERT INTO user_agreement_acceptance (user_id, agreement_type, agreement_version, content_hash, accepted_ip, device_id, scene) VALUES (:uid, :type, :version, :content_hash, :ip, :device, :scene) ON DUPLICATE KEY UPDATE accepted_at = UTC_TIMESTAMP(), accepted_ip = VALUES(accepted_ip), device_id = VALUES(device_id), scene = VALUES(scene), status = 1"), {"uid": user_id, "type": agreement_type, "version": version, "content_hash": content_hash, "ip": ip, "device": device_id, "scene": scene})
-    if agreement_type == "safety_pledge":
-        await db.execute(text("UPDATE users SET is_single_pledge = 1, updated_at = UTC_TIMESTAMP() WHERE id = :uid"), {"uid": user_id})
 
 
 def calculate_age(birthday: date) -> int:

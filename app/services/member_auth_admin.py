@@ -85,6 +85,15 @@ def _verify_result(value: int) -> tuple[str, str]:
     return "pending", "待审"
 
 
+def _qualification_result(value: int) -> tuple[str, str]:
+    """用户资质四态：0未提交、1审核中、2通过、3未通过。"""
+    if value == 2:
+        return "pass", "通过"
+    if value == 3:
+        return "fail", "未通过"
+    return "pending", "待审"
+
+
 def _realname_result(value: int) -> tuple[str, str]:
     """实名结果：1成功 2失败 0待审。"""
     if value == 1:
@@ -391,14 +400,14 @@ async def list_education_reviews(
     status: str,
     keyword: str | None,
 ) -> EducationReviewPage:
-    where = ["1=1"]
+    where = ["ua.education_cert IS NOT NULL"]
     params: dict[str, Any] = {}
     if status == "pass":
-        where.append("ua.education_verified = 1")
-    elif status == "pending":
-        where.append("ua.education_verified = 0")
-    elif status == "fail":
         where.append("ua.education_verified = 2")
+    elif status == "pending":
+        where.append("ua.education_verified = 1")
+    elif status == "fail":
+        where.append("ua.education_verified = 3")
     if keyword:
         where.append(
             "(u.nickname LIKE CONCAT('%', :kw, '%') OR u.phone LIKE CONCAT('%', :kw, '%') "
@@ -411,7 +420,7 @@ async def list_education_reviews(
         text(
             f"SELECT ua.id, ua.user_id, {_member_code_sql()} AS member_code, u.nickname, u.avatar, "
             f"ua.real_name, ua.id_card, ua.education, ua.school, ua.education_cert, "
-            f"ua.education_verified, ua.created_at "
+            f"ua.education_verified, COALESCE(ua.education_submitted_at, ua.created_at) AS created_at "
             f"{base} WHERE {clause} ORDER BY ua.id DESC LIMIT :limit OFFSET :offset"
         ),
         {**params, "limit": page_size, "offset": (page - 1) * page_size},
@@ -424,7 +433,7 @@ async def list_education_reviews(
 
 def _build_education(r: dict[str, Any]) -> EducationReviewItem:
     v = int(r["education_verified"] or 0)
-    result, label = _verify_result(v)
+    result, label = _qualification_result(v)
     return EducationReviewItem(
         id=int(r["id"]),
         user_id=int(r["user_id"]),
@@ -523,6 +532,8 @@ async def review_auth(
     因此 marriage 不支持该审核动作，直接返回 400。
     """
     new_status = body.status  # 1 通过 2 未通过
+    if new_status == 2 and kind in ("commitment", "education") and not (body.remark or "").strip():
+        raise HTTPException(422, detail="审核未通过时必须填写原因")
     if kind == "realname":
         resource_type = "user_auth"
         exists = await db.execute(text("SELECT id FROM user_auth WHERE id = :id"), {"id": review_id})
@@ -534,12 +545,19 @@ async def review_auth(
         )
     elif kind == "commitment":
         resource_type = "user_commitment_sign"
-        exists = await db.execute(text("SELECT id FROM user_commitment_sign WHERE id = :id"), {"id": review_id})
-        if not exists.scalar():
+        exists = await db.execute(text("SELECT id, user_id, status FROM user_commitment_sign WHERE id = :id"), {"id": review_id})
+        commitment = exists.mappings().first()
+        if not commitment:
             raise HTTPException(404, detail="承诺书签署记录不存在")
+        if int(commitment["status"] or 0) != 0:
+            raise HTTPException(409, detail="当前承诺书不在审核中")
         await db.execute(
             text("UPDATE user_commitment_sign SET status = :st, reviewed_by = :actor, reviewed_at = UTC_TIMESTAMP(), remark = :remark WHERE id = :id"),
             {"st": new_status, "actor": actor_id, "id": review_id, "remark": body.remark},
+        )
+        await db.execute(
+            text("UPDATE users SET is_single_pledge=:passed, updated_at=UTC_TIMESTAMP() WHERE id=:user_id"),
+            {"passed": 1 if new_status == 1 else 0, "user_id": int(commitment["user_id"])},
         )
     elif kind == "marriage":
         raise HTTPException(400, detail="婚姻核验记录不支持通过/未通过审核，仅可查看或删除")
@@ -554,12 +572,19 @@ async def review_auth(
         )
     elif kind == "education":
         resource_type = "user_auth"
-        exists = await db.execute(text("SELECT id FROM user_auth WHERE id = :id"), {"id": review_id})
-        if not exists.scalar():
+        exists = await db.execute(text("SELECT id, education_verified FROM user_auth WHERE id = :id"), {"id": review_id})
+        education_review = exists.mappings().first()
+        if not education_review:
             raise HTTPException(404, detail="学历认证记录不存在")
+        if int(education_review["education_verified"] or 0) != 1:
+            raise HTTPException(409, detail="当前学历认证不在审核中")
+        qualification_status = 2 if new_status == 1 else 3
         await db.execute(
-            text("UPDATE user_auth SET education_verified = :st, reviewed_by = :actor, reviewed_at = UTC_TIMESTAMP() WHERE id = :id"),
-            {"st": new_status, "actor": actor_id, "id": review_id},
+            text("""UPDATE user_auth SET education_verified=:st, education_fail_reason=:remark,
+                education_reviewed_at=UTC_TIMESTAMP(), reviewed_by=:actor, reviewed_at=UTC_TIMESTAMP(),
+                updated_at=UTC_TIMESTAMP()
+                WHERE id=:id"""),
+            {"st": qualification_status, "remark": body.remark if qualification_status == 3 else None, "actor": actor_id, "id": review_id},
         )
     elif kind == "other":
         resource_type = "user_auth_extra"
@@ -607,10 +632,16 @@ async def delete_auth_review(
     """
     if kind == "commitment":
         resource_type = "user_commitment_sign"
-        exists = await db.execute(text("SELECT id FROM user_commitment_sign WHERE id = :id"), {"id": review_id})
-        if not exists.scalar():
+        exists = await db.execute(text("SELECT id, user_id FROM user_commitment_sign WHERE id = :id"), {"id": review_id})
+        commitment = exists.mappings().first()
+        if not commitment:
             raise HTTPException(404, detail="承诺书签署记录不存在")
         await db.execute(text("DELETE FROM user_commitment_sign WHERE id = :id"), {"id": review_id})
+        passed = await db.execute(text("SELECT 1 FROM user_commitment_sign WHERE user_id=:user_id AND status=1 LIMIT 1"), {"user_id": int(commitment["user_id"])})
+        await db.execute(text("UPDATE users SET is_single_pledge=:passed, updated_at=UTC_TIMESTAMP() WHERE id=:user_id"), {
+            "passed": 1 if passed.scalar() else 0,
+            "user_id": int(commitment["user_id"]),
+        })
     elif kind == "marriage":
         resource_type = "user_marriage_check"
         exists = await db.execute(text("SELECT id FROM user_marriage_check WHERE id = :id"), {"id": review_id})
@@ -647,7 +678,9 @@ async def delete_auth_review(
         if not exists.scalar():
             raise HTTPException(404, detail="学历认证记录不存在")
         await db.execute(
-            text("UPDATE user_auth SET education_verified = 0, education_cert = NULL, reviewed_by = :actor, reviewed_at = UTC_TIMESTAMP() WHERE id = :id"),
+            text("""UPDATE user_auth SET education_verified=0, education_cert=NULL,
+                education_fail_reason=NULL, education_submitted_at=NULL, education_reviewed_at=NULL,
+                reviewed_by=:actor, reviewed_at=UTC_TIMESTAMP() WHERE id=:id"""),
             {"actor": actor_id, "id": review_id},
         )
     else:

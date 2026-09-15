@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.core.profile_tags import ALL_TAG_OPTIONS, TAG_OPTIONS_BY_CATEGORY, LEGACY_TAG_OPTIONS_BY_CATEGORY, PERSONALITY_OPTIONS, MAX_PERSONAL_TAGS, MAX_CUSTOM_TAGS, CUSTOM_TAG_MIN_LENGTH, CUSTOM_TAG_MAX_LENGTH, validate_personal_tag_selection
+from app.core.profile_tags import ALL_TAG_OPTIONS, TAG_OPTIONS_BY_CATEGORY, LEGACY_TAG_OPTIONS_BY_CATEGORY, PERSONALITY_OPTIONS, MAX_PERSONAL_TAGS, MAX_CUSTOM_TAGS, CUSTOM_TAG_MIN_LENGTH, CUSTOM_TAG_MAX_LENGTH, normalize_custom_tag, validate_personal_tag_selection
 
 
 MbtiType = Literal[
@@ -114,7 +114,11 @@ class ProfileUpdateRequest(BaseModel):
     self_intro: str | None = Field(default=None, max_length=500)
     personal_tags: list[str] | None = Field(
         default=None, max_length=MAX_PERSONAL_TAGS,
-        description="兴趣标签，0～10 个不重复的系统选项；空数组清空，不可与旧标签字段混传",
+        description="兴趣标签，0～10 个不重复的系统或自定义选项；空数组清空，不可与旧标签字段混传",
+    )
+    custom_tag_categories: dict[str, str] | None = Field(
+        default=None,
+        description="自定义标签到当前兴趣分区 key 的映射；提交自定义标签时必填",
     )
     interest_tags: list[str] | None = Field(
         default=None,
@@ -153,6 +157,26 @@ class ProfileUpdateRequest(BaseModel):
                 raise ValueError("personal_tags 不能为 null，清空请传 []")
             if self.model_fields_set & {"interest_tags", "personality_tags", "tag_selections"}:
                 raise ValueError("personal_tags 不能与旧标签字段同时提交")
+            custom = [tag for tag in self.personal_tags if tag not in ALL_TAG_OPTIONS]
+            raw_categories = self.custom_tag_categories or {}
+            normalized_categories: dict[str, str] = {}
+            for raw_label, category in raw_categories.items():
+                label = normalize_custom_tag(raw_label)
+                if label in ALL_TAG_OPTIONS:
+                    raise ValueError("系统标签无需提交自定义分区")
+                if category not in TAG_OPTIONS_BY_CATEGORY:
+                    raise ValueError(f"不支持的自定义标签分区: {category}")
+                if label.casefold() in {item.casefold() for item in normalized_categories}:
+                    raise ValueError("自定义标签分区不能重复")
+                normalized_categories[label] = category
+            if {tag.casefold() for tag in custom} != {tag.casefold() for tag in normalized_categories}:
+                raise ValueError("每个自定义标签都必须选择所属分区，且不能提交多余分区")
+            self.custom_tag_categories = {
+                tag: next(category for label, category in normalized_categories.items() if label.casefold() == tag.casefold())
+                for tag in custom
+            }
+        elif "custom_tag_categories" in self.model_fields_set:
+            raise ValueError("custom_tag_categories 必须与 personal_tags 同时提交")
         if any(tag in PERSONALITY_OPTIONS for tag in self.interest_tags or []):
             raise ValueError("性格标签请通过 personal_tags 或 personality_tags 提交")
         if any(tag not in PERSONALITY_OPTIONS for tag in self.personality_tags or []):
@@ -233,6 +257,7 @@ class ProfileResponse(BaseModel):
     self_intro: str | None
     personal_tags: list[str] = Field(default_factory=list, description="合并去重后的有效兴趣标签")
     custom_tags: list[str] = Field(default_factory=list, description="本人创建并通过校验的自定义标签")
+    custom_tag_categories: dict[str, str] = Field(default_factory=dict, description="自定义标签到兴趣分区 key 的映射")
     legacy_tags: list[str] = Field(default_factory=list, description="仅本人可见的待整理旧标签，公开响应为空")
     interest_tags: list[str]
     personality_tags: list[str]
@@ -317,6 +342,7 @@ class CustomTagPolicyResponse(BaseModel):
     max_tags: int = MAX_CUSTOM_TAGS
     min_length: int = CUSTOM_TAG_MIN_LENGTH
     max_length: int = CUSTOM_TAG_MAX_LENGTH
+    category_required: bool = True
 
 
 class TagOptionsResponse(BaseModel):

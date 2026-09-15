@@ -219,7 +219,8 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 
 #### 使用方法与业务规则
 
-- 列表「签署结果」列：`pass` 渲染徽标；`pending`/`fail` 渲染下拉，切换时调 `PATCH /auth/commitment/{id}`（见 §9）。
+- 列表「签署结果」列：仅 `pending` 渲染审核下拉，`pass`/`fail` 渲染只读徽标；切换时调 `PATCH /auth/commitment/{id}`（见 §7）。驳回必须填写 `remark`，该原因会回显给用户；用户重新签署后会生成一条新的待审记录。
+- 审核通过会同步 `users.is_single_pledge=1`；驳回会同步为 `0`。单纯存在签署记录不等于认证通过。
 - 删除调 `DELETE /auth/commitment/{id}`（见 §10）。
 
 #### 错误
@@ -328,7 +329,7 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 #### 返回参数差异
 
 - **house**：`items[].file_url` = `user_auth.house_cert`（文件凭证）；无附加字段。
-- **education**：`items[].degree`（学历）、`items[].school`（毕业学校）；`file_url` = `education_cert`。
+- **education**：只返回 `education_cert IS NOT NULL` 的已提交记录；`items[].degree`（学历）、`items[].school`（毕业学校）；`file_url` = `education_cert`。底层四态为 0未提交、1审核中、2通过、3未通过，并映射为 `pending/pass/fail`。
 - **other**：`items[].auth_type_id`（int）、`items[].auth_type_name`（string）；`file_url` = `user_auth_extra.file_url`。
 
 #### 返回示例（education）
@@ -353,7 +354,8 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 
 #### 使用方法与业务规则
 
-- 列表「认证结果」列渲染徽标；「删除」调对应 `DELETE /auth/{kind}/{id}`。
+- 学历列表的文件按钮打开证明图片；仅 `pending` 可通过下拉审核，已通过和已驳回记录只读。驳回必须填写 `remark`，该原因写入 `education_fail_reason` 并回显给用户；用户重新提交后才会再次进入 `pending`。
+- 「删除」调对应 `DELETE /auth/{kind}/{id}`。
 - other 的「认证类型」下拉选项来自 `GET /auth/types`（见 §6），选中后带 `auth_type_id` 重查。
 
 #### 错误
@@ -568,7 +570,7 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 | `kind` | path | string | 是 | `realname\|commitment\|marriage\|house\|education\|other` | 认证类型 |
 | `review_id` | path | int | 是 | ≥1 | 记录主键（实名/房产/学历为 `user_auth.id`，其余为各自表 id） |
 | `status` | body | int | 是 | 1 或 2 | 1 通过 / 2 未通过 |
-| `remark` | body | string\|null | 否 | ≤255 | 审核备注 |
+| `remark` | body | string\|null | 条件必填 | ≤255；`status=2` 时前端必须填写 | 审核备注；承诺和学历驳回原因会回显给用户 |
 
 #### 请求示例
 
@@ -580,7 +582,7 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 
 #### 使用方法与业务规则
 
-- `kind=commitment/house/education/other/realname`：更新对应表 `status`/`verified` 并写审计。
+- `kind=commitment/house/education/other/realname`：更新对应表 `status`/`verified` 并写审计。承诺通过/驳回同时更新单身承诺完成标记；学历将后台动作 `1/2` 映射为用户侧 `2通过/3未通过`。
 - `kind=marriage`：**不支持**，返回 `400`（婚姻核验结果为 married/no_record/divorced，无通过/未通过语义）。
 - `kind` 非法值（如 `foo`）被路径正则拦截，返回 `404`（未匹配到路由）。
 
@@ -590,7 +592,8 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 | --- | --- | --- |
 | 400 | `kind=marriage` | 提示婚姻核验不可审核 |
 | 404 | 记录不存在 / kind 非法 | 提示 |
-| 422 | `status` 非法 | 提示 |
+| 409 | 承诺或学历记录已不在审核中 | 刷新列表，不允许重复改判 |
+| 422 | `status` 非法，或驳回承诺/学历时未填写原因 | 提示并保留当前审核输入 |
 
 #### 文档完成自检清单
 

@@ -14,7 +14,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.profile_tags import CUSTOM_TAG_CATEGORY_KEY, DISCOVERY_CITY_OPTIONS, custom_tags, personal_tags
+from app.core.profile_tags import (
+    CUSTOM_TAG_CATEGORY_KEY,
+    CUSTOM_TAG_CATEGORY_MAP_KEY,
+    DISCOVERY_CITY_OPTIONS,
+    normalize_custom_tag_categories,
+    personal_tags,
+)
 from app.core.redis import consume_daily, get_daily_used, refund_daily
 from app.services.membership import (
     active_membership_exists_for_column_sql,
@@ -60,7 +66,7 @@ from app.services.candidate_visibility import (
     VisibilityScene,
 )
 from app.services.notifications import emit_notification
-from app.services.profile import _calculate_age, _json_dict, _json_list, get_profile
+from app.services.profile import _calculate_age, _json_dict, _json_list, _json_object, get_profile
 from app.services.quotas import consume_extra
 from app.services.admin_config import get_runtime_value
 from app.services.restrictions import ensure_user_allowed
@@ -218,8 +224,18 @@ def _all_tags(row: dict[str, Any]) -> set[str]:
     tags = set(_json_list(row.get("interest_tags"))) | set(_json_list(row.get("personality_tags")))
     for values in _json_dict(row.get("tags")).values():
         tags.update(values)
-    stored_custom = custom_tags(_json_dict(row.get("tags")).get(CUSTOM_TAG_CATEGORY_KEY, []))
+    stored_custom = _stored_custom_tags(row)
     return set(personal_tags(list(tags), stored_custom))
+
+
+def _stored_custom_tags(row: dict[str, Any]) -> list[str]:
+    stored = _json_object(row.get("tags"))
+    values = stored.get(CUSTOM_TAG_CATEGORY_KEY, [])
+    mapping = normalize_custom_tag_categories(
+        [str(item) for item in values] if isinstance(values, list) else [],
+        stored.get(CUSTOM_TAG_CATEGORY_MAP_KEY),
+    )
+    return list(mapping)
 
 
 def _candidate_score(viewer: dict[str, Any], candidate: dict[str, Any]) -> tuple[float, str]:
@@ -288,8 +304,8 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         is_married=row.get("is_married") if not detail_locked else None,
         online_status=0 if row.get("hide_online_status") else int(row.get("online_status") or 0),
         mbti=row.get("mbti") if not detail_locked else None,
-        personal_tags=personal_tags(_json_list(row.get("interest_tags")) + _json_list(row.get("personality_tags")), custom_tags(_json_dict(row.get("tags")).get(CUSTOM_TAG_CATEGORY_KEY, [])))[:10] if not detail_locked else [],
-        interest_tags=personal_tags(_json_list(row.get("interest_tags")), custom_tags(_json_dict(row.get("tags")).get(CUSTOM_TAG_CATEGORY_KEY, [])))[:5] if not detail_locked else [],
+        personal_tags=personal_tags(_json_list(row.get("interest_tags")) + _json_list(row.get("personality_tags")), _stored_custom_tags(row))[:10] if not detail_locked else [],
+        interest_tags=personal_tags(_json_list(row.get("interest_tags")), _stored_custom_tags(row))[:5] if not detail_locked else [],
         certification_tags=certification_tags,
         match_score=score,
         match_reason=reason,
