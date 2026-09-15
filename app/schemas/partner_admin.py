@@ -62,6 +62,10 @@ class PartnerUserCandidate(BaseModel):
     avatar: str | None = None
     is_promoter: bool = False
     has_team: bool = False
+    wechat_bound: bool = False
+    is_service_matchmaker: bool = False
+    unavailable: bool = False
+    unavailable_reason: str | None = None
 
 
 class PartnerStaffCreate(BaseModel):

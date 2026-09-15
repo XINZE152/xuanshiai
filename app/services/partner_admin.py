@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import user_candidates
 from app.schemas.partner_admin import (
     PartnerCommissionEntryCreate,
     PartnerCommissionEntryCreateResult,
@@ -212,48 +213,35 @@ async def partner_statistics(db: AsyncSession) -> PartnerStatistics:
 async def search_user_candidates(
     db: AsyncSession, keyword: str, limit: int = 10
 ) -> list[PartnerUserCandidate]:
-    """可绑定为合伙人的候选用户：仅排除服务红娘（服务红娘不可成为合伙人）。"""
-    rows = await db.execute(
-        text(
-            """SELECT u.id, u.nickname, u.phone, u.avatar,
-                EXISTS (SELECT 1 FROM user_matchmaker_apply ma
-                    WHERE ma.user_id = u.id AND ma.application_type = 'promoter') AS is_promoter,
-                EXISTS (SELECT 1 FROM partner_team t WHERE t.owner_user_id = u.id) AS has_team
-            FROM users u
-            WHERE u.status = 1
-              AND NOT EXISTS (SELECT 1 FROM user_matchmaker_apply sm
-                    WHERE sm.user_id = u.id AND sm.application_type = 'service_matchmaker')
-              AND (u.nickname LIKE CONCAT('%', :keyword, '%') OR u.phone LIKE CONCAT('%', :keyword, '%'))
-            ORDER BY u.id DESC LIMIT :limit"""
-        ),
-        {"keyword": keyword, "limit": limit},
-    )
+    """合伙人候选人：统一走 user_candidates 实现（服务红娘标记为不可用）。"""
+    rows = await user_candidates.search_user_candidates(db, keyword, "partner", limit)
     return [
         PartnerUserCandidate(
             id=int(row["id"]),
             nickname=row["nickname"],
-            real_name=row["nickname"],
+            real_name=row.get("real_name") or row["nickname"],
             phone=row["phone"],
             avatar=row["avatar"],
-            is_promoter=bool(row["is_promoter"]),
-            has_team=bool(row["has_team"]),
+            is_promoter=row["is_promoter"],
+            has_team=row["has_team"],
+            wechat_bound=row["wechat_bound"],
+            is_service_matchmaker=row["is_service_matchmaker"],
+            unavailable=row["unavailable"],
+            unavailable_reason=row["unavailable_reason"],
         )
-        for row in rows.mappings().all()
+        for row in rows
     ]
 
 
 async def _resolve_user_id(db: AsyncSession, body: PartnerStaffCreate) -> int:
     user_id = body.user_id
     if user_id is None and body.lookup:
-        column = "nickname" if body.lookup_by == "nickname" else "phone"
-        user_id = (
-            await db.execute(
-                text(f"SELECT id FROM users WHERE {column} = :lookup AND status = 1 ORDER BY id DESC LIMIT 1"),
-                {"lookup": body.lookup.strip()},
-            )
-        ).scalar()
-        if user_id is None:
-            raise HTTPException(404, detail="未找到可绑定的用户账号")
+        user_id = await user_candidates.resolve_user_id(
+            db,
+            body.lookup,
+            body.lookup_by or "nickname",
+            not_found_detail="未找到匹配的用户账号，请从下拉列表中选择",
+        )
     if user_id is None:
         raise HTTPException(422, detail="请先选择或搜索要绑定的用户账号")
     return int(user_id)

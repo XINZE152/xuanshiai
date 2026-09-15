@@ -67,10 +67,19 @@ class Settings(BaseSettings):
     paper_plane_daily_limit: int = 3
 
     live_enabled: bool = False
+    live_provider: Literal["mock", "tencent"] = "mock"
     tencent_live_sdk_app_id: int | None = Field(default=None, ge=1)
+    tencent_live_secret_id: str | None = None
     tencent_live_secret_key: SecretStr | None = None
+    tencent_live_region: str = "ap-guangzhou"
+    tencent_live_api_timeout_seconds: float = Field(default=5, gt=0, le=30)
+    tencent_live_max_retries: int = Field(default=2, ge=0, le=5)
     tencent_live_user_sig_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     tencent_live_callback_secret: SecretStr | None = None
+    tencent_live_callback_max_skew_seconds: int = Field(default=300, ge=0, le=3600)
+    tencent_live_cloud_recording_enabled: bool = False
+    tencent_live_mix_stream_enabled: bool = False
+    tencent_live_css_enabled: bool = False
 
     # AI avatar calls an OpenAI-compatible chat-completions service from the
     # backend only. API keys must never be exposed to the mini-program.
@@ -364,6 +373,13 @@ class Settings(BaseSettings):
         """Prevent Mock providers from being enabled in production."""
         if self.environment in {"staging", "production"} and self.auto_init_db:
             raise ValueError("staging/production 环境必须关闭 AUTO_INIT_DB")
+        if self.environment in {"staging", "production"} and self.live_provider == "mock":
+            raise ValueError("staging/production 环境禁止使用直播 Mock Provider")
+        if self.live_enabled and self.live_provider == "tencent":
+            if not self.tencent_live_sdk_app_id or not self.tencent_live_secret_id or not self.tencent_live_secret_key:
+                raise ValueError("启用腾讯直播 Provider 时必须配置 SDKAppID、SecretId 和 SecretKey")
+            if not self.tencent_live_callback_secret:
+                raise ValueError("启用腾讯直播 Provider 时必须配置回调密钥")
         if not self.is_test_mode and (
             self.sms_provider == "mock" or self.wechat_provider == "mock" or self.wechat_payment_mode == "mock"
         ):

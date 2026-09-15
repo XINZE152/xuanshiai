@@ -62,7 +62,7 @@ async def list_matchmakers(
 
 @router.get("/matchmakers/user-candidates", response_model=list[MatchmakerUserCandidate])
 async def matchmaker_user_candidates(
-    keyword: str = Query(..., min_length=2, max_length=100),
+    keyword: str = Query(..., min_length=1, max_length=100),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[MatchmakerUserCandidate]:

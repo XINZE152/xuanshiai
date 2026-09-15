@@ -76,6 +76,8 @@ from app.api.routes import (
     partner_level_admin,
     social,
     users,
+    user_cancellation_admin as user_cancellation_router,
+    admin_ticket as admin_ticket_router,
     voice,
     voice_moxiang,
     voice_ws,
@@ -162,9 +164,10 @@ api_router.include_router(promoter_level_admin.router, tags=["红娘后台"])
 api_router.include_router(partner_admin.router, tags=["红娘后台"])
 api_router.include_router(partner_admin.relation_router, tags=["红娘后台"])
 api_router.include_router(partner_level_admin.router, tags=["红娘后台"])
-api_router.include_router(matchmaker.admin_router, tags=["管理后台"])
 api_router.include_router(meeting.admin_router, tags=["管理后台"])
 api_router.include_router(promotion_order_admin.router, tags=["管理后台"])
+api_router.include_router(user_cancellation_router.router, tags=["管理后台"])
+api_router.include_router(admin_ticket_router.router, tags=["管理后台"])
 api_router.include_router(finance.admin_router, tags=["管理后台"])
 api_router.include_router(organization.router, tags=["组织与归属"])
 api_router.include_router(organization.promotion_router, tags=["组织与归属"])

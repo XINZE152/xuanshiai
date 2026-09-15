@@ -19,8 +19,15 @@ class PromoterUserCandidate(BaseModel):
 
     id: int
     nickname: str | None = None
+    real_name: str | None = None
     phone: str | None = None
     avatar: str | None = None
+    wechat_bound: bool = False
+    is_service_matchmaker: bool = False
+    is_promoter: bool = False
+    has_team: bool = False
+    unavailable: bool = False
+    unavailable_reason: str | None = None
 
 
 class PromoterStaffItem(BaseModel):
