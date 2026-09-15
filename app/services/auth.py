@@ -315,6 +315,9 @@ async def submit_realname(db: AsyncSession, user_id: int, request: RealNameReque
         raise HTTPException(422, detail="仅支持年满18周岁的用户认证")
     card_hash = hashlib.sha256(request.id_card.upper().encode()).hexdigest()
     allow_same_id = await same_id_multiple_accounts_allowed(db)
+    # Runtime-config reads start a SQLAlchemy transaction on this request.
+    # Close it before opening the atomic identity-submission transaction.
+    await db.rollback()
     async with db.begin():
         if not allow_same_id:
             duplicate = await db.execute(text("SELECT user_id FROM user_auth WHERE id_card_hash = :hash AND user_id <> :uid AND realname_status = 2"), {"hash": card_hash, "uid": user_id})
