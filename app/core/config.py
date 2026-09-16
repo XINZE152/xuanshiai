@@ -75,8 +75,11 @@ class Settings(BaseSettings):
     tencent_live_api_timeout_seconds: float = Field(default=5, gt=0, le=30)
     tencent_live_max_retries: int = Field(default=2, ge=0, le=5)
     tencent_live_user_sig_ttl_seconds: int = Field(default=900, ge=60, le=86400)
+    live_rtc_ticket_limit_per_minute: int = Field(default=10, ge=1, le=120)
     tencent_live_callback_secret: SecretStr | None = None
     tencent_live_callback_max_skew_seconds: int = Field(default=300, ge=0, le=3600)
+    tencent_live_callback_max_body_bytes: int = Field(default=65536, ge=1024, le=1048576)
+    tencent_live_callback_event_types_raw: str = ""
     tencent_live_cloud_recording_enabled: bool = False
     tencent_live_mix_stream_enabled: bool = False
     tencent_live_css_enabled: bool = False
@@ -380,6 +383,8 @@ class Settings(BaseSettings):
                 raise ValueError("启用腾讯直播 Provider 时必须配置 SDKAppID、SecretId 和 SecretKey")
             if not self.tencent_live_callback_secret:
                 raise ValueError("启用腾讯直播 Provider 时必须配置回调密钥")
+            if not self.tencent_live_callback_event_types_raw.strip():
+                raise ValueError("启用腾讯直播 Provider 时必须配置回调事件白名单")
         if not self.is_test_mode and (
             self.sms_provider == "mock" or self.wechat_provider == "mock" or self.wechat_payment_mode == "mock"
         ):

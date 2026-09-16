@@ -58,6 +58,9 @@ outputs
 .scripts/
 
 migrations/
+!migrations/
+!migrations/live/
+!migrations/live/*.sql
 scripts/
 artifacts/
 

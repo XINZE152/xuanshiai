@@ -9,6 +9,9 @@ from app.schemas.live import (
     LiveInviteRequest,
     LiveInviteResponse,
     LiveActionResponse,
+    LiveModerationRequest,
+    LiveModerationResponse,
+    LiveOperationsSnapshot,
     LiveSeatRemoveRequest,
     LiveSessionResponse,
     LiveTransitionRequest,
@@ -37,4 +40,43 @@ async def remove_from_stage(
 ) -> LiveActionResponse:
     return await service.remove_from_stage(
         db, session_id, current.id, body.user_id, body.reason
+    )
+
+
+@router.put(
+    "/sessions/{session_id}/restrictions",
+    response_model=LiveModerationResponse,
+    summary="设置或解除场内限制",
+)
+async def set_restriction(
+    body: LiveModerationRequest,
+    session_id: int = Path(..., ge=1),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> LiveModerationResponse:
+    return LiveModerationResponse(
+        **await service.set_participant_restriction(
+            db,
+            session_id,
+            current.id,
+            body.user_id,
+            body.restriction_type,
+            body.enabled,
+            body.reason,
+        )
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/operations",
+    response_model=LiveOperationsSnapshot,
+    summary="查询直播运营快照",
+)
+async def get_operations(
+    session_id: int = Path(..., ge=1),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> LiveOperationsSnapshot:
+    return LiveOperationsSnapshot(
+        **await service.operations_snapshot(db, session_id, current.id)
     )

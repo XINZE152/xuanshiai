@@ -1,11 +1,12 @@
 """直播相亲用户端接口。"""
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user, get_realname_verified_user
 from app.db.session import get_db
+from app.core.config import settings
+from app.core.redis import consume_rate_limit
 from app.schemas.live import (
     LiveActionResponse,
     LiveDeviceCheckRequest,
@@ -94,15 +95,14 @@ async def report(body: LiveReportRequest, session_id: int = Path(..., ge=1), cur
 
 @router.post("/sessions/{session_id}/rtc-ticket", response_model=LiveRtcTicketResponse, summary="领取腾讯 TRTC 凭证")
 async def rtc_ticket(session_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> LiveRtcTicketResponse:
-    session = await service.get_session(db, session_id)
-    role = (await db.execute(text("SELECT role_code FROM live_session_role WHERE session_id=:sid AND user_id=:uid AND status=1 ORDER BY FIELD(role_code,'HOST','MATCHMAKER','GUEST','MODERATOR') LIMIT 1"), {"sid": session_id, "uid": current.id})).scalar()
-    if not role:
-        on_stage = (await db.execute(text("SELECT 1 FROM live_stage_seat WHERE session_id=:sid AND user_id=:uid AND status='ON_STAGE'"), {"sid": session_id, "uid": current.id})).scalar()
-        if not on_stage:
-            raise HTTPException(403, detail="当前用户没有加入 RTC 的资格")
-        role = "GUEST"
-    if session["status"] in {"DRAFT", "SCHEDULED", "CLOSED"}:
-        raise HTTPException(409, detail="当前场次状态不可领取 RTC 凭证")
+    _, role = await service.ensure_rtc_access(db, session_id, current.id)
+    allowed = await consume_rate_limit(
+        f"live:rtc-ticket:{session_id}:{current.id}",
+        settings.live_rtc_ticket_limit_per_minute,
+        60,
+    )
+    if not allowed:
+        raise HTTPException(429, detail="LIVE_TICKET_RATE_LIMITED")
     try:
         app_id, user_sig, ttl = generate_user_sig(str(current.id))
     except LiveProviderUnavailable as exc:

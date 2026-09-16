@@ -9,12 +9,18 @@ from sqlalchemy import text
 from app.core.redis import redis_client
 from app.core.security import decode_access_token
 from app.db.session import session_factory
+from app.services.live import list_events_after
 
 router = APIRouter(prefix="/live")
 
 
 @router.websocket("/sessions/{session_id}/events")
-async def live_events(websocket: WebSocket, session_id: int, token: str = Query(...)) -> None:
+async def live_events(
+    websocket: WebSocket,
+    session_id: int,
+    token: str = Query(...),
+    last_version: int = Query(0, ge=0),
+) -> None:
     try:
         payload = decode_access_token(token)
         user_id = int(payload["sub"])
@@ -41,6 +47,13 @@ async def live_events(websocket: WebSocket, session_id: int, token: str = Query(
         if not session:
             await websocket.close(code=1008, reason="session access denied")
             return
+        pubsub = redis_client.pubsub()
+        try:
+            await pubsub.subscribe(f"live:session:{session_id}")
+        except RedisError:
+            await pubsub.aclose()
+            await websocket.close(code=1011, reason="realtime service unavailable")
+            return
         seats = (
             await db.execute(
                 text(
@@ -50,22 +63,31 @@ async def live_events(websocket: WebSocket, session_id: int, token: str = Query(
                 {"sid": session_id},
             )
         ).mappings().all()
+        missed_events = (
+            await list_events_after(db, session_id, last_version, 200)
+            if last_version > 0
+            else []
+        )
     await websocket.accept()
     await websocket.send_json({"event_type": "connection.ready", "session_id": session_id, "user_id": user_id})
+    for event in missed_events:
+        event["replayed"] = True
+        await websocket.send_json(event)
     await websocket.send_json(
         {
             "event_type": "session.snapshot",
             "session_id": session_id,
-            "version": int(session["state_version"]),
+            "state_version": int(session["state_version"]),
+            "event_version": (
+                missed_events[-1]["event_version"] if missed_events else last_version
+            ),
             "payload": {
                 "status": session["status"],
                 "seats": [dict(seat) for seat in seats],
             },
         }
     )
-    pubsub = redis_client.pubsub()
     try:
-        await pubsub.subscribe(f"live:session:{session_id}")
         while True:
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=20)
             if message and message.get("data"):
