@@ -78,7 +78,8 @@ async def update_member(db: AsyncSession, member_id: int, body: MatchmakerMember
     values = body.model_dump(exclude_unset=True)
     remark = values.pop("remark", None)
     user_values = {key: values.pop(key) for key in ("nickname", "gender", "birthday", "is_married", "avatar") if key in values}
-    auth_values = {key: values.pop(key) for key in ("education", "job", "auth_status") if key in values}
+    auth_values = {key: values.pop(key) for key in ("education", "school", "job", "company", "auth_status") if key in values}
+    match_status = values.pop("match_status", None) if "match_status" in values else None
     profile_columns: set[str] = set()
     if values:
         profile_columns = {
@@ -133,6 +134,13 @@ async def update_member(db: AsyncSession, member_id: int, body: MatchmakerMember
             VALUES (:user_id, {', '.join(':' + key for key in auth_values)})
             ON DUPLICATE KEY UPDATE {', '.join(f'{key} = VALUES({key})' for key in auth_values)}"""),
             {"user_id": member_id, **auth_values})
+    if match_status is not None:
+        await db.execute(text("""INSERT INTO user_privacy (user_id, match_status)
+            VALUES (:user_id, :match_status)
+            ON DUPLICATE KEY UPDATE match_status = VALUES(match_status), updated_at = UTC_TIMESTAMP()"""), {
+            "user_id": member_id,
+            "match_status": match_status,
+        })
     if remark is not None:
         await db.execute(text("""INSERT INTO matchmaker_admin_member_note (user_id, note, updated_by)
             VALUES (:user_id, :note, :updated_by)

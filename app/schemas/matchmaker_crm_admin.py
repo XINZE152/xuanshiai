@@ -21,12 +21,16 @@ class MemberListItem(BaseModel):
     is_married: int | None = None
     height: int | None = None
     weight: int | None = None
+    constellation: str | None = None
     zodiac: str | None = None
     household: str | None = None
     ethnicity: str | None = None
     house: str | None = None
     car: str | None = None
     smoking: str | None = None
+    drinking: str | None = None
+    religion: str | None = None
+    marriage_plan: str | None = None
     hometown_province_code: str | None = None
     hometown_city_code: str | None = None
     hometown_district_code: str | None = None
@@ -40,7 +44,10 @@ class MemberListItem(BaseModel):
     hometown: str | None = None
     residence: str | None = None
     education: str | None = None
+    school: str | None = None
     job: str | None = None
+    company: str | None = None
+    match_status: int | None = None
     auth_status: int | None = None
     intention_level: int | None = None
     last_follow_at: datetime | None = None

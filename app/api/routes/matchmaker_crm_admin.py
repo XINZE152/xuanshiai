@@ -90,6 +90,7 @@ async def _member_query(db: AsyncSession, where: str, params: dict, page: int, p
 
     base = """FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
         LEFT JOIN user_auth ua ON ua.user_id = u.id
+        LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(end_at) AS vip_end_at FROM user_membership WHERE status = 1 GROUP BY user_id) v ON v.user_id = u.id
         LEFT JOIN (SELECT user_id, matchmaker_id FROM resource_assignment WHERE status = 1) a ON a.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(created_at) last_follow_at, MAX(next_follow_at) next_follow_at FROM member_follow_up GROUP BY user_id) f ON f.user_id = u.id"""
@@ -106,9 +107,16 @@ async def _member_query(db: AsyncSession, where: str, params: dict, page: int, p
     rows = await db.execute(text(f"""SELECT u.id, u.nickname, u.phone, u.gender, u.status, u.created_at,
         COALESCE(u.avatar, JSON_UNQUOTE(JSON_EXTRACT(p.photos, '$[0]'))) AS avatar,
         u.birthday, u.is_married, p.height, p.income, p.hometown, p.residence,
-        {auth_expr('education')} AS education, {auth_expr('job')} AS job,
+        {profile_expr('constellation')} AS constellation, {profile_expr('zodiac')} AS zodiac,
+        {profile_expr('household')} AS household, {profile_expr('ethnicity')} AS ethnicity,
+        {profile_expr('house')} AS house, {profile_expr('car')} AS car, {profile_expr('smoking')} AS smoking,
+        {profile_expr('drinking')} AS drinking, {profile_expr('religion')} AS religion,
+        {profile_expr('marriage_plan')} AS marriage_plan,
+        {auth_expr('education')} AS education, {auth_expr('school')} AS school,
+        {auth_expr('job')} AS job, {auth_expr('company')} AS company,
         COALESCE({auth_expr('auth_status')}, 0) AS auth_status, {profile_expr('intention_level')} AS intention_level, f.last_follow_at, f.next_follow_at,
-        v.vip_end_at, a.matchmaker_id, CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()) THEN 0 ELSE 1 END AS is_vip
+        v.vip_end_at, a.matchmaker_id, COALESCE(pr.match_status, 1) AS match_status,
+        CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()) THEN 0 ELSE 1 END AS is_vip
         {base} WHERE {where} ORDER BY {sort_sql} LIMIT :limit OFFSET :offset"""), params)
     count = await db.execute(text(f"SELECT COUNT(*) {base} WHERE {where}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})
     total = int(count.scalar() or 0)
@@ -267,9 +275,12 @@ async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchm
         return f"ua.{name}" if ("user_auth", name) in available else "NULL"
     row = (await db.execute(text(f"""SELECT u.id, u.nickname, u.phone, u.gender, u.status, u.avatar, u.birthday, u.is_married, u.created_at,
         u.last_login_at, u.register_ip AS ip_location, {profile_expr('residence_city_code')} AS residence_city_code,
-        {profile_expr('height')} AS height, {profile_expr('weight')} AS weight, {profile_expr('zodiac')} AS zodiac,
+        {profile_expr('height')} AS height, {profile_expr('weight')} AS weight,
+        {profile_expr('constellation')} AS constellation, {profile_expr('zodiac')} AS zodiac,
         {profile_expr('household')} AS household, {profile_expr('ethnicity')} AS ethnicity,
         {profile_expr('house')} AS house, {profile_expr('car')} AS car, {profile_expr('smoking')} AS smoking,
+        {profile_expr('drinking')} AS drinking, {profile_expr('religion')} AS religion,
+        {profile_expr('marriage_plan')} AS marriage_plan,
         {profile_expr('hometown_province_code')} AS hometown_province_code,
         {profile_expr('hometown_city_code')} AS hometown_city_code,
         {profile_expr('hometown_district_code')} AS hometown_district_code,
@@ -282,11 +293,14 @@ async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchm
         {profile_expr('income')} AS income, {profile_expr('intention_level')} AS intention_level, {profile_expr('hometown')} AS hometown,
         {profile_expr('residence')} AS residence, {profile_expr('self_intro')} AS self_intro,
         {profile_expr('ideal_partner')} AS ideal_partner, {profile_expr('wechat')} AS wechat, {profile_expr('tags')} AS tags,
-        {auth_expr('education')} AS education, {auth_expr('job')} AS job, {auth_expr('auth_status')} AS auth_status,
+        {auth_expr('education')} AS education, {auth_expr('school')} AS school,
+        {auth_expr('job')} AS job, {auth_expr('company')} AS company, {auth_expr('auth_status')} AS auth_status,
+        COALESCE(pr.match_status, 1) AS match_status,
         v.vip_end_at, a.matchmaker_id,
         CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()) THEN 0 ELSE 1 END AS is_vip
         FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
         LEFT JOIN user_auth ua ON ua.user_id = u.id
+        LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(end_at) vip_end_at FROM user_membership WHERE status = 1 GROUP BY user_id) v ON v.user_id = u.id
         LEFT JOIN (SELECT user_id, matchmaker_id FROM resource_assignment WHERE status = 1) a ON a.user_id = u.id WHERE u.id = :id"""), {"id": member_id})).mappings().first()
     if not row:

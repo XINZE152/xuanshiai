@@ -37,12 +37,16 @@ class MatchmakerMemberUpdate(BaseModel):
     income: float | None = Field(default=None, ge=0, le=1_000_000)
     height: int | None = Field(default=None, ge=80, le=250)
     weight: int | None = Field(default=None, ge=40, le=120)
+    constellation: str | None = Field(default=None, max_length=16)
     zodiac: str | None = Field(default=None, max_length=16)
     household: str | None = Field(default=None, max_length=128)
     ethnicity: str | None = Field(default=None, max_length=32)
     house: str | None = Field(default=None, max_length=32)
     car: str | None = Field(default=None, max_length=32)
     smoking: str | None = Field(default=None, max_length=32)
+    drinking: str | None = Field(default=None, max_length=32)
+    religion: str | None = Field(default=None, max_length=32)
+    marriage_plan: str | None = Field(default=None, max_length=64)
     hometown_province_code: str | None = Field(default=None, max_length=32)
     hometown_city_code: str | None = Field(default=None, max_length=32)
     hometown_district_code: str | None = Field(default=None, max_length=32)
@@ -55,7 +59,13 @@ class MatchmakerMemberUpdate(BaseModel):
     hometown: str | None = Field(default=None, max_length=128)
     residence: str | None = Field(default=None, max_length=128)
     education: str | None = Field(default=None, max_length=64)
+    school: str | None = Field(default=None, max_length=128)
     job: str | None = Field(default=None, max_length=128)
+    company: str | None = Field(default=None, max_length=128)
+    match_status: Literal[1, 2, 3, 4, 5] | None = Field(
+        default=None,
+        description="交友展示状态：1公开相亲、2委托红娘、3完全私密、4停止相亲、5已经脱单",
+    )
     intention_level: Literal[1, 2, 3] | None = Field(default=None, description="客户意向：1低、2中、3高")
     auth_status: Literal[0, 1, 2, 3] | None = Field(default=None, description="认证审核状态：0待审、1审核中、2通过、3未通过")
     tags: dict[str, list[str]] | list[str] | None = None
