@@ -1420,6 +1420,32 @@ BUSINESS_TABLES = {
             KEY `idx_user_cancellation_reviewer` (`reviewed_by`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会员账号注销申请'
     """,
+    "admin_account_cancellation": """
+        CREATE TABLE IF NOT EXISTS `admin_account_cancellation` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `account_id` bigint unsigned NOT NULL COMMENT '申请注销的后台账号 matchmaker_admin_account.id',
+            `username` varchar(64) NOT NULL COMMENT '提交时的账号名快照',
+            `display_name` varchar(128) NOT NULL COMMENT '提交时的显示名快照',
+            `linked_user_id` bigint unsigned DEFAULT NULL COMMENT '提交时绑定的平台用户 ID 快照',
+            `requested_ip` varchar(64) DEFAULT NULL COMMENT '提交时的 IP 地址',
+            `reason` varchar(500) DEFAULT NULL COMMENT '注销原因',
+            `status` varchar(16) NOT NULL DEFAULT 'pending' COMMENT 'pending 待处理 / approved 已注销 / cancelled 已取消注销',
+            `previous_status` tinyint NOT NULL DEFAULT 1 COMMENT '提交时的账号状态快照，取消注销时恢复',
+            `has_member_profile` tinyint NOT NULL DEFAULT 0 COMMENT '是否关联会员资料 0否 1是',
+            `has_promoter_link` tinyint NOT NULL DEFAULT 0 COMMENT '是否关联推广红娘 0否 1是',
+            `has_partner_link` tinyint NOT NULL DEFAULT 0 COMMENT '是否关联合伙红娘 0否 1是',
+            `has_matchmaker_link` tinyint NOT NULL DEFAULT 0 COMMENT '是否关联服务红娘 0否 1是',
+            `reviewed_by` bigint unsigned DEFAULT NULL COMMENT '处理人（matchmaker_admin_account.id）',
+            `reviewed_at` datetime DEFAULT NULL COMMENT '处理时间',
+            `review_note` varchar(500) DEFAULT NULL COMMENT '审核批注',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_admin_account_cancel_pending` (`account_id`, `status`),
+            KEY `idx_admin_account_cancel_status` (`status`, `created_at`),
+            KEY `idx_admin_account_cancel_reviewer` (`reviewed_by`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='后台账号注销申请'
+    """,
     "admin_ticket": """
         CREATE TABLE IF NOT EXISTS `admin_ticket` (
             `id` bigint unsigned NOT NULL AUTO_INCREMENT,

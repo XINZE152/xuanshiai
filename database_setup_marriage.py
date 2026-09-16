@@ -158,6 +158,22 @@ class DatabaseManager:
         """
         return {name: f"`{name}` {definition}" for name, definition in columns.items()}
 
+    @staticmethod
+    def _assert_column_definition(table_name: str, column_name: str, column_def: str) -> None:
+        """校验列定义自带 `字段名` 前缀。
+
+        ``_ensure_table_columns`` 的 SQL 模板是 ``ALTER TABLE ... ADD COLUMN {column_def}``，
+        定义缺少前缀会生成语法错误语句（MySQL 1064）。历史事故：提交 ``8ec8ff1`` 为
+        M4/M5/M6/M7 传入的补列定义漏了前缀，异常又被下面的 ``except`` 降级成一条 WARNING，
+        于是这些列在旧库上一直没被创建，直到接口抛 ``1054 Unknown column`` 才暴露。
+        这里改为快速失败：写错的列定义在启动时就报错，不再静默通过。
+        """
+        if not column_def.lstrip().startswith(f"`{column_name}`"):
+            raise ValueError(
+                f"列定义缺少 `{column_name}` 前缀，无法生成 ALTER TABLE："
+                f"{table_name}.{column_name} = {column_def!r}"
+            )
+
     def _ensure_table_columns(self, cursor, table_name: str, required_columns: dict):
         """
         确保表的必需字段存在，如果不存在则添加
@@ -176,6 +192,7 @@ class DatabaseManager:
 
         for column_name, column_def in required_columns.items():
             if column_name not in existing_columns:
+                self._assert_column_definition(table_name, column_name, column_def)
                 try:
                     cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_def}")
                     logger.info(f"✅ 已添加字段 {table_name}.{column_name}")

@@ -2,11 +2,16 @@
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, Path, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
 from app.db.session import get_db
+from app.schemas.admin_account_cancellation import (
+    AdminAccountCancellationItem,
+    AdminAccountCancellationPage,
+    AdminAccountCancellationReview,
+)
 from app.schemas.matchmaker_admin_account import (
     MatchmakerAdminAccountCreate,
     MatchmakerAdminAccountItem,
@@ -18,6 +23,7 @@ from app.schemas.matchmaker_admin_account import (
     MatchmakerAdminPasswordReset,
     MatchmakerAdminSessionPage,
 )
+from app.services import admin_account_cancellation as cancellation_service
 from app.services.matchmaker_admin_account import (
     create_account,
     get_account,
@@ -153,3 +159,54 @@ async def revoke_account_sessions(
 ) -> None:
     current.require("matchmaker.account.manage")
     await revoke_all_sessions(db, account_id, current.account.id)
+
+
+@router.delete("/accounts/{account_id}", response_model=AdminAccountCancellationItem, summary="删除账号（提交注销申请）")
+async def delete_account(
+    account_id: int,
+    request: Request,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminAccountCancellationItem:
+    """前端「删除账号」确认弹窗走 DELETE；这里不物理删除，而是生成待审核的注销申请。"""
+    current.require("matchmaker.account.manage")
+    requested_ip = request.client.host if request.client else None
+    return await cancellation_service.submit_cancellation(
+        db, account_id=account_id, actor_id=current.account.id, requested_ip=requested_ip
+    )
+
+
+@router.get("/account-cancellations", response_model=AdminAccountCancellationPage, summary="注销申请列表")
+async def list_account_cancellations(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    status: str = Query("all", pattern="^(all|pending|approved|cancelled)$"),
+    keyword: str | None = Query(None, max_length=64),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminAccountCancellationPage:
+    current.require("matchmaker.account.manage")
+    return await cancellation_service.list_cancellations(
+        db, page=page, page_size=page_size, status=status, keyword=keyword
+    )
+
+
+@router.post(
+    "/account-cancellations/{cancellation_id}/review",
+    response_model=AdminAccountCancellationItem,
+    summary="处理注销申请（确定注销 / 取消注销）",
+)
+async def review_account_cancellation(
+    cancellation_id: int,
+    body: AdminAccountCancellationReview,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminAccountCancellationItem:
+    current.require("matchmaker.account.manage")
+    return await cancellation_service.review_cancellation(
+        db,
+        cancellation_id=cancellation_id,
+        admin_id=current.account.id,
+        approve=body.approve,
+        note=body.note,
+    )
