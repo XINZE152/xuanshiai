@@ -213,6 +213,20 @@ docker compose -f compose.ai-test.yml down -v --remove-orphans
 
 本地真实联调前先在腾讯控制台确认 TRTC 应用、CAM 最小权限和回调签名契约，再执行数据库初始化。未完成真实联调前，不得把 SDK 依赖安装成功等同于腾讯直播链路验收通过。
 
+直播可靠事件发布 Worker：
+
+```powershell
+# 单轮处理待发布事件
+uv run python -m app.workers.live_event_worker --once
+
+# 常驻处理；建议独立于 API 进程部署
+uv run python -m app.workers.live_event_worker --batch-size 50 --idle-seconds 2
+```
+
+生产升级前先运行 `no upload/直播相亲后端详细修改方案清单-2026-09-16.md` 中的重复席位检查，备份直播表后执行 `migrations/live/20260916_01_live_reliability_up.sql`。生产仍必须保持 `AUTO_INIT_DB=false`；回滚时先关闭直播和 Worker，再执行对应 down SQL。
+
+腾讯回调现在要求 `X-Tencent-Timestamp`、签名、时间窗口、体积上限和 `TENCENT_LIVE_CALLBACK_EVENT_TYPES_RAW` 白名单。该契约仍需使用实际开通产品的官方回调样例复核；白名单未配置时生产配置校验失败。
+
 运行全部测试：
 
 ```powershell

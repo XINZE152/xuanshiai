@@ -116,6 +116,7 @@ class LiveInteractionResponse(BaseModel):
     interaction_type: str
     status: str
     created_at: datetime
+    match_status: str | None = None
 
 
 class LiveReportRequest(BaseModel):
@@ -136,3 +137,58 @@ class LiveRtcTicketResponse(BaseModel):
     user_sig: str
     expires_in: int
     role: str
+
+
+class LiveModerationRequest(BaseModel):
+    user_id: int = Field(ge=1)
+    restriction_type: Literal["MUTE", "RTC_BLOCK"]
+    enabled: bool = True
+    reason: str = Field(min_length=2, max_length=255)
+
+
+class LiveModerationResponse(BaseModel):
+    session_id: int
+    user_id: int
+    restriction_type: str
+    enabled: bool
+
+
+class LiveSeatState(BaseModel):
+    seat_no: int
+    user_id: int | None = None
+    status: str
+    invitation_expires_at: datetime | None = None
+
+
+class LiveRegistrationState(BaseModel):
+    user_id: int
+    status: str
+    device_check_passed: bool
+    checked_in_at: datetime | None = None
+
+
+class LiveReportState(BaseModel):
+    id: int
+    reporter_user_id: int
+    target_user_id: int
+    category: str
+    status: str
+    created_at: datetime
+
+
+class LiveModerationState(BaseModel):
+    id: int
+    actor_user_id: int
+    target_user_id: int
+    action_type: str
+    reason: str | None = None
+    created_at: datetime
+
+
+class LiveOperationsSnapshot(BaseModel):
+    session_id: int
+    state_version: int
+    seats: list[LiveSeatState]
+    registrations: list[LiveRegistrationState]
+    reports: list[LiveReportState]
+    recent_actions: list[LiveModerationState]
