@@ -24,7 +24,7 @@ def get_live_provider():
 
 def generate_user_sig(user_id: str) -> tuple[int, str, int]:
     app_id = settings.tencent_live_sdk_app_id
-    secret = settings.tencent_live_secret_key
+    secret = settings.tencent_live_sdk_secret_key
     if not settings.live_enabled or not app_id or secret is None:
         raise LiveProviderUnavailable("直播或腾讯云 TRTC 尚未配置")
     issued_at = int(time.time())

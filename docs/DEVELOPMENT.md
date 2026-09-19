@@ -209,7 +209,9 @@ docker compose -f compose.ai-test.yml down -v --remove-orphans
 
 ### 5.0 直播腾讯 Provider
 
-直播后端使用 `tencentcloud-sdk-python` 的服务端 SDK 访问腾讯云控制面；音视频媒体流仍由客户端 TRTC SDK 负责。开发/测试默认使用 `LIVE_PROVIDER=mock`，生产或 staging 必须使用 `LIVE_PROVIDER=tencent` 并配置 `TENCENT_LIVE_SDK_APP_ID`、`TENCENT_LIVE_SECRET_ID`、`TENCENT_LIVE_SECRET_KEY` 和 `TENCENT_LIVE_CALLBACK_SECRET`。不得提交 `.env` 或真实腾讯密钥。
+直播后端使用 `tencentcloud-sdk-python` 的服务端 SDK 访问腾讯云控制面；音视频媒体流仍由客户端 TRTC SDK 负责。开发/测试默认使用 `LIVE_PROVIDER=mock`，生产或 staging 必须使用 `LIVE_PROVIDER=tencent` 并配置 `TENCENT_LIVE_SDK_APP_ID`、`TENCENT_LIVE_SDK_SECRET_KEY`、`TENCENT_LIVE_SECRET_ID`、`TENCENT_LIVE_SECRET_KEY` 和 `TENCENT_LIVE_CALLBACK_SECRET`。`SDKSecretKey` 仅用于生成 UserSig，CAM `SecretId/SecretKey` 仅用于服务端控制面 API，禁止复用。不得提交 `.env` 或真实腾讯密钥。
+
+从旧配置升级时，从 TRTC 控制台读取 SDKSecretKey 并新增 `TENCENT_LIVE_SDK_SECRET_KEY`；原 `TENCENT_LIVE_SECRET_KEY` 改为填写 CAM 子账号 SecretKey。两种密钥没有兼容回退，不能把同一个值复制到两项。`LIVE_ENABLED=true` 且 `LIVE_PROVIDER=tencent` 时缺少任一凭据会在启动阶段 fail-closed；轮换顺序为先注入全部新变量并验证，再重启 API/Worker，最后撤销旧凭据。
 
 本地真实联调前先在腾讯控制台确认 TRTC 应用、CAM 最小权限和回调签名契约，再执行数据库初始化。未完成真实联调前，不得把 SDK 依赖安装成功等同于腾讯直播链路验收通过。
 
@@ -226,6 +228,8 @@ uv run python -m app.workers.live_event_worker --batch-size 50 --idle-seconds 2
 生产升级前先运行 `no upload/直播相亲后端详细修改方案清单-2026-09-16.md` 中的重复席位检查，备份直播表后执行 `migrations/live/20260916_01_live_reliability_up.sql`。生产仍必须保持 `AUTO_INIT_DB=false`；回滚时先关闭直播和 Worker，再执行对应 down SQL。
 
 腾讯回调现在要求 `X-Tencent-Timestamp`、签名、时间窗口、体积上限和 `TENCENT_LIVE_CALLBACK_EVENT_TYPES_RAW` 白名单。该契约仍需使用实际开通产品的官方回调样例复核；白名单未配置时生产配置校验失败。
+
+直播 WebSocket 新客户端必须先调用 `POST /api/v1/live/sessions/{session_id}/ws-ticket`，再使用 60 秒单用途 `ticket` 建立连接；不得把长期 Access Token 放入 WebSocket URL。ticket 绑定登录会话和场次，Redis 不可用时生产环境拒绝签发/消费，连接期间会检查会话撤销和账号限制。详见 `docs/api/直播相亲.md`。
 
 运行全部测试：
 

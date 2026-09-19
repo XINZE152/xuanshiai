@@ -55,8 +55,10 @@ async def tencent_callback(
         payload = json.loads(raw_body)
     except json.JSONDecodeError as exc:
         raise HTTPException(422, detail="Invalid Tencent callback payload") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(422, detail="Tencent callback payload must be an object")
     event_id = payload.get("EventId") or payload.get("event_id")
-    if not event_id:
+    if not isinstance(event_id, (str, int)) or not str(event_id).strip() or len(str(event_id)) > 128:
         raise HTTPException(422, detail="Tencent callback event id is required")
     event_type = payload.get("EventType") or payload.get("event_type")
     allowed_event_types = {
@@ -64,11 +66,13 @@ async def tencent_callback(
         for item in settings.tencent_live_callback_event_types_raw.split(",")
         if item.strip()
     }
-    if not event_type or str(event_type) not in allowed_event_types:
+    if not isinstance(event_type, str) or len(event_type) > 64 or event_type not in allowed_event_types:
         raise HTTPException(422, detail="Tencent callback event type is not allowed")
     raw_session_id = payload.get("RoomId") or payload.get("room_id")
     try:
         session_id = int(raw_session_id) if raw_session_id is not None else None
+        if session_id is not None and session_id < 1:
+            raise ValueError
     except (TypeError, ValueError) as exc:
         raise HTTPException(422, detail="Invalid Tencent callback room id") from exc
     payload_hash = hashlib.sha256(raw_body).hexdigest()
