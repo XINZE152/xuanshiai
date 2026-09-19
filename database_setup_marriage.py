@@ -295,12 +295,20 @@ class DatabaseManager:
                 "personality_tags": "`personality_tags` json DEFAULT NULL",
                 "completion_algorithm_version": "`completion_algorithm_version` varchar(32) DEFAULT NULL",
                 "completion_calculated_at": "`completion_calculated_at` datetime DEFAULT NULL",
+                "matchmaker_note": "`matchmaker_note` varchar(2000) DEFAULT NULL COMMENT '红娘说（后台红娘对会员的备注）'",
             },
             "user_partner_preference": {
                 "dating_goal": "`dating_goal` varchar(32) DEFAULT NULL COMMENT '交友目标：倾向恋爱/倾向结婚'",
                 "meeting_pace": "`meeting_pace` varchar(64) DEFAULT NULL COMMENT '见面节奏'",
                 "children_intention": "`children_intention` varchar(64) DEFAULT NULL COMMENT '生育意愿'",
                 "preferred_occupation": "`preferred_occupation` varchar(128) DEFAULT NULL COMMENT '期望职业（择偶要求）'",
+                "income_range": "`income_range` varchar(32) DEFAULT NULL COMMENT '期望收入档位（后台UI单选）'",
+                "education_requirement": "`education_requirement` varchar(32) DEFAULT NULL COMMENT '期望学历（后台UI单选）'",
+                "marriage_requirement": "`marriage_requirement` varchar(32) DEFAULT NULL COMMENT '婚况要求（后台UI单选）'",
+                "housing_expectation": "`housing_expectation` varchar(32) DEFAULT NULL COMMENT '住房要求（后台UI单选）'",
+                "smoking_expectation": "`smoking_expectation` varchar(32) DEFAULT NULL COMMENT '吸烟要求（后台UI单选）'",
+                "drinking_expectation": "`drinking_expectation` varchar(32) DEFAULT NULL COMMENT '喝酒要求（后台UI单选）'",
+                "marriage_timeline": "`marriage_timeline` varchar(32) DEFAULT NULL COMMENT '结婚计划（后台UI单选）'",
             },
             "user_profile_completion": {
                 "weight_completed": "`weight_completed` tinyint NOT NULL DEFAULT '0'",
@@ -1212,6 +1220,14 @@ class DatabaseManager:
                     `dating_goal` varchar(32) DEFAULT NULL COMMENT '交友目标：倾向恋爱/倾向结婚',
                     `meeting_pace` varchar(64) DEFAULT NULL COMMENT '见面节奏',
                     `children_intention` varchar(64) DEFAULT NULL COMMENT '生育意愿',
+                    `income_range` varchar(32) DEFAULT NULL COMMENT '期望收入档位（后台UI单选）',
+                    `education_requirement` varchar(32) DEFAULT NULL COMMENT '期望学历（后台UI单选）',
+                    `preferred_occupation` varchar(128) DEFAULT NULL COMMENT '期望职业（择偶要求）',
+                    `marriage_requirement` varchar(32) DEFAULT NULL COMMENT '婚况要求（后台UI单选）',
+                    `housing_expectation` varchar(32) DEFAULT NULL COMMENT '住房要求（后台UI单选）',
+                    `smoking_expectation` varchar(32) DEFAULT NULL COMMENT '吸烟要求（后台UI单选）',
+                    `drinking_expectation` varchar(32) DEFAULT NULL COMMENT '喝酒要求（后台UI单选）',
+                    `marriage_timeline` varchar(32) DEFAULT NULL COMMENT '结婚计划（后台UI单选）',
                     `extra_requirement` varchar(1000) DEFAULT NULL,
                     `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
                     `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -3301,6 +3317,11 @@ class DatabaseManager:
     def _ensure_member_crm_columns(self, cursor) -> None:
         """Add CRM profile fields to already-existing installations."""
         columns = {
+            "member_follow_up": {
+                "images": "json DEFAULT NULL COMMENT '跟进图片URL列表'",
+                "voice_url": "varchar(500) DEFAULT NULL COMMENT '跟进录音地址'",
+                "voice_duration_sec": "int unsigned DEFAULT NULL COMMENT '录音时长秒'",
+            },
             "user_profile": {
                 "residence_city_code": "varchar(32) DEFAULT NULL",
                 "ideal_partner": "text DEFAULT NULL",

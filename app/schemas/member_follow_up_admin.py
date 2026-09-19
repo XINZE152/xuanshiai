@@ -20,6 +20,10 @@ class MemberFollowUp(BaseModel):
     next_follow_at: datetime | None
     created_by: int
     created_at: datetime
+    images: list[str] = Field(default_factory=list, description="跟进图片URL列表")
+    voice_url: str | None = Field(default=None, description="跟进录音地址")
+    voice_duration_sec: int | None = Field(default=None, description="录音时长秒")
+    matchmaker_name: str | None = Field(default=None, description="跟进红娘称呼（后台账号 display_name）")
 
 
 class MemberFollowUpPage(BaseModel):

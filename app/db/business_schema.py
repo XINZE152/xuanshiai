@@ -191,6 +191,9 @@ BUSINESS_TABLES = {
             `content` varchar(2000) NOT NULL,
             `next_follow_at` datetime DEFAULT NULL,
             `created_by` bigint unsigned NOT NULL,
+            `images` json DEFAULT NULL COMMENT '跟进图片URL列表',
+            `voice_url` varchar(500) DEFAULT NULL COMMENT '跟进录音地址',
+            `voice_duration_sec` int unsigned DEFAULT NULL COMMENT '录音时长秒',
             `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (`id`),
             KEY `idx_member_follow_up_user` (`user_id`, `created_at`)

@@ -13,6 +13,11 @@ def test_region_tree_lookup():
     assert any(item.code == "110101" and item.name == "东城区" for item in districts.items)
 
 
+def test_region_route_codes_can_be_normalized_to_tree_codes() -> None:
+    assert list_cities("110000").items == list_cities("11").items
+    assert list_districts("110100").items == list_districts("1101").items
+
+
 def test_region_display_normalizes_padded_codes() -> None:
     assert region_display("110000", "110100", "110105") == "北京市 朝阳区"
     assert region_display("330000", "330100", None) == "浙江省 杭州市"

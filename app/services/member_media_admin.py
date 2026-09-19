@@ -10,6 +10,7 @@ Python 端不自行生成。会员编号由 SQL ``CONCAT('G', LPAD(u.id, 6, '0')
 """
 
 import json
+from datetime import date
 from typing import Any
 
 from fastapi import HTTPException
@@ -23,6 +24,12 @@ from app.schemas.member_media_admin import (
     MemberMediaPage,
     MemberMediaReplace,
     MemberMediaReview,
+    MemberPreferenceAdminItem,
+    MemberPreferenceAdminUpdate,
+    MemberProfileExtItem,
+    MemberProfileExtUpdate,
+    MemberRecommendItem,
+    MemberRecommendPage,
 )
 
 
@@ -170,6 +177,367 @@ async def update_intro(db: AsyncSession, user_id: int, body: Any, actor_id: int)
         )
     ).mappings().first()
     return _build_intro(row)
+
+
+def _parse_json_tags(value: Any) -> list[str]:
+    """personality_tags 为 json 列：驱动可能返回 str / list / None，统一成 list[str]。"""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(tag) for tag in value]
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return [str(tag) for tag in parsed] if isinstance(parsed, list) else []
+
+
+# ─── 资料扩展字段（性格/爱好/MBTI/自我介绍/红娘说） ─────────────
+
+
+async def get_profile_ext(db: AsyncSession, user_id: int) -> MemberProfileExtItem:
+    """查询单个会员的资料扩展字段（性格/爱好/MBTI/自我介绍/红娘说）。
+
+    数据源 ``users u LEFT JOIN user_profile p``；会员不存在返回 404。
+    """
+    exists = await db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+    if not exists.scalar():
+        raise HTTPException(404, detail="会员不存在")
+    row = (
+        await db.execute(
+            text(
+                f"SELECT u.id, u.id AS user_id, {_member_code_sql()} AS member_code, u.nickname, u.avatar, "
+                "p.personality_tags, p.hobbies, p.mbti, p.self_intro, p.matchmaker_note, p.updated_at "
+                "FROM users u LEFT JOIN user_profile p ON p.user_id = u.id WHERE u.id = :id"
+            ),
+            {"id": user_id},
+        )
+    ).mappings().first()
+    return MemberProfileExtItem(
+        id=int(row["user_id"]),
+        user_id=int(row["user_id"]),
+        member_code=row["member_code"],
+        nickname=row["nickname"],
+        avatar=row["avatar"],
+        personality_tags=_parse_json_tags(row["personality_tags"]),
+        hobbies=row["hobbies"],
+        mbti=row["mbti"],
+        self_intro=row["self_intro"],
+        matchmaker_note=row["matchmaker_note"],
+        updated_at=row["updated_at"],
+    )
+
+
+async def update_profile_ext(
+    db: AsyncSession, user_id: int, body: MemberProfileExtUpdate, actor_id: int
+) -> MemberProfileExtItem:
+    """更新会员资料扩展字段，仅更新请求中出现的字段；并写审计 ``member.profile_ext.update``。
+
+    users 不存在返回 404；user_profile 不存在时先 ``INSERT IGNORE`` 建行再动态 UPDATE。
+    """
+    exists = await db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+    if not exists.scalar():
+        raise HTTPException(404, detail="会员不存在")
+
+    submitted = body.model_dump(exclude_unset=True)
+    sets: list[str] = []
+    params: dict[str, Any] = {"uid": user_id}
+    if "personality_tags" in submitted:
+        sets.append("personality_tags = :ptags")
+        params["ptags"] = json.dumps(submitted["personality_tags"] or [], ensure_ascii=False)
+    for field in ("hobbies", "mbti", "self_intro", "matchmaker_note"):
+        if field in submitted:
+            sets.append(f"{field} = :{field}")
+            params[field] = submitted[field]
+
+    await db.execute(text("INSERT IGNORE INTO user_profile (user_id) VALUES (:uid)"), {"uid": user_id})
+    await db.execute(
+        text(
+            "UPDATE user_profile SET "
+            + ", ".join(sets)
+            + ", updated_at = UTC_TIMESTAMP() WHERE user_id = :uid"
+        ),
+        params,
+    )
+    await db.execute(
+        text(
+            "INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id, after_json) "
+            "VALUES (:actor, 'member.profile_ext.update', 'user_profile', :rid, :after)"
+        ),
+        {
+            "actor": actor_id,
+            "rid": user_id,
+            "after": json.dumps(submitted, ensure_ascii=False),
+        },
+    )
+    await db.commit()
+    return await get_profile_ext(db, user_id)
+
+
+# ─── 择偶要求（后台管理端） ─────────────────────────────────────
+
+_PREFERENCE_FIELDS = (
+    "income_range",
+    "education_requirement",
+    "preferred_occupation",
+    "marriage_requirement",
+    "housing_expectation",
+    "smoking_expectation",
+    "drinking_expectation",
+    "marriage_timeline",
+    "extra_requirement",
+)
+
+
+async def get_member_preference(db: AsyncSession, user_id: int) -> MemberPreferenceAdminItem:
+    """查询单个会员的择偶要求（后台管理口径）。会员不存在返回 404。"""
+    exists = await db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+    if not exists.scalar():
+        raise HTTPException(404, detail="会员不存在")
+    row = (
+        await db.execute(
+            text(
+                f"SELECT u.id, u.id AS user_id, {_member_code_sql()} AS member_code, u.nickname, u.avatar, "
+                "p.age_min, p.age_max, p.height_min, p.height_max, "
+                + ", ".join(f"p.{f}" for f in _PREFERENCE_FIELDS)
+                + ", p.updated_at "
+                "FROM users u LEFT JOIN user_partner_preference p ON p.user_id = u.id WHERE u.id = :id"
+            ),
+            {"id": user_id},
+        )
+    ).mappings().first()
+    return MemberPreferenceAdminItem(
+        id=int(row["user_id"]),
+        user_id=int(row["user_id"]),
+        member_code=row["member_code"],
+        nickname=row["nickname"],
+        avatar=row["avatar"],
+        age_min=row["age_min"],
+        age_max=row["age_max"],
+        height_min=row["height_min"],
+        height_max=row["height_max"],
+        **{f: row[f] for f in _PREFERENCE_FIELDS},
+        updated_at=row["updated_at"],
+    )
+
+
+async def update_member_preference(
+    db: AsyncSession, user_id: int, body: MemberPreferenceAdminUpdate, actor_id: int
+) -> MemberPreferenceAdminItem:
+    """更新会员择偶要求，仅更新请求中出现的字段；并写审计 ``member.preference.update``。
+
+    users 不存在返回 404；user_partner_preference 不存在时先 ``INSERT IGNORE`` 建行再动态 UPDATE。
+    """
+    exists = await db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+    if not exists.scalar():
+        raise HTTPException(404, detail="会员不存在")
+
+    submitted = body.model_dump(exclude_unset=True)
+    sets: list[str] = []
+    params: dict[str, Any] = {"uid": user_id}
+    for field in ("age_min", "age_max", "height_min", "height_max", *_PREFERENCE_FIELDS):
+        if field in submitted:
+            sets.append(f"{field} = :{field}")
+            params[field] = submitted[field]
+
+    await db.execute(
+        text("INSERT IGNORE INTO user_partner_preference (user_id) VALUES (:uid)"),
+        {"uid": user_id},
+    )
+    await db.execute(
+        text(
+            "UPDATE user_partner_preference SET "
+            + ", ".join(sets)
+            + ", updated_at = UTC_TIMESTAMP() WHERE user_id = :uid"
+        ),
+        params,
+    )
+    await db.execute(
+        text(
+            "INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id, after_json) "
+            "VALUES (:actor, 'member.preference.update', 'user_partner_preference', :rid, :after)"
+        ),
+        {
+            "actor": actor_id,
+            "rid": user_id,
+            "after": json.dumps(submitted, ensure_ascii=False),
+        },
+    )
+    await db.commit()
+    return await get_member_preference(db, user_id)
+
+
+# ─── 会员推荐（后台按条件筛候选人，强制异性） ───────────────────
+
+
+_TAG_JSON_COLUMNS = ("p.tags", "p.interest_tags", "p.personality_tags")
+
+
+async def list_member_recommendations(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    page: int,
+    page_size: int,
+    store_id: int | None = None,
+    matchmaker_id: int | None = None,
+    smoking: str | None = None,
+    drinking: str | None = None,
+    house: str | None = None,
+    marriage: int | None = None,
+    ethnicity: str | None = None,
+    constellation: str | None = None,
+    hometown: str | None = None,
+    residence: str | None = None,
+    occupations: list[str] | None = None,
+    mbti: str | None = None,
+    tags: list[str] | None = None,
+) -> MemberRecommendPage:
+    """为指定会员按附加条件筛推荐候选人。
+
+    硬规则：候选人必须为异性（``u.gender <>`` 会员自身性别）、状态正常（status=1）、
+    排除本人；其余条件全部可选（不传即不限）。候选人无性别信息时返回 422。
+    """
+    viewer = (
+        await db.execute(text("SELECT gender FROM users WHERE id = :id"), {"id": user_id})
+    ).mappings().first()
+    if not viewer:
+        raise HTTPException(404, detail="会员不存在")
+    if viewer["gender"] not in (1, 2):
+        raise HTTPException(422, detail="该会员未填写性别，无法按异性筛选推荐")
+
+    clauses = [
+        "u.id <> :viewer_id",
+        "u.status = 1",
+        "u.gender <> :opposite_gender",
+    ]
+    params: dict[str, Any] = {
+        "viewer_id": user_id,
+        "opposite_gender": viewer["gender"],
+        "limit": page_size,
+        "offset": (page - 1) * page_size,
+    }
+    if matchmaker_id is not None:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM resource_assignment ram WHERE ram.user_id = u.id"
+            " AND ram.status = 1 AND ram.matchmaker_id = :matchmaker_id)"
+        )
+        params["matchmaker_id"] = matchmaker_id
+    if store_id is not None:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM resource_assignment ras"
+            " JOIN organization_member om ON om.user_id = ras.matchmaker_id"
+            " AND om.status = 1 AND om.organization_id = :store_id"
+            " WHERE ras.user_id = u.id AND ras.status = 1)"
+        )
+        params["store_id"] = store_id
+    for field, column in (
+        ("smoking", "p.smoking"),
+        ("drinking", "p.drinking"),
+        ("house", "p.house"),
+        ("ethnicity", "p.ethnicity"),
+        ("constellation", "p.constellation"),
+        ("hometown", "p.hometown"),
+        ("residence", "p.residence"),
+        ("mbti", "p.mbti"),
+    ):
+        value = locals()[field]
+        if value:
+            clauses.append(f"{column} = :{field}")
+            params[field] = value
+    if marriage is not None:
+        clauses.append("u.is_married = :marriage")
+        params["marriage"] = marriage
+    if occupations:
+        clean_jobs = [job.strip() for job in occupations if job and job.strip()][:10]
+        if clean_jobs:
+            clauses.append(
+                f"p.occupation IN ({', '.join(f':occ_{i}' for i in range(len(clean_jobs)))})"
+            )
+            for i, job in enumerate(clean_jobs):
+                params[f"occ_{i}"] = job
+    if tags:
+        clean_tags = [tag.strip() for tag in tags if tag and tag.strip()][:12]
+        if clean_tags:
+            tag_clauses = []
+            for i, tag in enumerate(clean_tags):
+                for j, column in enumerate(_TAG_JSON_COLUMNS):
+                    key = f"tag_{i}_{j}"
+                    params[key] = tag
+                    tag_clauses.append(f"JSON_CONTAINS({column}, JSON_QUOTE(:{key}))")
+            clauses.append("(" + " OR ".join(tag_clauses) + ")")
+
+    where = " AND ".join(clauses)
+    base = """FROM users u
+        LEFT JOIN user_profile p ON p.user_id = u.id
+        LEFT JOIN (SELECT user_id, MAX(id) AS max_assignment_id FROM resource_assignment WHERE status = 1 GROUP BY user_id) ca ON ca.user_id = u.id
+        LEFT JOIN resource_assignment cra ON cra.id = ca.max_assignment_id
+        LEFT JOIN matchmaker_admin_account maa ON maa.id = cra.matchmaker_id
+        LEFT JOIN users mu ON mu.id = cra.matchmaker_id"""
+    select_cols = f"""SELECT u.id AS user_id, {_member_code_sql()} AS member_code,
+        u.nickname, u.avatar, u.gender, u.birthday, u.is_married,
+        p.height, p.income, p.education_level, p.occupation,
+        p.constellation, p.mbti, p.hometown, p.residence,
+        p.smoking, p.drinking, p.house, p.ethnicity,
+        p.tags, p.interest_tags,
+        cra.matchmaker_id, COALESCE(mu.nickname, maa.display_name) AS matchmaker_name"""
+
+    rows = await db.execute(
+        text(f"{select_cols} {base} WHERE {where} ORDER BY u.id DESC LIMIT :limit OFFSET :offset"),
+        params,
+    )
+    count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+    total = int(
+        await db.scalar(text(f"SELECT COUNT(DISTINCT u.id) {base} WHERE {where}"), count_params) or 0
+    )
+    items = []
+    for row in rows.mappings().all():
+        merged_tags: list[str] = []
+        for raw in (row.get("tags"), row.get("interest_tags")):
+            parsed = _parse_json_tags(raw)
+            for tag in parsed:
+                if tag not in merged_tags:
+                    merged_tags.append(tag)
+        birthday = row.get("birthday")
+        items.append(
+            MemberRecommendItem(
+                user_id=int(row["user_id"]),
+                member_code=row["member_code"],
+                nickname=row["nickname"],
+                avatar=row["avatar"],
+                gender=row["gender"],
+                age=_age_from_birthday(birthday),
+                height=row["height"],
+                income=float(row["income"]) if row["income"] is not None else None,
+                education_level=row["education_level"],
+                occupation=row["occupation"],
+                constellation=row["constellation"],
+                mbti=row["mbti"],
+                hometown=row["hometown"],
+                residence=row["residence"],
+                smoking=row["smoking"],
+                drinking=row["drinking"],
+                house=row["house"],
+                ethnicity=row["ethnicity"],
+                tags=merged_tags,
+                matchmaker_id=int(row["matchmaker_id"]) if row["matchmaker_id"] is not None else None,
+                matchmaker_name=row["matchmaker_name"],
+            )
+        )
+    return MemberRecommendPage(
+        items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total
+    )
+
+
+def _age_from_birthday(birthday: Any) -> int | None:
+    """按生日算周岁；生日为空返回 None。"""
+    if birthday is None:
+        return None
+    today = date.today()
+    age = today.year - birthday.year
+    if (today.month, today.day) < (birthday.month, birthday.day):
+        age -= 1
+    return max(age, 0)
 
 
 # ─── 媒体（头像/照片/视频） ─────────────────────────────────────

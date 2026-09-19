@@ -6,19 +6,29 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import uuid
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
-from fastapi import HTTPException
+import aiofiles
+from fastapi import HTTPException, UploadFile
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
+from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL.Image import DecompressionBombError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.schemas.member_follow_up_admin import (
+    MemberFollowUp,
     MemberFollowUpImportResult,
     MemberFollowUpListPage,
+    MemberFollowUpPage,
     MemberFollowUpRow,
     MemberFollowUpSummary,
 )
@@ -446,3 +456,237 @@ async def import_follow_ups(
     return MemberFollowUpImportResult(
         created=created, skipped=skipped, failed=failed, errors=errors[:50]
     )
+
+
+# ─── 新增跟进（文字 + 图片 + 录音） ─────────────────────────────
+
+FOLLOW_UP_MAX_IMAGES = 9
+FOLLOW_UP_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+FOLLOW_UP_VOICE_MAX_BYTES = 20 * 1024 * 1024
+_FOLLOW_UP_IMAGE_MAX_PIXELS = 25_000_000
+_FOLLOW_UP_VOICE_EXT: dict[str, str] = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/mp4": "m4a",
+    "audio/x-m4a": "m4a",
+    "audio/aac": "aac",
+    "audio/ogg": "ogg",
+    "audio/amr": "amr",
+    "audio/webm": "webm",
+}
+
+
+async def _fu_read_limited(file: UploadFile, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, detail=f"文件大小不能超过{limit // 1024 // 1024}MB")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _fu_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiofiles.open(path, "wb") as output:
+        await output.write(data)
+
+
+def _fu_image_outputs(data: bytes) -> tuple[bytes, bytes]:
+    """图片 -> (webp 原图, webp 缩略图)，口径与会员资料上传一致。"""
+    try:
+        with Image.open(BytesIO(data)) as source:
+            if source.format not in {"JPEG", "PNG"}:
+                raise HTTPException(415, detail="仅支持JPG、JPEG或PNG图片")
+            if source.width * source.height > _FOLLOW_UP_IMAGE_MAX_PIXELS:
+                raise HTTPException(413, detail="图片像素不能超过2500万")
+            source.verify()
+        with Image.open(BytesIO(data)) as source:
+            image = ImageOps.exif_transpose(source)
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            output = BytesIO()
+            image.save(output, format="WEBP", quality=85, method=4)
+            thumbnail = image.copy()
+            thumbnail.thumbnail((480, 480), Image.Resampling.LANCZOS)
+            thumb_output = BytesIO()
+            thumbnail.save(thumb_output, format="WEBP", quality=80, method=4)
+            return output.getvalue(), thumb_output.getvalue()
+    except DecompressionBombError as exc:
+        raise HTTPException(413, detail="图片像素过大") from exc
+    except (UnidentifiedImageError, OSError) as exc:
+        raise HTTPException(415, detail="图片内容无法识别") from exc
+    except HTTPException:
+        raise
+
+
+def _voice_suffix(voice: UploadFile) -> str:
+    """按 Content-Type / 文件名后缀推断录音扩展名，白名单校验。"""
+    mime = (voice.content_type or "").split(";")[0].strip().lower()
+    if mime in _FOLLOW_UP_VOICE_EXT:
+        return _FOLLOW_UP_VOICE_EXT[mime]
+    name_ext = (voice.filename or "").rsplit(".", 1)[-1].strip().lower()
+    if name_ext in set(_FOLLOW_UP_VOICE_EXT.values()):
+        return name_ext
+    raise HTTPException(415, detail="仅支持 mp3/wav/m4a/aac/ogg/amr/webm 录音")
+
+
+def _parse_follow_up_images(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+
+def _build_follow_up_row(row: Any) -> MemberFollowUp:
+    return MemberFollowUp(
+        id=int(row["id"]),
+        user_id=int(row["user_id"]),
+        method=str(row["method"]),
+        content=str(row["content"] or ""),
+        next_follow_at=row["next_follow_at"],
+        created_by=int(row["created_by"]),
+        created_at=row["created_at"],
+        images=_parse_follow_up_images(row["images"]),
+        voice_url=row["voice_url"],
+        voice_duration_sec=int(row["voice_duration_sec"]) if row["voice_duration_sec"] is not None else None,
+        matchmaker_name=row["matchmaker_name"],
+    )
+
+
+_FOLLOW_UP_SELECT = """
+SELECT f.id, f.user_id, f.method, f.content, f.next_follow_at, f.created_by, f.created_at,
+       f.images, f.voice_url, f.voice_duration_sec,
+       COALESCE(acc.display_name, mk.nickname) AS matchmaker_name
+FROM member_follow_up f
+LEFT JOIN matchmaker_admin_account acc ON acc.id = f.created_by
+LEFT JOIN users mk ON mk.id = f.created_by
+"""
+
+
+async def get_member_follow_ups(
+    db: AsyncSession, member_id: int, page: int, page_size: int
+) -> MemberFollowUpPage:
+    """查询单个会员的跟进记录（含图片/录音与跟进红娘称呼），倒序分页。"""
+    if not await db.scalar(text("SELECT 1 FROM users WHERE id = :id"), {"id": member_id}):
+        raise HTTPException(404, detail="会员不存在")
+    params: dict[str, Any] = {"uid": member_id, "limit": page_size, "offset": (page - 1) * page_size}
+    rows = await db.execute(
+        text(f"{_FOLLOW_UP_SELECT} WHERE f.user_id = :uid ORDER BY f.id DESC LIMIT :limit OFFSET :offset"),
+        params,
+    )
+    total = int(
+        (await db.scalar(text("SELECT COUNT(*) FROM member_follow_up WHERE user_id = :uid"), {"uid": member_id})) or 0
+    )
+    items = [_build_follow_up_row(row) for row in rows.mappings().all()]
+    return MemberFollowUpPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
+
+
+async def create_follow_up_with_media(
+    db: AsyncSession,
+    member_id: int,
+    method: str,
+    content: str,
+    next_follow_at: datetime | None,
+    matchmaker_id: int | None,
+    images: list[UploadFile] | None,
+    voice: UploadFile | None,
+    voice_duration_sec: int | None,
+    actor_id: int,
+) -> MemberFollowUp:
+    """新增跟进记录，支持文字 + 图片（转 webp，最多 9 张）+ 录音。
+
+    ``matchmaker_id`` 为空时记录当前操作账号；提供时必须是启用中的后台账号。
+    图片存 ``{upload_dir}/{member_id}/follow-up-img-{uuid}.webp``，录音存
+    ``follow-up-voice-{uuid}.{ext}``；URL 形如 ``/storage/uploads/{member_id}/...``。
+    """
+    if not await db.scalar(text("SELECT 1 FROM users WHERE id = :id"), {"id": member_id}):
+        raise HTTPException(404, detail="会员不存在")
+
+    normalized_content = (content or "").strip()
+    image_files = [item for item in (images or []) if item is not None and (item.filename or "").strip()]
+    has_voice = voice is not None and bool((voice.filename or "").strip()) and voice.size != 0
+    if not normalized_content and not image_files and not has_voice:
+        raise HTTPException(422, detail="跟进文字与图片/录音至少提供一项")
+
+    if matchmaker_id is None:
+        operator_id = actor_id
+    else:
+        operator_id = await db.scalar(
+            text("SELECT id FROM matchmaker_admin_account WHERE id = :id AND status = 1"),
+            {"id": matchmaker_id},
+        )
+        if not operator_id:
+            raise HTTPException(422, detail="跟进红娘不存在或已停用")
+        operator_id = int(operator_id)
+
+    if len(image_files) > FOLLOW_UP_MAX_IMAGES:
+        raise HTTPException(422, detail=f"图片最多{FOLLOW_UP_MAX_IMAGES}张")
+
+    directory = Path(settings.upload_dir) / str(member_id)
+    image_urls: list[str] = []
+    for image in image_files:
+        data = await _fu_read_limited(image, FOLLOW_UP_IMAGE_MAX_BYTES)
+        webp_data, _thumb = await asyncio.to_thread(_fu_image_outputs, data)
+        name = uuid.uuid4().hex
+        target = directory / f"follow-up-img-{name}.webp"
+        await _fu_write_bytes(target, webp_data)
+        image_urls.append(f"/storage/uploads/{member_id}/{target.name}")
+
+    voice_url: str | None = None
+    if has_voice:
+        voice_data = await _fu_read_limited(voice, FOLLOW_UP_VOICE_MAX_BYTES)  # type: ignore[union-attr]
+        suffix = _voice_suffix(voice)  # type: ignore[arg-type]
+        name = uuid.uuid4().hex
+        target = directory / f"follow-up-voice-{name}.{suffix}"
+        await _fu_write_bytes(target, voice_data)
+        voice_url = f"/storage/uploads/{member_id}/{target.name}"
+
+    result = await db.execute(
+        text(
+            "INSERT INTO member_follow_up (user_id, method, content, next_follow_at, created_by, images, voice_url, voice_duration_sec)"
+            " VALUES (:uid, :method, :content, :next_follow_at, :created_by, :images, :voice_url, :voice_duration_sec)"
+        ),
+        {
+            "uid": member_id,
+            "method": method,
+            "content": normalized_content,
+            "next_follow_at": next_follow_at,
+            "created_by": operator_id,
+            "images": json.dumps(image_urls, ensure_ascii=False) if image_urls else None,
+            "voice_url": voice_url,
+            "voice_duration_sec": voice_duration_sec if (voice_url and voice_duration_sec) else None,
+        },
+    )
+    follow_id = int(result.lastrowid)
+    await db.execute(
+        text(
+            "INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id, after_json)"
+            " VALUES (:actor, 'member.follow_up.create', 'member_follow_up', :rid, :after)"
+        ),
+        {
+            "actor": actor_id,
+            "rid": follow_id,
+            "after": json.dumps(
+                {"images": image_urls, "voice_url": voice_url, "created_by": operator_id},
+                ensure_ascii=False,
+            ),
+        },
+    )
+    await db.commit()
+    row = (
+        await db.execute(text(f"{_FOLLOW_UP_SELECT} WHERE f.id = :id"), {"id": follow_id})
+    ).mappings().one()
+    return _build_follow_up_row(row)
