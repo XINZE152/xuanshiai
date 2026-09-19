@@ -202,6 +202,37 @@ async def get_session(db: AsyncSession, session_id: int, *, lock: bool = False) 
     return _session(dict(row))
 
 
+async def ensure_live_event_access(db: AsyncSession, session_id: int, user_id: int) -> dict:
+    row = (
+        await db.execute(
+            text(
+                "SELECT s.* FROM live_session s "
+                "LEFT JOIN live_registration r ON r.session_id=s.id "
+                "AND r.user_id=:uid AND r.status IN ('RESERVED','CHECKED_IN') "
+                "LEFT JOIN live_session_role role ON role.session_id=s.id "
+                "AND role.user_id=:uid AND role.status=1 "
+                "WHERE s.id=:sid AND (r.id IS NOT NULL OR role.id IS NOT NULL) LIMIT 1"
+            ),
+            {"sid": session_id, "uid": user_id},
+        )
+    ).mappings().first()
+    if not row:
+        raise HTTPException(403, detail="没有该场次实时事件访问权限")
+    restricted = (
+        await db.execute(
+            text(
+                "SELECT 1 FROM user_restriction WHERE user_id=:uid AND status=1 "
+                "AND restriction_type='TOTAL_BAN' AND starts_at<=UTC_TIMESTAMP() "
+                "AND (ends_at IS NULL OR ends_at>UTC_TIMESTAMP()) LIMIT 1"
+            ),
+            {"uid": user_id},
+        )
+    ).scalar()
+    if restricted:
+        raise HTTPException(403, detail="当前账号不能访问直播事件")
+    return _session(dict(row))
+
+
 async def list_sessions(db: AsyncSession, status: str | None) -> dict:
     where = "WHERE status = :status" if status else "WHERE status <> 'DRAFT'"
     params = {"status": status} if status else {}

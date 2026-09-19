@@ -139,6 +139,11 @@ class LiveRtcTicketResponse(BaseModel):
     role: str
 
 
+class LiveWsTicketResponse(BaseModel):
+    ticket: str
+    expires_in: int
+
+
 class LiveModerationRequest(BaseModel):
     user_id: int = Field(ge=1)
     restriction_type: Literal["MUTE", "RTC_BLOCK"]
