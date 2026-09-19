@@ -7,6 +7,7 @@ from app.api.dependencies import CurrentUser, get_current_user, get_realname_ver
 from app.db.session import get_db
 from app.core.config import settings
 from app.core.redis import consume_rate_limit
+from app.core.security import create_live_ws_ticket, random_token
 from app.schemas.live import (
     LiveActionResponse,
     LiveDeviceCheckRequest,
@@ -20,6 +21,7 @@ from app.schemas.live import (
     LiveSessionPage,
     LiveSessionResponse,
     LiveStatus,
+    LiveWsTicketResponse,
 )
 from app.services import live as service
 from app.services.live_tencent import LiveProviderUnavailable, generate_user_sig
@@ -108,3 +110,16 @@ async def rtc_ticket(session_id: int = Path(..., ge=1), current: CurrentUser = D
     except LiveProviderUnavailable as exc:
         raise HTTPException(503, detail=str(exc)) from exc
     return LiveRtcTicketResponse(sdk_app_id=app_id, room_id=session_id, user_id=str(current.id), user_sig=user_sig, expires_in=ttl, role=str(role))
+
+
+@router.post("/sessions/{session_id}/ws-ticket", response_model=LiveWsTicketResponse, summary="领取直播 WebSocket 短时凭证")
+async def ws_ticket(
+    session_id: int = Path(..., ge=1),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> LiveWsTicketResponse:
+    await service.ensure_live_event_access(db, session_id, current.id)
+    expires_in = 60
+    ticket_id = random_token()
+    ticket = create_live_ws_ticket(current.id, session_id, ticket_id, expires_in)
+    return LiveWsTicketResponse(ticket=ticket, expires_in=expires_in)

@@ -2,13 +2,14 @@
 
 import asyncio
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from redis.exceptions import RedisError
 from sqlalchemy import text
 
-from app.core.redis import redis_client
-from app.core.security import decode_access_token
+from app.core.redis import consume_once, redis_client
+from app.core.security import decode_live_ws_ticket
 from app.db.session import session_factory
+from app.services import live as service
 from app.services.live import list_events_after
 
 router = APIRouter(prefix="/live")
@@ -18,34 +19,37 @@ router = APIRouter(prefix="/live")
 async def live_events(
     websocket: WebSocket,
     session_id: int,
-    token: str = Query(...),
+    ticket: str = Query(...),
     last_version: int = Query(0, ge=0),
 ) -> None:
     try:
-        payload = decode_access_token(token)
+        payload = decode_live_ws_ticket(ticket)
         user_id = int(payload["sub"])
+        ticket_session_id = int(payload["sid"])
+        ticket_id = payload["jti"]
     except (ValueError, KeyError):
-        await websocket.close(code=1008, reason="invalid token")
+        await websocket.close(code=1008, reason="invalid ticket")
+        return
+    if ticket_session_id != session_id:
+        await websocket.close(code=1008, reason="ticket session mismatch")
+        return
+    try:
+        if not await consume_once(f"live:ws-ticket:{ticket_id}", 60):
+            await websocket.close(code=1008, reason="ticket already used")
+            return
+    except Exception:
+        await websocket.close(code=1011, reason="ticket service unavailable")
         return
     if session_factory is None:
         await websocket.close(code=1011, reason="database unavailable")
         return
     async with session_factory() as db:
-        access = await db.execute(
-            text(
-                "SELECT s.id,s.status,s.state_version FROM live_session s "
-                "LEFT JOIN live_registration r "
-                "ON r.session_id=s.id AND r.user_id=:uid "
-                "AND r.status IN ('RESERVED','CHECKED_IN') "
-                "LEFT JOIN live_session_role role ON role.session_id=s.id "
-                "AND role.user_id=:uid AND role.status=1 "
-                "WHERE s.id=:sid AND (r.id IS NOT NULL OR role.id IS NOT NULL) LIMIT 1"
-            ),
-            {"sid": session_id, "uid": user_id},
-        )
-        session = access.mappings().first()
-        if not session:
+        try:
+            session = await service.ensure_live_event_access(db, session_id, user_id)
+        except HTTPException:
             await websocket.close(code=1008, reason="session access denied")
+            return
+        if not session:
             return
         pubsub = redis_client.pubsub()
         try:
@@ -94,6 +98,18 @@ async def live_events(
                 await websocket.send_text(str(message["data"]))
             else:
                 await websocket.send_json({"event_type": "heartbeat", "session_id": session_id})
+            async with session_factory() as check_db:
+                current = await check_db.execute(
+                    text(
+                        "SELECT 1 FROM user_session WHERE id=:sid AND user_id=:uid AND status=1 "
+                        "AND revoked_at IS NULL AND access_expire_at>UTC_TIMESTAMP()"
+                    ),
+                    {"uid": user_id, "sid": ticket_session_id},
+                )
+                session_is_valid = bool(current.scalar())
+            if not session_is_valid:
+                await websocket.close(code=1008, reason="session revoked")
+                return
             await asyncio.sleep(0.05)
     except (RedisError, WebSocketDisconnect):
         return

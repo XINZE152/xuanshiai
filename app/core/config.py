@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     live_enabled: bool = False
     live_provider: Literal["mock", "tencent"] = "mock"
     tencent_live_sdk_app_id: int | None = Field(default=None, ge=1)
+    tencent_live_sdk_secret_key: SecretStr | None = None
     tencent_live_secret_id: str | None = None
     tencent_live_secret_key: SecretStr | None = None
     tencent_live_region: str = "ap-guangzhou"
@@ -379,9 +380,28 @@ class Settings(BaseSettings):
         if self.environment in {"staging", "production"} and self.live_provider == "mock":
             raise ValueError("staging/production 环境禁止使用直播 Mock Provider")
         if self.live_enabled and self.live_provider == "tencent":
-            if not self.tencent_live_sdk_app_id or not self.tencent_live_secret_id or not self.tencent_live_secret_key:
-                raise ValueError("启用腾讯直播 Provider 时必须配置 SDKAppID、SecretId 和 SecretKey")
-            if not self.tencent_live_callback_secret:
+            sdk_secret = (
+                self.tencent_live_sdk_secret_key.get_secret_value().strip()
+                if self.tencent_live_sdk_secret_key
+                else ""
+            )
+            cam_secret = (
+                self.tencent_live_secret_key.get_secret_value().strip()
+                if self.tencent_live_secret_key
+                else ""
+            )
+            if not self.tencent_live_sdk_app_id or not sdk_secret:
+                raise ValueError(
+                    "启用腾讯直播 Provider 时必须配置 SDKAppID 和 SDKSecretKey"
+                )
+            if not (self.tencent_live_secret_id or "").strip() or not cam_secret:
+                raise ValueError(
+                    "启用腾讯直播 Provider 时必须配置 CAM SecretId 和 SecretKey"
+                )
+            if (
+                not self.tencent_live_callback_secret
+                or not self.tencent_live_callback_secret.get_secret_value().strip()
+            ):
                 raise ValueError("启用腾讯直播 Provider 时必须配置回调密钥")
             if not self.tencent_live_callback_event_types_raw.strip():
                 raise ValueError("启用腾讯直播 Provider 时必须配置回调事件白名单")

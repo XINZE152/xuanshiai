@@ -3,13 +3,16 @@
 import hashlib
 import hmac
 import json
+import base64
 from pathlib import Path
 import time
+import zlib
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr, ValidationError
 
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.main import app
 from app.services.live import INTERACTION_STATUS, TRANSITIONS
 from app.services.live_tencent import LiveProviderUnavailable, generate_user_sig
@@ -32,6 +35,7 @@ def test_live_routes_registered_in_openapi() -> None:
     assert "/api/v1/live/host/sessions/{session_id}/operations" in paths
     assert "/api/v1/live/sessions/{session_id}/stage/leave" in paths
     assert "/api/v1/live/sessions/{session_id}/rtc-ticket" in paths
+    assert "/api/v1/live/sessions/{session_id}/ws-ticket" in paths
     assert "/api/v1/live/callbacks/tencent" not in paths
 
 
@@ -43,11 +47,67 @@ def test_tencent_ticket_fails_closed_without_configuration(
         generate_user_sig("1")
 
 
+def test_tencent_user_sig_uses_sdk_secret_not_cam_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issued_at = 1_700_000_000
+    monkeypatch.setattr(settings, "live_enabled", True)
+    monkeypatch.setattr(settings, "tencent_live_sdk_app_id", 123456)
+    monkeypatch.setattr(
+        settings, "tencent_live_sdk_secret_key", SecretStr("sdk-secret")
+    )
+    monkeypatch.setattr(settings, "tencent_live_secret_key", SecretStr("cam-secret"))
+    monkeypatch.setattr(time, "time", lambda: issued_at)
+
+    _, user_sig, _ = generate_user_sig("user-1")
+    compressed = base64.b64decode(
+        user_sig.replace("*", "+").replace("-", "/").replace("_", "=")
+    )
+    payload = json.loads(zlib.decompress(compressed))
+    content = (
+        "TLS.identifier:user-1\n"
+        "TLS.sdkappid:123456\n"
+        f"TLS.time:{issued_at}\n"
+        f"TLS.expire:{settings.tencent_live_user_sig_ttl_seconds}\n"
+    )
+    expected = base64.b64encode(
+        hmac.new(b"sdk-secret", content.encode(), hashlib.sha256).digest()
+    ).decode()
+    cam_signature = base64.b64encode(
+        hmac.new(b"cam-secret", content.encode(), hashlib.sha256).digest()
+    ).decode()
+
+    assert payload["TLS.sig"] == expected
+    assert payload["TLS.sig"] != cam_signature
+
+
+def test_tencent_live_configuration_requires_distinct_sdk_secret() -> None:
+    values = {
+        "debug": True,
+        "environment": "testing",
+        "live_enabled": True,
+        "live_provider": "tencent",
+        "tencent_live_sdk_app_id": 123456,
+        "tencent_live_secret_id": "cam-id",
+        "tencent_live_secret_key": "cam-secret",
+        "tencent_live_callback_secret": "callback-secret",
+        "tencent_live_callback_event_types_raw": "ROOM_CLOSE",
+    }
+    with pytest.raises(ValidationError, match="SDKSecretKey"):
+        Settings(_env_file=None, **values)
+
+    configured = Settings(
+        _env_file=None,
+        tencent_live_sdk_secret_key="sdk-secret",
+        **values,
+    )
+    assert configured.tencent_live_sdk_secret_key is not None
+    assert configured.tencent_live_sdk_secret_key.get_secret_value() == "sdk-secret"
+
+
 def test_tencent_callback_rejects_bad_signature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pydantic import SecretStr
-
     monkeypatch.setattr(settings, "tencent_live_callback_secret", SecretStr("test-secret"))
     monkeypatch.setattr(settings, "tencent_live_callback_event_types_raw", "ROOM_CLOSE")
     client = TestClient(app)
@@ -61,6 +121,28 @@ def test_tencent_callback_rejects_bad_signature(
         },
     )
     assert response.status_code == 401
+
+
+def test_tencent_callback_rejects_non_object_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "tencent_live_callback_secret", SecretStr("test-secret"))
+    monkeypatch.setattr(settings, "tencent_live_callback_event_types_raw", "ROOM_CLOSE")
+    client = TestClient(app)
+    timestamp = str(int(time.time()))
+    body = "[]"
+    signature = hmac.new(
+        b"test-secret", f"{timestamp}.{body}".encode(), hashlib.sha256
+    ).hexdigest()
+    response = client.post(
+        "/api/v1/live/callbacks/tencent",
+        content=body,
+        headers={
+            "X-Tencent-Signature": signature,
+            "X-Tencent-Timestamp": timestamp,
+        },
+    )
+    assert response.status_code == 422
 
 
 def test_tencent_callback_signature_shape() -> None:

@@ -176,3 +176,16 @@ async def consume_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
             _local_window_counts[key] = (expires_at, used + 1)
             return True
         raise HTTPException(503, detail="Redis服务未配置或暂时不可用") from exc
+
+
+async def consume_once(key: str, ttl_seconds: int) -> bool:
+    """Atomically consume a short-lived single-use key; production fails closed."""
+    try:
+        return bool(await redis_client.set(key, "1", ex=ttl_seconds, nx=True))
+    except RedisError as exc:
+        if _local_fallback_enabled():
+            if key in _local_window_counts:
+                return False
+            _local_window_counts[key] = (datetime.now(UTC).timestamp() + ttl_seconds, 1)
+            return True
+        raise HTTPException(503, detail="Redis服务未配置或暂时不可用") from exc
