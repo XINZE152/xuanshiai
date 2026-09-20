@@ -18,6 +18,7 @@ from app.schemas.member_media_admin import (
     MemberRecommendItem,
     MemberRecommendPage,
 )
+from app.api.routes.member_records_admin import MemberMatchQuotaResponse, MemberMatchRecordItem, MemberMatchRecordPage
 
 client = TestClient(app)
 
@@ -32,6 +33,8 @@ def test_recommend_route_is_registered() -> None:
     assert "get" in paths[f"{BASE}/{{user_id}}/recommendations"]
     assert "post" in paths[f"{BASE}/{{member_id}}/recommendations"]
     assert "get" in paths[f"{BASE}/{{member_id}}/recommend-history"]
+    assert "get" in paths[f"{BASE}/{{member_id}}/match-records"]
+    assert "get" in paths[f"{BASE}/{{member_id}}/match-quota"]
     assert "get" in paths[f"{BASE}/{{user_id}}/met-members"]
 
 
@@ -39,6 +42,8 @@ def test_recommend_route_requires_authentication() -> None:
     assert client.get(f"{BASE}/1/recommendations").status_code == 401
     assert client.post(f"{BASE}/1/recommendations", json={"recommend_user_id": 2}).status_code == 401
     assert client.get(f"{BASE}/1/recommend-history").status_code == 401
+    assert client.get(f"{BASE}/1/match-records").status_code == 401
+    assert client.get(f"{BASE}/1/match-quota").status_code == 401
     assert client.get(f"{BASE}/1/met-members").status_code == 401
 
 
@@ -103,3 +108,17 @@ def test_met_item_and_page_construct() -> None:
     assert page_model.total == 1
     with __import__("pytest").raises(ValidationError):
         MemberMetPage(items=[], page=0, page_size=20, total=0, has_more=False)
+
+
+def test_match_record_and_quota_models_construct() -> None:
+    item = MemberMatchRecordItem(
+        id=1,
+        from_user_id=101,
+        to_user_id=202,
+        target_nickname="对方",
+        status=1,
+    )
+    page = MemberMatchRecordPage(items=[item], page=1, page_size=20, total=1, has_more=False)
+    assert page.items[0].target_nickname == "对方"
+    quota = MemberMatchQuotaResponse(user_id=101, available_count=5, used_count=2, refunded_count=1)
+    assert quota.available_count == 5

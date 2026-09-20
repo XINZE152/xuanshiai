@@ -465,7 +465,7 @@ async def list_member_recommendations(
     elif vip_filter == "online_vip":
         clauses.append(
             "EXISTS (SELECT 1 FROM user_membership umv WHERE umv.user_id = u.id AND umv.status = 1"
-            " AND (umv.vip_end_at IS NULL OR umv.vip_end_at > UTC_TIMESTAMP()))"
+            " AND (umv.end_at IS NULL OR umv.end_at > UTC_TIMESTAMP()))"
         )
     elif vip_filter == "store_verified":
         clauses.append(
@@ -543,7 +543,7 @@ async def list_member_recommendations(
         cra.matchmaker_id, COALESCE(mu.nickname, maa.display_name) AS matchmaker_name,
         ov.promise_meet_count, ov.success_meet_count,
         EXISTS (SELECT 1 FROM offline_vip ovx WHERE ovx.user_id = u.id AND ovx.deleted_at IS NULL) AS is_offline_vip,
-        EXISTS (SELECT 1 FROM user_membership umx WHERE umx.user_id = u.id AND umx.status = 1 AND (umx.vip_end_at IS NULL OR umx.vip_end_at > UTC_TIMESTAMP())) AS is_online_vip,
+        EXISTS (SELECT 1 FROM user_membership umx WHERE umx.user_id = u.id AND umx.status = 1 AND (umx.end_at IS NULL OR umx.end_at > UTC_TIMESTAMP())) AS is_online_vip,
         EXISTS (SELECT 1 FROM member_follow_up fux WHERE fux.user_id = u.id AND fux.method = 'VISIT') AS store_visited,
         EXISTS (SELECT 1 FROM customer_lead clx WHERE clx.converted_user_id = u.id AND clx.status = 'LOST') AS abandoned,
         (SELECT COUNT(DISTINCT CASE WHEN may.from_user_id = u.id THEN may.to_user_id ELSE may.from_user_id END)

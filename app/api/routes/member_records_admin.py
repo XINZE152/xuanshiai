@@ -56,6 +56,39 @@ class MemberRecommendationHistoryPage(BaseModel):
     has_more: bool
 
 
+class MemberMatchRecordItem(BaseModel):
+    """会员详情中的单条牵线记录。"""
+
+    id: int
+    from_user_id: int
+    to_user_id: int
+    target_nickname: str | None = None
+    message: str | None = None
+    status: int
+    responded_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+class MemberMatchRecordPage(BaseModel):
+    """会员详情牵线记录分页响应。"""
+
+    items: list[MemberMatchRecordItem]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
+
+
+class MemberMatchQuotaResponse(BaseModel):
+    """会员牵线次数账户。"""
+
+    user_id: int
+    available_count: int
+    used_count: int
+    refunded_count: int
+    updated_at: datetime | None = None
+
+
 class MemberCallRecordCreate(BaseModel):
     direction: str = Field(default="OUTBOUND", pattern="^(INBOUND|OUTBOUND)$")
     status: str = Field(default="COMPLETED", pattern="^(COMPLETED|MISSED|FAILED)$")
@@ -85,13 +118,29 @@ def _paging():
     return (Query(1, ge=1, le=1000), Query(20, ge=1, le=100))
 
 
-@router.get("/{member_id}/match-records")
-async def match_records(member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+@router.get("/{member_id}/match-records", response_model=MemberMatchRecordPage, summary="查询会员牵线记录")
+async def match_records(member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberMatchRecordPage:
     await _ensure_member(db, member_id)
-    return await _page(db, """SELECT a.id, a.from_user_id, a.to_user_id, u.nickname AS target_nickname, a.message, a.status, a.responded_at, a.created_at
+    result = await _page(db, """SELECT a.id, a.from_user_id, a.to_user_id, u.nickname AS target_nickname, a.message, a.status, a.responded_at, a.created_at
         FROM match_apply a LEFT JOIN users u ON u.id = CASE WHEN a.from_user_id = :id THEN a.to_user_id ELSE a.from_user_id END
         WHERE a.from_user_id = :id OR a.to_user_id = :id ORDER BY a.created_at DESC, a.id DESC LIMIT :limit OFFSET :offset""",
         "SELECT COUNT(*) FROM match_apply WHERE from_user_id = :id OR to_user_id = :id", member_id, page, page_size)
+    return MemberMatchRecordPage(**result)
+
+
+@router.get("/{member_id}/match-quota", response_model=MemberMatchQuotaResponse, summary="查询会员剩余牵线次数")
+async def match_quota(
+    member_id: int = Path(..., ge=1, description="会员 ID"),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MemberMatchQuotaResponse:
+    """查询会员牵线次数账户；没有账户记录时按零次数返回。"""
+    await _ensure_member(db, member_id)
+    row = (await db.execute(text("""SELECT user_id, available_count, used_count, refunded_count, updated_at
+        FROM matchmaker_service_quota WHERE user_id = :id"""), {"id": member_id})).mappings().first()
+    if not row:
+        return MemberMatchQuotaResponse(user_id=member_id, available_count=0, used_count=0, refunded_count=0)
+    return MemberMatchQuotaResponse(**dict(row))
 
 
 @router.get("/{member_id}/recommend-history", response_model=MemberRecommendationHistoryPage, summary="查询会员已添加的推荐名单")
