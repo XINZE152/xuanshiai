@@ -6,6 +6,8 @@
 （/media/{media_id}）之前，避免被动态路由抢占。
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +21,7 @@ from app.schemas.member_media_admin import (
     MemberMediaPage,
     MemberMediaReplace,
     MemberMediaReview,
+    MemberMetPage,
     MemberPreferenceAdminItem,
     MemberPreferenceAdminUpdate,
     MemberProfileExtItem,
@@ -162,6 +165,11 @@ async def member_recommendations(
     occupations: list[str] | None = Query(None, max_length=10, description="职业多选，最多 10 项"),
     mbti: str | None = Query(None, max_length=16, description="人格类型（MBTI），精确匹配"),
     tags: list[str] | None = Query(None, max_length=12, description="标签多选（命中 tags/interest_tags/personality_tags 任一即可）"),
+    respect_preference: bool = Query(True, description="是否套用该会员已存择偶要求（页面顶部芯片）"),
+    vip_filter: Literal["all", "offline_vip", "online_vip", "store_verified", "exclude_abandoned"] = Query(
+        "all",
+        description="底部单选：all不限 / offline_vip仅线下VIP / online_vip仅线上VIP / store_verified仅到店核验 / exclude_abandoned排除弃海会员",
+    ),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> MemberRecommendPage:
@@ -185,7 +193,22 @@ async def member_recommendations(
         occupations=occupations,
         mbti=mbti,
         tags=tags,
+        respect_preference=respect_preference,
+        vip_filter=vip_filter,
     )
+
+
+@router.get("/{user_id}/met-members", response_model=MemberMetPage, summary="见过哪些人（牵线对手方名单）")
+async def member_met_members(
+    user_id: int = Path(..., ge=1),
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MemberMetPage:
+    """返回与该会员发生过牵线（match_apply）的对手方名单，按牵线时间倒序分页。"""
+    current.require("matchmaker.member.read")
+    return await service.list_met_members(db, user_id, page=page, page_size=page_size)
 
 
 # ─── 媒体（头像/照片/视频） ─────────────────────────────────────

@@ -1,6 +1,8 @@
 """Read-only record feeds used by the member CRM detail workspace."""
 
-from fastapi import APIRouter, Depends, Path, Query
+from datetime import date, datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -10,6 +12,48 @@ from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_
 from app.db.session import get_db
 
 router = APIRouter(prefix="/admin/members")
+
+
+class MemberRecommendationCreate(BaseModel):
+    """后台手工把一名会员推荐给指定会员。"""
+
+    recommend_user_id: int = Field(..., ge=1, description="要推荐的会员 ID")
+    recommend_date: date | None = Field(default=None, description="推荐日期，默认当天")
+    match_reason: str | None = Field(default=None, max_length=255, description="推荐理由")
+
+
+class MemberRecommendationResponse(BaseModel):
+    id: int
+    user_id: int
+    recommend_user_id: int
+    recommend_date: date
+    match_score: float
+    match_reason: str | None = None
+    recommend_source: str
+    created_at: datetime | None = None
+
+
+class MemberRecommendationHistoryItem(BaseModel):
+    id: int
+    recommend_date: date
+    match_score: float
+    match_reason: str | None = None
+    recommend_source: str
+    is_viewed: bool
+    is_liked: bool
+    is_passed: bool
+    created_at: datetime | None = None
+    target_user_id: int | None = None
+    target_nickname: str | None = None
+    target_avatar: str | None = None
+
+
+class MemberRecommendationHistoryPage(BaseModel):
+    items: list[MemberRecommendationHistoryItem]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
 
 
 class MemberCallRecordCreate(BaseModel):
@@ -50,14 +94,57 @@ async def match_records(member_id: int = Path(..., ge=1), page: int = _paging()[
         "SELECT COUNT(*) FROM match_apply WHERE from_user_id = :id OR to_user_id = :id", member_id, page, page_size)
 
 
-@router.get("/{member_id}/recommendations")
-async def recommendations(member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+@router.get("/{member_id}/recommend-history", response_model=MemberRecommendationHistoryPage, summary="查询会员已添加的推荐名单")
+async def recommendations(member_id: int = Path(..., ge=1, description="接收推荐的会员 ID"), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberRecommendationHistoryPage:
+    """已推荐名单（历史推荐记录）。路径由 ``/recommendations`` 改为 ``/recommend-history``：
+    原路径与 ``member_media_admin`` 的「按条件筛选推荐候选人」完全同形，且本文件在 router.py
+    中注册更早，会遮蔽后者导致筛选参数被静默忽略。"""
     await _ensure_member(db, member_id)
     return await _page(db, """SELECT r.id, r.recommend_date, r.match_score, r.match_reason, r.recommend_source,
-        r.is_viewed, r.is_liked, r.is_passed, r.created_at, u.id AS target_user_id, u.nickname AS target_nickname
+        r.is_viewed, r.is_liked, r.is_passed, r.created_at, u.id AS target_user_id,
+        u.nickname AS target_nickname, u.avatar AS target_avatar
         FROM user_match_recommend r LEFT JOIN users u ON u.id = r.recommend_user_id
         WHERE r.user_id = :id ORDER BY r.recommend_date DESC, r.id DESC LIMIT :limit OFFSET :offset""",
         "SELECT COUNT(*) FROM user_match_recommend WHERE user_id = :id", member_id, page, page_size)
+
+
+@router.post("/{member_id}/recommendations", response_model=MemberRecommendationResponse, status_code=201, summary="手工添加推荐名单")
+async def create_recommendation(
+    member_id: int = Path(..., ge=1, description="已推荐给谁的会员 ID"),
+    body: MemberRecommendationCreate = ...,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MemberRecommendationResponse:
+    """从会员 CRM 中选择一名会员，手工加入指定会员的推荐名单。"""
+    await _ensure_member(db, member_id)
+    if body.recommend_user_id == member_id:
+        raise HTTPException(422, detail="不能把会员推荐给自己")
+    if not await db.scalar(text("SELECT 1 FROM users WHERE id = :id"), {"id": body.recommend_user_id}):
+        raise HTTPException(404, detail="推荐会员不存在")
+
+    recommend_date = body.recommend_date or date.today()
+    duplicate = await db.scalar(
+        text("""SELECT id FROM user_match_recommend
+               WHERE user_id = :user_id AND recommend_user_id = :recommend_user_id
+                 AND recommend_date = :recommend_date LIMIT 1"""),
+        {"user_id": member_id, "recommend_user_id": body.recommend_user_id, "recommend_date": recommend_date},
+    )
+    if duplicate:
+        raise HTTPException(409, detail="该会员今日已在推荐名单中")
+
+    result = await db.execute(text("""INSERT INTO user_match_recommend
+        (user_id, recommend_user_id, recommend_date, match_score, match_reason, recommend_source)
+        VALUES (:user_id, :recommend_user_id, :recommend_date, 0, :match_reason, 'manual')"""), {
+        "user_id": member_id,
+        "recommend_user_id": body.recommend_user_id,
+        "recommend_date": recommend_date,
+        "match_reason": body.match_reason,
+    })
+    await db.commit()
+    row = (await db.execute(text("""SELECT id, user_id, recommend_user_id, recommend_date,
+        match_score, match_reason, recommend_source, created_at
+        FROM user_match_recommend WHERE id = :id"""), {"id": int(result.lastrowid)})).mappings().one()
+    return MemberRecommendationResponse(**dict(row))
 
 
 @router.get("/{member_id}/dating-records")
@@ -71,8 +158,10 @@ async def dating_records(member_id: int = Path(..., ge=1), page: int = _paging()
         "SELECT COUNT(*) FROM meeting_record r JOIN meeting_request q ON q.id = r.request_id WHERE q.user_id = :id OR q.target_user_id = :id", member_id, page, page_size)
 
 
-@router.get("/{member_id}/media")
+@router.get("/{member_id}/media-records")
 async def media(member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    """会员媒体原始记录（含审核中的行）。路径由 ``/media`` 改为 ``/media-records``：
+    原路径与 ``member_media_admin`` 的媒体审核列表同形且注册更早，会遮蔽后者。"""
     await _ensure_member(db, member_id)
     return await _page(db, """SELECT id, media_type, file_url, thumbnail_url, mime_type, duration_seconds, sort_order, is_primary, review_status, created_at
         FROM user_media WHERE user_id = :id AND deleted_at IS NULL ORDER BY sort_order ASC, id DESC LIMIT :limit OFFSET :offset""",
@@ -89,8 +178,10 @@ async def activity_signups(member_id: int = Path(..., ge=1), page: int = _paging
         "SELECT COUNT(*) FROM activity_signup WHERE user_id = :id", member_id, page, page_size)
 
 
-@router.get("/{member_id}/private-info")
+@router.get("/{member_id}/private-info-records")
 async def private_info(member_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    """会员基础隐私摘要（手机/实名/家庭背景等）。路径由 ``/private-info`` 改为
+    ``/private-info-records``：原路径与 ``member_media_admin`` 的私密资料接口同形且注册更早。"""
     await _ensure_member(db, member_id)
     row = (await db.execute(text("""SELECT u.id, u.phone, ua.real_name, ua.id_card, ua.company,
         p.family_background, p.single_reason, p.online_status, p.last_active_at

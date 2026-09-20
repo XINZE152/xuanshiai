@@ -28,6 +28,9 @@ from app.schemas.member_media_admin import (
     MemberPreferenceAdminUpdate,
     MemberProfileExtItem,
     MemberProfileExtUpdate,
+    MemberMetItem,
+    MemberMetPage,
+    MemberPreferenceChips,
     MemberPrivateInfoItem,
     MemberPrivateInfoUpdate,
     MemberRecommendItem,
@@ -394,19 +397,36 @@ async def list_member_recommendations(
     occupations: list[str] | None = None,
     mbti: str | None = None,
     tags: list[str] | None = None,
+    respect_preference: bool = True,
+    vip_filter: str = "all",
 ) -> MemberRecommendPage:
-    """为指定会员按附加条件筛推荐候选人。
+    """为指定会员按附加条件筛推荐候选人（智能匹配页）。
 
     硬规则：候选人必须为异性（``u.gender <>`` 会员自身性别）、状态正常（status=1）、
-    排除本人；其余条件全部可选（不传即不限）。候选人无性别信息时返回 422。
+    排除本人。``respect_preference=True`` 时先套用该会员已存的择偶要求
+    （年龄/身高区间 + 学历/收入下限，即页面顶部芯片）；``vip_filter`` 支持线下VIP/
+    线上VIP/到店核验/排除弃海会员。候选人无性别信息时返回 422。
     """
     viewer = (
-        await db.execute(text("SELECT gender FROM users WHERE id = :id"), {"id": user_id})
+        await db.execute(
+            text("SELECT gender FROM users WHERE id = :id"), {"id": user_id}
+        )
     ).mappings().first()
     if not viewer:
         raise HTTPException(404, detail="会员不存在")
     if viewer["gender"] not in (1, 2):
         raise HTTPException(422, detail="该会员未填写性别，无法按异性筛选推荐")
+
+    pref_row = (
+        await db.execute(
+            text(
+                "SELECT age_min, age_max, height_min, height_max, education_min, income_min "
+                "FROM user_partner_preference WHERE user_id = :uid LIMIT 1"
+            ),
+            {"uid": user_id},
+        )
+    ).mappings().first()
+    preference = MemberPreferenceChips(**dict(pref_row)) if pref_row else None
 
     clauses = [
         "u.id <> :viewer_id",
@@ -419,6 +439,43 @@ async def list_member_recommendations(
         "limit": page_size,
         "offset": (page - 1) * page_size,
     }
+    if respect_preference and pref_row:
+        if pref_row["age_min"] is not None:
+            clauses.append("TIMESTAMPDIFF(YEAR, u.birthday, CURDATE()) >= :pref_age_min")
+            params["pref_age_min"] = pref_row["age_min"]
+        if pref_row["age_max"] is not None:
+            clauses.append("TIMESTAMPDIFF(YEAR, u.birthday, CURDATE()) <= :pref_age_max")
+            params["pref_age_max"] = pref_row["age_max"]
+        if pref_row["height_min"] is not None:
+            clauses.append("p.height >= :pref_height_min")
+            params["pref_height_min"] = pref_row["height_min"]
+        if pref_row["height_max"] is not None:
+            clauses.append("p.height <= :pref_height_max")
+            params["pref_height_max"] = pref_row["height_max"]
+        if pref_row["education_min"] is not None:
+            clauses.append("p.education_level >= :pref_education_min")
+            params["pref_education_min"] = pref_row["education_min"]
+        if pref_row["income_min"] is not None:
+            clauses.append("p.income >= :pref_income_min")
+            params["pref_income_min"] = pref_row["income_min"]
+    if vip_filter == "offline_vip":
+        clauses.append(
+            "EXISTS (SELECT 1 FROM offline_vip ovf WHERE ovf.user_id = u.id AND ovf.deleted_at IS NULL)"
+        )
+    elif vip_filter == "online_vip":
+        clauses.append(
+            "EXISTS (SELECT 1 FROM user_membership umv WHERE umv.user_id = u.id AND umv.status = 1"
+            " AND (umv.vip_end_at IS NULL OR umv.vip_end_at > UTC_TIMESTAMP()))"
+        )
+    elif vip_filter == "store_verified":
+        clauses.append(
+            "EXISTS (SELECT 1 FROM member_follow_up fuv WHERE fuv.user_id = u.id AND fuv.method = 'VISIT')"
+        )
+    elif vip_filter == "exclude_abandoned":
+        clauses.append(
+            "NOT EXISTS (SELECT 1 FROM customer_lead cla WHERE cla.converted_user_id = u.id"
+            " AND cla.status = 'LOST')"
+        )
     if matchmaker_id is not None:
         clauses.append(
             "EXISTS (SELECT 1 FROM resource_assignment ram WHERE ram.user_id = u.id"
@@ -475,14 +532,22 @@ async def list_member_recommendations(
         LEFT JOIN (SELECT user_id, MAX(id) AS max_assignment_id FROM resource_assignment WHERE status = 1 GROUP BY user_id) ca ON ca.user_id = u.id
         LEFT JOIN resource_assignment cra ON cra.id = ca.max_assignment_id
         LEFT JOIN matchmaker_admin_account maa ON maa.id = cra.matchmaker_id
-        LEFT JOIN users mu ON mu.id = cra.matchmaker_id"""
+        LEFT JOIN users mu ON mu.id = cra.matchmaker_id
+        LEFT JOIN (SELECT user_id, MAX(promise_meet_count) AS promise_meet_count, MAX(success_meet_count) AS success_meet_count FROM offline_vip WHERE deleted_at IS NULL GROUP BY user_id) ov ON ov.user_id = u.id"""
     select_cols = f"""SELECT u.id AS user_id, {_member_code_sql()} AS member_code,
         u.nickname, u.avatar, u.gender, u.birthday, u.is_married,
         p.height, p.income, p.education_level, p.occupation,
         p.constellation, p.mbti, p.hometown, p.residence,
         p.smoking, p.drinking, p.house, p.ethnicity,
         p.tags, p.interest_tags,
-        cra.matchmaker_id, COALESCE(mu.nickname, maa.display_name) AS matchmaker_name"""
+        cra.matchmaker_id, COALESCE(mu.nickname, maa.display_name) AS matchmaker_name,
+        ov.promise_meet_count, ov.success_meet_count,
+        EXISTS (SELECT 1 FROM offline_vip ovx WHERE ovx.user_id = u.id AND ovx.deleted_at IS NULL) AS is_offline_vip,
+        EXISTS (SELECT 1 FROM user_membership umx WHERE umx.user_id = u.id AND umx.status = 1 AND (umx.vip_end_at IS NULL OR umx.vip_end_at > UTC_TIMESTAMP())) AS is_online_vip,
+        EXISTS (SELECT 1 FROM member_follow_up fux WHERE fux.user_id = u.id AND fux.method = 'VISIT') AS store_visited,
+        EXISTS (SELECT 1 FROM customer_lead clx WHERE clx.converted_user_id = u.id AND clx.status = 'LOST') AS abandoned,
+        (SELECT COUNT(DISTINCT CASE WHEN may.from_user_id = u.id THEN may.to_user_id ELSE may.from_user_id END)
+            FROM match_apply may WHERE may.from_user_id = u.id OR may.to_user_id = u.id) AS met_count"""
 
     rows = await db.execute(
         text(f"{select_cols} {base} WHERE {where} ORDER BY u.id DESC LIMIT :limit OFFSET :offset"),
@@ -524,10 +589,53 @@ async def list_member_recommendations(
                 tags=merged_tags,
                 matchmaker_id=int(row["matchmaker_id"]) if row["matchmaker_id"] is not None else None,
                 matchmaker_name=row["matchmaker_name"],
+                is_offline_vip=bool(row["is_offline_vip"]),
+                is_online_vip=bool(row["is_online_vip"]),
+                store_visited=bool(row["store_visited"]),
+                abandoned=bool(row["abandoned"]),
+                promise_meet_count=int(row["promise_meet_count"] or 0),
+                success_meet_count=int(row["success_meet_count"] or 0),
+                met_count=int(row["met_count"] or 0),
             )
         )
     return MemberRecommendPage(
-        items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total
+        items=items,
+        page=page,
+        page_size=page_size,
+        total=total,
+        has_more=page * page_size < total,
+        preference=preference,
+    )
+
+
+async def list_met_members(
+    db: AsyncSession, user_id: int, *, page: int, page_size: int
+) -> MemberMetPage:
+    """「见过哪些人」名单：与该会员发生过牵线（match_apply）的对手方，倒序分页。"""
+    exists = await db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+    if not exists.scalar():
+        raise HTTPException(404, detail="会员不存在")
+    params: dict[str, Any] = {"uid": user_id, "limit": page_size, "offset": (page - 1) * page_size}
+    base = """FROM match_apply ma
+        JOIN users o ON o.id = (CASE WHEN ma.from_user_id = :uid THEN ma.to_user_id ELSE ma.from_user_id END)
+        LEFT JOIN user_profile op ON op.user_id = o.id"""
+    where = "ma.from_user_id = :uid OR ma.to_user_id = :uid"
+    rows = await db.execute(
+        text(
+            f"""SELECT o.id AS user_id, CONCAT('G', LPAD(o.id, 6, '0')) AS member_code,
+            o.nickname, o.avatar, o.gender, ma.status AS apply_status, ma.created_at AS applied_at
+            {base} WHERE {where} ORDER BY ma.created_at DESC, ma.id DESC LIMIT :limit OFFSET :offset"""
+        ),
+        params,
+    )
+    count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+    total = int(await db.scalar(text(f"SELECT COUNT(*) {base} WHERE {where}"), count_params) or 0)
+    return MemberMetPage(
+        items=[MemberMetItem(**dict(row)) for row in rows.mappings().all()],
+        page=page,
+        page_size=page_size,
+        total=total,
+        has_more=page * page_size < total,
     )
 
 

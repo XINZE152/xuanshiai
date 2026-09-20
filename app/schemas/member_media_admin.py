@@ -166,12 +166,53 @@ class MemberRecommendItem(BaseModel):
     tags: list[str] = []  # 标签（tags/interest_tags 合并去重）
     matchmaker_id: int | None = None  # 服务红娘后台账号 ID
     matchmaker_name: str | None = None  # 服务红娘姓名
+    is_offline_vip: bool = False  # 线下VIP（offline_vip 有效记录）
+    is_online_vip: bool = False  # 线上VIP（user_membership 生效中）
+    store_visited: bool = False  # 到店核验（有 VISIT 跟进记录）
+    abandoned: bool = False  # 弃海（来源客源 status=LOST）
+    promise_meet_count: int = 0  # 安排约见数（offline_vip 承诺约见）
+    success_meet_count: int = 0  # 已成功约见数（offline_vip）
+    met_count: int = 0  # 见过哪些人（牵线对手方去重数）
+
+
+class MemberPreferenceChips(BaseModel):
+    """「根据该会员择偶要求」芯片数据（user_partner_preference 摘要）。"""
+
+    age_min: int | None = None
+    age_max: int | None = None
+    height_min: int | None = None
+    height_max: int | None = None
+    education_min: int | None = None
+    income_min: float | None = None
 
 
 class MemberRecommendPage(BaseModel):
-    """推荐候选人分页。"""
+    """推荐候选人分页。``preference`` 供前端渲染「根据该会员择偶要求」芯片。"""
 
     items: list[MemberRecommendItem]
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total: int = Field(ge=0)
+    has_more: bool
+    preference: MemberPreferenceChips | None = None
+
+
+class MemberMetItem(BaseModel):
+    """「见过哪些人」名单行：与该会员发生过牵线的对手方。"""
+
+    user_id: int  # 对手方 user_id
+    member_code: str  # 对手方会员编号
+    nickname: str | None = None
+    avatar: str | None = None
+    gender: int | None = None
+    apply_status: int | None = None  # 牵线申请状态（match_apply.status）
+    applied_at: datetime | None = None  # 牵线时间
+
+
+class MemberMetPage(BaseModel):
+    """「见过哪些人」名单分页。"""
+
+    items: list[MemberMetItem]
     page: int = Field(ge=1)
     page_size: int = Field(ge=1, le=100)
     total: int = Field(ge=0)
