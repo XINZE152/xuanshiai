@@ -23,6 +23,8 @@ from app.schemas.member_media_admin import (
     MemberPreferenceAdminUpdate,
     MemberProfileExtItem,
     MemberProfileExtUpdate,
+    MemberPrivateInfoItem,
+    MemberPrivateInfoUpdate,
     MemberRecommendPage,
 )
 from app.services import member_media_admin as service
@@ -111,6 +113,32 @@ async def intro_update(
 ) -> MemberIntroItem:
     current.require("matchmaker.member.manage")
     return await service.update_intro(db, user_id, body, current.account.id)
+
+
+# ─── 私密资料（默认不对外公开） ─────────────────────────────────
+
+
+@router.get("/private-info/{user_id}", response_model=MemberPrivateInfoItem, summary="查询会员私密资料")
+async def private_info_get(
+    user_id: int = Path(..., ge=1),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MemberPrivateInfoItem:
+    """返回会员私密资料（个人情况/感情文本/原生家庭/补充信息），默认不对外公开。"""
+    current.require("matchmaker.member.read")
+    return await service.get_private_info(db, user_id)
+
+
+@router.put("/private-info/{user_id}", response_model=MemberPrivateInfoItem, summary="更新会员私密资料")
+async def private_info_update(
+    user_id: int = Path(..., ge=1),
+    body: MemberPrivateInfoUpdate = ...,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MemberPrivateInfoItem:
+    """按提交字段增量更新私密资料；传空串清空该字段。写审计 member.private_info.update。"""
+    current.require("matchmaker.member.manage")
+    return await service.update_private_info(db, user_id, body, current.account.id)
 
 
 # ─── 会员推荐（后台按条件筛候选人，强制异性） ───────────────────

@@ -178,6 +178,124 @@ class MemberRecommendPage(BaseModel):
     has_more: bool
 
 
+# ─── 私密资料（默认不对外公开，新表 user_private_info） ────────
+
+OnlyChildOption = Literal["未知", "独生", "非独生"]
+
+# 私密资料全部列名（建表 DDL 同步维护于 app/db/business_schema.py）
+_PRIVATE_INFO_SINGLE_FIELDS = (
+    # 个人情况
+    "body_type", "face_type", "skin_type", "eye_type",
+    "love_experience", "longest_love", "single_duration",
+    "work_status", "rest_schedule", "health_condition",
+    "infectious_disease", "genetic_disease", "bad_habits",
+    "criminal_record", "emotional_status", "children_status",
+    # 原生家庭
+    "parents_status", "family_structure", "family_members",
+    "sibling_rank", "other_members",
+    "father_age", "father_occupation", "father_health", "father_retirement",
+    "mother_age", "mother_occupation", "mother_health", "mother_retirement",
+)
+_PRIVATE_INFO_TEXT_FIELDS = ("breakup_reason", "love_bottom_line", "divorce_reason")
+
+
+class MemberPrivateInfoItem(BaseModel):
+    """会员私密资料行（新表 user_private_info，一用户一行）。``id`` 等于 ``user_id``。"""
+
+    id: int  # 主键（= user_id）
+    user_id: int  # 会员 user_id
+    member_code: str  # 会员编号 G+6 位
+    nickname: str | None = None  # 昵称
+    # 个人情况（单选，中文原样）
+    body_type: str | None = None  # 身材体型
+    face_type: str | None = None  # 脸型
+    skin_type: str | None = None  # 皮肤类型
+    eye_type: str | None = None  # 眼睛类型
+    love_experience: str | None = None  # 恋爱经历
+    longest_love: str | None = None  # 最长恋爱
+    single_duration: str | None = None  # 单身时长
+    work_status: str | None = None  # 工作情况
+    rest_schedule: str | None = None  # 休息时间
+    health_condition: str | None = None  # 身体情况
+    infectious_disease: str | None = None  # 传染病
+    genetic_disease: str | None = None  # 遗传病史
+    bad_habits: str | None = None  # 不良嗜好
+    criminal_record: str | None = None  # 犯罪记录
+    emotional_status: str | None = None  # 情感状态
+    children_status: str | None = None  # 孩子情况
+    # 感情文本（≤200 字）
+    breakup_reason: str | None = None  # 分手原因
+    love_bottom_line: str | None = None  # 感情底线
+    divorce_reason: str | None = None  # 离婚原因
+    # 原生家庭
+    parents_status: str | None = None  # 父母情况
+    family_structure: str | None = None  # 家庭结构
+    family_members: str | None = None  # 家庭成员（多选，逗号分隔）
+    sibling_rank: str | None = None  # 家中排行
+    only_child: OnlyChildOption | None = None  # 独生子女
+    other_members: str | None = None  # 其他成员描述
+    father_age: str | None = None  # 父亲年龄
+    father_occupation: str | None = None  # 父亲职业
+    father_health: str | None = None  # 父亲健康
+    father_retirement: str | None = None  # 父亲退休情况
+    mother_age: str | None = None  # 母亲年龄
+    mother_occupation: str | None = None  # 母亲职业
+    mother_health: str | None = None  # 母亲健康
+    mother_retirement: str | None = None  # 母亲退休情况
+    # 补充信息
+    other_info: str | None = None  # 其它信息（≤1000 字）
+    updated_at: datetime | None = None  # 最近修改时间
+
+
+class MemberPrivateInfoUpdate(BaseModel):
+    """私密资料更新请求体。全部可选、至少提供一个字段；传空串表示清空该字段。"""
+
+    # 个人情况（单选，中文原样，≤32 字）
+    body_type: str | None = Field(default=None, max_length=32)
+    face_type: str | None = Field(default=None, max_length=32)
+    skin_type: str | None = Field(default=None, max_length=32)
+    eye_type: str | None = Field(default=None, max_length=32)
+    love_experience: str | None = Field(default=None, max_length=32)
+    longest_love: str | None = Field(default=None, max_length=32)
+    single_duration: str | None = Field(default=None, max_length=32)
+    work_status: str | None = Field(default=None, max_length=32)
+    rest_schedule: str | None = Field(default=None, max_length=32)
+    health_condition: str | None = Field(default=None, max_length=64)
+    infectious_disease: str | None = Field(default=None, max_length=64)
+    genetic_disease: str | None = Field(default=None, max_length=64)
+    bad_habits: str | None = Field(default=None, max_length=64)
+    criminal_record: str | None = Field(default=None, max_length=64)
+    emotional_status: str | None = Field(default=None, max_length=32)
+    children_status: str | None = Field(default=None, max_length=32)
+    # 感情文本（≤200 字）
+    breakup_reason: str | None = Field(default=None, max_length=200)
+    love_bottom_line: str | None = Field(default=None, max_length=200)
+    divorce_reason: str | None = Field(default=None, max_length=200)
+    # 原生家庭
+    parents_status: str | None = Field(default=None, max_length=32)
+    family_structure: str | None = Field(default=None, max_length=32)
+    family_members: str | None = Field(default=None, max_length=255)
+    sibling_rank: str | None = Field(default=None, max_length=32)
+    only_child: OnlyChildOption | None = None
+    other_members: str | None = Field(default=None, max_length=255)
+    father_age: str | None = Field(default=None, max_length=16)
+    father_occupation: str | None = Field(default=None, max_length=64)
+    father_health: str | None = Field(default=None, max_length=32)
+    father_retirement: str | None = Field(default=None, max_length=32)
+    mother_age: str | None = Field(default=None, max_length=16)
+    mother_occupation: str | None = Field(default=None, max_length=64)
+    mother_health: str | None = Field(default=None, max_length=32)
+    mother_retirement: str | None = Field(default=None, max_length=32)
+    # 补充信息
+    other_info: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def require_update(self) -> "MemberPrivateInfoUpdate":
+        if not self.model_dump(exclude_unset=True):
+            raise ValueError("至少提供一个需要修改的字段")
+        return self
+
+
 # ─── 择偶要求（后台管理端） ─────────────────────────────────────
 # 与 C 端 PreferenceUpdateRequest 相互独立：图中单选项以中文字符串落库
 # （风格同 dating_goal/children_intention），不占用 C 端 tinyint 枚举口径。

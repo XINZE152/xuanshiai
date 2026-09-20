@@ -28,6 +28,8 @@ from app.schemas.member_media_admin import (
     MemberPreferenceAdminUpdate,
     MemberProfileExtItem,
     MemberProfileExtUpdate,
+    MemberPrivateInfoItem,
+    MemberPrivateInfoUpdate,
     MemberRecommendItem,
     MemberRecommendPage,
 )
@@ -538,6 +540,99 @@ def _age_from_birthday(birthday: Any) -> int | None:
     if (today.month, today.day) < (birthday.month, birthday.day):
         age -= 1
     return max(age, 0)
+
+
+# ─── 私密资料（user_private_info，默认不对外公开） ─────────────
+
+_PRIVATE_INFO_COLUMNS = (
+    # 个人情况
+    "body_type", "face_type", "skin_type", "eye_type",
+    "love_experience", "longest_love", "single_duration",
+    "work_status", "rest_schedule", "health_condition",
+    "infectious_disease", "genetic_disease", "bad_habits",
+    "criminal_record", "emotional_status", "children_status",
+    # 感情文本
+    "breakup_reason", "love_bottom_line", "divorce_reason",
+    # 原生家庭
+    "parents_status", "family_structure", "family_members",
+    "sibling_rank", "only_child", "other_members",
+    "father_age", "father_occupation", "father_health", "father_retirement",
+    "mother_age", "mother_occupation", "mother_health", "mother_retirement",
+    # 补充信息
+    "other_info",
+)
+
+
+async def get_private_info(db: AsyncSession, user_id: int) -> MemberPrivateInfoItem:
+    """查询单个会员的私密资料。会员不存在返回 404；无资料行时字段全空。"""
+    exists = await db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+    if not exists.scalar():
+        raise HTTPException(404, detail="会员不存在")
+    row = (
+        await db.execute(
+            text(
+                f"SELECT u.id, u.id AS user_id, {_member_code_sql()} AS member_code, u.nickname, "
+                + ", ".join(f"pi.{c}" for c in _PRIVATE_INFO_COLUMNS)
+                + ", pi.updated_at "
+                "FROM users u LEFT JOIN user_private_info pi ON pi.user_id = u.id WHERE u.id = :id"
+            ),
+            {"id": user_id},
+        )
+    ).mappings().first()
+    return MemberPrivateInfoItem(
+        id=int(row["user_id"]),
+        user_id=int(row["user_id"]),
+        member_code=row["member_code"],
+        nickname=row["nickname"],
+        **{c: row[c] for c in _PRIVATE_INFO_COLUMNS},
+        updated_at=row["updated_at"],
+    )
+
+
+async def update_private_info(
+    db: AsyncSession, user_id: int, body: MemberPrivateInfoUpdate, actor_id: int
+) -> MemberPrivateInfoItem:
+    """更新会员私密资料，仅更新请求中出现的字段；并写审计 ``member.private_info.update``。
+
+    users 不存在返回 404；user_private_info 不存在时先 ``INSERT IGNORE`` 建行再动态 UPDATE。
+    """
+    exists = await db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": user_id})
+    if not exists.scalar():
+        raise HTTPException(404, detail="会员不存在")
+
+    submitted = body.model_dump(exclude_unset=True)
+    sets: list[str] = []
+    params: dict[str, Any] = {"uid": user_id}
+    for field in _PRIVATE_INFO_COLUMNS:
+        if field in submitted:
+            sets.append(f"{field} = :{field}")
+            params[field] = submitted[field]
+
+    await db.execute(
+        text("INSERT IGNORE INTO user_private_info (user_id) VALUES (:uid)"),
+        {"uid": user_id},
+    )
+    await db.execute(
+        text(
+            "UPDATE user_private_info SET "
+            + ", ".join(sets)
+            + ", updated_at = UTC_TIMESTAMP() WHERE user_id = :uid"
+        ),
+        params,
+    )
+    await db.execute(
+        text(
+            "INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id, after_json) "
+            "VALUES (:actor, 'member.private_info.update', 'user_private_info', :rid, :after)"
+        ),
+        {
+            "actor": actor_id,
+            "rid": user_id,
+            "after": json.dumps(submitted, ensure_ascii=False),
+        },
+    )
+    await db.commit()
+    return await get_private_info(db, user_id)
 
 
 # ─── 媒体（头像/照片/视频） ─────────────────────────────────────
