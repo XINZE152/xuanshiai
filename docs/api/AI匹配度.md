@@ -2,12 +2,13 @@
 
 接口前缀：`/api/v1/ai`。本文件是 M06「资料合拍参考」（统一方案 §9，执行计划 Task 11）对外的完整契约。
 
-对外文案固定为「资料合拍参考」，并附免责声明「仅根据双方当前可见且已确认资料整理，供了解和破冰参考」。内部算法名为 `compatibility-rule-v1`；旧 `match_score`/`match_reason` 的算法版本恒为 `legacy-rule-v1`。
+对外文案固定为「资料合拍参考」，并附免责声明「仅根据双方当前可见且已确认资料整理，供了解和破冰参考」。内部算法名为 `compatibility-rule-v2`；旧 `match_score`/`match_reason` 的算法版本恒为 `legacy-rule-v1`。
 
 ### 变更记录
 
 - 2026-08-08：新增 2 个 `/api/v1/ai/compatibility/*` 路径（GET 读取 + POST recompute）。旧推荐流的 `match_score/match_reason` 保持 `legacy-rule-v1` 语义并在卡片上标注 `algorithm_version`/`match_score_source=legacy-rule-v1`；新兼容度只写 shadow，不影响首页推荐排序、不触发喜欢/申请/聊天。
 - 2026-08-11（二期 M06）：兼容度快照保存双方完整五维修订向量与 `compatibility_shadow` 双方同意快照；GET 读取时重新校验双方同意、投影授权、完整版本和过期时间，发现变化返回 `stale/blocked`，不在 GET 中回写数据库。
+- 2026-09-17（算法 v2）：`algorithm_version` 由 `compatibility-rule-v1` 升为 `compatibility-rule-v2`。修复三处口径缺陷：①理想型集合类维度（`marriage_status`/`relationship_goal`/`city_code`）此前被当单值比较，合法集合输入恒判不满足；②理想型 `income_band` 的金额口径与个人 0-6 档位混算，现统一为 0-6 月收入档位区间；③`_score_education` 忽略理想型 `max` 上界（「本科及以下」对博士也判满足）。**迁移影响**：读路径按 `algorithm_version` 精确过滤，v1 快照自动不再可读；存量 v1 行由 `migrations/ai/20260917_01_compatibility_rule_v2_*.sql` 标记为 `stale`（不删行、不改分）。另：不可表达取值（越界档位、集合当个人事实等）现记 `DIMENSION_UNKNOWN` 并退出覆盖率分母，不再伪装成 0 分，因此部分 pair 的 `coverage` 会上升、可能首次产出分数。**前端**：`algorithm_version` 字段值变化，若有按值判断的逻辑需同步。
 
 通用请求头（所有接口）：
 
@@ -82,7 +83,7 @@ X-Request-ID: req_01J...                # 可选，1-128 位 [A-Za-z0-9._:-]，�
 | --- | --- | --- | --- | --- | --- | --- |
 | `snapshot_id` | string | 是 | 空字符串=尚无快照 | — | 快照 ID（`cp_` 前缀 hex） | `cp_01JXc5...` |
 | `status` | string | 是 | — | `ready/stale/blocked/coverage_insufficient` | 快照状态（§3.1） | `ready` |
-| `algorithm_version` | string | 是 | — | 固定 `compatibility-rule-v1` | 内部算法版本 | `compatibility-rule-v1` |
+| `algorithm_version` | string | 是 | — | 固定 `compatibility-rule-v2` | 内部算法版本 | `compatibility-rule-v2` |
 | `score_semantics` | string | 是 | — | 固定 `rule_based_reference_shadow` | 分数语义（参考 shadow） | `rule_based_reference_shadow` |
 | `compatibility_index` | number | 否 | `null`：无分数（stale/blocked/coverage_insufficient） | 0..100 | 资料合拍参考分 | `78.0` |
 | `coverage` | number | 否 | `null`：无快照 | 0..1 | 双向可用维度覆盖率 | `0.74` |
@@ -115,7 +116,7 @@ X-Request-ID: req_01J...                # 可选，1-128 位 [A-Za-z0-9._:-]，�
 {
   "snapshot_id": "cp_01JXc5...",
   "status": "ready",
-  "algorithm_version": "compatibility-rule-v1",
+  "algorithm_version": "compatibility-rule-v2",
   "score_semantics": "rule_based_reference_shadow",
   "compatibility_index": 78.0,
   "coverage": 0.74,
@@ -146,7 +147,7 @@ X-Request-ID: req_01J...                # 可选，1-128 位 [A-Za-z0-9._:-]，�
 {
   "snapshot_id": "",
   "status": "coverage_insufficient",
-  "algorithm_version": "compatibility-rule-v1",
+  "algorithm_version": "compatibility-rule-v2",
   "score_semantics": "rule_based_reference_shadow",
   "compatibility_index": null,
   "coverage": null,
@@ -253,6 +254,6 @@ Content-Type: application/json
 ## 3. 旧推荐流兼容说明
 
 - 旧推荐流（`/api/v1/discovery/*`）仍返回 `match_score/match_reason`，卡片上标注 `algorithm_version=legacy-rule-v1`、`match_score_source=legacy-rule-v1`；评分逻辑与排序完全不变。
-- 新兼容度（`compatibility-rule-v1`）只写 `ai_compatibility_snapshot`，`display_eligible=false`、`experiment_bucket=shadow`，不影响推荐排序、喜欢/申请/聊天等任何用户动作。
+- 新兼容度（`compatibility-rule-v2`）只写 `ai_compatibility_snapshot`，`display_eligible=false`、`experiment_bucket=shadow`，不影响推荐排序、喜欢/申请/聊天等任何用户动作。
 - 旧 `user_match_recommend`/`user_match_score_history` 继续承载旧推荐来源与历史，`match_score` 语义恒为 `legacy-rule-v1`；新双向快照不回写旧行。
 - C-06 质量反馈只做离线评估（Task 12），学习排序仍受 Phase 5 门禁，本期不实现。

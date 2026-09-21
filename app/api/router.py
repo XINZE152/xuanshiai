@@ -7,6 +7,7 @@ from app.api.routes import (
     ai_consents,
     ai_recommend,
     ai_profile,
+    ai_profile_card,
     ai_search,
     ai_tasks,
     ai_moxiang,
@@ -176,6 +177,7 @@ api_router.include_router(finance.router, tags=["财务与结算"])
 api_router.include_router(ai_tasks.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_consents.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_profile.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_profile_card.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_search.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_compatibility.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_recommend.router, prefix="/ai", tags=["AI"])

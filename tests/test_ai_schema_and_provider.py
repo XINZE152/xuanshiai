@@ -36,7 +36,8 @@ def test_ai_schema_contains_the_registered_fact_tables() -> None:
         "ai_profile_preview",
         "ai_profile_projection_status",
         "ai_search_draft", "ai_search_condition", "ai_search_snapshot",
-        "ai_search_result", "ai_feature_projection", "ai_compatibility_snapshot",
+        "ai_search_result", "ai_search_suggest_publish", "ai_profile_card_draft",
+        "ai_feature_projection", "ai_compatibility_snapshot",
         "ai_recommendation_snapshot", "voice_transcript",
         "ai_memory_owner_sequence", "ai_memory_event", "ai_memory_observation",
         "ai_memory_claim", "ai_memory_insight", "ai_memory_state",
@@ -101,6 +102,37 @@ def test_development_allows_mock_ai_with_disabled_defaults() -> None:
     assert configured.ai_search_enabled is False
     assert configured.ai_retention_policy_version is None
 
+
+
+def test_production_legacy_ai_enabled_requires_approvals() -> None:
+    """只开 legacy ``ai_enabled`` 也必须走生产 fail-closed，不得绕过审批门。"""
+    with pytest.raises(ValidationError, match="ai_policy_approved"):
+        Settings(
+            _env_file=None,
+            environment="production",
+            auto_init_db=False,
+            live_provider="tencent",
+            sms_provider="disabled",
+            wechat_provider="wechat",
+            wechat_payment_mode="real",
+            ai_enabled=True,
+        )
+
+
+def test_production_all_ai_off_including_legacy_skips_fail_closed() -> None:
+    configured = Settings(
+        _env_file=None,
+        environment="production",
+        auto_init_db=False,
+        live_provider="tencent",
+        sms_provider="disabled",
+        wechat_provider="wechat",
+        wechat_payment_mode="real",
+        ai_enabled=False,
+        ai_master_enabled=False,
+    )
+    assert configured.ai_enabled is False
+    assert configured.ai_master_enabled is False
 
 # ----------------------------------------------------------------------
 # Protocol contract and deterministic providers

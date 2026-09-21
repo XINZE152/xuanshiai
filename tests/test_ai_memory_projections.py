@@ -263,6 +263,10 @@ class FakeProjectionSession:
                     row["revoked_at"] = "FAKE-UTC"
                     return _WriteResult(rowcount=1)
             return _WriteResult(rowcount=0)
+        if "UPDATE ai_profile_card_draft" in sql:
+            # 撤回授权时资料卡未采用草稿一并作废（consents.py 撤回链路新增
+            # 副作用）。本假库不维护草稿行，按"无未采用草稿"返回 0 行。
+            return _WriteResult(rowcount=0)
         if (
             "SELECT DISTINCT owner_user_id AS user_id FROM ai_memory_projection"
             in sql

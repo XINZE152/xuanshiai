@@ -71,7 +71,7 @@ async def test_real_ensure_engine_columns_idempotent_on_legacy_database() -> Non
                     `snapshot_id` varchar(64) NOT NULL,
                     `viewer_user_id` bigint unsigned NOT NULL,
                     `target_user_id` bigint unsigned NOT NULL,
-                    `algorithm_version` varchar(32) NOT NULL DEFAULT 'compatibility-rule-v1',
+                    `algorithm_version` varchar(32) NOT NULL DEFAULT 'compatibility-rule-v2',
                     `snapshot_hash` char(64) NOT NULL,
                     `status` varchar(24) NOT NULL DEFAULT 'ready',
                     PRIMARY KEY (`id`)
@@ -169,7 +169,7 @@ async def test_real_write_shadow_default_rule_engine_unchanged(
     assert row["engine"] == "rule-v1"
     assert row["brand_label"] is None
     assert row["score_semantics"] == "rule_based_reference_shadow"
-    assert row["algorithm_version"] == "compatibility-rule-v1"
+    assert row["algorithm_version"] == "compatibility-rule-v2"
     assert row["ttl_minutes"] is not None and int(row["ttl_minutes"]) >= 9
     await real_db_session.rollback()
 

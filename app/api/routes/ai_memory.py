@@ -10,7 +10,11 @@
 - ``POST /ai/memory/{claim_id}/suppress``——删除墓碑；
 - ``POST /ai/memory/suppressions/{suppression_id}/lift``——解除墓碑；
 - ``POST /ai/memory/grants/{grant_id}/revoke``——撤销单个投影授权并立即
-  失效对应投影（owner-scoped 404，Phase 3）。
+  失效对应投影（owner-scoped 404，Phase 3）；
+- ``POST /ai/memory/pause``——「暂停使用」：撤全部投影读取许可，数据保留、
+  可一键恢复（重新授权即恢复）；
+- ``POST /ai/memory/forget``——「删除并忘记」：撤全部读取许可 + 物理清理，
+  不可恢复（决策 2(a)：两个入口、两种生命周期）。
 
 复用既有鉴权（``get_current_user``）、AI 错误 envelope、HMAC 签名 cursor
 （与 AI 搜索 cursor 同构，密钥 ``settings.secret_key``）与 Idempotency-Key
@@ -265,6 +269,27 @@ class MemoryGrantRevokeResponse(BaseModel):
     purpose: str
     data_category: str
     invalidated_projections: int = 0
+
+
+class MemoryPauseResponse(BaseModel):
+    """「暂停使用」响应：数据保留、可一键恢复。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    revoked_grants: int = 0
+    data_purged: bool = False
+
+
+class MemoryForgetResponse(BaseModel):
+    """「删除并忘记」响应：同步已撤读取许可，物理清理异步执行且不可恢复。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    cleanup_task_id: str
+    revoked_grants: int = 0
+    recoverable: bool = False
 
 
 def _require_idempotency_key(idempotency_key: str | None) -> str:
@@ -566,4 +591,60 @@ async def revoke_memory_grant(
         purpose=str(result["purpose"]),
         data_category=str(result["data_category"]),
         invalidated_projections=int(result.get("invalidated_projections") or 0),
+    )
+
+
+@router.post("/memory/pause", response_model=MemoryPauseResponse)
+async def pause_memory(
+    current: CurrentUser = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db),
+) -> MemoryPauseResponse:
+    """「暂停使用」：撤销全部投影读取许可，**数据保留、可一键恢复**。
+
+    与 ``/memory/forget`` 的区别是本端点**不删任何数据、不建清理任务**：只撤销
+    授权使读取端（``read_active`` 的授权复核门）立刻不可读。重新授予
+    ``profile_text_extract`` 授权即恢复（生产者重新授予维度）。
+
+    治理类操作：仅校验登录身份 + Idempotency-Key，**不**经过 AI 功能开关——
+    用户必须能在 AI 关闭时撤回自己的数据许可。
+    """
+
+    _require_idempotency_key(idempotency_key)
+    from app.services.ai.memory.lifecycle import pause_memory_for_owner
+
+    revoked = await pause_memory_for_owner(db, current.id)
+    await db.commit()
+    return MemoryPauseResponse(
+        status="paused", revoked_grants=int(revoked), data_purged=False
+    )
+
+
+@router.post("/memory/forget", response_model=MemoryForgetResponse)
+async def forget_memory(
+    current: CurrentUser = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db),
+) -> MemoryForgetResponse:
+    """「删除并忘记」：撤全部读取许可 + 物理清理，**不可恢复**。
+
+    同步半部：撤销全部投影授权（立刻不可读）+ 入队 ``cleanup`` 任务
+    （``scope="memory"``）。异步半部由 Worker 的 ``cleanup_handler`` 调用
+    ``purge_ai_resources(scope="memory")`` 完成逐表物理清理；``ai_consent_grant``
+    与墓碑按 §3.17.1 清单保留（撤回记录是合规证据；墓碑是「不要再记起来」的
+    依据）。
+
+    治理类操作：同 ``/memory/pause``，不经过 AI 功能开关。
+    """
+
+    key = _require_idempotency_key(idempotency_key)
+    from app.services.ai.memory.lifecycle import forget_memory_for_owner
+
+    result = await forget_memory_for_owner(db, current.id, idempotency_key=key)
+    await db.commit()
+    return MemoryForgetResponse(
+        status="forget_scheduled",
+        cleanup_task_id=result.task_id,
+        revoked_grants=int(result.revoked_dimensions),
+        recoverable=False,
     )

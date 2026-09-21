@@ -60,6 +60,7 @@ from app.services.ai.tasks import (
     claim_tasks,
     complete_task,
     fail_task,
+    get_task_registration,
     heartbeat_lease,
     reap_expired_leases,
     start_task,
@@ -109,6 +110,49 @@ async def _notify_reaped_tasks(recovered: list[str]) -> None:
     for task_id in recovered:
         await notify_task_event(str(task_id))
 
+
+# 完成期发布钩子（修复清单 §3.7.2）：把"计算完成"与"对外发布"分离。
+# handler 只在事务内暂存结果；只有当 complete_task 真的把任务判为 succeeded
+# 并提交之后，这里才把结果发布到 Redis。superseded / failed / not_applied 一律
+# 不发布——这正是原缺陷 C-06 的成因（handler 直写缓存发生在完成期复核之前）。
+_POST_COMPLETE_PUBLISHERS: dict[
+    str, Callable[[Any, str], Awaitable[Any]]
+] = {}
+
+
+def register_post_complete_publisher(
+    task_type: str, publisher: Callable[[Any, str], Awaitable[Any]]
+) -> None:
+    """Register a publisher invoked with ``(db, task_id)`` after a successful commit."""
+    _POST_COMPLETE_PUBLISHERS.setdefault(str(task_type), publisher)
+
+
+async def _run_post_complete_publisher(
+    record: Any, db: Any, session_provider: Any
+) -> None:
+    """Publish output of a succeeded task; never for any other terminal status."""
+    publisher = _POST_COMPLETE_PUBLISHERS.get(str(record.task_type))
+    if publisher is None:
+        return
+    status = getattr(record, "status", None)
+    if str(getattr(status, "value", status)) != AiTaskStatus.SUCCEEDED.value:
+        return
+    try:
+        if session_provider is None:
+            await publisher(db, str(record.task_id))
+            return
+        async with session_provider() as publish_db:
+            try:
+                await publisher(publish_db, str(record.task_id))
+                await publish_db.commit()
+            except Exception:
+                await publish_db.rollback()
+                raise
+    except Exception:
+        # 发布是 best-effort：读取端本就回落标签回显，发布失败不得改写任务终态。
+        logger.warning(
+            "ai_worker_post_publish_failed task_id=%s", record.task_id, exc_info=True
+        )
 
 def _heartbeat_interval() -> float:
     """Lease renewal cadence: half the lease but never slower than 15s.
@@ -310,6 +354,33 @@ async def _process(
     except Exception:
         logger.exception("ai_worker_start_failed task_id=%s", task.task_id)
         return "skipped"
+    registration = get_task_registration(started.task_type)
+    if registration is None:
+        # 未登记任务类型：执行前即失败，不再靠 feature_enabled=True 放行。
+        # 错误码复用冻结码 AI_FEATURE_DISABLED（不得新增 AI_TASK_UNREGISTERED）。
+        logger.warning(
+            "ai_worker_unregistered_task_type task_type=%s task_id=%s",
+            started.task_type,
+            started.task_id,
+        )
+        try:
+            failed_record = await finish_in_session(
+                lambda finalize_db: fail_task(
+                    finalize_db,
+                    started.task_id,
+                    worker_id,
+                    error_code="AI_FEATURE_DISABLED",
+                    retryable=False,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "ai_worker_unregistered_fail_failed task_id=%s", started.task_id
+            )
+            return "failed"
+        await _notify_task_terminal(failed_record)
+        return "failed"
+    handler = TASK_HANDLERS.get(started.task_type)
     handler = TASK_HANDLERS.get(started.task_type)
     if handler is None:
         # 任务类型未注册业务 handler：服务端配置缺失，重试不会改善，直接终态
@@ -433,6 +504,9 @@ async def _process(
     else:
         completed_record = await finalize_handler(complete_in_handler)
         await _notify_task_terminal(completed_record)
+    # 发布发生在 commit 之后（finalize_handler / finish_in_session 已提交）：
+    # 只有真正 succeeded 的任务才会对外可见，superseded 的任务不留任何缓存。
+    await _run_post_complete_publisher(completed_record, db, session_provider)
     return "completed"
 
 
@@ -714,6 +788,7 @@ async def _run_retention_cleanup_round() -> dict[str, int]:
         "generation_audits": stats.generation_audits,
         "outbox_succeeded": stats.outbox_succeeded,
         "outbox_dead_letters": stats.outbox_dead_letters,
+        "search_suggest_publishes": stats.search_suggest_publishes,
     }
     logger.info("ai_retention_cleanup_round %s", payload)
     # Task 17：retention 清理计数进入指标序列（按类别打点）。
@@ -721,7 +796,8 @@ async def _run_retention_cleanup_round() -> dict[str, int]:
     emit_ai_metric(
         "retention_cleanup_deleted",
         float(stats.voice_transcripts + stats.generation_audits
-              + stats.outbox_succeeded + stats.outbox_dead_letters),
+              + stats.outbox_succeeded + stats.outbox_dead_letters
+              + stats.search_suggest_publishes),
         {"worker_id": worker_id},
     )
     return payload
@@ -972,6 +1048,10 @@ def register_business_handlers() -> None:
         generate_profile_narrative_handler,
         profile_projection_handler,
     )
+    from app.services.ai.profile_card import (
+        PROFILE_CARD_SUMMARIZE_TASK_TYPE,
+        generate_profile_card_summarize_handler,
+    )
     from app.services.ai.recommend import (
         RECOMMEND_TASK_TYPE,
         recommend_rebuild_handler,
@@ -981,6 +1061,7 @@ def register_business_handlers() -> None:
         SEARCH_PARSE_TASK_TYPE,
         SEARCH_SUGGEST_TASK_TYPE,
         parse_search_draft,
+        publish_search_suggest,
         search_execute_handler,
         search_suggest_handler,
     )
@@ -992,6 +1073,11 @@ def register_business_handlers() -> None:
     TASK_HANDLERS.setdefault(SEARCH_PARSE_TASK_TYPE, parse_search_draft)
     TASK_HANDLERS.setdefault(SEARCH_EXECUTE_TASK_TYPE, search_execute_handler)
     TASK_HANDLERS.setdefault(SEARCH_SUGGEST_TASK_TYPE, search_suggest_handler)
+    # 建议缓存不在 handler 内写：登记完成期发布器，只有任务真 succeeded 并提交
+    # 之后才发布（修复清单 §3.7.2）。
+    register_post_complete_publisher(
+        SEARCH_SUGGEST_TASK_TYPE, publish_search_suggest
+    )
     TASK_HANDLERS.setdefault(COMPATIBILITY_TASK_TYPE, compatibility_execute_handler)
     TASK_HANDLERS.setdefault(
         COMPATIBILITY_LLM_TASK_TYPE, compatibility_llm_execute_handler
@@ -1001,6 +1087,9 @@ def register_business_handlers() -> None:
     TASK_HANDLERS.setdefault(NARRATIVE_TASK_TYPE, generate_profile_narrative_handler)
     TASK_HANDLERS.setdefault(RECOMMEND_TASK_TYPE, recommend_rebuild_handler)
     TASK_HANDLERS.setdefault(VOICE_TRANSCRIBE_TASK_TYPE, voice_transcribe_handler)
+    TASK_HANDLERS.setdefault(
+        PROFILE_CARD_SUMMARIZE_TASK_TYPE, generate_profile_card_summarize_handler
+    )
 
 
 register_business_handlers()

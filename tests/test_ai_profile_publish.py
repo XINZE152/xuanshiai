@@ -79,6 +79,16 @@ class _OneMappingResult(_MappingResult):
 class PublishFakeSession(FakeProfileSession):
     """Routes the Task 8 service SQL; everything else falls back to Task 7."""
 
+    async def scalar(
+        self, statement: object, params: dict[str, Any] | None = None
+    ) -> Any:
+        """补齐记忆围栏读取（``current_owner_sequence`` 经 ``db.scalar``）。
+
+        假库无序号表：返回 0；围栏只影响记忆清理范围，不影响本组断言。
+        """
+        self.calls.append((str(statement), dict(params or {})))
+        return 0
+
     async def execute(
         self, statement: object, params: dict[str, Any] | None = None
     ) -> _MappingResult | _WriteResult:
@@ -1607,7 +1617,16 @@ async def test_delete_queued_task_is_persisted(profile_store) -> None:
     assert row is not None
     assert row["status"] == "queued"
     payload = json.loads(row["payload_summary"])
-    assert set(payload) == {"scope", "resource_id", "version", "purge_deadline"}
+    # fence_seq 是第四批新增的「记忆清理序号围栏」（撤回事务内读取并冻结）；
+    # 其余四个键是既有契约。
+    assert set(payload) == {
+        "scope",
+        "resource_id",
+        "version",
+        "purge_deadline",
+        "fence_seq",
+    }
+    assert isinstance(payload["fence_seq"], int)
     assert payload["scope"] == "profile"
     assert payload["resource_id"] == "profile:10:personal"
 

@@ -28,6 +28,7 @@ from app.schemas.ai_profile import (
     ProfileSessionStatus,
     ProfileSubject,
 )
+from app.schemas.auth import ProfileUpdateRequest
 
 
 def test_profile_question_carries_stable_field_key() -> None:
@@ -164,3 +165,17 @@ def test_question_bank_field_keys_are_within_allowlist() -> None:
         assert field_key in AI_FIELD_ALLOWLIST, (
             f"question bank field_key {field_key} 不在 AI_FIELD_ALLOWLIST"
         )
+
+
+def test_profile_update_accepts_qa_answers_without_completion_weight() -> None:
+    request = ProfileUpdateRequest(
+        qa_answers=[{"question_id": 1, "answer": "希望对方真诚稳定"}]
+    )
+    assert request.qa_answers[0].question_id == 1
+    assert request.qa_answers[0].question == "你理想中的另一半是什么样的"
+    with pytest.raises(ValidationError):
+        ProfileUpdateRequest(qa_answers=[{"question_id": 9, "answer": "非法"}])
+    from app.services.profile import COMPLETION_RULES
+
+    assert "qa_answers" not in {key for key, _, _ in COMPLETION_RULES}
+    assert sum(weight for _, _, weight in COMPLETION_RULES) == 100

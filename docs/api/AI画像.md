@@ -12,6 +12,7 @@
 - 2026-09-03（旅程发布门槛与提问引导）：§9 发布门槛修正为可配置 `ai_profile_min_fields`（默认 7，取代上文历史值 5）；墨相师 `master` 会话 entry 条目计入 `confirmed_count`，且 personal 发布前必须已确认 `age`+`city_code`（缺项 `400 AI_INPUT_INVALID`）。抽取 prompt 增加六维归属、置信度 rubric 与跨轮去重（`existing_digest`）；知遇每轮按整理进度与缺失硬字段感知提问。单会话自动整理邀请上限由 2 提升到 3（见 WS 文档）。
 - 2026-09-03（会话历史 405 修复）：同一 `/profile-sessions/{session_id}/turns` 路径新增 `GET` 历史分页方法，保留原 `POST` 提交方法；首次读取返回最新一页并按 `turn_no` 升序输出，只允许读取本人会话。
 
+- 2026-09-22：资料卡开放文本草稿（`POST /profile-card/summarize`、`GET /profile-card/draft`、`POST /profile-card/draft/apply`）不在本文件。契约见 [AI资料卡.md](./AI资料卡.md)。本文件的会话、抽取和发布契约不变。
 通用请求头（所有接口）：
 
 ```http

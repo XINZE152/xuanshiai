@@ -1,0 +1,15 @@
+{
+  "name": "paper_plane",
+  "versions": [
+    {
+      "version": "20260903_01_profile_unlock",
+      "up": "20260903_01_profile_unlock_up.sql",
+      "down": "20260903_01_profile_unlock_down.sql"
+    },
+    {
+      "version": "20260903_02_contact_exchange",
+      "up": "20260903_02_contact_exchange_up.sql",
+      "down": "20260903_02_contact_exchange_down.sql"
+    }
+  ]
+}

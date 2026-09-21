@@ -119,6 +119,8 @@ def test_history_get_returns_owned_latest_page(monkeypatch) -> None:
                 "answer_text": "第二轮",
                 "client_turn_id": "client-t-2",
                 "created_at": "2026-09-03T10:02:00Z",
+                # 实时语音 v2 元数据：非语音行为 None（2026-09-12 契约扩展）
+                "voice_reply_metadata": None,
             },
             {
                 "turn_id": "t-3",
@@ -127,6 +129,7 @@ def test_history_get_returns_owned_latest_page(monkeypatch) -> None:
                 "answer_text": "第三轮",
                 "client_turn_id": "assistant-t-3",
                 "created_at": "2026-09-03T10:03:00Z",
+                "voice_reply_metadata": None,
             },
         ],
         "next_before_turn_no": 2,

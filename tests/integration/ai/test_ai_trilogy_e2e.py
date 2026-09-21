@@ -84,8 +84,8 @@ async def _seed_visible_users(db: AsyncSession) -> None:
     now = _now()
     await db.execute(
         text(
-            "INSERT INTO users (id, nickname, gender, birthday, status, is_married) "
-            "VALUES (:id, :nickname, :gender, :birthday, 1, 1)"
+            "INSERT INTO users (id, nickname, gender, birthday, status, is_married, avatar, is_single_pledge) "
+            "VALUES (:id, :nickname, :gender, :birthday, 1, 1, :avatar, 1)"
         ),
         [
             {
@@ -93,36 +93,58 @@ async def _seed_visible_users(db: AsyncSession) -> None:
                 "nickname": "task11-a",
                 "gender": 1,
                 "birthday": "1994-01-01",
+                "avatar": "https://cdn.xuanshiai.test/task11-a.jpg",
             },
             {
                 "id": USER_B,
                 "nickname": "task11-b",
                 "gender": 2,
                 "birthday": "1996-01-01",
+                "avatar": "https://cdn.xuanshiai.test/task11-b.jpg",
             },
         ],
     )
     await db.execute(
         text(
             "INSERT INTO user_profile "
-            "(user_id, height, income, occupation, education_level, residence_city_code, "
+            "(user_id, height, weight, income, occupation, education_level, residence_province_code, "
+            "residence_city_code, hometown_province_code, hometown_city_code, self_intro, mbti, "
             "interest_tags, personality_tags, last_active_at) "
-            "VALUES (:user_id, 172, 12000, 'technology', 4, '330100', :tags, '[]', :active)"
+            "VALUES (:user_id, 172, 60, 12000, 'technology', 4, '330000', '330100', '320000', '320100', "
+            "'认真对待感情，希望找到可以长期相处的人。', 'INFP', :tags, :ptags, :active)"
         ),
         [
             {
                 "user_id": USER_A,
                 "tags": json.dumps(["户外", "旅行"], ensure_ascii=False),
+                "ptags": json.dumps(["户外", "旅行", "摄影"], ensure_ascii=False),
                 "active": now,
             },
             {
                 "user_id": USER_B,
                 "tags": json.dumps(["户外", "旅行"], ensure_ascii=False),
+                "ptags": json.dumps(["户外", "旅行", "摄影"], ensure_ascii=False),
                 "active": now,
             },
         ],
     )
     for user_id in (USER_A, USER_B):
+        # 审核通过的相册照片（完成度 album 项 + 可见性 media_approved 门禁）
+        await db.execute(
+            text(
+                "INSERT INTO user_media (user_id, media_type, file_url, review_status) "
+                "VALUES (:user_id, 'photo', :url, 1)"
+            ),
+            {"user_id": user_id, "url": f"https://cdn.xuanshiai.test/{user_id}/photo-1.jpg"},
+        )
+        # 择偶年龄（完成度 preference 项）
+        await db.execute(
+            text(
+                "INSERT INTO user_partner_preference (user_id, age_min, age_max) "
+                "VALUES (:user_id, 22, 40)"
+            ),
+            {"user_id": user_id},
+        )
         await db.execute(
             text("INSERT INTO user_profile_completion (user_id, score) VALUES (:user_id, 100)"),
             {"user_id": user_id},

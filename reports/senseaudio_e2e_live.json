@@ -1,0 +1,376 @@
+{
+  "probe": "senseaudio_e2e_live",
+  "verdict": "FAIL: 实时供应商指令写入失败",
+  "timeline": [
+    {
+      "t_ms": 2404.0,
+      "stage": "A_ready",
+      "event": "ready",
+      "detail": "elapsed_ms=2404.0"
+    },
+    {
+      "t_ms": 10672.9,
+      "stage": "T1",
+      "event": "VendorSpeechStarted",
+      "detail": ""
+    },
+    {
+      "t_ms": 10673.1,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10673.2,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10673.4,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10673.5,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10673.6,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10673.6,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10673.7,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10673.8,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10673.9,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10674.1,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10674.2,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10674.3,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10674.5,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10674.6,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10674.6,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10674.7,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10674.8,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10674.9,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10675.0,
+      "stage": "T1",
+      "event": "VendorUserTranscriptDone",
+      "detail": "len=26"
+    },
+    {
+      "t_ms": 10675.1,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10675.2,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10675.4,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10727.6,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10778.8,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10809.9,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10810.0,
+      "stage": "T1",
+      "event": "VendorAssistantAudioStart",
+      "detail": ""
+    },
+    {
+      "t_ms": 10854.8,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10866.7,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 10890.1,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 11053.7,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 11385.5,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 11385.7,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 11385.8,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 11385.9,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 11386.0,
+      "stage": "T1",
+      "event": "VendorAssistantTextDelta",
+      "detail": ""
+    },
+    {
+      "t_ms": 11808.1,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=36864"
+    },
+    {
+      "t_ms": 11998.5,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=18432"
+    },
+    {
+      "t_ms": 12015.1,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=18432"
+    },
+    {
+      "t_ms": 12296.2,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=20480"
+    },
+    {
+      "t_ms": 12297.0,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=18432"
+    },
+    {
+      "t_ms": 12681.8,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=20480"
+    },
+    {
+      "t_ms": 12682.0,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=18432"
+    },
+    {
+      "t_ms": 12740.5,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=4096"
+    },
+    {
+      "t_ms": 13296.6,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=34816"
+    },
+    {
+      "t_ms": 13297.1,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=18432"
+    },
+    {
+      "t_ms": 13297.2,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=18432"
+    },
+    {
+      "t_ms": 13297.3,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=20480"
+    },
+    {
+      "t_ms": 13297.4,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=6144"
+    },
+    {
+      "t_ms": 18243.1,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=61440"
+    },
+    {
+      "t_ms": 18267.4,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=18432"
+    },
+    {
+      "t_ms": 18733.7,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=20480"
+    },
+    {
+      "t_ms": 18734.1,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=18432"
+    },
+    {
+      "t_ms": 18734.6,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=20480"
+    },
+    {
+      "t_ms": 18734.9,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=18432"
+    },
+    {
+      "t_ms": 18889.6,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=18432"
+    },
+    {
+      "t_ms": 18889.8,
+      "stage": "T1",
+      "event": "VendorAudio",
+      "detail": "bytes=2048"
+    },
+    {
+      "t_ms": 52818.1,
+      "stage": "T1",
+      "event": "VendorError",
+      "detail": "code=fatal fatal=True msg=sami error: codes=52000016, desc=AudioTTSIdleTimeoutError"
+    },
+    {
+      "t_ms": 52818.2,
+      "stage": "T1",
+      "event": "VendorConnectionClosed",
+      "detail": ""
+    },
+    {
+      "t_ms": 85706.4,
+      "stage": "FATAL",
+      "event": "RealtimeProviderError",
+      "detail": "实时供应商指令写入失败"
+    }
+  ],
+  "transcripts": {
+    "t1": "我平时喜欢爬山，周末经常一个人去郊外走走，看看风景。",
+    "t2": ""
+  }
+}

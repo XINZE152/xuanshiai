@@ -81,7 +81,7 @@ candidate_visibility_service = CandidateVisibilityService()
 candidate_query_service = CandidateQueryService(secret_key=settings.secret_key)
 
 # 旧 match_score/match_reason 的算法版本（统一方案 §9.1/§10.4）：语义恒为
-# legacy-rule-v1；新兼容度（compatibility-rule-v1）只写 ai_compatibility_snapshot，
+# legacy-rule-v1；新兼容度（compatibility-rule-v2）只写 ai_compatibility_snapshot，
 # 不触碰旧字段或推荐排序。
 LEGACY_MATCH_ALGORITHM_VERSION = "legacy-rule-v1"
 
@@ -604,10 +604,21 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
 
 
 async def get_filter_options() -> FilterOptionsResponse:
+    # education_levels 必须与 user_profile.education_level 的存储域一致：
+    # 1=高中及以下 … 5=博士（档案编辑写入域，utils 编号即 educationOptions
+    # 数组下标；_AI_SYNC_EDU_MAP 目标域同）。此前 1=博士…5=高中 与存储域
+    # 方向相反——education_min 的 SQL 语义是 `education_level >= :min`，
+    # 反向字典会让"本科及以上"实际筛出"本科及以下"。
     return FilterOptionsResponse(
         genders=[{"value": 1, "label": "男"}, {"value": 2, "label": "女"}],
         marriage_statuses=[{"value": 1, "label": "未婚"}, {"value": 2, "label": "离异"}, {"value": 3, "label": "丧偶"}],
-        education_levels=[{"value": 1, "label": "博士"}, {"value": 2, "label": "硕士"}, {"value": 3, "label": "本科"}, {"value": 4, "label": "大专"}, {"value": 5, "label": "高中"}],
+        education_levels=[
+            {"value": 1, "label": "高中及以下"},
+            {"value": 2, "label": "大专"},
+            {"value": 3, "label": "本科"},
+            {"value": 4, "label": "硕士"},
+            {"value": 5, "label": "博士"},
+        ],
         cities=sorted(DISCOVERY_CITY_OPTIONS),
     )
 
@@ -1079,8 +1090,14 @@ async def list_applications(db: AsyncSession, viewer_id: int, incoming: bool, pa
     items = []
     for row in result.mappings().all():
         data = dict(row)
-        data["from_user"] = RelationUserSummary(user_id=data.pop("from_user_id"), nickname=data.pop("from_nickname"), avatar=data.pop("from_avatar"), age=_calculate_age(data.pop("from_birthday")) if data.get("from_birthday") else None, city_code=data.pop("from_city_code"))
-        data["to_user"] = RelationUserSummary(user_id=data.pop("to_user_id"), nickname=data.pop("to_nickname"), avatar=data.pop("to_avatar"), age=_calculate_age(data.pop("to_birthday")) if data.get("to_birthday") else None, city_code=data.pop("to_city_code"))
+        # 响应契约同时要求顶层 from_user_id/to_user_id 与嵌套 from_user/to_user，
+        # 因此先取出 ID 再构造嵌套对象，避免 pop 之后顶层字段缺失导致校验失败。
+        from_user_id = data.pop("from_user_id")
+        to_user_id = data.pop("to_user_id")
+        data["from_user"] = RelationUserSummary(user_id=from_user_id, nickname=data.pop("from_nickname"), avatar=data.pop("from_avatar"), age=_calculate_age(data.pop("from_birthday")) if data.get("from_birthday") else None, city_code=data.pop("from_city_code"))
+        data["to_user"] = RelationUserSummary(user_id=to_user_id, nickname=data.pop("to_nickname"), avatar=data.pop("to_avatar"), age=_calculate_age(data.pop("to_birthday")) if data.get("to_birthday") else None, city_code=data.pop("to_city_code"))
+        data["from_user_id"] = from_user_id
+        data["to_user_id"] = to_user_id
         items.append(ApplicationResponse(**data))
     return ApplicationPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 

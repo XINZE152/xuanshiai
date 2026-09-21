@@ -27,7 +27,7 @@ def test_ai_product_and_security_decisions_are_frozen() -> None:
         "查看者认证状态缺失或无法判定时拒绝访问（fail-closed）",
         "AI 输出经用户确认后才能发布",
         "ai-policy-2026-08-20-v2",
-        "compatibility-rule-v1",
+        "compatibility-rule-v2",
         "legacy-rule-v1",
         "age",
         "city_code",
@@ -47,7 +47,7 @@ def test_ai_product_and_security_decisions_are_frozen() -> None:
         "ai_retention_policy_version",
         "HTTP 503 AI_FEATURE_DISABLED",
         "retryable=false",
-        "compatibility-rule-v1",
+        "compatibility-rule-v2",
         "普通日志不得写入手机号、身份证、精确位置、原始 IP、原始 prompt、原始 Provider 响应、隐藏资料或凭据",
     )
     for phrase in product_required:

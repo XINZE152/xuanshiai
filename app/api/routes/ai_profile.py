@@ -21,6 +21,7 @@
 
 所有写操作要求 ``Idempotency-Key`` header；错误统一为 ``AiErrorDetail`` 形状并
 携带 request_id。普通响应不携带原文、provider trace 或密钥。
+删除类入口（会话 / 整份画像 / 单字段）不依赖画像功能开关：AI 关闭后仍可清理。
 """
 
 from __future__ import annotations
@@ -496,7 +497,6 @@ async def delete_profile_session_route(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> CleanupTaskAccepted:
     """Soft-delete the session; published revisions are never implicitly deleted."""
-    _require_profile_feature()
     _check_idempotency_key(idempotency_key)
     try:
         submission = await delete_profile_session(db, session_id, current.id, idempotency_key)
@@ -892,7 +892,6 @@ async def delete_ai_profile_route(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> CleanupTaskAccepted:
     """Delete one subject's AI profile: drafts/results hidden synchronously."""
-    _require_profile_feature()
     _check_idempotency_key(idempotency_key)
     try:
         task = await delete_ai_profile(db, current.id, subject, idempotency_key)
@@ -920,7 +919,6 @@ async def delete_ai_profile_field_route(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> CleanupTaskAccepted:
     """Hide one field synchronously and enqueue its invalidation task."""
-    _require_profile_feature()
     _check_idempotency_key(idempotency_key)
     try:
         task = await delete_ai_profile_field(

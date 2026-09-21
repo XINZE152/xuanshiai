@@ -3,26 +3,59 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
+import uuid
 from typing import Any
 
 import httpx
 from fastapi import HTTPException
 
 from app.core.config import settings
+from app.services.ai.audit import GenerationAuditEvent, emit_ai_metric, record_generation_audit
+from app.services.ai.flags import AiFeature, AiFeatureDisabledError, require_ai_feature
+
+logger = logging.getLogger(__name__)
 
 
-async def complete(messages: list[dict[str, str]], *, json_mode: bool = False) -> str:
+async def complete(
+    messages: list[dict[str, str]],
+    *,
+    json_mode: bool = False,
+    request_id: str | None = None,
+    scene: str = "legacy",
+) -> str:
+    """Call the legacy chat-completions endpoint under the shared AI gate.
+
+    ``ai_enabled=False`` in development/testing still returns the local mock
+    (existing contract).  Any real call requires ``require_ai_feature(ADVISOR)``
+    so master + ``ai_enabled`` + production approvals cannot be bypassed.
+    """
     if not settings.ai_enabled:
         if settings.is_test_mode:
             return _mock_response(messages, json_mode=json_mode)
         raise HTTPException(503, detail="AI服务未启用")
+    try:
+        require_ai_feature(AiFeature.ADVISOR, settings)
+    except AiFeatureDisabledError as exc:
+        raise HTTPException(503, detail="AI服务未启用") from exc
     if not settings.ai_api_key:
         raise HTTPException(503, detail="AI服务未配置 API Key")
     url = settings.ai_base_url.rstrip("/") + "/chat/completions"
-    headers = {"Authorization": f"Bearer {settings.ai_api_key.get_secret_value()}", "Content-Type": "application/json"}
-    payload: dict[str, Any] = {"model": settings.ai_model, "messages": messages, "temperature": 0.4}
+    headers = {
+        "Authorization": f"Bearer {settings.ai_api_key.get_secret_value()}",
+        "Content-Type": "application/json",
+    }
+    payload: dict[str, Any] = {
+        "model": settings.ai_model,
+        "messages": messages,
+        "temperature": 0.4,
+    }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    started = time.monotonic()
+    audit_status = "failed"
+    error_code: str | None = None
     try:
         async with httpx.AsyncClient(timeout=settings.ai_timeout_seconds) as client:
             response = await client.post(url, headers=headers, json=payload)
@@ -31,9 +64,33 @@ async def complete(messages: list[dict[str, str]], *, json_mode: bool = False) -
         content = data.get("choices", [{}])[0].get("message", {}).get("content")
         if not isinstance(content, str) or not content.strip():
             raise ValueError("AI返回内容为空")
+        audit_status = "success"
         return content.strip()
-    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+    except httpx.TimeoutException as exc:
+        error_code = "AI_TEMPORARILY_UNAVAILABLE"
+        emit_ai_metric("provider_timeout", 1, {"scene": scene})
         raise HTTPException(503, detail="AI服务暂时不可用") from exc
+    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+        error_code = "AI_TEMPORARILY_UNAVAILABLE"
+        emit_ai_metric("provider_5xx", 1, {"scene": scene})
+        raise HTTPException(503, detail="AI服务暂时不可用") from exc
+    finally:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        try:
+            await record_generation_audit(
+                GenerationAuditEvent(
+                    request_id=request_id or uuid.uuid4().hex,
+                    task_id=None,
+                    scene=scene,
+                    provider="legacy",
+                    model=settings.ai_model,
+                    status=audit_status,
+                    error_code=error_code,
+                    duration_ms=duration_ms,
+                )
+            )
+        except Exception:
+            logger.warning("legacy_ai_audit_failed scene=%s", scene, exc_info=True)
 
 
 def parse_json(content: str) -> dict[str, Any]:

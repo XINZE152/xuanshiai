@@ -1,0 +1,857 @@
+{
+  "probe": "moxiang_realtime_route_e2e",
+  "verdict": "PASS",
+  "session_id": "e907343b56a44387a42c0987c8f8cf5e",
+  "assistant_metadata": {
+    "protocol": "v2",
+    "played_ms": 0,
+    "response_id": "55158267810299394",
+    "user_turn_id": "df1edaeffd804de889b6a5fc5fb7238f",
+    "generation_id": "658f6469c7f64728b9c3efeed404a1c3",
+    "client_turn_id": "e2e-i-1789223735457",
+    "playback_status": "interrupted",
+    "generation_status": "interrupted"
+  },
+  "events": [
+    {
+      "t_ms": 29.6,
+      "type": "journey_ready",
+      "detail": ""
+    },
+    {
+      "t_ms": 30.8,
+      "type": "journey_progress",
+      "detail": ""
+    },
+    {
+      "t_ms": 2419.1,
+      "type": "voice_ready",
+      "detail": ""
+    },
+    {
+      "t_ms": 2970.5,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 3146.8,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 3390.0,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 3628.7,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 3760.7,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 4016.6,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 4016.7,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 4628.6,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 4628.8,
+      "type": "final_transcript",
+      "detail": "len=9"
+    },
+    {
+      "t_ms": 4628.9,
+      "type": "input_closed",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.5,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.8,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.8,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "audio_output_start",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4640.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4641.0,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 4641.1,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 4848.8,
+      "type": "audio_chunk",
+      "detail": "seq=1 bytes=21848"
+    },
+    {
+      "t_ms": 5116.5,
+      "type": "audio_chunk",
+      "detail": "seq=2 bytes=27308"
+    },
+    {
+      "t_ms": 5383.8,
+      "type": "audio_chunk",
+      "detail": "seq=3 bytes=24576"
+    },
+    {
+      "t_ms": 5736.1,
+      "type": "audio_chunk",
+      "detail": "seq=4 bytes=24576"
+    },
+    {
+      "t_ms": 6006.5,
+      "type": "audio_chunk",
+      "detail": "seq=5 bytes=27308"
+    },
+    {
+      "t_ms": 6352.9,
+      "type": "audio_chunk",
+      "detail": "seq=6 bytes=24576"
+    },
+    {
+      "t_ms": 6576.2,
+      "type": "audio_chunk",
+      "detail": "seq=7 bytes=27308"
+    },
+    {
+      "t_ms": 6784.5,
+      "type": "audio_chunk",
+      "detail": "seq=8 bytes=24576"
+    },
+    {
+      "t_ms": 7020.9,
+      "type": "audio_chunk",
+      "detail": "seq=9 bytes=16384"
+    },
+    {
+      "t_ms": 7354.5,
+      "type": "audio_chunk",
+      "detail": "seq=10 bytes=35500"
+    },
+    {
+      "t_ms": 7955.8,
+      "type": "audio_chunk",
+      "detail": "seq=11 bytes=24576"
+    },
+    {
+      "t_ms": 7987.2,
+      "type": "audio_chunk",
+      "detail": "seq=12 bytes=24576"
+    },
+    {
+      "t_ms": 7987.5,
+      "type": "audio_chunk",
+      "detail": "seq=13 bytes=8192"
+    },
+    {
+      "t_ms": 8588.1,
+      "type": "audio_chunk",
+      "detail": "seq=14 bytes=40960"
+    },
+    {
+      "t_ms": 8853.6,
+      "type": "audio_chunk",
+      "detail": "seq=15 bytes=27308"
+    },
+    {
+      "t_ms": 9075.5,
+      "type": "audio_chunk",
+      "detail": "seq=16 bytes=24576"
+    },
+    {
+      "t_ms": 9325.6,
+      "type": "audio_chunk",
+      "detail": "seq=17 bytes=27308"
+    },
+    {
+      "t_ms": 9590.9,
+      "type": "audio_chunk",
+      "detail": "seq=18 bytes=24576"
+    },
+    {
+      "t_ms": 10227.1,
+      "type": "audio_chunk",
+      "detail": "seq=19 bytes=24576"
+    },
+    {
+      "t_ms": 10485.7,
+      "type": "audio_chunk",
+      "detail": "seq=20 bytes=27308"
+    },
+    {
+      "t_ms": 10485.8,
+      "type": "audio_chunk",
+      "detail": "seq=21 bytes=2732"
+    },
+    {
+      "t_ms": 11835.2,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 11836.6,
+      "type": "journey_progress",
+      "detail": ""
+    },
+    {
+      "t_ms": 40582.3,
+      "type": "response_done",
+      "detail": ""
+    },
+    {
+      "t_ms": 40582.7,
+      "type": "error",
+      "detail": "code=AI_TEMPORARILY_UNAVAILABLE msg=实时语音暂时不可用"
+    },
+    {
+      "t_ms": 42010.0,
+      "type": "voice_ready",
+      "detail": ""
+    },
+    {
+      "t_ms": 42904.4,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 43314.9,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 44501.8,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 44501.9,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 44628.4,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 44943.0,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 44943.3,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 45748.3,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 45760.9,
+      "type": "final_transcript",
+      "detail": "len=9"
+    },
+    {
+      "t_ms": 45761.0,
+      "type": "input_closed",
+      "detail": ""
+    },
+    {
+      "t_ms": 45771.6,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 45771.6,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 45771.9,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 45788.6,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 45799.0,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 45843.0,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 45918.1,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 45942.0,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 45962.6,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 46004.7,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 46302.1,
+      "type": "audio_output_start",
+      "detail": ""
+    },
+    {
+      "t_ms": 46303.0,
+      "type": "audio_chunk",
+      "detail": "seq=1 bytes=21848"
+    },
+    {
+      "t_ms": 46557.3,
+      "type": "audio_chunk",
+      "detail": "seq=2 bytes=27308"
+    },
+    {
+      "t_ms": 46558.8,
+      "type": "audio_chunk",
+      "detail": "seq=3 bytes=24576"
+    },
+    {
+      "t_ms": 46565.0,
+      "type": "audio_chunk",
+      "detail": "seq=4 bytes=27308"
+    },
+    {
+      "t_ms": 46783.7,
+      "type": "audio_chunk",
+      "detail": "seq=5 bytes=24576"
+    },
+    {
+      "t_ms": 46795.6,
+      "type": "audio_chunk",
+      "detail": "seq=6 bytes=24576"
+    },
+    {
+      "t_ms": 46976.9,
+      "type": "audio_chunk",
+      "detail": "seq=7 bytes=27308"
+    },
+    {
+      "t_ms": 46978.0,
+      "type": "audio_chunk",
+      "detail": "seq=8 bytes=24576"
+    },
+    {
+      "t_ms": 47152.9,
+      "type": "audio_chunk",
+      "detail": "seq=9 bytes=19116"
+    },
+    {
+      "t_ms": 47189.4,
+      "type": "audio_chunk",
+      "detail": "seq=10 bytes=32768"
+    },
+    {
+      "t_ms": 47760.4,
+      "type": "audio_chunk",
+      "detail": "seq=11 bytes=24576"
+    },
+    {
+      "t_ms": 48697.2,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 48698.8,
+      "type": "journey_progress",
+      "detail": ""
+    },
+    {
+      "t_ms": 52630.2,
+      "type": "audio_chunk",
+      "detail": "seq=12 bytes=51884"
+    },
+    {
+      "t_ms": 55471.8,
+      "type": "audio_chunk",
+      "detail": "seq=13 bytes=24576"
+    },
+    {
+      "t_ms": 55472.7,
+      "type": "audio_chunk",
+      "detail": "seq=14 bytes=21848"
+    },
+    {
+      "t_ms": 87560.9,
+      "type": "response_done",
+      "detail": ""
+    },
+    {
+      "t_ms": 87561.3,
+      "type": "error",
+      "detail": "code=AI_TEMPORARILY_UNAVAILABLE msg=实时语音暂时不可用"
+    },
+    {
+      "t_ms": 90266.4,
+      "type": "voice_ready",
+      "detail": ""
+    },
+    {
+      "t_ms": 91152.8,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 91856.6,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 92069.8,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 92361.1,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 92815.3,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 93192.7,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 93192.8,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 94214.3,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 94214.4,
+      "type": "final_transcript",
+      "detail": "len=9"
+    },
+    {
+      "t_ms": 94214.4,
+      "type": "input_closed",
+      "detail": ""
+    },
+    {
+      "t_ms": 94226.0,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 94226.1,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94226.2,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94226.2,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94226.4,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 94264.0,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94311.6,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94464.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94465.1,
+      "type": "audio_output_start",
+      "detail": ""
+    },
+    {
+      "t_ms": 94465.1,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94465.1,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94486.3,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94536.9,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94563.6,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 94563.7,
+      "type": "ai_reply",
+      "detail": "len=25"
+    },
+    {
+      "t_ms": 94766.5,
+      "type": "audio_chunk",
+      "detail": "seq=1 bytes=21848"
+    },
+    {
+      "t_ms": 94863.0,
+      "type": "audio_chunk",
+      "detail": "seq=2 bytes=27308"
+    },
+    {
+      "t_ms": 94864.0,
+      "type": "audio_chunk",
+      "detail": "seq=3 bytes=24576"
+    },
+    {
+      "t_ms": 94995.1,
+      "type": "audio_chunk",
+      "detail": "seq=4 bytes=24576"
+    },
+    {
+      "t_ms": 95083.7,
+      "type": "audio_chunk",
+      "detail": "seq=5 bytes=27308"
+    },
+    {
+      "t_ms": 95093.9,
+      "type": "audio_chunk",
+      "detail": "seq=6 bytes=24576"
+    },
+    {
+      "t_ms": 95110.0,
+      "type": "audio_chunk",
+      "detail": "seq=7 bytes=21848"
+    },
+    {
+      "t_ms": 95141.6,
+      "type": "audio_chunk",
+      "detail": "seq=8 bytes=30040"
+    },
+    {
+      "t_ms": 95142.9,
+      "type": "audio_chunk",
+      "detail": "seq=9 bytes=24576"
+    },
+    {
+      "t_ms": 95204.9,
+      "type": "audio_chunk",
+      "detail": "seq=10 bytes=27308"
+    },
+    {
+      "t_ms": 95205.1,
+      "type": "audio_chunk",
+      "detail": "seq=11 bytes=5464"
+    },
+    {
+      "t_ms": 95329.9,
+      "type": "audio_chunk",
+      "detail": "seq=12 bytes=43692"
+    },
+    {
+      "t_ms": 95927.6,
+      "type": "audio_chunk",
+      "detail": "seq=13 bytes=24576"
+    },
+    {
+      "t_ms": 95929.3,
+      "type": "audio_chunk",
+      "detail": "seq=14 bytes=27308"
+    },
+    {
+      "t_ms": 95930.6,
+      "type": "audio_chunk",
+      "detail": "seq=15 bytes=24576"
+    },
+    {
+      "t_ms": 95932.5,
+      "type": "audio_chunk",
+      "detail": "seq=16 bytes=24576"
+    },
+    {
+      "t_ms": 95932.6,
+      "type": "audio_chunk",
+      "detail": "seq=17 bytes=10924"
+    },
+    {
+      "t_ms": 96028.0,
+      "type": "audio_chunk",
+      "detail": "seq=18 bytes=31604"
+    },
+    {
+      "t_ms": 96028.1,
+      "type": "audio_output_end",
+      "detail": ""
+    },
+    {
+      "t_ms": 103038.0,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 103039.5,
+      "type": "journey_progress",
+      "detail": ""
+    },
+    {
+      "t_ms": 106034.7,
+      "type": "response_done",
+      "detail": ""
+    },
+    {
+      "t_ms": 106035.3,
+      "type": "response_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 106035.7,
+      "type": "response_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 106035.8,
+      "type": "voice_ready",
+      "detail": ""
+    },
+    {
+      "t_ms": 106042.1,
+      "type": "response_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 107593.2,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 107593.3,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 107885.4,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 108069.5,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 108134.5,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 108921.9,
+      "type": "partial_transcript",
+      "detail": ""
+    },
+    {
+      "t_ms": 109052.5,
+      "type": "final_transcript",
+      "detail": "len=7"
+    },
+    {
+      "t_ms": 109052.6,
+      "type": "input_closed",
+      "detail": ""
+    },
+    {
+      "t_ms": 109062.9,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 109063.1,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 109063.1,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 109063.1,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 109063.1,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 109063.2,
+      "type": "extraction_status",
+      "detail": ""
+    },
+    {
+      "t_ms": 109142.6,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 109142.7,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 109619.2,
+      "type": "audio_output_start",
+      "detail": ""
+    },
+    {
+      "t_ms": 109619.4,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 109619.4,
+      "type": "ai_content",
+      "detail": ""
+    },
+    {
+      "t_ms": 109619.5,
+      "type": "cancelled",
+      "detail": ""
+    },
+    {
+      "t_ms": 109620.0,
+      "type": "response_done",
+      "detail": ""
+    },
+    {
+      "t_ms": 111979.9,
+      "type": "voice_ready",
+      "detail": ""
+    }
+  ]
+}

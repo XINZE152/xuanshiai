@@ -35,7 +35,7 @@ class CompatibilityRecomputeRequest(BaseModel):
 class CompatibilitySnapshotRead(BaseModel):
     snapshot_id: str
     status: CompatibilitySnapshotStatus
-    algorithm_version: str = "compatibility-rule-v1"
+    algorithm_version: str = "compatibility-rule-v2"
     score_semantics: str = "rule_based_reference_shadow"
     compatibility_index: float | None = Field(default=None, ge=0.0, le=100.0)
     coverage: float | None = Field(default=None, ge=0.0, le=1.0)

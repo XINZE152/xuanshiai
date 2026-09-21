@@ -36,6 +36,7 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
 import time
 import uuid
 from dataclasses import dataclass
@@ -231,17 +232,6 @@ class SearchDraftNotConfirmed(Exception):
         self.message = message
 
 
-class SearchResultStale(Exception):
-    """409 RESULT_STALE：结果已过期，需重新确认生成新快照。"""
-
-    code = "RESULT_STALE"
-    status_code = 409
-
-    def __init__(self) -> None:
-        super().__init__("搜索结果已过期，请重新发起搜索")
-        self.message = "搜索结果已过期，请重新发起搜索"
-
-
 # ----------------------------------------------------------------------
 # 领域对象
 # ----------------------------------------------------------------------
@@ -432,16 +422,30 @@ class CompiledFilters(DiscoveryFilters):
                 return self.model_copy(update={"height_min": _int_value(value)})
             return self.model_copy(update={"height_max": _int_value(value)})
         if field_key == "income_band":
+            # 档位是月收入口径，p.income 是年收入（元）：换算后再进筛选，
+            # 否则"至少第4档"会变成 p.income >= 4（人人命中）。
             if operator == "between":
                 return self.model_copy(
                     update={
-                        "income_min": _float_value(_dict_value(value, "min")),
-                        "income_max": _float_value(_dict_value(value, "max")),
+                        "income_min": _AI_INCOME_BAND_LOWER_YEARLY.get(
+                            _int_value(_dict_value(value, "min"))
+                        ),
+                        "income_max": _AI_INCOME_BAND_UPPER_YEARLY.get(
+                            _int_value(_dict_value(value, "max"))
+                        ),
                     }
                 )
             if operator == "gte":
-                return self.model_copy(update={"income_min": _float_value(value)})
-            return self.model_copy(update={"income_max": _float_value(value)})
+                return self.model_copy(
+                    update={
+                        "income_min": _AI_INCOME_BAND_LOWER_YEARLY.get(
+                            _int_value(value)
+                        )
+                    }
+                )
+            return self.model_copy(
+                update={"income_max": _AI_INCOME_BAND_UPPER_YEARLY.get(_int_value(value))}
+            )
         raise SearchInputInvalid(f"hard 字段 {field_key} 缺少静态映射")
 
 
@@ -1495,6 +1499,36 @@ candidate_query_service = CandidateQueryService(secret_key=settings.secret_key)
 candidate_visibility_service = CandidateVisibilityService()
 
 
+# search_parse 输出的学历是 AI 刻度（1=初中及以下…6=博士，见
+# prompts/search_parse.py），而 p.education_level 是存储刻度（1=高中及以下…
+# 5=博士，编辑写入域）。进 SQL 前必须换算——否则"本科及以上"(AI=4)会错筛成
+# 硕士及以上。口径与 profile._AI_SYNC_EDU_MAP 一致（双源，改动需互相同步）。
+_AI_EDU_TO_STORAGE = {1: 1, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+
+
+# search_parse 的 income_band 是 AI 月收入档位（profile_extract.py 契约：
+# 0=无收入，1=月5千以下 … 6=月5万以上，左闭右开），而 p.income 存年收入（元）
+# （编辑写入域 edit.uvue incomeValue：'10-20w'→150000）。档位号不得当元直接
+# 比较——按档位边界×12 换算为年收入区间再进筛选；6 档无上界，未知档位不筛。
+_AI_INCOME_BAND_LOWER_YEARLY = {
+    0: 0,
+    1: 0,
+    2: 60_000,
+    3: 120_000,
+    4: 240_000,
+    5: 420_000,
+    6: 600_000,
+}
+_AI_INCOME_BAND_UPPER_YEARLY = {
+    0: 0,
+    1: 60_000,
+    2: 120_000,
+    3: 240_000,
+    4: 420_000,
+    5: 600_000,
+}
+
+
 def _hard_filter_clauses(
     filters: DiscoveryFilters,
     params: dict[str, Any],
@@ -1520,8 +1554,10 @@ def _hard_filter_clauses(
         clauses.append("u.is_married = :filter_marriage")
         params["filter_marriage"] = int(filters.marriage_status)
     if filters.education_min:
-        clauses.append("p.education_level >= :filter_education")
-        params["filter_education"] = int(filters.education_min)
+        ai_edu = _AI_EDU_TO_STORAGE.get(int(filters.education_min))
+        if ai_edu is not None:
+            clauses.append("p.education_level >= :filter_education")
+            params["filter_education"] = ai_edu
     if filters.height_min:
         clauses.append("p.height >= :filter_height_min")
         params["filter_height_min"] = int(filters.height_min)
@@ -1978,35 +2014,6 @@ async def _upsert_result_rows(
         await db.execute(text(_SEARCH_RESULT_UPSERT_SQL), chunk)
 
 
-async def _upsert_result_row(
-    db: AsyncSession,
-    snapshot_id: str,
-    target_user_id: int,
-    rank_position: int,
-    evidence: SearchEvidence,
-    result_expires_at: datetime,
-    *,
-    generation: int = _SEARCH_RESULT_DEFAULT_GENERATION,
-) -> None:
-    # Task8 Step2：upsert 时携带 generation。ON DUPLICATE KEY UPDATE 也更新
-    # generation，保证同一 (snapshot_id, target_user_id) 的行在新 generation 下
-    # 被正确刷新；旧 generation 的行由 materialize 成功后统一清理。
-    # （Task 15：单行入口保留为批量路径的委托，参数构造单一来源。）
-    await _upsert_result_rows(
-        db,
-        [
-            _result_row_params(
-                snapshot_id,
-                target_user_id,
-                rank_position,
-                evidence,
-                result_expires_at,
-                generation=generation,
-            )
-        ],
-    )
-
-
 def _encode_materialized_cursor(
     snapshot_id: str,
     rank_position: int,
@@ -2439,6 +2446,13 @@ async def materialize_search_snapshot(
             row, condition_objects, compiled, projections.get(candidate_id)
         )
         visible.append((baseline_index, row, evidence))
+    # Task8 Step2：atomic generation 的读取必须先于下面的 partial 初筛集写入。
+    # partial 行以 generation=0 复用同一 (snapshot_id, target_user_id) 唯一键，
+    # upsert 会把上一轮完整集行的 generation 覆盖为 0；若读取发生在其后，
+    # MAX(generation) 恒为 0，new_generation 停在 1，代次永不推进、旧 cursor
+    # 永不失效（``DELETE WHERE generation < new_generation`` 同样失效）。
+    active_generation = await _load_active_generation(db, snapshot_id)
+    new_generation = active_generation + 1
     # WP-S2：filtering 收尾（进度 30% 后）物化模糊候选初筛集。partial 是
     # 纯增强：任何异常都不得中断主流程——失败降级为无 partial（读取端
     # 继续等待完整集）。无 hard 条件的查询不物化，partial_visible 保持 none。
@@ -2465,14 +2479,6 @@ async def materialize_search_snapshot(
     )
     materialized = visible[:SEARCH_MATERIALIZATION_LIMIT]
     result_expires_at = _now_utc() + timedelta(minutes=SEARCH_RESULT_TTL_MINUTES)
-    # Task8 Step2：atomic generation。先读当前 active generation，写新 generation
-    # = active + 1 的行；成功后把旧 generation 的行（不在新结果中的候选）标记
-    # stale 或删除，原子切换 active generation。同一 (snapshot_id, target_user_id)
-    # 的行由 upsert 覆盖为新 generation；旧候选（不再在新结果中）由
-    # ``DELETE WHERE generation < new_generation`` 清理，保证「候选集合变化时
-    # 旧候选为 0」。
-    active_generation = await _load_active_generation(db, snapshot_id)
-    new_generation = active_generation + 1
     # 先删除旧 generation 中 rank_position > limit 的溢出行
     await db.execute(
         text("DELETE FROM ai_search_result WHERE snapshot_id = :snapshot_id AND rank_position > :limit"),
@@ -2736,20 +2742,37 @@ async def get_search_suggestions(
     数据源为 ``personal_searchable`` 特征投影（仅已确认字段）；无投影时返回
     空数组。WP-S3：猜你喜欢 AI 建议缓存（24h TTL）优先——命中时 source='ai'；
     未命中或 Redis 不可用时回退标签回显（source='tags'，前端无感）。
+
+    修复清单 §3.7.4：缓存命中不再直接返回。命中后校验**当前授权仍存在**、
+    投影仍 active 且代际一致（投影内容 + 撤权计数），只读当前代际的 key——
+    撤回授权/注销后即便旧代际的缓存行仍在 Redis 里，本路径也取不到它。代际
+    不可得（Redis 抖动）时禁用缓存走数据库，与 persona 缓存一致的 fail-closed
+    取舍。授权校验只约束 source='ai' 的缓存命中；标签回显（source='tags'）
+    只依赖投影本身，不受本门禁影响。
     """
-    try:
-        cached = await redis_client.get(_suggest_cache_key(owner_user_id))
-        if cached:
-            items = json.loads(cached)
-            if isinstance(items, list) and items:
-                return SearchSuggestionRead(
-                    items=[str(item) for item in items][: _SEARCH_SUGGEST_MAX_ITEMS],
-                    source="ai",
-                )
-    except Exception:  # noqa: BLE001 - 缓存是尽力而为：Redis 不可用时回退标签
-        logger.warning(
-            "search_suggest_cache_read_failed user_id=%s", owner_user_id
+    generation = await current_suggest_generation(db, owner_user_id)
+    if generation is not None:
+        consent = await _load_active_consent(
+            db, owner_user_id, SEARCH_CONSENT_SCOPE
         )
+        if consent is not None:
+            try:
+                cached = await redis_client.get(
+                    _suggest_cache_key(owner_user_id, generation)
+                )
+                if cached:
+                    items = json.loads(cached)
+                    if isinstance(items, list) and items:
+                        return SearchSuggestionRead(
+                            items=[str(item) for item in items][
+                                : _SEARCH_SUGGEST_MAX_ITEMS
+                            ],
+                            source="ai",
+                        )
+            except Exception:  # noqa: BLE001 - 缓存尽力而为：Redis 不可用回落标签
+                logger.warning(
+                    "search_suggest_cache_read_failed user_id=%s", owner_user_id
+                )
     result = await db.execute(
         text(
             "SELECT p.subject_user_id, p.fields_json, p.status, p.expires_at "
@@ -2832,9 +2855,11 @@ async def delete_search_snapshot(
 
 
 def register_search_handlers() -> None:
-    """把 ``search_parse`` / ``search_execute`` 注册进 AI Worker 的 TASK_HANDLERS。
+    """把 search 相关 handler 与完成期发布器注册进 AI Worker。
 
     模块导入时自动注册（路由导入本模块即生效）；幂等，可在测试中重复调用。
+    ``search_suggest`` 登记完成期发布器：handler 只暂存，发布由 Worker 在
+    complete_task 提交成功后调用（修复清单 §3.7.2）。
     """
     from app.workers import ai_worker as worker_module
 
@@ -2842,8 +2867,12 @@ def register_search_handlers() -> None:
     worker_module.TASK_HANDLERS.setdefault(
         SEARCH_EXECUTE_TASK_TYPE, search_execute_handler
     )
-
-
+    worker_module.TASK_HANDLERS.setdefault(
+        SEARCH_SUGGEST_TASK_TYPE, search_suggest_handler
+    )
+    worker_module.register_post_complete_publisher(
+        SEARCH_SUGGEST_TASK_TYPE, publish_search_suggest
+    )
 
 # ----------------------------------------------------------------------
 # WP-S3：猜你喜欢 AI 化（search_suggest 任务 + 24h Redis 缓存 + 频控 + 降级）
@@ -2856,10 +2885,176 @@ def register_search_handlers() -> None:
 
 _SEARCH_SUGGEST_MAX_ITEMS = 5
 _SUGGEST_CACHE_TTL_SECONDS = 24 * 3600
+# 建议缓存代际机制（修复清单 §3.7.3）：key 携带代际，撤回/重新授权或投影内容
+# 变化都会让旧代际的发布物在当前读路径不可见——迟到旧任务即便晚一步发布，也
+# 只会写到当前读不到的 key。与既有 persona 缓存
+# （`ai:memory:persona-generation:v1`）同构：代际键只递增，不逐键 SCAN/DELETE。
+_SUGGEST_CACHE_KEY_PREFIX = "ai:search_suggest"
+_SUGGEST_GENERATION_KEY_PREFIX = "ai:search_suggest-generation:v2"
+_SUGGEST_GENERATION_EPOCH_KEY_PREFIX = "ai:search_suggest-epoch:v1"
+# 纪元量：建键时写入一次的随机串，参与代际串。
+#
+# 为什么不能只用"递增计数"（审查发现 (b)）：计数键带 TTL，过期后下一次 INCR 会
+# 从 1 重新开始，于是"上一纪元末段写入的 …-1 键"可能与"新纪元第一次撤权后的
+# …-1"重名——撤回 + 重新授权后最多 24h 内会重新读到撤回前时代生成的建议。
+# 把一次性随机纪元量并入代际串后，新纪元代际串必与历史不同，重名不可能发生；
+# 纪元量用 SET NX 保持稳定（多次撤销只递增计数，不换纪元）。
+_SUGGEST_GENERATION_EPOCH_BYTES = 8
+# 代际键 TTL 仅作"长期不活跃用户"的键回收兜底：语义正确性不依赖它（纪元量已
+# 消除重名），保留续期以免单用户无限期占键。取 4 倍缓存 TTL。
+_SUGGEST_GENERATION_TTL_SECONDS = 4 * _SUGGEST_CACHE_TTL_SECONDS
 
 
-def _suggest_cache_key(owner_user_id: int) -> str:
-    return f"ai:search_suggest:{owner_user_id}"
+def _suggest_cache_key(owner_user_id: int, generation: str) -> str:
+    """建议缓存 key：携带代际，旧代际的发布物在当前读路径不可见。"""
+    return f"{_SUGGEST_CACHE_KEY_PREFIX}:{owner_user_id}:{generation}"
+
+
+def _suggest_generation_key(owner_user_id: int) -> str:
+    return f"{_SUGGEST_GENERATION_KEY_PREFIX}:{owner_user_id}"
+
+
+def _suggest_epoch_key(owner_user_id: int) -> str:
+    return f"{_SUGGEST_GENERATION_EPOCH_KEY_PREFIX}:{owner_user_id}"
+
+
+async def _load_suggest_epoch(owner_user_id: int) -> str | None:
+    """读取（必要时创建）该用户的纪元量；Redis 不可用返回 None。
+
+    SET NX 保证同一纪元内稳定：撤权只递增计数，纪元量不变，因此"计数键 TTL
+    到期后重新从 1 计数"不会与历史代际串重合（审查发现 (b) 的重名根因）。
+    """
+    key = _suggest_epoch_key(owner_user_id)
+    try:
+        epoch = secrets.token_hex(_SUGGEST_GENERATION_EPOCH_BYTES)
+        await redis_client.set(
+            key, epoch, ex=_SUGGEST_GENERATION_TTL_SECONDS, nx=True
+        )
+        raw = await redis_client.get(key)
+        if raw is None:
+            return None
+        try:
+            await redis_client.expire(key, _SUGGEST_GENERATION_TTL_SECONDS)
+        except Exception:  # noqa: BLE001 - 续期失败不影响本次代际计算
+            pass
+        return str(raw)
+    except Exception:  # noqa: BLE001 - 读不到纪元即视为代际不可得（不读缓存）
+        logger.warning(
+            "search_suggest_epoch_read_failed user_id=%s", owner_user_id
+        )
+        return None
+
+
+async def _load_suggest_generation(owner_user_id: int) -> str | None:
+    """读取当前建议代际串 `<epoch>-<counter>`；不可得返回 None（不读缓存）。
+
+    不把“读不到”归并为 0 后复用缓存：Redis 抖动时归零会让已失效的旧缓存
+    重新对外可见（与 persona 缓存同一 fail-closed 取舍）。
+    """
+    epoch = await _load_suggest_epoch(owner_user_id)
+    if epoch is None:
+        return None
+    try:
+        raw = await redis_client.get(_suggest_generation_key(owner_user_id))
+        return f"{epoch}-{int(raw or 0)}"
+    except Exception:  # noqa: BLE001 - Redis 不可用时由调用方回落标签回显
+        logger.warning(
+            "search_suggest_generation_read_failed user_id=%s", owner_user_id
+        )
+        return None
+
+
+async def invalidate_search_suggest_cache(owner_user_id: int) -> int:
+    """使该用户已发布的建议缓存立即失效（撤回授权／注销共用入口）。
+
+    语义与 persona 缓存一致：只递增计数，不逐键 SCAN/DELETE——旧代际条目留在
+    Redis 里自然过期，读取端已换 key，外部读不到。纪元量由读取路径按需建立，
+    这里只递增计数（纪元不变，故同一纪元的代际串单调变化）。
+    """
+    key = _suggest_generation_key(owner_user_id)
+    try:
+        counter = int(await redis_client.incr(key))
+        try:
+            await redis_client.expire(key, _SUGGEST_GENERATION_TTL_SECONDS)
+        except Exception:  # noqa: BLE001 - 续期失败不影响失效本身
+            pass
+        return counter
+    except Exception:  # noqa: BLE001 - 缓存尽力而为，清理另有 pattern 兜底
+        logger.warning(
+            "search_suggest_generation_invalidate_failed user_id=%s", owner_user_id
+        )
+        return 0
+
+
+async def _load_suggest_publish_row(
+    db: AsyncSession, task_id: str
+) -> dict[str, Any] | None:
+    """读取待发布行（发布阶段与完成期钩子共用；无行返回 None）。"""
+    return await _first_row(
+        await db.execute(
+            text(
+                "SELECT id, user_id, task_id, generation, suggestions_json, "
+                "consent_snapshot_json, source_revision_json, status, expires_at "
+                "FROM ai_search_suggest_publish WHERE task_id = :task_id"
+            ),
+            {"task_id": task_id},
+        )
+    )
+
+def _suggest_projection_generation(
+    owner_user_id: int, projection_row: dict[str, Any]
+) -> str:
+    """投影派生代际：投影内容变（重抽/重建）→ 代际变 → 旧缓存自动失效。
+
+    只取投影自身的内容标识（kind + source_hash），不含任何字段值或原文；
+    “撤回/注销”这类与内容无关的失效由代际计数键负责，两者相乘即完整隔离。
+    """
+    payload = json.dumps(
+        {
+            "user_id": int(owner_user_id),
+            "kind": str(projection_row.get("projection_kind") or ""),
+            "source_hash": str(projection_row.get("source_hash") or ""),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+
+async def _load_suggest_projection_row(
+    db: AsyncSession, owner_user_id: int
+) -> dict[str, Any] | None:
+    """当前 active 的 ``personal_searchable`` 投影行（建议代际的内容锚）。"""
+    return await _first_row(
+        await db.execute(
+            text(
+                "SELECT subject_user_id, projection_kind, source_hash, status, "
+                "expires_at FROM ai_feature_projection "
+                "WHERE subject_user_id = :user_id "
+                "AND projection_kind = 'personal_searchable' AND status = 'active' "
+                "AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP()) "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"user_id": owner_user_id},
+        )
+    )
+
+
+async def current_suggest_generation(
+    db: AsyncSession, owner_user_id: int
+) -> str | None:
+    """当前建议代际 = 投影内容标识 + 纪元量 + 撤权计数；任一不可得即 None。
+
+    四段结构（`<hash32>-<epoch>-<counter>`）：内容标识覆盖"资料变更"，纪元量
+    消除"计数键 TTL 归零后重新计数"与历史代际串重名的可能，计数覆盖"撤权/注销"。
+    """
+    row = await _load_suggest_projection_row(db, owner_user_id)
+    if row is None:
+        return None
+    counter = await _load_suggest_generation(owner_user_id)
+    if counter is None:
+        return None
+    return f"{_suggest_projection_generation(owner_user_id, row)}-{counter}"
 
 
 async def _load_suggest_context_lines(
@@ -2917,12 +3112,20 @@ async def generate_search_suggestions(
     用户无可归纳投影时不建任务直接降级（source='tags'）；同日重复请求回放
     既有任务（幂等键 search-suggest-{user}-{YYYYMMDD}，缓存即回放）；24h
     窗口内生成次数达 settings.ai_search_suggest_daily_limit 时 400。不 commit。
+
+    修复清单 §3.7.2：入队时携带当前 ``search_parse`` 授权快照——任务行有了
+    consent scope 后，完成期复核（``_load_current_completion_context``）才会
+    真正比对撤回状态，撤权时把任务判 superseded 而不是照常成功。
     """
     context_lines = await _load_suggest_context_lines(db, owner_user_id)
     if not context_lines:
         return SearchSuggestGenerateRead(
             task_id="", status="degraded", source="tags", replayed=False
         )
+    consent = await _load_active_consent(db, owner_user_id, SEARCH_CONSENT_SCOPE)
+    if consent is None:
+        # 未授权即不生成：建议归纳读取的是本人已确认资料，无授权不得进入模型。
+        raise SearchConsentRequired()
     date_key = f"search-suggest-{owner_user_id}-{_now_utc():%Y%m%d}"
     existing = await _find_by_idempotency(
         db, owner_user_id, SEARCH_SUGGEST_TASK_TYPE, date_key
@@ -2955,7 +3158,25 @@ async def generate_search_suggestions(
         idempotency_key=date_key,
         request_hash=hash_suggest_request(owner_user_id),
         revisions=await _load_owner_revision_vector(db, owner_user_id),
-        consent=None,
+        consent=_consent_snapshot(consent),
+    )
+    await db.execute(
+        text(
+            "UPDATE ai_task SET payload_summary = :payload_summary, "
+            "updated_at = UTC_TIMESTAMP() WHERE task_id = :task_id"
+        ),
+        {
+            "payload_summary": json.dumps(
+                {"user_id": owner_user_id}, ensure_ascii=False
+            ),
+            "task_id": task.task_id,
+        },
+    )
+    # 新任务意味着代际可能已过期：递增代际使旧代际缓存立即失效，避免用户看到
+    # 与新一次生成无关的陈旧建议。
+    await invalidate_search_suggest_cache(owner_user_id)
+    return SearchSuggestGenerateRead(
+        task_id=task.task_id, status=task.status.value, source="ai", replayed=False
     )
     await db.execute(
         text(
@@ -3008,10 +3229,16 @@ def hash_suggest_request(owner_user_id: int) -> str:
 async def search_suggest_handler(
     db: AsyncSession, task: AiTaskRecord, worker_id: str
 ) -> tuple[str, RevisionVector] | None:
-    """``search_suggest`` Worker handler：归纳搜索词并写 24h Redis 缓存。
+    """``search_suggest`` Worker handler：归纳搜索词并**暂存**待发布结果。
 
-    LLM 失败/Redis 不可用按可重试失败处理（GET 自动回退标签回显，前端
-    无感）。建议出参去重并截断到 _SEARCH_SUGGEST_MAX_ITEMS 条。不 commit。
+    修复清单 §3.7.1：handler 不再直接写 Redis。建议在同事务内写入
+    ``ai_search_suggest_publish``（status='staged'），由 Worker 在完成期复核
+    通过并 commit 之后调用 :func:`publish_search_suggest` 才对外发布——这样
+    "计算完成"与"对外可见"彻底分离，撤权导致的 supersede 不会再让已写缓存
+    泄漏（原缺陷 C-06）。
+
+    LLM 失败按可重试失败处理（GET 自动回退标签回显，前端无感）。建议出参去重
+    并截断到 _SEARCH_SUGGEST_MAX_ITEMS 条。不 commit。
     """
     payload = task.payload_summary or {}
     user_id = payload.get("user_id")
@@ -3026,6 +3253,27 @@ async def search_suggest_handler(
         await fail_task(
             db, task.task_id, worker_id,
             error_code="AI_INPUT_INVALID", retryable=False,
+        )
+        return None
+    # 代际在计算期就固定：任务执行期间若发生撤权或投影重建，当前代际随即变化，
+    # 发布阶段核对不一致就不会对外发布（迟到旧任务无法覆盖新代际结果）。
+    generation = await current_suggest_generation(db, int(user_id))
+    if generation is None:
+        # 两种成因的可重试性不同：投影被删除/失效是终态（重试永远不会成功），
+        # Redis 代际读取抖动是可重试的。用投影行是否还在区分，避免无谓重试耗尽。
+        has_projection = (
+            await _load_suggest_projection_row(db, int(user_id))
+        ) is not None
+        logger.warning(
+            "search_suggest_generation_unavailable task_id=%s has_projection=%s",
+            task.task_id,
+            has_projection,
+        )
+        await fail_task(
+            db, task.task_id, worker_id,
+            error_code="AI_INPUT_INVALID" if not has_projection
+            else "AI_TEMPORARILY_UNAVAILABLE",
+            retryable=has_projection,
         )
         return None
     context = AITaskContext(
@@ -3058,27 +3306,126 @@ async def search_suggest_handler(
             error_code="AI_TEMPORARILY_UNAVAILABLE", retryable=True,
         )
         return None
-    try:
-        await redis_client.set(
-            _suggest_cache_key(int(user_id)),
-            json.dumps(suggestions, ensure_ascii=False),
-            ex=_SUGGEST_CACHE_TTL_SECONDS,
-        )
-    except Exception:  # noqa: BLE001 - Redis 不可用按可重试失败，GET 回退标签
-        logger.warning(
-            "search_suggest_cache_write_failed task_id=%s", task.task_id
-        )
-        await fail_task(
-            db, task.task_id, worker_id,
-            error_code="AI_TEMPORARILY_UNAVAILABLE", retryable=True,
-        )
-        return None
+    # 暂存（重试同一 task_id 时覆盖为新结果，保持单行）。受 Worker savepoint
+    # 保护：完成期复核判 superseded 时这一行随之回滚，不会留下"没人读得到的
+    # 孤儿暂存"。
+    await db.execute(
+        text(
+            "INSERT INTO ai_search_suggest_publish "
+            "(user_id, task_id, generation, suggestions_json, "
+            " consent_snapshot_json, source_revision_json, status, staged_at, "
+            " expires_at, created_at, updated_at) "
+            "VALUES (:user_id, :task_id, :generation, :suggestions_json, "
+            " :consent_snapshot_json, :source_revision_json, 'staged', "
+            " UTC_TIMESTAMP(), :expires_at, UTC_TIMESTAMP(), UTC_TIMESTAMP()) "
+            "ON DUPLICATE KEY UPDATE generation = VALUES(generation), "
+            " suggestions_json = VALUES(suggestions_json), "
+            " consent_snapshot_json = VALUES(consent_snapshot_json), "
+            " source_revision_json = VALUES(source_revision_json), "
+            " status = 'staged', published_at = NULL, "
+            " expires_at = VALUES(expires_at), updated_at = UTC_TIMESTAMP()"
+        ),
+        {
+            "user_id": int(user_id),
+            "task_id": task.task_id,
+            "generation": generation,
+            "suggestions_json": json.dumps(suggestions, ensure_ascii=False),
+            "consent_snapshot_json": (
+                json.dumps(task.consent_snapshot_json, ensure_ascii=False)
+                if task.consent_snapshot_json
+                else None
+            ),
+            "source_revision_json": (
+                json.dumps(task.source_revision_json, ensure_ascii=False)
+                if task.source_revision_json
+                else None
+            ),
+            "expires_at": _now_utc()
+            + timedelta(seconds=_SUGGEST_CACHE_TTL_SECONDS),
+        },
+    )
     revisions = (
         RevisionVector(**task.source_revision_json)
         if task.source_revision_json
         else RevisionVector()
     )
     return f"search-suggest:{len(suggestions)}", revisions
+
+
+async def publish_search_suggest(
+    db: AsyncSession, task_id: str
+) -> str:
+    """把暂存的建议发布到 Redis（完成期复核通过、且事务已提交之后调用）。
+
+    修复清单 §3.7.2：发布前**再次**核验——当前 ``search_parse`` 授权仍有效、
+    暂存代际与当前代际一致、暂存未过期。任何一项不满足都只把暂存标
+    ``superseded`` 并放弃发布，绝不写入一个当前读不到的 key 假装成功。
+
+    返回发布结果字符串（``published`` / ``suppressed:<原因>`` / ``skipped``），
+    供 Worker 记录指标；不抛异常——发布失败不能改写"任务已成功"的事实。
+    """
+    try:
+        row = await _load_suggest_publish_row(db, task_id)
+        if row is None or str(row.get("status") or "") != "staged":
+            return "skipped"
+        owner_user_id = int(row["user_id"])
+        staged_generation = str(row["generation"])
+        consent = await _load_active_consent(db, owner_user_id, SEARCH_CONSENT_SCOPE)
+        if consent is None:
+            await _mark_suggest_publish_superseded(db, task_id)
+            return "suppressed:consent_revoked"
+        current = await current_suggest_generation(db, owner_user_id)
+        if current is None or current != staged_generation:
+            await _mark_suggest_publish_superseded(db, task_id)
+            return "suppressed:generation_changed"
+        # 发布路径对过期采取 fail-closed：expires_at 缺失或不是 datetime（驱动/
+        # 旧数据异常）一律视为已过期，不发布——_is_expired 的通用语义（None=False）
+        # 适用于读取既有草案/快照，不适用于"是否新写一份对外内容"的判断。
+        expires_at = row.get("expires_at")
+        if not isinstance(expires_at, datetime) or _is_expired(expires_at):
+            await _mark_suggest_publish_superseded(db, task_id)
+            return "suppressed:expired"
+        raw_items = _maybe_json(row.get("suggestions_json"))
+        items = (
+            [str(item) for item in raw_items if isinstance(item, str) and item.strip()]
+            if isinstance(raw_items, list)
+            else []
+        )
+        if not items:
+            await _mark_suggest_publish_superseded(db, task_id)
+            return "suppressed:empty"
+        await redis_client.set(
+            _suggest_cache_key(owner_user_id, staged_generation),
+            json.dumps(items[:_SEARCH_SUGGEST_MAX_ITEMS], ensure_ascii=False),
+            ex=_SUGGEST_CACHE_TTL_SECONDS,
+        )
+    except Exception:  # noqa: BLE001 - 发布尽力而为：读取端本就回落标签回显
+        logger.warning("search_suggest_publish_failed task_id=%s", task_id)
+        return "failed"
+    await db.execute(
+        text(
+            "UPDATE ai_search_suggest_publish SET status = 'published', "
+            "published_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() "
+            "WHERE task_id = :task_id AND status = 'staged'"
+        ),
+        {"task_id": task_id},
+    )
+    return "published"
+
+
+async def _mark_suggest_publish_superseded(db: AsyncSession, task_id: str) -> None:
+    """标记暂存不可发布（保留行供审计，不写 Redis）。"""
+    try:
+        await db.execute(
+            text(
+                "UPDATE ai_search_suggest_publish SET status = 'superseded', "
+                "updated_at = UTC_TIMESTAMP() "
+                "WHERE task_id = :task_id AND status = 'staged'"
+            ),
+            {"task_id": task_id},
+        )
+    except Exception:  # noqa: BLE001 - 标记失败不影响"未发布"这一事实
+        logger.warning("search_suggest_publish_mark_failed task_id=%s", task_id)
 
 # 模块末尾注册：保证上方全部任务类型/handler 符号已定义，避免与
 # ai_worker 的相互导入在半初始化状态下取不到新符号（WP-S3）。

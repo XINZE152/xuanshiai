@@ -23,6 +23,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import Any
 
 from sqlalchemy import text
@@ -327,30 +328,95 @@ def _revisions_changed(stored: dict[str, Any] | None, current: Any) -> bool:
     return (stored or {}) != _revision_dict(current)
 
 
-_TASK_FEATURES = {
-    "profile_extract": AiFeature.PROFILE,
-    "moxiang_candidate_extract": AiFeature.PROFILE,
-    "profile_projection": AiFeature.PROFILE,
-    "search_parse": AiFeature.SEARCH,
-    "search_execute": AiFeature.SEARCH,
-    "compatibility": AiFeature.COMPATIBILITY_SHADOW,
-    "compatibility_llm": AiFeature.COMPATIBILITY_SHADOW,
-    "recommend_rebuild": AiFeature.RECOMMEND,
-    "voice_transcribe": AiFeature.VOICE,
+class TaskKind(str, Enum):
+    """三类任务策略（修复清单 §3.12）：生成 / 读取派生 / 清理治理。"""
+
+    GENERATE = "generate"
+    READ = "read"
+    GOVERNANCE = "governance"
+
+
+@dataclass(frozen=True)
+class TaskRegistration:
+    """一条 ``ai_task.task_type`` 的显式策略。
+
+    ``feature is None`` 仅允许治理类：不走生成开关，但仍须校验对象范围
+    （由 handler / ``purge_ai_resources`` 的 generation 围栏负责）。
+    """
+
+    kind: TaskKind
+    feature: AiFeature | None
+    has_handler: bool = True
+
+_TASK_REGISTRY: dict[str, TaskRegistration] = {
+    # 生成类：执行前与完成期都检查功能开关 + 用途授权。
+    "profile_extract": TaskRegistration(TaskKind.GENERATE, AiFeature.PROFILE),
+    "moxiang_candidate_extract": TaskRegistration(TaskKind.GENERATE, AiFeature.PROFILE),
+    "profile_narrative": TaskRegistration(TaskKind.GENERATE, AiFeature.PROFILE),
+    "profile_card_summarize": TaskRegistration(TaskKind.GENERATE, AiFeature.PROFILE),
+    "search_parse": TaskRegistration(TaskKind.GENERATE, AiFeature.SEARCH),
+    "search_suggest": TaskRegistration(TaskKind.GENERATE, AiFeature.SEARCH),
+    "compatibility": TaskRegistration(TaskKind.GENERATE, AiFeature.COMPATIBILITY_SHADOW),
+    "compatibility_llm": TaskRegistration(TaskKind.GENERATE, AiFeature.COMPATIBILITY_SHADOW),
+    "recommend_rebuild": TaskRegistration(TaskKind.GENERATE, AiFeature.RECOMMEND),
+    "voice_transcribe": TaskRegistration(TaskKind.GENERATE, AiFeature.VOICE),
+    # 读取/派生类：明确所有者、输入来源、授权范围与版本。
+    "search_execute": TaskRegistration(TaskKind.READ, AiFeature.SEARCH),
+    "profile_projection": TaskRegistration(TaskKind.READ, AiFeature.PROFILE),
+    # restore 是同步幂等锚，无 Worker handler；登记以免被判未登记。
+    "profile_restore": TaskRegistration(
+        TaskKind.READ, AiFeature.PROFILE, has_handler=False
+    ),
+    # 清理治理类：不依赖生成开关，AI 关闭后仍须能清理。
+    "cleanup": TaskRegistration(TaskKind.GOVERNANCE, None),
 }
+
+# 兼容既有测试：只暴露带功能开关的登记项（cleanup 的 feature 为 None）。
+
+# ``cleanup`` 任务类型的公开常量（与 ``profile.CLEANUP_TASK_TYPE`` 同值）。
+# 定义在此处而不是从 ``profile`` 导入：``profile`` 反向依赖本模块的
+# ``enqueue_task``，从那里取常量会形成循环导入。任务类型的权威来源是上面的
+# ``_TASK_REGISTRY``，此常量供治理类调用方（如 memory.lifecycle）引用。
+CLEANUP_TASK_TYPE = "cleanup"
+_TASK_FEATURES = {
+    task_type: registration.feature
+    for task_type, registration in _TASK_REGISTRY.items()
+    if registration.feature is not None
+}
+
+# 未登记任务复用冻结码，不新增 AI_TASK_UNREGISTERED（AiErrorCode 14 码冻结）。
+_UNREGISTERED_TASK_ERROR_CODE = "AI_FEATURE_DISABLED"
+
+
+def get_task_registration(task_type: str) -> TaskRegistration | None:
+    """Return the explicit registration for ``task_type``, or ``None``."""
+    return _TASK_REGISTRY.get(task_type)
+
+
+def is_registered_task_type(task_type: str) -> bool:
+    return task_type in _TASK_REGISTRY
 
 
 async def _load_current_completion_context(
     db: AsyncSession, task: AiTaskRecord
-) -> tuple[bool, bool, RevisionVector]:
-    """Re-read release gate, active consent and revisions before writing output."""
-    feature = _TASK_FEATURES.get(task.task_type)
+) -> tuple[bool, bool, RevisionVector, bool]:
+    """Re-read release gate, active consent and revisions before writing output.
+
+    第四个返回值 ``registered``：未登记任务不得默认放行（修复清单 §3.12.2）。
+    治理类任务不检查生成开关，始终 ``feature_enabled=True``。
+    """
+    registration = get_task_registration(task.task_type)
+    registered = registration is not None
     feature_enabled = True
-    if feature is not None:
-        try:
-            require_ai_feature(feature, settings)
-        except AiFeatureDisabledError:
+    if registration is not None and registration.kind is not TaskKind.GOVERNANCE:
+        feature = registration.feature
+        if feature is None:
             feature_enabled = False
+        else:
+            try:
+                require_ai_feature(feature, settings)
+            except AiFeatureDisabledError:
+                feature_enabled = False
 
     result = await db.execute(
         text(
@@ -390,7 +456,7 @@ async def _load_current_completion_context(
             consent_matches = consent_matches and str(
                 current_consent["policy_revision"]
             ) == str(snapshot["policy_revision"])
-    return feature_enabled, consent_matches, current_revision
+    return feature_enabled, consent_matches, current_revision, registered
 
 
 async def _supersede(db: AsyncSession, task: AiTaskRecord, now: datetime) -> AiTaskRecord:
@@ -772,18 +838,42 @@ async def complete_task(
     # 会完全跳过完成门禁，导致旧版本/已撤回 consent 的结果覆盖新状态。
     # 只有需要回滚保护的子写（supersede）才在 savepoint 内执行；安全
     # 复查本身是只读 SELECT，不依赖 savepoint。
-    feature_enabled, consent_matches, current_revision = (
+    feature_enabled, consent_matches, current_revision, registered = (
         await _load_current_completion_context(db, task)
     )
+    if not registered:
+        # 未登记类型不得默认 True 放行；完成期失败且不可重试。
+        if before_not_applied is not None:
+            await before_not_applied()
+        return await fail_task(
+            db,
+            task_id,
+            worker_id,
+            error_code=_UNREGISTERED_TASK_ERROR_CODE,
+            retryable=False,
+        )
     if not feature_enabled or not consent_matches:
         return await supersede()
-    if task.source_revision_json and (
+    # 治理类任务（cleanup / memory 清理）不受版本向量门禁：它们不是「用旧版本
+    # 覆盖新状态」的生成结果，而是删除动作本身。若在此判 superseded，会把 handler
+    # 已执行的物理删除随 savepoint 一起回滚，而接口已向用户返回成功——形成
+    # 「承诺删除、实际零删除」的合规假账（第四批审查 B-1）。
+    # 生成 / 读取类任务仍严格比对，语义不变。
+    _registration = get_task_registration(task.task_type)
+    _revision_gated = (
+        _registration is None or _registration.kind is not TaskKind.GOVERNANCE
+    )
+    if _revision_gated and task.source_revision_json and (
         task.source_revision_json != current_revision.as_dict()
     ):
         return await supersede()
-    if revisions is not None and _revision_dict(revisions) != current_revision.as_dict():
+    if (
+        _revision_gated
+        and revisions is not None
+        and _revision_dict(revisions) != current_revision.as_dict()
+    ):
         return await supersede()
-    if _revisions_changed(task.source_revision_json, revisions):
+    if _revision_gated and _revisions_changed(task.source_revision_json, revisions):
         if task.status is AiTaskStatus.RUNNING:
             return await supersede()
         return await not_applied()

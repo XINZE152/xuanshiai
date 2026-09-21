@@ -39,6 +39,9 @@ from app.services.ai.base import (
     NarrativeRecentChange,
     NarrativeRequest,
     NarrativeResult,
+    ProfileCardSummarizeRequest,
+    ProfileCardSummarizeResult,
+    ProfileCardDraftFieldResult,
     ProviderError,
     ProviderErrorKind,
     ReplyRequest,
@@ -56,6 +59,11 @@ from app.services.ai.prompts.profile_extract import (
 )
 from app.services.ai.prompts.compatibility_compare import build_compatibility_compare_prompt
 from app.services.ai.prompts.profile_narrative import build_profile_narrative_prompt
+from app.services.ai.prompts.profile_card_summarize import (
+    PROFILE_CARD_PROMPT_VERSION,
+    PROFILE_CARD_SCHEMA_VERSION,
+    build_profile_card_summarize_prompt,
+)
 from app.services.ai.prompts.search_parse import build_search_parse_prompt
 from app.services.ai.prompts.voice_reply import build_voice_reply_messages
 
@@ -156,7 +164,10 @@ _IDEAL_PARTNER_FIXTURE_FIELDS: dict[str, tuple[Any, str | None, float]] = {
     "marriage_status": (("single",), "希望未婚", 0.90),
     "education_level": ({"min": 3, "max": None}, "本科及以上", 0.89),
     "height_cm": ({"min": 160, "max": 180}, "身高160到180", 0.96),
-    "income_band": ({"min": 10000, "max": None}, "月收入至少一万", 0.83),
+    # 收入档位区间：与个人同口径（0-6 月收入档），「至少一万」对应档位 3
+    # （PRODUCT.md 收入档位表：3=1万-2万）。此前误写金额 10000，与个人
+    # 档位 0-6 混算后被评分器判为不满足。
+    "income_band": ({"min": 3, "max": None}, "月收入至少一万", 0.83),
     "occupation_group": (("technology", "education"), "技术或教育行业", 0.76),
     "interest_tags": (("旅行", "音乐"), "喜欢旅行和音乐", 0.81),
     "lifestyle_tags": (("户外",), "愿意周末户外", 0.74),
@@ -404,6 +415,40 @@ class MockAIProvider:
     ) -> CompatibilityCompareResult:
         self._check_failure("compare_compatibility")
         return _COMPARE_FIXTURE
+
+    async def generate_profile_card_draft(
+        self, request: ProfileCardSummarizeRequest
+    ) -> ProfileCardSummarizeResult:
+        self._check_failure("generate_profile_card_draft")
+        return ProfileCardSummarizeResult(
+            schema_version=PROFILE_CARD_SCHEMA_VERSION,
+            prompt_version=PROFILE_CARD_PROMPT_VERSION,
+            self_intro=ProfileCardDraftFieldResult(
+                value="我喜欢把周末过得具体一点，散步、做饭，也愿意认真经营一段稳定关系。",
+                confidence=0.86,
+                source_ref="insight",
+            ),
+            qa_1_partner=ProfileCardDraftFieldResult(
+                value="我希望遇到愿意沟通、生活节奏相近、也能一起把日常过踏实的人。",
+                confidence=0.82,
+                source_ref="ideal_partner",
+            ),
+            qa_3_love=ProfileCardDraftFieldResult(
+                value="我期待的爱情是彼此尊重、慢慢靠近，而不是急着证明什么。",
+                confidence=0.8,
+                source_ref="relationship",
+            ),
+            qa_2_sports_candidates=ProfileCardDraftFieldResult(
+                candidates=("徒步", "跑步"),
+                confidence=0.55,
+                source_ref="lifestyle",
+            ),
+            interest_tag_candidates=ProfileCardDraftFieldResult(
+                candidates=("徒步", "阅读", "下厨"),
+                confidence=0.7,
+                source_ref="interest_tags",
+            ),
+        )
 
     async def stream_chat(
         self,
@@ -1346,6 +1391,24 @@ class _OpenAICompatProvider:
             raise ProviderError(
                 code="AI_TEMPORARILY_UNAVAILABLE",
                 message=f"compatibility compare 输出未通过 schema 校验: {exc}",
+                kind=ProviderErrorKind.RETRYABLE,
+            ) from exc
+
+    async def generate_profile_card_draft(
+        self, request: ProfileCardSummarizeRequest
+    ) -> ProfileCardSummarizeResult:
+        prompt = build_profile_card_summarize_prompt(
+            personal_fields=request.personal_fields,
+            narrative=request.narrative,
+            ideal_partner_summary=request.ideal_partner_summary,
+        )
+        data = await self._chat_json(prompt)
+        try:
+            return ProfileCardSummarizeResult.model_validate(data)
+        except ValidationError as exc:
+            raise ProviderError(
+                code="AI_TEMPORARILY_UNAVAILABLE",
+                message=f"profile card 输出未通过 schema 校验: {exc}",
                 kind=ProviderErrorKind.RETRYABLE,
             ) from exc
 

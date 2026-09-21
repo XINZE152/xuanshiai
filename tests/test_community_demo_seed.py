@@ -64,3 +64,60 @@ def test_community_demo_seed_can_import_backend_modules_when_run_as_a_script() -
     script = (ROOT / "scripts" / "seed_community_demo.py").read_text(encoding="utf-8")
 
     assert "sys.path.insert" in script
+
+
+def test_member_seed_refuses_non_development_environments() -> None:
+    from scripts.seed_community_members import seed_community_members
+
+    with pytest.raises(RuntimeError, match="development/testing"):
+        seed_community_members(connection=object(), environment="production")
+
+
+def test_member_seed_roster_is_complete_and_balanced() -> None:
+    """每个演示会员都要有足以打开 C 端门禁的完整资料。"""
+    from scripts.seed_community_members import MEMBERS
+
+    assert len(MEMBERS) >= 10
+    assert len({member["phone"] for member in MEMBERS}) == len(MEMBERS)
+    assert len({member["id_card"] for member in MEMBERS}) == len(MEMBERS)
+    genders = {member["gender"] for member in MEMBERS}
+    assert genders == {1, 2}
+    for member in MEMBERS:
+        assert len(member["id_card"]) == 18
+        # 自我介绍需 ≥20 字，否则完整度「自我介绍」项不达标。
+        assert len(member["intro"]) >= 20
+        # 兴趣 + 性格标签需 ≥3 条。
+        assert len(member["interest_tags"]) + len(member["personality_tags"]) >= 3
+        assert member["age_range"][0] <= member["age_range"][1]
+        assert member["height_range"][0] <= member["height_range"][1]
+
+
+def test_member_seed_assets_resolve_to_frontend_files() -> None:
+    from scripts.seed_community_members import MEMBERS, _asset_source
+
+    for member in MEMBERS:
+        for token in (member["avatar"], *member["photos"]):
+            assert _asset_source(token).exists(), f"缺少素材 {token}"
+
+
+def test_member_seed_approves_leftover_pending_media() -> None:
+    """待审媒体会让作者在所有推荐/搜索里消失，脚本必须清掉这个状态。"""
+    script = (ROOT / "scripts" / "seed_community_members.py").read_text(encoding="utf-8")
+
+    assert "_approve_pending_media" in script
+    assert "review_status=1" in script
+    # 该补审动作只应作用于演示会员自己，不能全表放开。
+    assert "WHERE user_id=%s AND deleted_at IS NULL AND review_status <> 1" in script
+
+
+def test_member_seed_uses_idempotent_writes_only() -> None:
+    """脚本必须可重复执行且不删除既有数据。"""
+    script = (ROOT / "scripts" / "seed_community_members.py").read_text(encoding="utf-8")
+
+    assert "ON DUPLICATE KEY UPDATE" in script
+    assert "INSERT IGNORE" in script
+    # 删除仅允许清理本脚本自己生成的演示媒体。
+    assert "DELETE FROM user_media" in script
+    assert "DELETE FROM users" not in script
+    assert "TRUNCATE" not in script
+    assert "DROP TABLE" not in script

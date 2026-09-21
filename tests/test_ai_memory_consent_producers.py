@@ -445,6 +445,21 @@ class _FlowMappingResult:
 class ConsentFlowSession(FakeProjectionSession):
     """在内存投影假库之上补齐 consent 服务流的 SQL 路由。"""
 
+    async def scalar(
+        self, statement: object, params: dict[str, Any] | None = None
+    ) -> Any:
+        """补齐记忆围栏读取：``current_owner_sequence`` 经 ``db.scalar``。
+
+        consent 撤回在同事务内读取序号水位并冻结进事件 payload；假库按
+        owner 序列表返回当前值。
+        """
+        sql = str(statement)
+        values = dict(params or {})
+        self.calls.append((sql, values))
+        if "next_seq FROM ai_memory_owner_sequence" in sql:
+            return self.store.owner_sequences.get(int(values["owner_user_id"]), 0)
+        return 0
+
     async def execute(self, statement: object, params: dict[str, Any] | None = None) -> Any:
         sql = str(statement)
         values = dict(params or {})
@@ -525,6 +540,8 @@ class ConsentFlowSession(FakeProjectionSession):
             "UPDATE ai_search_snapshot",
             "UPDATE ai_search_result",
             "UPDATE ai_compatibility_snapshot",
+            # 画像卡片草稿的撤权失效语句（与 ai_profile_draft 同族，均为幂等标记）。
+            "UPDATE ai_profile_card_draft",
         ):
             if sql.startswith(prefix):
                 return _WriteResultLocal(rowcount=1)
