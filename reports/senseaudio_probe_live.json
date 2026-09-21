@@ -1,0 +1,77 @@
+{
+  "probe": "senseaudio_realtime",
+  "model": "senseaudio-realtime-1.0",
+  "errors": [
+    {
+      "stage": "B_first_turn",
+      "code": "NO_FINAL_TRANSCRIPT",
+      "message": "未见 user.transcript.done"
+    },
+    {
+      "stage": "C_second_turn",
+      "code": "NO_FINAL_TRANSCRIPT",
+      "message": "复用连接第二轮无定稿"
+    },
+    {
+      "stage": "D_update",
+      "code": "invalid_tts_speed",
+      "message": "语速 0.0 超出范围 0.5~2.0，本次更新已忽略"
+    }
+  ],
+  "stages": {
+    "A_connect_ready": [
+      {
+        "t_ms": 3082.4,
+        "event": "ready",
+        "detail": "elapsed_ms=3082.4"
+      }
+    ],
+    "B_first_turn": [
+      {
+        "t_ms": 15758.7,
+        "event": "error",
+        "detail": "NO_FINAL_TRANSCRIPT"
+      }
+    ],
+    "C_second_turn": [
+      {
+        "t_ms": 28678.7,
+        "event": "error",
+        "detail": "NO_FINAL_TRANSCRIPT"
+      }
+    ],
+    "D_update": [
+      {
+        "t_ms": 28679.6,
+        "event": "update_sent",
+        "detail": ""
+      },
+      {
+        "t_ms": 28988.8,
+        "event": "VendorError",
+        "detail": ""
+      },
+      {
+        "t_ms": 28988.8,
+        "event": "error",
+        "detail": "invalid_tts_speed"
+      }
+    ],
+    "E_odd_chunk": [
+      {
+        "t_ms": 28989.2,
+        "event": "sent",
+        "detail": "bytes=3"
+      }
+    ],
+    "F_cancel": [
+      {
+        "t_ms": 38543.3,
+        "event": "cancel_sent",
+        "detail": ""
+      }
+    ],
+    "verdict": "FAIL: 2 项核心能力未通过"
+  },
+  "verdict": "FAIL: 2 项核心能力未通过"
+}

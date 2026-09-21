@@ -178,6 +178,8 @@ class MoxiangTurn(BaseModel):
     answer_text: str = Field(..., min_length=1, max_length=2000)
     client_turn_id: str
     created_at: str | None = None
+    # 实时语音 v2 回复元数据（生成/播放状态）；非语音行保持 None（向后兼容）。
+    voice_reply_metadata: dict[str, Any] | None = None
 
 
 class MoxiangTurnsResponse(BaseModel):

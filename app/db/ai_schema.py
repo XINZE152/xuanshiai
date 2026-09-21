@@ -182,6 +182,7 @@ AI_TABLES = {
             `answer_text` text NOT NULL COMMENT '原始回答，不入普通日志',
             `status` varchar(24) NOT NULL DEFAULT 'saved',
             `source_type` varchar(24) DEFAULT NULL,
+            `voice_reply_metadata` json DEFAULT NULL COMMENT '实时语音 v2 回复元数据（生成/播放状态），非语音行为 NULL',
             `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (`id`),

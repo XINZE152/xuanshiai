@@ -1012,6 +1012,14 @@ async def _reuse_active_session(
     if _is_expired(row.get("expires_at")):
         await _mark_stale(db, str(row["session_id"]))
         raise ProfileSessionStale()
+    # 版本漂移同样按 stale 处理（与 load_owned_active_session 语义一致）：
+    # 会话行快照落后于用户当前 revision 向量时，首个 turn 提交必然
+    # ProfileSessionStale——与其让调用方拿到一个不可提交的会话，不如在
+    # 复用判定时就关槽（_mark_stale 会释放活动槽），由调用方重建。
+    stored = _stored_revision(row)
+    if stored != RevisionVector(profile=revision.profile, preference=revision.preference):
+        await _mark_stale(db, str(row["session_id"]))
+        raise ProfileSessionStale()
     field_keys, confirmed_keys = await _load_field_keys(db, str(row["session_id"]))
     draft_id = await _load_active_draft_id_for_session(db, str(row["session_id"]))
     return _session_from_row(
@@ -1267,9 +1275,15 @@ async def create_master_session(
     existing = await _find_active_session(db, owner_user_id, subject_value)
     if existing is not None:
         if str(existing.get("session_kind") or "build") == "master":
-            return await _reuse_active_session(
-                db, existing, revision=revision, consent_snapshot=consent_snapshot
-            )
+            try:
+                return await _reuse_active_session(
+                    db, existing, revision=revision, consent_snapshot=consent_snapshot
+                )
+            except ProfileSessionStale:
+                # 过期或版本漂移的活动槽已在 _reuse_active_session 内关槽；
+                # 落到下方新建分支，保证 session_start 返回可直接提交的会话，
+                # 而不是把 stale 会话透传给首个 turn 再失败。
+                existing = None
         # 旧 build/update 会话不能静默复用为 master：抽取 handler 会按
         # session_kind 分流，误复用会把墨相师轮次送进题库/更新路径。保留旧数据，
         # 仅关闭活动槽并标记 stale，再创建新的 master 会话。
@@ -1348,19 +1362,51 @@ async def create_master_session(
 
 
 async def persist_master_assistant_reply(
-    db: AsyncSession, session_id: str, user_id: int, reply_text: str
-) -> None:
+    db: AsyncSession,
+    session_id: str,
+    user_id: int,
+    reply_text: str,
+    *,
+    voice_reply_metadata: dict[str, Any] | None = None,
+) -> str:
     """把墨相师回复落为 assistant turn（对话全程可审计）。不 commit。
 
     现场版 ``_insert_assistant_turn`` 签名接收 ``ProfileSession``（简报按意图
     写、现场签名优先），故先经 ``load_owned_active_session`` 做属主/活动校验
     并加载会话——入参 ``user_id`` 用于属主校验，turn 行的 user_id 以会话属主
     为准。纯空白回复为 no-op，不产生空 turn。
+
+    ``voice_reply_metadata`` 为实时语音 v2 的回复元数据（生成/播放状态），
+    可空；旧数据保持 NULL，不推断为已播放。返回 assistant turn_id，
+    空白回复返回空串。
     """
     if not reply_text.strip():
-        return
+        return ""
     session = await load_owned_active_session(db, session_id, user_id)
-    await _insert_assistant_turn(db, session, reply_text.strip())
+    turn = await _insert_assistant_turn(
+        db, session, reply_text.strip(), voice_reply_metadata=voice_reply_metadata
+    )
+    return turn.turn_id
+
+
+async def update_voice_reply_metadata(
+    db: AsyncSession, assistant_turn_id: str, metadata: dict[str, Any]
+) -> None:
+    """刷新实时语音回复的元数据（播放状态推进）。不 commit。
+
+    仅当该 turn 行是 assistant 且已有元数据时更新，避免覆盖非语音行。
+    """
+    await db.execute(
+        text(
+            "UPDATE ai_profile_turn SET voice_reply_metadata = :meta "
+            "WHERE turn_id = :turn_id AND role = 'assistant' "
+            "AND voice_reply_metadata IS NOT NULL"
+        ),
+        {
+            "turn_id": assistant_turn_id,
+            "meta": json.dumps(metadata, ensure_ascii=False),
+        },
+    )
 
 
 async def update_session_input_mode(
@@ -2242,12 +2288,17 @@ def _entry_digest_with_keys(rows: list[dict[str, Any]]) -> str | None:
 
 
 async def _insert_assistant_turn(
-    db: AsyncSession, session: ProfileSession, question_text: str
+    db: AsyncSession,
+    session: ProfileSession,
+    question_text: str,
+    *,
+    voice_reply_metadata: dict[str, Any] | None = None,
 ) -> ProfileTurn:
     """澄清追问以 assistant turn 落库（role='assistant'，turn_no 同序列）。
 
     与用户 turn 相同的 FOR UPDATE 行锁序列化 turn_no，避免并发抽取任务
-    写出重复序号。不 commit。
+    写出重复序号。不 commit。``voice_reply_metadata`` 仅实时语音回复使用，
+    可空（列可空，旧行保持 NULL）。
     """
     await db.execute(
         text(
@@ -2266,13 +2317,19 @@ async def _insert_assistant_turn(
     turn_no = int(await _scalar(result) or 1)
     turn_id = uuid.uuid4().hex
     client_turn_id = f"assist-{turn_id[:24]}"
+    metadata_json = (
+        json.dumps(voice_reply_metadata, ensure_ascii=False)
+        if voice_reply_metadata is not None
+        else None
+    )
     await db.execute(
         text(
             "INSERT INTO ai_profile_turn "
             "(turn_id, session_id, client_turn_id, user_id, turn_no, role, "
-            " answer_text, status, source_type, created_at) "
+            " answer_text, status, source_type, voice_reply_metadata, created_at) "
             "VALUES (:turn_id, :session_id, :client_turn_id, :user_id, :turn_no, "
-            " 'assistant', :answer_text, 'saved', 'assistant_clarify', UTC_TIMESTAMP())"
+            " 'assistant', :answer_text, 'saved', 'assistant_clarify', "
+            " :voice_reply_metadata, UTC_TIMESTAMP())"
         ),
         {
             "turn_id": turn_id,
@@ -2281,6 +2338,7 @@ async def _insert_assistant_turn(
             "user_id": session.owner_user_id,
             "turn_no": turn_no,
             "answer_text": question_text,
+            "voice_reply_metadata": metadata_json,
         },
     )
     return ProfileTurn(

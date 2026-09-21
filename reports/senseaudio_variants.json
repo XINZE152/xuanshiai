@@ -1,0 +1,71 @@
+{
+  "experiment1_stall": {
+    "baseline_silence": {
+      "rounds": [
+        {
+          "outcome": "fatal_stall",
+          "detail": "fatal: sami error: codes=52000016, desc=AudioTTSIdleTimeoutError",
+          "turn_done": false,
+          "reply_len": 0,
+          "audio_bytes": 409600,
+          "ms": 51866
+        },
+        {
+          "outcome": "fatal_stall",
+          "detail": "fatal: sami error: codes=52000016, desc=AudioTTSIdleTimeoutError",
+          "turn_done": false,
+          "reply_len": 0,
+          "audio_bytes": 413696,
+          "ms": 51548
+        },
+        {
+          "outcome": "content_complete_no_turn_done",
+          "detail": "",
+          "turn_done": false,
+          "reply_len": 21,
+          "audio_bytes": 259326,
+          "ms": 60521
+        }
+      ],
+      "summary": "{\"fatal_stall\": 2, \"content_complete_no_turn_done\": 1}"
+    },
+    "no_silence_commit": {
+      "rounds": [
+        {
+          "outcome": "no_transcript",
+          "detail": "无定稿",
+          "ms": 23782
+        },
+        {
+          "outcome": "no_transcript",
+          "detail": "无定稿",
+          "ms": 24191
+        },
+        {
+          "outcome": "no_transcript",
+          "detail": "无定稿",
+          "ms": 23242
+        }
+      ],
+      "summary": "{\"no_transcript\": 3}"
+    }
+  },
+  "experiment2_update": {
+    "speed": {
+      "outcome": "provider_error:PROVIDER_EVENT_TIMEOUT",
+      "events": []
+    },
+    "tts_speed": {
+      "outcome": "provider_error:PROVIDER_EVENT_TIMEOUT",
+      "events": []
+    },
+    "speech_rate": {
+      "outcome": "provider_error:PROVIDER_EVENT_TIMEOUT",
+      "events": []
+    },
+    "tts_setting.speed": {
+      "outcome": "provider_error:PROVIDER_EVENT_TIMEOUT",
+      "events": []
+    }
+  }
+}

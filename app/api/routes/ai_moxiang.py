@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from uuid import uuid4
 
@@ -159,6 +160,16 @@ async def get_session_turns(
         created_at = row.get("created_at")
         if created_at is not None and hasattr(created_at, "isoformat"):
             created_at = created_at.isoformat()
+        # 实时语音 v2 回复元数据：JSON 列经原生驱动可能回传字符串，
+        # 统一收敛为 dict 或 None（解析失败按无元数据处理，不丢 turn）。
+        raw_metadata = row.get("voice_reply_metadata")
+        if isinstance(raw_metadata, str):
+            try:
+                raw_metadata = json.loads(raw_metadata)
+            except (TypeError, ValueError):
+                raw_metadata = None
+        if not isinstance(raw_metadata, dict):
+            raw_metadata = None
         turns.append(
             MoxiangTurn(
                 turn_id=str(row["turn_id"]),
@@ -167,6 +178,7 @@ async def get_session_turns(
                 answer_text=str(row["answer_text"]),
                 client_turn_id=str(row["client_turn_id"]),
                 created_at=str(created_at) if created_at is not None else None,
+                voice_reply_metadata=raw_metadata,
             )
         )
     return MoxiangTurnsResponse(

@@ -265,6 +265,29 @@ class Settings(BaseSettings):
         "wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1"
     )
 
+    # ==================== 实时全双工语音对话（SenseAudio，v2 协议）====================
+    # 墨相师实时语音分支：由端到端实时供应商直接产出语音回复（ASR+LLM+TTS 一体），
+    # 画像抽取仍走现有旅程任务。默认关闭；生产环境 fail closed：
+    # 需三道审批门禁 + 供应商凭据（见 _validate_ai_feature_gates，按实际启用
+    # 能力校验对应凭据，不借用阿里云 AccessKey 门禁）。
+    # api_key 仅存于被忽略的 .env，不进 .env.example、不进代码与日志。
+    ai_realtime_voice_enabled: bool = False
+    # 实时供应商选择；空串表示未配置，v2 协商直接失败。
+    ai_realtime_voice_provider: Literal["", "senseaudio"] = ""
+    ai_senseaudio_api_key: SecretStr | None = None
+    ai_senseaudio_ws_url: str = "wss://api.senseaudio.cn/ws/v1/realtime/voice-dialog"
+    ai_senseaudio_model: str = "senseaudio-realtime-1.0"
+    # 供应商音色；空串使用供应商默认女声。
+    ai_senseaudio_voice: str = ""
+    # 会话与额度灰度默认值（方案 §5）：每用户同时 1 条会话（内存计数）、
+    # 单次最多 10 分钟、每日最多 20 分钟连接时长、无有效发言 60 秒退出。
+    ai_realtime_session_max_minutes: int = Field(default=10, gt=0, le=60)
+    ai_realtime_daily_minutes: int = Field(default=20, gt=0, le=600)
+    ai_realtime_idle_exit_seconds: int = Field(default=60, gt=0, le=600)
+    # 下行放行前的输入审核等待上限（秒）：最终转写提交（含审核）超过该时长
+    # 仍未通过时终止本轮回复，绝不放行未经审核的下行内容。
+    ai_realtime_submission_hold_seconds: float = Field(default=15.0, gt=0, le=60)
+
     # AI 任务/租约/重试/限流配置。
     ai_lease_seconds: int = Field(default=300, gt=0, le=3600)
     ai_max_attempts: int = Field(default=3, gt=0, le=10)
@@ -437,6 +460,10 @@ class Settings(BaseSettings):
                 self.ai_compatibility_shadow_enabled,
                 self.ai_recommend_enabled,
                 self.ai_voice_enabled,
+                # 实时对话/实时语音各自独立开关，必须参与判定，否则仅开
+                # 其中一个时整段 fail-closed 校验会被跳过。
+                self.ai_voice_conversation_enabled,
+                self.ai_realtime_voice_enabled,
                 self.ai_moxiang_journey_enabled,
             )
         )
@@ -464,6 +491,18 @@ class Settings(BaseSettings):
             ):
                 raise ValueError(
                     "生产环境启用实时语音对话必须配置 AccessKey ID/Secret"
+                )
+        if self.ai_realtime_voice_enabled:
+            # 实时语音 v2 按实际启用的能力校验对应凭据：SenseAudio 用自己的
+            # api_key，不借用阿里云 AccessKey 门禁；旧 STT/TTS 启用时仍走
+            # 上面的原凭据检查。
+            if self.ai_realtime_voice_provider != "senseaudio":
+                raise ValueError(
+                    "生产环境启用实时语音必须配置 ai_realtime_voice_provider"
+                )
+            if not self.ai_senseaudio_api_key:
+                raise ValueError(
+                    "生产环境启用实时语音必须配置 SenseAudio api_key"
                 )
 
 
