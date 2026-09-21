@@ -182,11 +182,15 @@ _TAG_FIELDS = frozenset({"interest_tags", "lifestyle_tags"})
 _RANGE_LIMITS: Mapping[str, tuple[int, int | None]] = MappingProxyType(
     {
         "age": (18, 100),
-        "education_level": (1, 8),
+        # 学历刻度 1-6（profile_extract 抽取契约：1=初中及以下…6=博士）。
+        # 此前写作 1-8，模型漂移出的 7/8 会入库但无对应中文展示。
+        "education_level": (1, 6),
         "height_cm": (100, 250),
-        # 理想型 income_band 是金额区间（如「至少一万」→ min=10000），与个人
-        # 档位 0-6 不同口径；range 分支不设档位上限，档位上界见 _INTEGER_LIMITS。
-        "income_band": (0, None),
+        # 理想型 income_band 与个人同口径：0-6 月收入档位区间（PRODUCT.md
+        # 2026-09-03；抽取 prompt 同界）。此前注释与 mock 按「金额区间」
+        # （如「至少一万」→ min=10000），与抽取契约和评分器三方口径分裂，
+        # 导致档位与金额混算恒判不满足。
+        "income_band": (0, 6),
     }
 )
 # personal 整数档位上界：收入档 0-6（PRODUCT.md 2026-09-03），与抽取 prompt

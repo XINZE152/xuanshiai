@@ -912,6 +912,12 @@ async def moxiang_master_conversation(
                         history = await _load_master_history(db, session.session_id)
                 except Exception as exc:  # noqa: BLE001
                     code = "AI_CONSENT_REQUIRED" if isinstance(exc, AIConsentRequired) else "AI_TEMPORARILY_UNAVAILABLE"
+                    logger.warning(
+                        "moxiang_session_start_failed subject=%s error=%s",
+                        requested_subject,
+                        type(exc).__name__,
+                        exc_info=True,
+                    )
                     await _send_error(ws, code, "墨相师旅程暂不可用，可稍后重试")
                     continue
                 sessions_by_subject[requested_subject] = session.session_id

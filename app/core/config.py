@@ -319,8 +319,9 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    # AI 军师（助手/润色/搜索/匹配，合著仓方案）。与画像/搜索/语音的
-    # ai_provider/ai_master_* 那套互不影响：本套用 ai_enabled + ai_base_url 直连。
+    # AI 军师（助手/润色/搜索/匹配，合著仓方案）。与画像/搜索/语音共用
+    # 生产 fail-closed：``ai_enabled`` 计入 any_ai_enabled。运行时仍走
+    # ``require_ai_feature(AiFeature.ADVISOR)``（master + ai_enabled + 审批门）。
     ai_enabled: bool = False
     ai_base_url: str = "https://api.deepseek.com/v1"
     ai_api_key: SecretStr | None = None
@@ -465,6 +466,9 @@ class Settings(BaseSettings):
                 self.ai_voice_conversation_enabled,
                 self.ai_realtime_voice_enabled,
                 self.ai_moxiang_journey_enabled,
+                # legacy 军师直连栈：只开 ai_enabled 也必须走审批门，
+                # 不得绕过生产 fail-closed（修复清单 §3.12.4）。
+                self.ai_enabled,
             )
         )
         if not any_ai_enabled:

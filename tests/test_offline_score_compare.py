@@ -56,7 +56,7 @@ def test_rows_carry_all_contract_fields() -> None:
         for field in REQUIRED_FIELDS:
             assert field in row, f"{row['sample_id']} 缺字段 {field}"
         assert row["version_legacy"] == "legacy-rule-v1"
-        assert row["version_pair"] == "compatibility-rule-v1"
+        assert row["version_pair"] == "compatibility-rule-v2"
 
 
 def test_coverage_boundary_exactly_050_is_ready() -> None:

@@ -379,6 +379,8 @@ class RetentionCleanupStats:
     generation_audits: int = 0
     outbox_succeeded: int = 0
     outbox_dead_letters: int = 0
+    # 建议发布暂存：越过 expires_at 的行（staged 未发布 / published 已过期）回收。
+    search_suggest_publishes: int = 0
 
 
 def _affected_rows(result: Any) -> int:
@@ -504,6 +506,16 @@ async def run_retention_cleanup(
                 limit=batch_size,
                 index_name="idx_derivation_outbox_retention_dead_letter",
             )
+            # 建议发布暂存：expires_at 是"该建议的对外有效期"，同时用作暂存行的
+            # 回收期限（staged 行若因崩溃未被发布，也在此回收，避免永久残留）。
+            suggest_result = await db.execute(
+                text(
+                    "DELETE FROM ai_search_suggest_publish WHERE expires_at < :cutoff "
+                    "ORDER BY expires_at ASC, id ASC LIMIT :limit"
+                ),
+                {"cutoff": now, "limit": batch_size},
+            )
+            stats.search_suggest_publishes = _affected_rows(suggest_result)
             await db.commit()
         except Exception:
             await db.rollback()

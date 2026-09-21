@@ -145,6 +145,42 @@
         "up": "e0bcf901ee88d7726b0b65de4d170eab12df77a12e3d7e3279a6f2f12bdeed4f",
         "down": "960c1ad0fb3e67681b719961f0008d1ee9089d18106190764e8495c7d593f9bb"
       }
+    },
+    {
+      "version": "20260917_01_compatibility_rule_v2",
+      "up": "20260917_01_compatibility_rule_v2_up.sql",
+      "down": "20260917_01_compatibility_rule_v2_down.sql",
+      "sha256": {
+        "up": "8c59c0b363a37fbbd9d8c4eb1ae6f88ad51eab3861363674c74fb592429af048",
+        "down": "8a0388f9836d35f574ebafde6108f4633ec2238d1146f68f25eb3062c98f7f9a"
+      }
+    },
+    {
+      "version": "20260917_02_search_suggest_publish",
+      "up": "20260917_02_search_suggest_publish_up.sql",
+      "down": "20260917_02_search_suggest_publish_down.sql",
+      "sha256": {
+        "up": "42ec53e676c2022bc4876e45180c42e8d94156685163294720a586f4d0fbfccc",
+        "down": "a815caed6d185882a72c1b032577e34b642134b679e7fa6a22a1222cf257da15"
+      }
+    },
+    {
+      "version": "20260917_03_profile_card_draft",
+      "up": "20260917_03_profile_card_draft_up.sql",
+      "down": "20260917_03_profile_card_draft_down.sql",
+      "sha256": {
+        "up": "021669bf410c59fd181ef2222aa02ee95d531ad09c2c8fb25506f6ed3e487d00",
+        "down": "a0b2d22c109c07b7b020af89d12da75f1ab1b10311870a45b4b818fe24857563"
+      }
+    },
+    {
+      "version": "20260917_04_user_profile_qa_answers",
+      "up": "20260917_04_user_profile_qa_answers_up.sql",
+      "down": "20260917_04_user_profile_qa_answers_down.sql",
+      "sha256": {
+        "up": "aa98323849ea79a67c3b82f7489fc0bb6164e751ee7bb5e073aaac7db2b1c6f8",
+        "down": "83d9075efec32d0be88dcdbd1f2a6be0a846cce30f33ea449c4eb2471b902ed7"
+      }
     }
   ]
 }

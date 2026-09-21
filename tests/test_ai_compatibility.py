@@ -4,7 +4,7 @@ The three Step 1 tests are mirrored verbatim from the task brief.  Additional
 tests pin the frozen eight-dimension weights (统一方案 §9.2), the stable reason
 code / evidence-ref alignment (§9.3), hard-gate-before-rules on the read path
 (§5.2), snapshot staleness on profile/privacy revision changes (§5.5), and the
-shadow discipline: ``compatibility-rule-v1`` writes only
+shadow discipline: ``compatibility-rule-v2`` writes only
 ``ai_compatibility_snapshot`` with ``display_eligible=false`` while the legacy
 ``match_score`` semantics stay ``legacy-rule-v1`` (§9.1/§9.5, §10.4).
 
@@ -87,19 +87,19 @@ def feature_a() -> FeatureSet:
             "marriage_status": "single",
             "education_level": 3,
             "height_cm": 175,
-            "income_band": 20000,
+            "income_band": 4,
             "interest_tags": ["旅行", "摄影"],
-            "relationship_goal": "婚姻",
+            "relationship_goal": "marriage",
         },
         preference={
             "age": {"min": 26, "max": 34},
             "city_code": ["330100", "330200"],
-            "marriage_status": "single",
+            "marriage_status": ["single"],
             "education_level": {"min": 3},
             "height_cm": {"min": 160, "max": 180},
-            "income_band": {"min": 10000},
+            "income_band": {"min": 3},
             "interest_tags": ["旅行", "音乐"],
-            "relationship_goal": "婚姻",
+            "relationship_goal": ["marriage"],
         },
     )
 
@@ -113,19 +113,19 @@ def feature_b() -> FeatureSet:
             "marriage_status": "single",
             "education_level": 4,
             "height_cm": 165,
-            "income_band": 15000,
+            "income_band": 3,
             "interest_tags": ["旅行", "美食"],
-            "relationship_goal": "婚姻",
+            "relationship_goal": "marriage",
         },
         preference={
             "age": {"min": 28, "max": 36},
             "city_code": ["330100"],
-            "marriage_status": "single",
+            "marriage_status": ["single"],
             "education_level": {"min": 3},
             "height_cm": {"min": 170, "max": 185},
-            "income_band": {"min": 8000},
+            "income_band": {"min": 2},
             "interest_tags": ["摄影", "旅行"],
-            "relationship_goal": "婚姻",
+            "relationship_goal": ["marriage"],
         },
     )
 
@@ -174,6 +174,24 @@ async def test_shadow_never_overwrites_legacy_match_score(compatibility_store) -
     legacy = await compatibility_store.read_legacy_card(viewer_id=10, target_id=42)
     assert legacy.algorithm_version == "legacy-rule-v1"
     assert legacy.match_score_source == "legacy-rule-v1"
+
+
+def test_algorithm_version_bump_invalidates_stored_v1_snapshots() -> None:
+    """算法升版必须让 v1 分数失效：读路径按 algorithm_version 精确过滤。
+
+    这保证「修好评分器」之后，旧的错误分数不会继续被当作最新结果返回，
+    也满足清单 §3.3 的验收项「旧错误快照按版本失效」。
+    """
+    from app.services.ai.compatibility import (
+        COMPATIBILITY_ALGORITHM_VERSION,
+        LEGACY_ALGORITHM_VERSION,
+    )
+
+    assert COMPATIBILITY_ALGORITHM_VERSION == "compatibility-rule-v2"
+    # v1 分数已被证伪，不得与当前算法版本同值（否则读路径会继续命中旧分）。
+    assert COMPATIBILITY_ALGORITHM_VERSION != "compatibility-rule-v1"
+    # 算法版本与旧展示分语义是两个独立常量，不能混为一谈。
+    assert LEGACY_ALGORITHM_VERSION == "legacy-rule-v1"
 
 
 # ----------------------------------------------------------------------
@@ -388,7 +406,7 @@ class CompatibilityStore:
     # ---- brief Step 1 fixture surface -----------------------------------
 
     async def write_shadow(self, viewer_id: int, target_id: int) -> str:
-        """写一条 shadow 快照（compatibility-rule-v1，display_eligible=false）。
+        """写一条 shadow 快照（compatibility-rule-v2，display_eligible=false）。
 
         使用本 store 的假会话走真实服务函数，确保 shadow 只写
         ai_compatibility_snapshot、不触碰旧字段。
@@ -454,9 +472,9 @@ class CompatibilityStore:
                 "marriage_status": "single",
                 "education_level": 3,
                 "height_cm": 175,
-                "income_band": 20000,
+                "income_band": 4,
                 "interest_tags": ["旅行", "摄影"],
-                "relationship_goal": "婚姻",
+                "relationship_goal": "marriage",
             },
             revision=viewer_rev,
         )
@@ -466,12 +484,12 @@ class CompatibilityStore:
             fields={
                 "age": {"min": 26, "max": 34},
                 "city_code": ["330100", "330200"],
-                "marriage_status": "single",
+                "marriage_status": ["single"],
                 "education_level": {"min": 3},
                 "height_cm": {"min": 160, "max": 180},
-                "income_band": {"min": 10000},
+                "income_band": {"min": 3},
                 "interest_tags": ["旅行", "音乐"],
-                "relationship_goal": "婚姻",
+                "relationship_goal": ["marriage"],
             },
             revision=viewer_rev,
         )
@@ -484,9 +502,9 @@ class CompatibilityStore:
                 "marriage_status": "single",
                 "education_level": 4,
                 "height_cm": 165,
-                "income_band": 15000,
+                "income_band": 3,
                 "interest_tags": ["旅行", "美食"],
-                "relationship_goal": "婚姻",
+                "relationship_goal": "marriage",
             },
             revision=target_rev,
         )
@@ -496,12 +514,12 @@ class CompatibilityStore:
             fields={
                 "age": {"min": 28, "max": 36},
                 "city_code": ["330100"],
-                "marriage_status": "single",
+                "marriage_status": ["single"],
                 "education_level": {"min": 3},
                 "height_cm": {"min": 170, "max": 185},
-                "income_band": {"min": 8000},
+                "income_band": {"min": 2},
                 "interest_tags": ["摄影", "旅行"],
-                "relationship_goal": "婚姻",
+                "relationship_goal": ["marriage"],
             },
             revision=target_rev,
         )
@@ -874,7 +892,7 @@ async def test_write_shadow_persists_compatibility_rule_v1_shadow_snapshot(
     row = compatibility_store.snapshots[0]
     assert row["viewer_user_id"] == 10
     assert row["target_user_id"] == 42
-    assert row["algorithm_version"] == "compatibility-rule-v1"
+    assert row["algorithm_version"] == "compatibility-rule-v2"
     assert row["score_semantics"] == "rule_based_reference_shadow"
     assert row["experiment_bucket"] == "shadow"
     assert row["display_eligible"] == 0
@@ -1017,7 +1035,7 @@ async def test_read_compatibility_returns_ready_when_current(
     result = await read_compatibility_snapshot(compat_db, 10, 42)
     assert result.status == CompatibilitySnapshotStatus.READY
     assert result.compatibility_index == 78.0
-    assert result.algorithm_version == "compatibility-rule-v1"
+    assert result.algorithm_version == "compatibility-rule-v2"
     assert result.experiment_bucket == "shadow"
     assert result.display_eligible is False
     assert result.disclaimer == DISCLAIMER

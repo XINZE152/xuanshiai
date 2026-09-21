@@ -45,6 +45,7 @@ from app.schemas.auth import (
     ProfileOverviewResponse,
     ProfileUpdateRequest,
     NicknameUpdateResponse,
+    QA_QUESTION_TEXTS,
     TagCategoryResponse,
     TagOptionsResponse,
 )
@@ -140,6 +141,36 @@ def _json_object(value: Any) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return value if isinstance(value, dict) else {}
+
+
+def _qa_answers_from_value(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(value, list):
+        return []
+    by_id: dict[int, dict[str, Any]] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        try:
+            question_id = int(item.get("question_id") or item.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if question_id not in QA_QUESTION_TEXTS:
+            continue
+        answer = str(item.get("answer") or "").strip()[:300]
+        question = str(item.get("question") or QA_QUESTION_TEXTS[question_id]).strip()[:64]
+        by_id[question_id] = {
+            "question_id": question_id,
+            "question": question or QA_QUESTION_TEXTS[question_id],
+            "answer": answer,
+        }
+    return [by_id[key] for key in sorted(by_id)]
 
 
 def _profile_tag_values(row: Any) -> list[str]:
@@ -258,7 +289,7 @@ async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> d
                       p.height, p.weight, p.occupation, p.industry, p.education_level, p.income,
                       p.hometown_province_code, p.hometown_city_code, p.hometown_district_code,
                       p.residence_province_code, p.residence_city_code, p.residence_district_code,
-                      p.self_intro, p.interest_tags, p.personality_tags, p.mbti, p.tags,
+                      p.self_intro, p.qa_answers, p.interest_tags, p.personality_tags, p.mbti, p.tags,
                       COALESCE(c.score, 0) AS completion_score,
                       COALESCE(pr.hide_school, 0) AS hide_school,
                       COALESCE(pr.hide_company, 0) AS hide_company,
@@ -280,6 +311,7 @@ async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> d
     data["age"] = _calculate_age(data["birthday"]) if data["birthday"] else None
     data["interest_tags"] = _json_list(data["interest_tags"])
     data["personality_tags"] = _json_list(data["personality_tags"])
+    data["qa_answers"] = _qa_answers_from_value(data.get("qa_answers"))
     raw_tags = _profile_tag_values(data)
     data["custom_tag_categories"] = _profile_custom_tag_categories(data)
     data["custom_tags"] = list(data["custom_tag_categories"])
@@ -370,6 +402,18 @@ async def update_profile(db: AsyncSession, user_id: int, request: ProfileUpdateR
         values["personality_tags"] = _json_value(values["personality_tags"])
     if "tag_selections" in values:
         values["tags"] = _json_value(values.pop("tag_selections"))
+    if "qa_answers" in values:
+        raw_answers = values.get("qa_answers") or []
+        for item in raw_answers:
+            answer = str(item.get("answer") or "").strip() if isinstance(item, dict) else ""
+            if not answer:
+                continue
+            decision = await moderate_text(db, answer, field="关于我问答")
+            if decision.action == "reject":
+                raise HTTPException(422, detail="关于我问答内容不适合公开展示，请修改后重试")
+            if decision.action == "replace" and isinstance(item, dict):
+                item["answer"] = decision.display_content
+        values["qa_answers"] = _json_value(_qa_answers_from_value(raw_answers))
     if values:
         columns = ["user_id", *values]
         placeholders = ", ".join(f":{column}" for column in columns)

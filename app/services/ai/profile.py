@@ -82,6 +82,7 @@ from app.services.ai.features import (
 )
 from app.services.ai.gateway import AIGateway
 from app.services.ai.memory.consent_producers import run_projection_producer_safely
+from app.services.ai.memory.purge import current_owner_sequence
 from app.services.ai.prompts.profile_narrative import serialize_fields_for_prompt
 from app.services.ai.tasks import AiTaskRecord, TaskError, enqueue_task, fail_task
 from app.services.content_filter import moderate_text
@@ -2853,13 +2854,35 @@ def _cleanup_payload(
     scope: str,
     resource_id: str,
     version: RevisionVector,
+    fence_seq: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "scope": scope,
         "resource_id": resource_id,
         "version": version.as_dict(),
         "purge_deadline": _cleanup_purge_deadline(),
     }
+    # 记忆清理围栏：撤回事务内读取的序号水位。必须在此刻冻结——清理任务迟到
+    # 执行时若再读水位，会把撤回后（重新授权）新建的记忆一起划进删除范围。
+    if fence_seq is not None:
+        payload["fence_seq"] = int(fence_seq)
+    return payload
+
+
+def _task_fence(payload: dict[str, Any] | None) -> int | None:
+    """从 cleanup 任务 payload 读取删除事务里冻结的序号围栏（缺失返回 None）。
+
+    缺失时 ``_effective_memory_fence`` 会让记忆相关 scope 退化为「不清」而非
+    「全删」——误删不可恢复，少删可重试。
+    """
+    raw = (payload or {}).get("fence_seq")
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning("cleanup_task_fence_unparsable")
+        return None
 
 
 def _parse_cleanup_resource_id(resource_id: str) -> dict[str, str]:
@@ -2880,6 +2903,8 @@ def _parse_cleanup_resource_id(resource_id: str) -> dict[str, str]:
         return {"kind": kind, "user_id": parts[1], "snapshot_id": parts[2]}
     if kind == "consent" and len(parts) >= 3:
         return {"kind": kind, "user_id": parts[1], "consent_scope": parts[2]}
+    if kind == "memory" and len(parts) >= 2:
+        return {"kind": kind, "user_id": parts[1]}
     return {"kind": kind}
 
 
@@ -4350,6 +4375,9 @@ async def delete_ai_profile(
         if subject_value == ProfileSubject.PERSONAL.value
         else "ai_preference_deleted"
     )
+    # 记忆清理围栏必须在撤回事务内读取：消费者据此只清旧代记忆，撤回后
+    # （重新授权）新建的记忆不会被迟到的清理任务误删。
+    memory_fence = await current_owner_sequence(db, owner_user_id)
     revision = await increment_revision_and_enqueue(
         db,
         owner_user_id,
@@ -4357,10 +4385,8 @@ async def delete_ai_profile(
         (event_type,),
         event_type,
         priority=10,
-        payload_extra={"subject": subject_value},
+        payload_extra={"subject": subject_value, "fence_seq": memory_fence},
     )
-    # Phase 3 授权生产者：画像删除已撤销 profile_text_extract 授权，这里同步
-    # 撤销全部投影授权并失效 active 投影（失败转安全日志 + outbox 重试）。
     await run_projection_producer_safely(
         db,
         action="revoke",
@@ -4389,6 +4415,7 @@ async def delete_ai_profile(
                     scope="profile",
                     resource_id=f"profile:{owner_user_id}:{subject_value}",
                     version=current_revision,
+                    fence_seq=memory_fence,
                 ),
                 ensure_ascii=False,
             ),
@@ -5122,13 +5149,43 @@ async def cleanup_handler(
             subject=subject_value,
         )
         if scope == "profile":
+            # cleanup 任务路径同样要带围栏：它由同步删除事务入队，围栏值在
+            # payload 里冻结（见 delete_ai_profile）。无围栏会让记忆清理
+            # fail-closed 退化为不清（合规假账），因此必须透传。
             await purge_ai_resources(
                 db,
                 user_id_int,
                 scope="profile",
                 subject=subject_value,
+                fence_seq=_task_fence(payload),
             )
         return f"cleanup:user:{user_id}", source_revision
+    if scope == "memory":
+        # §3.17.5「删除并忘记」：只做记忆内核物理清理，不触碰画像/搜索数据
+        # （那是「暂停使用」与画像删除的语义）。resource_id 形如
+        # ``memory:{user_id}``，与其余 cleanup payload 同构。
+        if not user_id:
+            await fail_task(
+                db, task.task_id, worker_id,
+                error_code="AI_INPUT_INVALID", retryable=False,
+            )
+            return None
+        try:
+            memory_user_id = int(user_id)
+        except (TypeError, ValueError):
+            await fail_task(
+                db, task.task_id, worker_id,
+                error_code="AI_INPUT_INVALID", retryable=False,
+            )
+            return None
+        # fence_seq 由「删除并忘记」路由在撤回事务内读取并写进 payload：
+        # 清理只删 <= fence_seq 的行，撤回后重新授权新建的记忆不受迟到任务影响。
+        raw_fence = resource.get("fence_seq") or (payload or {}).get("fence_seq")
+        fence_seq = int(raw_fence) if raw_fence not in (None, "") else None
+        await purge_ai_resources(
+            db, memory_user_id, scope="memory", fence_seq=fence_seq
+        )
+        return f"cleanup:memory:{memory_user_id}", RevisionVector()
     snapshot_id = resource.get("snapshot_id")
     if snapshot_id:
         await purge_ai_resources(
@@ -5151,6 +5208,7 @@ async def cleanup_handler(
                     db,
                     int(user_id),
                     scope=consent_cleanup_scope,
+                    fence_seq=_task_fence(payload),
                 )
         return f"cleanup:consent:{user_id or 'unknown'}:{consent_scope}", (
             RevisionVector(**task.source_revision_json)

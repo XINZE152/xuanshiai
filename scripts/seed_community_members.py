@@ -835,6 +835,22 @@ def _upsert_commitment(cur: Any, member: dict[str, Any], user_id: int, material:
     )
 
 
+def _approve_pending_media(cur: Any, user_id: int) -> int:
+    """Approve this member's leftover pending uploads.
+
+    可见性门禁要求作者没有任何 ``review_status IN (0,2,3)`` 的媒体，否则
+    该会员不会出现在任何人的推荐/搜索里。本地开发环境没有审核后台，
+    历史上传会一直停在待审，因此这里显式补一次"审核通过"。
+    仅作用于演示会员自己的媒体行。
+    """
+    cur.execute(
+        """UPDATE user_media SET review_status=1, reviewed_at=UTC_TIMESTAMP(),
+        review_reason=NULL WHERE user_id=%s AND deleted_at IS NULL AND review_status <> 1""",
+        (user_id,),
+    )
+    return cur.rowcount
+
+
 def _replace_media(cur: Any, member: dict[str, Any], user_id: int, assets: dict[str, Any]) -> None:
     """Replace this member's own demo media rows (only rows this script created)."""
     cur.execute(
@@ -872,6 +888,7 @@ def _replace_media(cur: Any, member: dict[str, Any], user_id: int, assets: dict[
             assets["background"]["size"],
         ),
     )
+    _approve_pending_media(cur, user_id)
 
 
 def _refresh_completion(cur: Any, user_id: int) -> float:

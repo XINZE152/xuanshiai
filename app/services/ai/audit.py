@@ -503,6 +503,10 @@ KNOWN_METRICS = frozenset({
     "retention_cleanup_deleted",
     "provider_timeout",
     "quota_refund_failure",
+    # 第四批 §3.17.3：记忆「删除并忘记」的逐表聚合计数。dry-run 与实删分名
+    # 上报，避免运维把预检数字误读成已删除量。
+    "memory_purge_deleted",
+    "memory_purge_dry_run",
 })
 
 #: 积压类指标超过阈值时打印本地告警（queue/backlog 告警语义）。

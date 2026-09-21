@@ -100,6 +100,16 @@ def test_member_seed_assets_resolve_to_frontend_files() -> None:
             assert _asset_source(token).exists(), f"缺少素材 {token}"
 
 
+def test_member_seed_approves_leftover_pending_media() -> None:
+    """待审媒体会让作者在所有推荐/搜索里消失，脚本必须清掉这个状态。"""
+    script = (ROOT / "scripts" / "seed_community_members.py").read_text(encoding="utf-8")
+
+    assert "_approve_pending_media" in script
+    assert "review_status=1" in script
+    # 该补审动作只应作用于演示会员自己，不能全表放开。
+    assert "WHERE user_id=%s AND deleted_at IS NULL AND review_status <> 1" in script
+
+
 def test_member_seed_uses_idempotent_writes_only() -> None:
     """脚本必须可重复执行且不删除既有数据。"""
     script = (ROOT / "scripts" / "seed_community_members.py").read_text(encoding="utf-8")

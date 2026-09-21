@@ -30,6 +30,7 @@ storage/uploads/*
 # Local startup scripts (contain local conda paths)
 start.bat
 start.sh
+start-ai-worker.bat
 
 # IDE and operating system files
 .idea/

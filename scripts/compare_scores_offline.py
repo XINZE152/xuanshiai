@@ -5,7 +5,7 @@
 - 旧展示分：``app.services.discovery._candidate_score``（``legacy-rule-v1``，
   发现页 match_score）
 - 新兼容分：``app.services.ai.compatibility.compute_compatibility`` /
-  ``directional_score``（``compatibility-rule-v1``，双向 + 谐波均值 pair +
+  ``directional_score``（``compatibility-rule-v2``，双向 + 谐波均值 pair +
   0.50 覆盖率门）
 
 人物语义单一来源：每个样本用业务语义声明一次（学历档/收入档/年龄/城市/标签/

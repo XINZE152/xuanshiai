@@ -8,7 +8,7 @@
 
 ## 1. 设计目标
 
-在避免一次性全量切换风险的前提下，将 AI 匹配度（`compatibility-rule-v1`）从内部 shadow 解冻为对用户可见的「资料合拍参考」，替换旧 `match_score`/`legacy-rule-v1` 显示。
+在避免一次性全量切换风险的前提下，将 AI 匹配度（`compatibility-rule-v2`）从内部 shadow 解冻为对用户可见的「资料合拍参考」，替换旧 `match_score`/`legacy-rule-v1` 显示。
 
 核心约束：
 - **库中 shadow 语义不变**：`write_shadow_snapshot` 继续写 `display_eligible=0`、`experiment_bucket=shadow`，保持 shadow 纪律

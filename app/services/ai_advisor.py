@@ -424,7 +424,7 @@ async def get_advice(
         raw = await complete([
             {"role": "system", "content": "You are a cautious, privacy-respecting relationship advisor clearly identified as AI."},
             {"role": "user", "content": prompt},
-        ], json_mode=True)
+        ], json_mode=True, request_id=request_id, scene="advisor")
         data = _normalize_result(parse_json(raw), request)
         if data["risk_level"] == "high":
             raise _AdvisorRiskBlocked()

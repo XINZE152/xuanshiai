@@ -81,7 +81,7 @@ candidate_visibility_service = CandidateVisibilityService()
 candidate_query_service = CandidateQueryService(secret_key=settings.secret_key)
 
 # 旧 match_score/match_reason 的算法版本（统一方案 §9.1/§10.4）：语义恒为
-# legacy-rule-v1；新兼容度（compatibility-rule-v1）只写 ai_compatibility_snapshot，
+# legacy-rule-v1；新兼容度（compatibility-rule-v2）只写 ai_compatibility_snapshot，
 # 不触碰旧字段或推荐排序。
 LEGACY_MATCH_ALGORITHM_VERSION = "legacy-rule-v1"
 

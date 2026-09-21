@@ -12,7 +12,7 @@
   是否可展示、限制说明），不存对方敏感原文；写入快照时附上五维 revision pair
   （§9.3）。
 - ``write_shadow_snapshot`` 只写 ``ai_compatibility_snapshot``：algorithm_version
-  ``compatibility-rule-v1``、score_semantics ``rule_based_reference_shadow``、
+  ``compatibility-rule-v2``、score_semantics ``rule_based_reference_shadow``、
   experiment_bucket ``shadow``、display_eligible 默认 0，外显灰度打开后按
   ``_resolve_display_eligible`` 写入；绝不触碰旧
   ``match_score``/``match_reason``（语义恒为 ``legacy-rule-v1``，§10.4）。
@@ -68,7 +68,11 @@ logger = logging.getLogger(__name__)
 # 冻结常量（统一方案 §9.1/§9.3，执行计划 §3.1/§3.2）
 # ----------------------------------------------------------------------
 
-COMPATIBILITY_ALGORITHM_VERSION = "compatibility-rule-v1"
+# 算法版本：compatibility-rule-v2 = 契约形态归一（集合/区间）+ 学历上下界
+# + 收入档位口径统一。v1 快照由错误口径算出（集合恒不满足、金额与档位混算），
+# 读路径按本常量过滤，因此升版即自动失效旧分；存量行由
+# migrations/ai/20260917_01_compatibility_rule_v2_*.sql 标 stale。
+COMPATIBILITY_ALGORITHM_VERSION = "compatibility-rule-v2"
 LEGACY_ALGORITHM_VERSION = "legacy-rule-v1"
 SCORE_SEMANTICS = "rule_based_reference_shadow"
 COMPATIBILITY_EXPERIMENT_BUCKET = "shadow"
@@ -345,6 +349,168 @@ def _as_str(value: Any) -> str | None:
             return raw.strip()
     return None
 
+# ----------------------------------------------------------------------
+# 契约形态归一化（第一批 C-01/C-02/C-03/C-04）
+#
+# 抽取契约（`app/schemas/ai_profile.py`）两侧形态不同：ideal_partner 的
+# marriage_status / relationship_goal / city_code 是集合（归一化返回 tuple，
+# 投影 fields_json 原样保存、JSON 往返后变 list）；age / education_level /
+# height_cm / income_band 是区间 dict；personal 侧一律是标量。
+#
+# 评分入口必须先把两侧归一到契约形态再打分，且**不可表达的值按 unknown
+# 处理**（记 DIMENSION_UNKNOWN、不计入加权分母），不能退化成 0 分——否则
+# 「未知」会被当成「不满足」污染加权平均（方案 §9.2 语义）。
+# ----------------------------------------------------------------------
+
+_COLLECTION_FIELDS = frozenset({"marriage_status", "relationship_goal", "city_code"})
+_TAG_FIELDS = frozenset({"interest_tags", "lifestyle_tags"})
+_RANGE_FIELDS = frozenset({"age", "education_level", "height_cm", "income_band"})
+# 维度取值边界（与抽取契约同源）。超出即视为不可表达：历史金额口径的
+# 「月收入至少一万」（min=10000）不得被当成有效档位参与打分。
+_DIMENSION_BOUNDS: dict[str, tuple[float, float]] = {
+    "age": (18.0, 100.0),
+    "education_level": (1.0, 6.0),
+    "height_cm": (100.0, 250.0),
+    "income_band": (0.0, 6.0),
+}
+
+
+def _as_scalar(value: Any) -> Any | None:
+    """标量语义归一：str/int/float 原样返回（空串视为缺失），枚举取 .value。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, (int, float)):
+        return value
+    return _as_str(value)
+
+
+def _as_collection(value: Any) -> tuple[str, ...] | None:
+    """集合语义归一：tuple/list/set/frozenset/单标量 → 去重 tuple[str, ...]。
+
+    ``None``、空集合与含不可转字符串元素的值返回 ``None``（调用方按 unknown
+    处理）。数字元素（如 int 城市码）转为十进制字符串。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items: list[Any] = list(value)
+    else:
+        items = [value]
+    normalized: list[str] = []
+    for item in items:
+        text = _as_str(item)
+        if text is None:
+            number = _as_number(item)
+            if number is not None:
+                text = str(int(number)) if number.is_integer() else str(number)
+        if text is None:
+            return None
+        if text not in normalized:
+            normalized.append(text)
+    return tuple(normalized) or None
+
+
+def _as_range(value: Any) -> dict[str, float | None] | None:
+    """区间语义归一：``{min,max}`` 或单标量 → ``{"min":..,"max":..}``。
+
+    两侧都缺失时返回 ``None``（调用方按 unknown 处理）；只给一侧是合法的
+    （契约允许 ``max`` 为 null）。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, dict):
+        low = _as_number(value.get("min"))
+        high = _as_number(value.get("max"))
+    else:
+        low = _as_number(value)
+        high = None
+    if low is None and high is None:
+        return None
+    return {"min": low, "max": high}
+
+
+def _within_bounds(field_key: str, normalized: Any) -> bool:
+    """归一化结果是否落在抽取契约取值范围内（越界 = 不可比较）。"""
+    bounds = _DIMENSION_BOUNDS.get(field_key)
+    if bounds is None:
+        return True
+    low, high = bounds
+    candidates = (
+        [normalized.get("min"), normalized.get("max")]
+        if isinstance(normalized, dict)
+        else [normalized]
+    )
+    for item in candidates:
+        number = _as_number(item)
+        if number is not None and (number < low or number > high):
+            return False
+    return True
+
+
+def normalize_preference_value(field_key: str, value: Any) -> Any | None:
+    """理想型（约束）侧归一：集合类 → tuple、区间类 → dict、其余标量。
+
+    不可表达（``None``/空集/越界）返回 ``None``。
+    """
+    if value is None:
+        return None
+    if field_key in _COLLECTION_FIELDS or field_key in _TAG_FIELDS:
+        normalized: Any = _as_collection(value)
+    elif field_key in _RANGE_FIELDS:
+        normalized = _as_range(value)
+    else:
+        normalized = _as_scalar(value)
+    if normalized is None or not _within_bounds(field_key, normalized):
+        return None
+    return normalized
+
+
+def normalize_profile_value(field_key: str, value: Any) -> Any | None:
+    """个人（事实）侧归一：一律单值；集合/区间折不出唯一值时返回 ``None``。
+
+    个人事实是「这个人的取值」，多元素集合或区间都无法判定其单值语义，
+    按 unknown 处理而不是猜一个（方案 §9.2：缺失维度不补负面事实）。
+    """
+    if value is None:
+        return None
+    if field_key in _COLLECTION_FIELDS:
+        members = _as_collection(value)
+        if members is None or len(members) != 1:
+            return None
+        normalized: Any = members[0]
+    elif field_key in _TAG_FIELDS:
+        normalized = _as_collection(value)
+    elif field_key in _RANGE_FIELDS:
+        if isinstance(value, dict):
+            return None
+        normalized = _as_scalar(value)
+    else:
+        normalized = _as_scalar(value)
+    if normalized is None or not _within_bounds(field_key, normalized):
+        return None
+    return normalized
+
+
+def normalized_dimension_inputs(
+    field_key: str, preference: dict[str, Any], profile: dict[str, Any]
+) -> tuple[Any, Any] | None:
+    """取「一侧偏好 + 对侧事实」并归一到契约形态；任一不可表达返回 ``None``。
+
+    打分（``directional_score``）与原因码（``mutual_reason_codes``）共用本函数，
+    保证分数与证据同源。
+    """
+    raw_preference = preference.get(field_key)
+    raw_value = profile.get(field_key)
+    if raw_preference is None or raw_value is None:
+        return None
+    normalized_preference = normalize_preference_value(field_key, raw_preference)
+    normalized_value = normalize_profile_value(field_key, raw_value)
+    if normalized_preference is None or normalized_value is None:
+        return None
+    return normalized_preference, normalized_value
+
 
 def _score_within_range(pref: Any, value: Any) -> float:
     """min/max 区间满足度：区间偏好缺失时按 100（偏好不设限）。"""
@@ -366,39 +532,53 @@ def _score_age(pref: Any, value: Any) -> float:
     return _score_within_range(pref, value)
 
 
-def _score_city(pref: Any, value: Any) -> float:
-    target_city = _as_str(value)
-    if not target_city:
+def _score_membership(pref: Any, value: Any) -> float:
+    """「对侧取值落在偏好可接受集合内」满足度（§9.2 的集合类维度语义）。
+
+    两侧都接受抽取契约的两种集合表示：理想型侧是集合（tuple/list），个人
+    侧是单值标量。个人侧若本身是集合（历史/异常数据），只要其成员落在
+    可接受集合内即视为满足。
+    """
+    accepted = _as_collection(pref)
+    if accepted is None:
         return 0.0
-    accepted = pref if isinstance(pref, list) else [pref]
-    for item in accepted:
-        if _as_str(item) == target_city:
-            return 100.0
-    return 0.0
+    candidates = _as_collection(value)
+    if candidates is None:
+        return 0.0
+    return 100.0 if set(candidates).issubset(set(accepted)) else 0.0
+
+
+def _score_city(pref: Any, value: Any) -> float:
+    """城市是否落在可接受城市集合内（不照搬旧 ``list`` 特判，走统一集合归一）。"""
+    return _score_membership(pref, value)
 
 
 def _score_marriage(pref: Any, value: Any) -> float:
-    pref_s = _as_str(pref)
-    value_s = _as_str(value)
-    if not pref_s or not value_s:
-        return 0.0
-    return 100.0 if pref_s == value_s else 0.0
+    """婚姻状态是否落在对侧可接受集合内（理想型侧契约即集合）。"""
+    return _score_membership(pref, value)
 
 
 def _score_education(pref: Any, value: Any) -> float:
     """AI 学历刻度 1=初中及以下…6=博士（profile_extract 抽取契约，投影
-    fields_json 原样保存），编号越大越高；target >= 最低学历即满足。
-    此前按代码库中不存在的"1=博士…5=高中"刻度写成 <=，方向恰好相反。"""
+    fields_json 原样保存），编号越大越高。
+
+    区间语义：``min`` 为下限（缺失不设下限）、``max`` 为上界（缺失不设上限），
+    两侧都满足才计 100。此前仅处理 ``min``，``{"max": 4}`` 对博士 6 会误判满分。
+    """
     target = _as_number(value)
     if target is None:
         return 0.0
     if isinstance(pref, dict):
         minimum = _as_number(pref.get("min"))
+        maximum = _as_number(pref.get("max"))
     else:
         minimum = _as_number(pref)
-    if minimum is None:
-        return 100.0
-    return 100.0 if target >= minimum else 0.0
+        maximum = None
+    if minimum is not None and target < minimum:
+        return 0.0
+    if maximum is not None and target > maximum:
+        return 0.0
+    return 100.0
 
 
 def _score_height(pref: Any, value: Any) -> float:
@@ -406,12 +586,21 @@ def _score_height(pref: Any, value: Any) -> float:
 
 
 def _score_income(pref: Any, value: Any) -> float:
+    """收入档位区间满足度：pref/value 均为 0-6 月收入档（抽取契约同口径）。
+
+    历史金额口径（如 ``{"min": 10000}``）已由 ``normalize_preference_value``
+    按 ``_DIMENSION_BOUNDS`` 判为不可表达，不会走到这里参与打分。
+    """
     return _score_within_range(pref, value)
 
 
 def _score_interest(pref: Any, value: Any) -> float:
-    pref_tags = pref if isinstance(pref, list) else [pref]
-    value_tags = value if isinstance(value, list) else [value]
+    """兴趣标签重叠率：两侧均接受契约的两种集合表示（list / tuple）。
+
+    分母取偏好侧标签数（方案 §9.2 的 INTEREST_OVERLAP 语义）。
+    """
+    pref_tags = pref if isinstance(pref, (list, tuple, set, frozenset)) else [pref]
+    value_tags = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
     pref_set = {str(t).strip() for t in pref_tags if str(t).strip()}
     value_set = {str(t).strip() for t in value_tags if str(t).strip()}
     if not pref_set or not value_set:
@@ -421,11 +610,8 @@ def _score_interest(pref: Any, value: Any) -> float:
 
 
 def _score_relationship_goal(pref: Any, value: Any) -> float:
-    pref_s = _as_str(pref)
-    value_s = _as_str(value)
-    if not pref_s or not value_s:
-        return 0.0
-    return 100.0 if pref_s == value_s else 0.0
+    """关系期待是否落在对侧可接受集合内（两侧均支持集合表示）。"""
+    return _score_membership(pref, value)
 
 
 # §9.2 冻结维度与权重：年龄 20、城市/异地 15、婚姻 10、学历 10、身高 10、
@@ -470,15 +656,25 @@ COMPATIBILITY_RULES = RuleSet(
 def directional_score(
     source: FeatureSet, target: FeatureSet, rules: RuleSet
 ) -> tuple[float | None, float, tuple[str, ...]]:
+    """单向加权得分：两侧先归一到抽取契约形态，再逐个维度打分。
+
+    维度在以下任一情况记 ``DIMENSION_UNKNOWN`` 并**排除出加权分母**（不记 0 分、
+    不补负面事实，方案 §9.2）：任一侧缺该字段，或取值无法按契约表达
+    （越界档位、多元素集合当个人事实等）。这样「未知」不会被当成「不满足」。
+    """
     available = []
     reasons = []
     for dimension in rules.dimensions:
-        source_preference = source.preference.get(dimension.key)
-        target_value = target.profile.get(dimension.key)
-        if source_preference is None or target_value is None:
+        normalized = normalized_dimension_inputs(
+            dimension.key, source.preference, target.profile
+        )
+        if normalized is None:
             reasons.append("DIMENSION_UNKNOWN")
             continue
-        available.append((dimension.weight, dimension.score(source_preference, target_value)))
+        preference_value, profile_value = normalized
+        available.append(
+            (dimension.weight, dimension.score(preference_value, profile_value))
+        )
     if not available:
         return None, 0.0, tuple(reasons)
     total_weight = sum(weight for weight, _ in available)
@@ -535,13 +731,20 @@ def mutual_reason_codes(
         reason = _DIMENSION_TO_REASON.get(dimension.key)
         if reason is None:
             continue
-        pref_a = viewer.preference.get(dimension.key)
-        value_b = target.profile.get(dimension.key)
-        pref_b = target.preference.get(dimension.key)
-        value_a = viewer.profile.get(dimension.key)
-        if pref_a is None or value_b is None or pref_b is None or value_a is None:
+        # 与 directional_score 共用同一归一化：不可表达的维度不会产生
+        # 相互满足码，避免「分数按 unknown 排除、证据却声称满足」的错位。
+        forward = normalized_dimension_inputs(
+            dimension.key, viewer.preference, target.profile
+        )
+        backward = normalized_dimension_inputs(
+            dimension.key, target.preference, viewer.profile
+        )
+        if forward is None or backward is None:
             continue
-        if dimension.score(pref_a, value_b) > 0 and dimension.score(pref_b, value_a) > 0:
+        if (
+            dimension.score(forward[0], forward[1]) > 0
+            and dimension.score(backward[0], backward[1]) > 0
+        ):
             codes.append(reason)
     return tuple(codes)
 
@@ -1041,7 +1244,7 @@ async def write_shadow_snapshot(
     """把双向规则结果写入 ``ai_compatibility_snapshot``（shadow，永不覆盖旧字段）。
 
     默认形参行为与混合引擎上线前逐字段一致（algorithm_version=
-    compatibility-rule-v1、score_semantics=rule_based_reference_shadow、
+    compatibility-rule-v2、score_semantics=rule_based_reference_shadow、
     experiment_bucket=shadow、display_eligible 按灰度、TTL 走规则配置）。
     WP-C1c 的 llm 精算路径经 ``engine='llm-v1'`` + ``brand_label`` +
     ``ttl_minutes=ai_compatibility_llm_ttl_minutes`` 写入，engine 标记最近

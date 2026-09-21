@@ -1876,6 +1876,32 @@ def test_search_feature_disabled_returns_503() -> None:
     assert response.json()["detail"]["code"] == "AI_FEATURE_DISABLED"
 
 
+def test_delete_search_snapshot_still_works_when_search_feature_disabled(
+    search_store,
+) -> None:
+    """删除搜索快照是治理类：功能关闭时仍返回 202 并创建 cleanup 任务。"""
+    search_store.snapshots["ss-delete-off"] = {
+        "snapshot_id": "ss-delete-off",
+        "draft_id": "draft-delete-off",
+        "user_id": 10,
+        "invalidated_at": None,
+    }
+    _override_auth(search_store)
+    try:
+        response = client.delete(
+            "/api/v1/ai/search-snapshots/ss-delete-off",
+            headers={"Idempotency-Key": "search-del-01"},
+        )
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["cleanup_requested"] is True
+    assert body["task_id"]
+    assert search_store.snapshots["ss-delete-off"]["invalidated_at"] is not None
+
+
 # ----------------------------------------------------------------------
 # Worker handler 注册
 # ----------------------------------------------------------------------

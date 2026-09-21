@@ -7,6 +7,7 @@
 - 2026-08-08：新增 7 个 `/api/v1/ai/search-*` 路径；错误统一为 `AiErrorDetail` 形状（含 `request_id`）；`SearchPolicyDenied → 422 AI_POLICY_DENIED`、`SearchInputInvalid → 400 AI_INPUT_INVALID` 固定映射，这两个异常路径不触发数据库查询。旧 `/api/v1/discovery/search`（手工筛选）保持兼容，新搜索失败时前端回退手工筛选。
 - 2026-08-11（二期 M03）：解析请求摘要不再包含随机 draft ID；PATCH 持久化最近一次 Idempotency-Key/响应；search_execute 最多物化 200 条并保存精确 total/degraded；结果 GET 只读物化行并复核 owner/candidate revision、consent、projection source hash。
 
+- 2026-09-17（修复清单第二批）：建议缓存改为**代际隔离 + 完成期发布**——`source="ai"` 命中前复核授权/投影/代际，撤回授权或投影重建后旧缓存即刻不可读；缓存写入由 handler 内直写改为 Worker 完成期复核通过并提交后发布（发布前二次核验）；清理 pattern 补齐 `ai:search_suggest:{uid}` 与代际格式（详见 `docs/AI画像-搜索-匹配度修复清单-2026-09-17.md` §3.7）。
 通用请求头（所有接口）：
 
 ```http
@@ -299,6 +300,13 @@ Content-Type: application/json
 ## 5. 查询本人可编辑的搜索标签建议
 
 **基本信息**：只读本人已确认且允许搜索的标签（`interest_tags`/`lifestyle_tags`，来源为 `personal_searchable` 特征投影）；完整 URL `GET /api/v1/ai/search-suggestions`；HTTP Method `GET`；需要登录；成功状态码 `200 OK`。不足返回空数组。
+
+`source` 语义与缓存代际（修复清单第二批 §3.7.4）：
+
+- `source="ai"`：命中猜你喜欢 AI 建议缓存。命中前会**复核三件事**——本人 `search_parse` 授权仍有效、`personal_searchable` 投影仍 active、请求代际与发布代际一致；任一不满足即不返回该缓存。
+- `source="tags"`：回退标签回显（既有行为，前端无感）。授权撤回、投影重建/失效、缓存未命中或 Redis 不可用时均为该值。
+- 代际 = `sha256(投影内容标识) + 撤权计数`。缓存 key 形如 `ai:search_suggest:{user_id}:{generation}`；撤回授权/注销时计数器递增，旧代际的缓存即刻不可读（不做逐键删除，旧键按 24h TTL 自然过期）。
+- 缓存写入改由 Worker 在**完成期复核通过并提交之后**执行（原先 handler 内直写，存在"撤回后仍对外可见"的竞态）；发布前会再次核验授权与代际。
 
 ### 请求参数
 

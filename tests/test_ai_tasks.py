@@ -57,6 +57,151 @@ _FULL_REVISION = {
 }
 
 
+# ----------------------------------------------------------------------
+# 第三批：任务三类登记 / 未登记即拒绝 / 治理类豁免
+# ----------------------------------------------------------------------
+
+
+def test_every_enqueued_task_type_is_explicitly_registered() -> None:
+    """入队的任务类型必须全部出现在三类登记表，防止再漏登记。"""
+    from app.services.ai.compatibility import COMPATIBILITY_LLM_TASK_TYPE, COMPATIBILITY_TASK_TYPE
+    from app.services.ai.journey import TASK_TYPE as MOXIANG_TASK_TYPE
+    from app.services.ai.profile import CLEANUP_TASK_TYPE, NARRATIVE_TASK_TYPE, PROJECTION_TASK_TYPE
+    from app.services.ai.profile_card import PROFILE_CARD_SUMMARIZE_TASK_TYPE
+    from app.services.ai.recommend import RECOMMEND_TASK_TYPE
+    from app.services.ai.search import (
+        SEARCH_CLEANUP_TASK_TYPE,
+        SEARCH_EXECUTE_TASK_TYPE,
+        SEARCH_PARSE_TASK_TYPE,
+        SEARCH_SUGGEST_TASK_TYPE,
+    )
+    from app.services.ai.tasks import TaskKind, get_task_registration
+    from app.services.voice.transcribe_handler import VOICE_TRANSCRIBE_TASK_TYPE
+
+    expected = {
+        "profile_extract": (TaskKind.GENERATE, "profile"),
+        MOXIANG_TASK_TYPE: (TaskKind.GENERATE, "profile"),
+        NARRATIVE_TASK_TYPE: (TaskKind.GENERATE, "profile"),
+        PROFILE_CARD_SUMMARIZE_TASK_TYPE: (TaskKind.GENERATE, "profile"),
+        SEARCH_PARSE_TASK_TYPE: (TaskKind.GENERATE, "search"),
+        SEARCH_SUGGEST_TASK_TYPE: (TaskKind.GENERATE, "search"),
+        COMPATIBILITY_TASK_TYPE: (TaskKind.GENERATE, "compatibility_shadow"),
+        COMPATIBILITY_LLM_TASK_TYPE: (TaskKind.GENERATE, "compatibility_shadow"),
+        RECOMMEND_TASK_TYPE: (TaskKind.GENERATE, "recommend"),
+        VOICE_TRANSCRIBE_TASK_TYPE: (TaskKind.GENERATE, "voice"),
+        SEARCH_EXECUTE_TASK_TYPE: (TaskKind.READ, "search"),
+        PROJECTION_TASK_TYPE: (TaskKind.READ, "profile"),
+        "profile_restore": (TaskKind.READ, "profile"),
+        CLEANUP_TASK_TYPE: (TaskKind.GOVERNANCE, None),
+        SEARCH_CLEANUP_TASK_TYPE: (TaskKind.GOVERNANCE, None),
+    }
+    for task_type, (kind, feature_value) in expected.items():
+        registration = get_task_registration(task_type)
+        assert registration is not None, task_type
+        assert registration.kind is kind, task_type
+        if feature_value is None:
+            assert registration.feature is None, task_type
+        else:
+            assert registration.feature is not None, task_type
+            assert registration.feature.value == feature_value, task_type
+    restore = get_task_registration("profile_restore")
+    assert restore is not None
+    assert restore.has_handler is False
+
+
+@pytest.mark.asyncio
+async def test_unregistered_task_fails_at_completion(task_store) -> None:
+    """未登记任务完成期失败，不再默认 feature_enabled=True 放行。"""
+    db = task_store.session
+    task = await task_store.seed(
+        status="running",
+        lease_owner="worker-1",
+        task_type="brand_new_unregistered_type",
+        source_revision_json=dict(_FULL_REVISION),
+    )
+    completed = await complete_task(db, task.task_id, "worker-1", "res:1")
+    assert completed.status is AiTaskStatus.FAILED
+    assert completed.error_code == "AI_FEATURE_DISABLED"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_completes_when_generation_features_are_off(
+    task_store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """治理类 cleanup 不依赖画像/搜索开关，AI 关闭后仍可完成。"""
+    monkeypatch.setattr(settings, "ai_master_enabled", False)
+    monkeypatch.setattr(settings, "ai_profile_enabled", False)
+    monkeypatch.setattr(settings, "ai_search_enabled", False)
+    db = task_store.session
+    task = await task_store.seed(
+        status="running",
+        lease_owner="worker-1",
+        task_type="cleanup",
+        source_revision_json=dict(_FULL_REVISION),
+    )
+    completed = await complete_task(
+        db,
+        task.task_id,
+        "worker-1",
+        "cleanup:done",
+        revisions=RevisionVector(**dict(_FULL_REVISION)),
+    )
+    assert completed.status is AiTaskStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_profile_narrative_is_superseded_when_profile_feature_off(
+    task_store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "ai_master_enabled", True)
+    monkeypatch.setattr(settings, "ai_profile_enabled", False)
+    db = task_store.session
+    task = await task_store.seed(
+        status="running",
+        lease_owner="worker-1",
+        task_type="profile_narrative",
+        source_revision_json=dict(_FULL_REVISION),
+    )
+    completed = await complete_task(db, task.task_id, "worker-1", "res:narrative")
+    assert completed.status is AiTaskStatus.SUPERSEDED
+
+
+@pytest.mark.asyncio
+async def test_search_suggest_is_superseded_when_search_feature_off(
+    task_store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "ai_master_enabled", True)
+    monkeypatch.setattr(settings, "ai_search_enabled", False)
+    db = task_store.session
+    task = await task_store.seed(
+        status="running",
+        lease_owner="worker-1",
+        task_type="search_suggest",
+        source_revision_json=dict(_FULL_REVISION),
+    )
+    completed = await complete_task(db, task.task_id, "worker-1", "res:suggest")
+    assert completed.status is AiTaskStatus.SUPERSEDED
+
+
+@pytest.mark.asyncio
+async def test_worker_fails_unregistered_type_before_handler(
+    task_store, preserved_handlers,
+) -> None:
+    db = task_store.session
+    task = await task_store.seed(
+        status="leased",
+        lease_owner="worker-1",
+        lease_until=datetime.now(UTC) + timedelta(minutes=1),
+        task_type="never_registered_type",
+    )
+    outcome = await worker_mod._process(db, task, "worker-1")
+    final = await task_store.get(task.task_id)
+    assert outcome == "failed"
+    assert final is not None
+    assert final.status is AiTaskStatus.FAILED
+    assert final.error_code == "AI_FEATURE_DISABLED"
+
+
 def _to_dt(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -1307,3 +1452,70 @@ def test_task_record_from_row_maps_progress_percent():
     }
     record = AiTaskRecord.from_row(row)
     assert record.progress_percent == 30
+
+
+# ----------------------------------------------------------------------
+# 治理类清理任务不受版本向量门禁（第四批审查 B-1）
+#
+# 回归背景：`cleanup` 任务曾因存的是全 0 版本向量、而当前向量非 0 被判
+# superseded，导致 handler 里已执行的物理删除随 savepoint 一起回滚——接口
+# 已向用户返回「删除并忘记」成功，记忆却一条没删（合规假账）。
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_governance_cleanup_task_is_not_superseded_by_revision_change(
+    task_store,
+) -> None:
+    """cleanup（治理类）即使版本向量落后也必须完成，不得回滚删除结果。"""
+    db = task_store.session
+    task = await task_store.seed(
+        task_type="cleanup",
+        scene="cleanup",
+        status="running",
+        lease_owner="worker-1",
+        # forget 入队时冻结的全 0 向量；当前向量已被授权/发布改成非 0。
+        source_revision_json={
+            "profile": 0,
+            "preference": 0,
+            "privacy": 0,
+            "relationship": 0,
+            "policy": 0,
+        },
+        payload_summary={"scope": "memory", "resource_id": "memory:10"},
+    )
+    completed = await complete_task(
+        db,
+        task.task_id,
+        "worker-1",
+        "res:cleanup",
+        revisions=RevisionVector(profile=1, policy=1, privacy=3),
+    )
+    assert completed.status is AiTaskStatus.SUCCEEDED, (
+        "治理类 cleanup 被判 superseded 会回滚物理删除，"
+        "造成「承诺删除但实际零删除」"
+    )
+
+
+@pytest.mark.asyncio
+async def test_generation_task_is_still_superseded_by_revision_change(
+    task_store,
+) -> None:
+    """生成类任务仍严格受版本门禁保护（本批不得放宽既有语义）。"""
+    db = task_store.session
+    task = await task_store.seed(
+        task_type="profile_extract",
+        scene="profile_text_extract",
+        status="running",
+        lease_owner="worker-1",
+        source_revision_json=dict(_FULL_REVISION),
+        consent_snapshot_json={"scope": "profile_text_extract", "version": ""},
+    )
+    completed = await complete_task(
+        db,
+        task.task_id,
+        "worker-1",
+        "res:stale",
+        revisions=RevisionVector(profile=9, policy=1),
+    )
+    assert completed.status is AiTaskStatus.SUPERSEDED
