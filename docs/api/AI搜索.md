@@ -47,7 +47,7 @@ X-Request-ID: req_01J...                # 可选，1-128 位 [A-Za-z0-9._:-]，�
 | 401 | — | 未登录/令牌失效 | false | 重新登录 |
 | 404 | `SEARCH_DRAFT_NOT_FOUND` / `SEARCH_SNAPSHOT_NOT_FOUND` | 草稿/快照不存在或非本人（不泄露归属） | false | 提示已失效，回列表 |
 | 400 | `AI_INPUT_INVALID` | query_text 长度非法、Idempotency-Key 非法、operator 非法、value 形状非法、PATCH 缺 expected_condition_revision | false | 修正入参后重试 |
-| 400 | `INVALID_CANDIDATE_CURSOR` | 跨查询使用他人 cursor、伪造或超长 cursor（读取结果页时） | false | 丢弃 cursor，从第一页重新请求 |
+| 400 | `INVALID_CANDIDATE_CURSOR` | 跨查询使用他人 cursor、伪造或超长 cursor；或快照已重新物化（active generation 切换）后使用旧 cursor（读取结果页时） | false | 丢弃 cursor，从第一页重新请求 |
 | 422 | `AI_POLICY_DENIED` | 已确认条件包含 allowlist 外字段（电话/精确位置/敏感推断等） | false | 提示“不支持的条件”，引导手工筛选 |
 | 403 | `AI_CONSENT_REQUIRED` | 未同意 `search_parse` 授权或已撤回 | false | 引导重新授权 |
 | 429 | `AI_QUOTA_EXCEEDED` | 每分钟解析次数超限 | true | 稍后重试 |
@@ -396,6 +396,8 @@ Content-Type: application/json
 - 前置：快照存在且未删除；Worker 先扫描 hard 筛选后的候选集，按 soft 命中数降序、候选基础顺序和 user_id 稳定 tie-break 物化最多 200 条，`total` 为精确总数。
 - 每条结果绑定 `personal_searchable` projection ID、source hash、候选 consent 快照和完整五维 revision。读取期间 owner revision、候选可见性/授权、投影 hash 或 revision 任一变化，该条按 stale 排除。
 - cursor 是快照绑定的物化结果 cursor；跨快照、伪造或超长 cursor → `400 INVALID_CANDIDATE_CURSOR`。
+- cursor 绑定物化代次（generation）：同一快照被重新物化后，旧 cursor 一律失效 → `400 INVALID_CANDIDATE_CURSOR`；客户端应丢弃 cursor 从第一页重新请求，不要复用下一页 token。
+- 模糊初筛（partial_visible='partial'，仅含 hard 条件命中者）期间返回的行 `is_fuzzy=true`，此时 cursor 读取的是 generation=0 初筛集；完整集物化后 `is_fuzzy=false`。
 - 软字段缺失为 `unknown`，不会当作硬失败；`matched_condition_count` 语义固定。
 - 结果过期：快照 `expires_at` 过期返回 `stale` 页（HTTP 200）；客户端应重新发起搜索。
 - Redis 断开时从 MySQL 恢复，结果仍可读；结果 GET 只执行物化结果、投影、授权和可见性读取，不执行候选搜索或结果 upsert。

@@ -19,6 +19,9 @@ from app.services.candidate_query import InvalidCandidateCursor
 
 OWNER_ID = 9_876_543_221
 CANDIDATE_ID = OWNER_ID + 1
+# cursor 用例播种 CANDIDATE_ID..CANDIDATE_LAST_ID 的候选带（见
+# test_real_old_cursor_invalid_after_generation_switch）；清理按同一带删。
+CANDIDATE_LAST_ID = CANDIDATE_ID + 23
 
 
 async def _clean(db: AsyncSession) -> None:
@@ -27,19 +30,24 @@ async def _clean(db: AsyncSession) -> None:
         "DELETE FROM ai_search_condition WHERE draft_id IN (SELECT draft_id FROM ai_search_draft WHERE user_id = :owner)",
         "DELETE FROM ai_search_snapshot WHERE user_id = :owner",
         "DELETE FROM ai_search_draft WHERE user_id = :owner",
-        "DELETE FROM ai_profile_projection_status WHERE user_id IN (:owner, :candidate)",
+        "DELETE FROM ai_profile_projection_status WHERE user_id BETWEEN :owner AND :candidate_last",
         "DELETE FROM ai_task WHERE owner_user_id = :owner",
-        "DELETE FROM ai_feature_projection WHERE subject_user_id = :candidate",
-        "DELETE FROM ai_consent_grant WHERE user_id IN (:owner, :candidate)",
-        "DELETE FROM user_revision_state WHERE user_id IN (:owner, :candidate)",
-        "DELETE FROM user_profile_completion WHERE user_id IN (:owner, :candidate)",
-        "DELETE FROM user_privacy WHERE user_id IN (:owner, :candidate)",
-        "DELETE FROM user_auth WHERE user_id IN (:owner, :candidate)",
-        "DELETE FROM user_profile WHERE user_id IN (:owner, :candidate)",
-        "DELETE FROM users WHERE id IN (:owner, :candidate)",
+        "DELETE FROM ai_feature_projection WHERE subject_user_id BETWEEN :owner AND :candidate_last",
+        "DELETE FROM ai_consent_grant WHERE user_id BETWEEN :owner AND :candidate_last",
+        "DELETE FROM user_revision_state WHERE user_id BETWEEN :owner AND :candidate_last",
+        "DELETE FROM user_profile_completion WHERE user_id BETWEEN :owner AND :candidate_last",
+        "DELETE FROM user_privacy WHERE user_id BETWEEN :owner AND :candidate_last",
+        "DELETE FROM user_auth WHERE user_id BETWEEN :owner AND :candidate_last",
+        "DELETE FROM user_profile WHERE user_id BETWEEN :owner AND :candidate_last",
+        "DELETE FROM users WHERE id BETWEEN :owner AND :candidate_last",
     ):
         await db.execute(
-            text(statement), {"owner": OWNER_ID, "candidate": CANDIDATE_ID}
+            text(statement),
+            {
+                "owner": OWNER_ID,
+                "candidate": CANDIDATE_ID,
+                "candidate_last": CANDIDATE_LAST_ID,
+            },
         )
     await db.commit()
 
@@ -589,6 +597,9 @@ async def test_real_old_cursor_invalid_after_generation_switch(
         "granted_at": now.isoformat(),
     }
     vector = {"profile": 1, "preference": 0, "privacy": 0, "relationship": 0, "policy": 0}
+    # 物化首页 next_cursor 仅在 total > SEARCH_PAGE_SIZE_DEFAULT(20) 时生成——
+    # 种 24 个合格候选让 cursor 分支真实执行，而不是 skip 掉本测试的目标断言。
+    candidate_ids = [CANDIDATE_ID + offset for offset in range(24)]
     await real_db_session.execute(
         text(
             "INSERT INTO users (id, nickname, gender, birthday, status, is_married) "
@@ -596,10 +607,13 @@ async def test_real_old_cursor_invalid_after_generation_switch(
         ),
         [
             {"id": OWNER_ID, "nickname": "switch-owner", "gender": 1},
-            {"id": CANDIDATE_ID, "nickname": "switch-candidate", "gender": 2},
+            *(
+                {"id": uid, "nickname": f"switch-candidate-{uid}", "gender": 2}
+                for uid in candidate_ids
+            ),
         ],
     )
-    for uid in (OWNER_ID, CANDIDATE_ID):
+    for uid in (OWNER_ID, *candidate_ids):
         await real_db_session.execute(
             text(
                 "INSERT INTO user_profile "
@@ -640,29 +654,33 @@ async def test_real_old_cursor_invalid_after_generation_switch(
         ),
         [
             {"user_id": OWNER_ID, "scope": owner_consent["scope"], "version": owner_consent["version"], "policy": owner_consent["policy_revision"], "granted_at": now},
-            {"user_id": CANDIDATE_ID, "scope": candidate_consent["scope"], "version": candidate_consent["version"], "policy": candidate_consent["policy_revision"], "granted_at": now},
+            *(
+                {"user_id": uid, "scope": candidate_consent["scope"], "version": candidate_consent["version"], "policy": candidate_consent["policy_revision"], "granted_at": now}
+                for uid in candidate_ids
+            ),
         ],
     )
-    await real_db_session.execute(
-        text(
-            "INSERT INTO ai_feature_projection "
-            "(subject_user_id, projection_kind, source_hash, projection_version, fields_json, "
-            "source_revision_json, profile_revision, preference_revision, privacy_revision, "
-            "relationship_revision, policy_revision, consent_snapshot_json, visibility_class, "
-            "status, expires_at) VALUES (:user_id, 'personal_searchable', :source_hash, "
-            "'profile-extract-v1', :fields, :source_revision, 1, 0, 0, 0, 0, :consent, "
-            "'searchable', 'active', :expires_at)"
-        ),
-        {
-            "user_id": CANDIDATE_ID,
-            "source_hash": "switch-source-hash",
-            "fields": json.dumps({"interest_tags": ["户外"]}, ensure_ascii=False),
-            "source_revision": json.dumps(vector),
-            "consent": json.dumps(candidate_consent),
-            "expires_at": now + timedelta(days=1),
-        },
-    )
-    await _seed_projection_status_active(real_db_session, CANDIDATE_ID)
+    for uid in candidate_ids:
+        await real_db_session.execute(
+            text(
+                "INSERT INTO ai_feature_projection "
+                "(subject_user_id, projection_kind, source_hash, projection_version, fields_json, "
+                "source_revision_json, profile_revision, preference_revision, privacy_revision, "
+                "relationship_revision, policy_revision, consent_snapshot_json, visibility_class, "
+                "status, expires_at) VALUES (:user_id, 'personal_searchable', :source_hash, "
+                "'profile-extract-v1', :fields, :source_revision, 1, 0, 0, 0, 0, :consent, "
+                "'searchable', 'active', :expires_at)"
+            ),
+            {
+                "user_id": uid,
+                "source_hash": f"switch-source-hash-{uid}",
+                "fields": json.dumps({"interest_tags": ["户外"]}, ensure_ascii=False),
+                "source_revision": json.dumps(vector),
+                "consent": json.dumps(candidate_consent),
+                "expires_at": now + timedelta(days=1),
+            },
+        )
+        await _seed_projection_status_active(real_db_session, uid)
     draft_id = "real-switch-draft-1"
     await real_db_session.execute(
         text(
@@ -685,6 +703,18 @@ async def test_real_old_cursor_invalid_after_generation_switch(
             "'interest_tags', 'contains', :value, 'soft', 1, 'confirmed')"
         ),
         {"draft_id": draft_id, "value": json.dumps("户外", ensure_ascii=False)},
+    )
+    # hard 条件让 WP-S2 partial 初筛集参与物化（generation=0 行与完整集共用
+    # 唯一键）。回归：曾因 active generation 读取晚于 partial 写入，导致代次
+    # 不推进、本用例的旧 cursor 断言失效。
+    await real_db_session.execute(
+        text(
+            "INSERT INTO ai_search_condition "
+            "(draft_id, condition_revision, condition_no, field_key, operator, value_json, "
+            "condition_kind, confidence, user_action) VALUES (:draft_id, 0, 1, "
+            "'city_code', 'eq', :value, 'hard', 1, 'confirmed')"
+        ),
+        {"draft_id": draft_id, "value": json.dumps("330100", ensure_ascii=False)},
     )
     await real_db_session.commit()
 

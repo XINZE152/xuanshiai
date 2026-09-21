@@ -231,17 +231,6 @@ class SearchDraftNotConfirmed(Exception):
         self.message = message
 
 
-class SearchResultStale(Exception):
-    """409 RESULT_STALE：结果已过期，需重新确认生成新快照。"""
-
-    code = "RESULT_STALE"
-    status_code = 409
-
-    def __init__(self) -> None:
-        super().__init__("搜索结果已过期，请重新发起搜索")
-        self.message = "搜索结果已过期，请重新发起搜索"
-
-
 # ----------------------------------------------------------------------
 # 领域对象
 # ----------------------------------------------------------------------
@@ -432,16 +421,30 @@ class CompiledFilters(DiscoveryFilters):
                 return self.model_copy(update={"height_min": _int_value(value)})
             return self.model_copy(update={"height_max": _int_value(value)})
         if field_key == "income_band":
+            # 档位是月收入口径，p.income 是年收入（元）：换算后再进筛选，
+            # 否则"至少第4档"会变成 p.income >= 4（人人命中）。
             if operator == "between":
                 return self.model_copy(
                     update={
-                        "income_min": _float_value(_dict_value(value, "min")),
-                        "income_max": _float_value(_dict_value(value, "max")),
+                        "income_min": _AI_INCOME_BAND_LOWER_YEARLY.get(
+                            _int_value(_dict_value(value, "min"))
+                        ),
+                        "income_max": _AI_INCOME_BAND_UPPER_YEARLY.get(
+                            _int_value(_dict_value(value, "max"))
+                        ),
                     }
                 )
             if operator == "gte":
-                return self.model_copy(update={"income_min": _float_value(value)})
-            return self.model_copy(update={"income_max": _float_value(value)})
+                return self.model_copy(
+                    update={
+                        "income_min": _AI_INCOME_BAND_LOWER_YEARLY.get(
+                            _int_value(value)
+                        )
+                    }
+                )
+            return self.model_copy(
+                update={"income_max": _AI_INCOME_BAND_UPPER_YEARLY.get(_int_value(value))}
+            )
         raise SearchInputInvalid(f"hard 字段 {field_key} 缺少静态映射")
 
 
@@ -1495,6 +1498,36 @@ candidate_query_service = CandidateQueryService(secret_key=settings.secret_key)
 candidate_visibility_service = CandidateVisibilityService()
 
 
+# search_parse 输出的学历是 AI 刻度（1=初中及以下…6=博士，见
+# prompts/search_parse.py），而 p.education_level 是存储刻度（1=高中及以下…
+# 5=博士，编辑写入域）。进 SQL 前必须换算——否则"本科及以上"(AI=4)会错筛成
+# 硕士及以上。口径与 profile._AI_SYNC_EDU_MAP 一致（双源，改动需互相同步）。
+_AI_EDU_TO_STORAGE = {1: 1, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+
+
+# search_parse 的 income_band 是 AI 月收入档位（profile_extract.py 契约：
+# 0=无收入，1=月5千以下 … 6=月5万以上，左闭右开），而 p.income 存年收入（元）
+# （编辑写入域 edit.uvue incomeValue：'10-20w'→150000）。档位号不得当元直接
+# 比较——按档位边界×12 换算为年收入区间再进筛选；6 档无上界，未知档位不筛。
+_AI_INCOME_BAND_LOWER_YEARLY = {
+    0: 0,
+    1: 0,
+    2: 60_000,
+    3: 120_000,
+    4: 240_000,
+    5: 420_000,
+    6: 600_000,
+}
+_AI_INCOME_BAND_UPPER_YEARLY = {
+    0: 0,
+    1: 60_000,
+    2: 120_000,
+    3: 240_000,
+    4: 420_000,
+    5: 600_000,
+}
+
+
 def _hard_filter_clauses(
     filters: DiscoveryFilters,
     params: dict[str, Any],
@@ -1520,8 +1553,10 @@ def _hard_filter_clauses(
         clauses.append("u.is_married = :filter_marriage")
         params["filter_marriage"] = int(filters.marriage_status)
     if filters.education_min:
-        clauses.append("p.education_level >= :filter_education")
-        params["filter_education"] = int(filters.education_min)
+        ai_edu = _AI_EDU_TO_STORAGE.get(int(filters.education_min))
+        if ai_edu is not None:
+            clauses.append("p.education_level >= :filter_education")
+            params["filter_education"] = ai_edu
     if filters.height_min:
         clauses.append("p.height >= :filter_height_min")
         params["filter_height_min"] = int(filters.height_min)
@@ -1978,35 +2013,6 @@ async def _upsert_result_rows(
         await db.execute(text(_SEARCH_RESULT_UPSERT_SQL), chunk)
 
 
-async def _upsert_result_row(
-    db: AsyncSession,
-    snapshot_id: str,
-    target_user_id: int,
-    rank_position: int,
-    evidence: SearchEvidence,
-    result_expires_at: datetime,
-    *,
-    generation: int = _SEARCH_RESULT_DEFAULT_GENERATION,
-) -> None:
-    # Task8 Step2：upsert 时携带 generation。ON DUPLICATE KEY UPDATE 也更新
-    # generation，保证同一 (snapshot_id, target_user_id) 的行在新 generation 下
-    # 被正确刷新；旧 generation 的行由 materialize 成功后统一清理。
-    # （Task 15：单行入口保留为批量路径的委托，参数构造单一来源。）
-    await _upsert_result_rows(
-        db,
-        [
-            _result_row_params(
-                snapshot_id,
-                target_user_id,
-                rank_position,
-                evidence,
-                result_expires_at,
-                generation=generation,
-            )
-        ],
-    )
-
-
 def _encode_materialized_cursor(
     snapshot_id: str,
     rank_position: int,
@@ -2439,6 +2445,13 @@ async def materialize_search_snapshot(
             row, condition_objects, compiled, projections.get(candidate_id)
         )
         visible.append((baseline_index, row, evidence))
+    # Task8 Step2：atomic generation 的读取必须先于下面的 partial 初筛集写入。
+    # partial 行以 generation=0 复用同一 (snapshot_id, target_user_id) 唯一键，
+    # upsert 会把上一轮完整集行的 generation 覆盖为 0；若读取发生在其后，
+    # MAX(generation) 恒为 0，new_generation 停在 1，代次永不推进、旧 cursor
+    # 永不失效（``DELETE WHERE generation < new_generation`` 同样失效）。
+    active_generation = await _load_active_generation(db, snapshot_id)
+    new_generation = active_generation + 1
     # WP-S2：filtering 收尾（进度 30% 后）物化模糊候选初筛集。partial 是
     # 纯增强：任何异常都不得中断主流程——失败降级为无 partial（读取端
     # 继续等待完整集）。无 hard 条件的查询不物化，partial_visible 保持 none。
@@ -2465,14 +2478,6 @@ async def materialize_search_snapshot(
     )
     materialized = visible[:SEARCH_MATERIALIZATION_LIMIT]
     result_expires_at = _now_utc() + timedelta(minutes=SEARCH_RESULT_TTL_MINUTES)
-    # Task8 Step2：atomic generation。先读当前 active generation，写新 generation
-    # = active + 1 的行；成功后把旧 generation 的行（不在新结果中的候选）标记
-    # stale 或删除，原子切换 active generation。同一 (snapshot_id, target_user_id)
-    # 的行由 upsert 覆盖为新 generation；旧候选（不再在新结果中）由
-    # ``DELETE WHERE generation < new_generation`` 清理，保证「候选集合变化时
-    # 旧候选为 0」。
-    active_generation = await _load_active_generation(db, snapshot_id)
-    new_generation = active_generation + 1
     # 先删除旧 generation 中 rank_position > limit 的溢出行
     await db.execute(
         text("DELETE FROM ai_search_result WHERE snapshot_id = :snapshot_id AND rank_position > :limit"),

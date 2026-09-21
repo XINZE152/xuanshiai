@@ -1090,8 +1090,14 @@ async def list_applications(db: AsyncSession, viewer_id: int, incoming: bool, pa
     items = []
     for row in result.mappings().all():
         data = dict(row)
-        data["from_user"] = RelationUserSummary(user_id=data.pop("from_user_id"), nickname=data.pop("from_nickname"), avatar=data.pop("from_avatar"), age=_calculate_age(data.pop("from_birthday")) if data.get("from_birthday") else None, city_code=data.pop("from_city_code"))
-        data["to_user"] = RelationUserSummary(user_id=data.pop("to_user_id"), nickname=data.pop("to_nickname"), avatar=data.pop("to_avatar"), age=_calculate_age(data.pop("to_birthday")) if data.get("to_birthday") else None, city_code=data.pop("to_city_code"))
+        # 响应契约同时要求顶层 from_user_id/to_user_id 与嵌套 from_user/to_user，
+        # 因此先取出 ID 再构造嵌套对象，避免 pop 之后顶层字段缺失导致校验失败。
+        from_user_id = data.pop("from_user_id")
+        to_user_id = data.pop("to_user_id")
+        data["from_user"] = RelationUserSummary(user_id=from_user_id, nickname=data.pop("from_nickname"), avatar=data.pop("from_avatar"), age=_calculate_age(data.pop("from_birthday")) if data.get("from_birthday") else None, city_code=data.pop("from_city_code"))
+        data["to_user"] = RelationUserSummary(user_id=to_user_id, nickname=data.pop("to_nickname"), avatar=data.pop("to_avatar"), age=_calculate_age(data.pop("to_birthday")) if data.get("to_birthday") else None, city_code=data.pop("to_city_code"))
+        data["from_user_id"] = from_user_id
+        data["to_user_id"] = to_user_id
         items.append(ApplicationResponse(**data))
     return ApplicationPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 

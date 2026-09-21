@@ -225,7 +225,6 @@ RECOMMEND_TASK_TYPE = "recommend_rebuild"
 RECOMMEND_ALGORITHM_VERSION = "recommend-rule-v1"
 RECOMMEND_ENGINE_RULE = "rule-v1"
 RECOMMEND_ENGINE_LLM = "llm-v1"
-VIEW_KINDS = ("i_like", "likes_me", "similar")
 
 _PROJECTION_KINDS = ("personal_compatibility", "ideal_partner_preference")
 

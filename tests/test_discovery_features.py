@@ -1,4 +1,5 @@
 import inspect
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,7 +20,11 @@ from app.services.candidate_query import (
     CandidateQueryService,
     InvalidCandidateCursor,
 )
-from app.services.candidate_visibility import CandidateVisibilityService, ViewerContext
+from app.services.candidate_visibility import (
+    CandidateVisibilityService,
+    ViewerContext,
+    VisibilityScene,
+)
 from app.services.discovery import _card, _consume_browse
 discovery = discovery_service
 
@@ -329,6 +334,82 @@ async def test_target_rows_uses_the_realname_visibility_predicate(
     assert db.params is not None
     assert db.params["visibility_realname_status"] == 0
     assert "COALESCE(pr.who_can_see_me, 1) <> 2" in str(db.statement)
+
+
+@pytest.mark.asyncio
+async def test_application_list_keeps_ids_alongside_nested_users(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A populated application page must serialise the top-level id fields.
+
+    ``ApplicationResponse`` requires ``from_user_id``/``to_user_id`` in addition
+    to the nested ``from_user``/``to_user`` summaries, so the service must not
+    consume the id columns while it builds the nested objects.
+    """
+    row = {
+        "id": 5,
+        "from_user_id": 11,
+        "to_user_id": 22,
+        "message": "想认识一下",
+        "status": 0,
+        "expire_at": None,
+        "created_at": datetime(2026, 9, 1, 10, 0, 0),
+        "from_nickname": "甲",
+        "from_avatar": None,
+        "from_birthday": None,
+        "from_city_code": "110100",
+        "to_nickname": "乙",
+        "to_avatar": None,
+        "to_birthday": None,
+        "to_city_code": "320100",
+    }
+
+    class Rows:
+        def __init__(self, *, scalar_value: int, rows: list[dict[str, object]]) -> None:
+            self._scalar = scalar_value
+            self._rows = rows
+
+        def scalar(self) -> int:
+            return self._scalar
+
+        def mappings(self) -> "Rows":
+            return self
+
+        def all(self) -> list[dict[str, object]]:
+            return self._rows
+
+    class RecordingDb:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, statement: object, params: dict[str, object] | None = None) -> Rows:
+            self.calls += 1
+            # 第一次是 COUNT，第二次是明细查询。
+            if self.calls == 1:
+                return Rows(scalar_value=1, rows=[])
+            return Rows(scalar_value=1, rows=[dict(row)])
+
+    async def passthrough_scene(*_args: object, **_kwargs: object):
+        predicate = CandidateVisibilityService().predicate(
+            ViewerContext(user_id=1, realname_status=2, is_vip=True),
+            VisibilityScene.INTERACTION,
+            candidate_alias="fu",
+            privacy_alias="fpr",
+            completion_alias="fc",
+        )
+        return {}, False, predicate
+
+    monkeypatch.setattr(discovery, "_scene_visibility", passthrough_scene)
+
+    page = await discovery.list_applications(RecordingDb(), 1, True, page=1, page_size=20)
+
+    assert page.total == 1
+    assert len(page.items) == 1
+    item = page.items[0]
+    assert item.from_user_id == 11
+    assert item.to_user_id == 22
+    assert item.from_user is not None and item.from_user.user_id == 11
+    assert item.to_user is not None and item.to_user.user_id == 22
 
 
 @pytest.mark.asyncio

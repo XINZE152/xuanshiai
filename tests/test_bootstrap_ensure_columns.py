@@ -14,7 +14,6 @@ map（realname_status 等 23 列）静默覆盖——Python 字典字面量重�
 from __future__ import annotations
 
 import ast
-import re
 from collections import Counter
 from pathlib import Path
 

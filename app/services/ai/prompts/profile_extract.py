@@ -16,7 +16,7 @@ _PERSONAL_FIELD_GUIDE = {
     "age": "整数，年龄，范围 18-100",
     "city_code": "字符串，6 位行政区划代码，如 330100（杭州市）",
     "marriage_status": "枚举，取值 single / divorced / widowed",
-    "education_level": "整数，学历等级 1-8。中文映射：1=初中及以下，2=高中/中专，3=大专，4=本科，5=硕士，6=博士",
+    "education_level": "整数，学历等级 1-6。中文映射：1=初中及以下，2=高中/中专，3=大专，4=本科，5=硕士，6=博士",
     "height_cm": "整数，身高厘米数，范围 100-250",
     # 产品口径（PRODUCT.md 收入档位）：以个人月收入为准，区间左闭右开。
     "income_band": (
@@ -36,7 +36,7 @@ _IDEAL_PARTNER_FIELD_GUIDE = {
     "age": "区间，{\"min\": 最小年龄, \"max\": 最大年龄}，18-100",
     "city_code": "字符串数组，可接受的城市代码，如 [\"330100\", \"330200\"]",
     "marriage_status": "字符串数组，可接受的婚姻状态，single / divorced / widowed",
-    "education_level": "区间，{\"min\": 最低学历, \"max\": 最高学历}，1-8；max 可为 null。中文映射：1=初中及以下，2=高中/中专，3=大专，4=本科，5=硕士，6=博士。用户说“本科以上”时 min=4",
+    "education_level": "区间，{\"min\": 最低学历, \"max\": 最高学历}，1-6；max 可为 null。中文映射：1=初中及以下，2=高中/中专，3=大专，4=本科，5=硕士，6=博士。用户说“本科以上”时 min=4",
     "height_cm": "区间，{\"min\": 最矮, \"max\": 最高}，100-250",
     "income_band": "区间，{\"min\": 最低档位, \"max\": 最高档位}，0 及以上；max 可为 null。中文映射：1=一档/第一档，2=二档/第二档，以此类推",
     "occupation_group": "字符串数组，可接受的行业，technology / education / healthcare / finance / public_service / other",

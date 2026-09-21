@@ -190,6 +190,17 @@ docker compose -f compose.ai-test.yml ps
 
 **执行顺序（必须）**：全新卷上必须先跑业务 schema bootstrap（`initialize_database`，集成夹具会自动执行），再跑 `python scripts/manage_ai_migration.py up --target test`。顺序颠倒时，AI 迁移会在空库上先建表，bootstrap 的 `CREATE TABLE IF NOT EXISTS` 会跳过这些表，留下缺列的旧定义（2026-09-13 曾因此误判为"bootstrap 落后"）。
 
+手动执行 bootstrap/迁移时的环境变量（bootstrap 的 URL 解析只认 `mysql://` 与 `mysql+aiomysql://` 前缀，`mysql+pymysql://` 不被解析并静默回退到 `DB_*`/localhost:3306，易误连开发库）：
+
+```powershell
+$env:DATABASE_URL = "mysql://root:@127.0.0.1:3307/xuanshiai_ai_test"
+.\.venv\Scripts\python.exe database_setup_marriage.py
+$env:AI_TEST_DATABASE_URL = "mysql+aiomysql://root:@127.0.0.1:3307/xuanshiai_ai_test"
+.\.venv\Scripts\python.exe scripts/manage_ai_migration.py --target test up
+```
+
+**跑集成套件前停掉 worker-a/worker-b**：这两个容器与测试进程内驱动的 `ai_worker._run_round` 消费同一个 `ai_task_queue`，并发领取会让任务计数断言变成竞态（2026-09-13 干净卷复现 `_run_worker(4)` 实领 3）。`docker compose -f compose.ai-test.yml stop worker-a worker-b` 后再跑 `tests/integration`；跨进程并发 claim 的专项验证按 `test_ai_worker_real_db.py:34` 的 skip 说明在容器内执行。
+
 启动服务后，测试 fixture 会运行现有 `database_setup_marriage.initialize_database()`，然后从真实 MySQL 读取 `information_schema` 并启动真实子进程：
 
 ```powershell

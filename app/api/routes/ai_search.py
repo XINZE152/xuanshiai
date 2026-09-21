@@ -51,7 +51,6 @@ from app.services.ai.search import (
     SearchInputInvalid,
     SearchPolicyDenied,
     SearchQuotaExceeded,
-    SearchResultStale,
     SearchSnapshotNotFound,
     confirm_search_draft,
     create_search_draft,
@@ -350,8 +349,6 @@ async def get_search_results_route(
             db, snapshot_id, current.id, cursor, page_size
         )
     except SearchSnapshotNotFound as exc:
-        raise _error_response(exc.code, exc.message, exc.status_code) from exc
-    except SearchResultStale as exc:
         raise _error_response(exc.code, exc.message, exc.status_code) from exc
     except InvalidCandidateCursor as exc:
         # 文档 §6：跨查询/伪造/过长的 cursor → 400 INVALID_CANDIDATE_CURSOR，

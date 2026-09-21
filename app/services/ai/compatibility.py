@@ -386,7 +386,9 @@ def _score_marriage(pref: Any, value: Any) -> float:
 
 
 def _score_education(pref: Any, value: Any) -> float:
-    """学历编号越小越高（1=博士…5=高中）；target <= 偏好下限即满足。"""
+    """AI 学历刻度 1=初中及以下…6=博士（profile_extract 抽取契约，投影
+    fields_json 原样保存），编号越大越高；target >= 最低学历即满足。
+    此前按代码库中不存在的"1=博士…5=高中"刻度写成 <=，方向恰好相反。"""
     target = _as_number(value)
     if target is None:
         return 0.0
@@ -396,7 +398,7 @@ def _score_education(pref: Any, value: Any) -> float:
         minimum = _as_number(pref)
     if minimum is None:
         return 100.0
-    return 100.0 if target <= minimum else 0.0
+    return 100.0 if target >= minimum else 0.0
 
 
 def _score_height(pref: Any, value: Any) -> float:

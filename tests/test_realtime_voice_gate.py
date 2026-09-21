@@ -22,6 +22,9 @@ def _production_base() -> dict[str, object]:
         "sms_provider": "disabled",
         "wechat_provider": "wechat",
         "wechat_payment_mode": "real",
+        # 生产环境禁止直播 Mock Provider（config.validate_test_providers）；
+        # 本文件的断言关注 AI 语音门禁，直播 provider 用非 mock 值让基座先通过。
+        "live_provider": "tencent",
         "ai_policy_approved": True,
         "ai_provider_approved": True,
         "ai_retention_policy_version": "ai-policy-2026-08-07-v1",
