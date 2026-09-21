@@ -188,6 +188,8 @@ docker compose -f compose.ai-test.yml ps
 
 默认映射到 `127.0.0.1:3307`（MySQL）和 `127.0.0.1:6380`（Redis），数据库为 `xuanshiai_ai_test`，root 空密码只在这个临时测试服务中启用。可以用 `AI_TEST_MYSQL_DATABASE`、`AI_TEST_MYSQL_PORT` 和 `AI_TEST_REDIS_PORT` 覆盖默认值。
 
+**执行顺序（必须）**：全新卷上必须先跑业务 schema bootstrap（`initialize_database`，集成夹具会自动执行），再跑 `python scripts/manage_ai_migration.py up --target test`。顺序颠倒时，AI 迁移会在空库上先建表，bootstrap 的 `CREATE TABLE IF NOT EXISTS` 会跳过这些表，留下缺列的旧定义（2026-09-13 曾因此误判为"bootstrap 落后"）。
+
 启动服务后，测试 fixture 会运行现有 `database_setup_marriage.initialize_database()`，然后从真实 MySQL 读取 `information_schema` 并启动真实子进程：
 
 ```powershell

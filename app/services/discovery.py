@@ -604,10 +604,21 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
 
 
 async def get_filter_options() -> FilterOptionsResponse:
+    # education_levels 必须与 user_profile.education_level 的存储域一致：
+    # 1=高中及以下 … 5=博士（档案编辑写入域，utils 编号即 educationOptions
+    # 数组下标；_AI_SYNC_EDU_MAP 目标域同）。此前 1=博士…5=高中 与存储域
+    # 方向相反——education_min 的 SQL 语义是 `education_level >= :min`，
+    # 反向字典会让"本科及以上"实际筛出"本科及以下"。
     return FilterOptionsResponse(
         genders=[{"value": 1, "label": "男"}, {"value": 2, "label": "女"}],
         marriage_statuses=[{"value": 1, "label": "未婚"}, {"value": 2, "label": "离异"}, {"value": 3, "label": "丧偶"}],
-        education_levels=[{"value": 1, "label": "博士"}, {"value": 2, "label": "硕士"}, {"value": 3, "label": "本科"}, {"value": 4, "label": "大专"}, {"value": 5, "label": "高中"}],
+        education_levels=[
+            {"value": 1, "label": "高中及以下"},
+            {"value": 2, "label": "大专"},
+            {"value": 3, "label": "本科"},
+            {"value": 4, "label": "硕士"},
+            {"value": 5, "label": "博士"},
+        ],
         cities=sorted(DISCOVERY_CITY_OPTIONS),
     )
 

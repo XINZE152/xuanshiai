@@ -57,12 +57,6 @@ outputs
 .worktrees/
 .scripts/
 
-migrations/
-!migrations/
-!migrations/live/
-!migrations/live/*.sql
-!migrations/m4_m7/
-!migrations/m4_m7/*.sql
 scripts/
 artifacts/
 

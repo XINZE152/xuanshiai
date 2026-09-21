@@ -170,6 +170,14 @@ def test_filter_options_is_public() -> None:
     assert response.json()["genders"]
 
 
+def test_filter_options_education_direction_matches_storage_domain() -> None:
+    """education_levels 必须与 user_profile.education_level 存储域同向：
+    1=高中及以下 … 5=博士（SQL 语义为 education_level >= :education_min）。"""
+    response = client.get("/api/v1/discovery/filter-options")
+    levels = {item["value"]: item["label"] for item in response.json()["education_levels"]}
+    assert levels == {1: "高中及以下", 2: "大专", 3: "本科", 4: "硕士", 5: "博士"}
+
+
 def test_my_overview_is_registered_and_requires_authentication() -> None:
     paths = client.get("/openapi.json").json()["paths"]
     assert "/api/v1/users/me/overview" in paths

@@ -251,7 +251,7 @@ class DatabaseManager:
                 "house_fail_reason": "`house_fail_reason` varchar(255) DEFAULT NULL",
                 "house_submitted_at": "`house_submitted_at` datetime DEFAULT NULL",
                 "house_reviewed_at": "`house_reviewed_at` datetime DEFAULT NULL",
-                # 会员认证：实名/学历/房产认证审核所需字段
+                # 会员认证审核字段（421ff28 引入；曾因重复键被静默丢失，现并入本条目）
                 "face_method": "`face_method` varchar(32) DEFAULT NULL COMMENT '验证方式 动作活检/照片比对'",
                 "face_vendor": "`face_vendor` varchar(64) DEFAULT NULL COMMENT '人脸服务商'",
                 "face_score": "`face_score` decimal(5,2) DEFAULT NULL COMMENT '人脸比对得分'",
@@ -357,7 +357,7 @@ class DatabaseManager:
                 "action": "`action` varchar(32) NOT NULL DEFAULT 'none' COMMENT 'none|hide_content|restore_content|dismiss'",
                 "reviewed_by": "`reviewed_by` bigint unsigned DEFAULT NULL COMMENT '原举报审核人'",
                 "reviewed_at": "`reviewed_at` datetime DEFAULT NULL COMMENT '举报审核时间'",
-                # 线上行为：举报页需要展示提交人 IP
+                # 举报页需要展示提交人 IP（曾因重复键被静默丢失，现并入本条目）
                 "submit_ip": "`submit_ip` varchar(64) DEFAULT NULL COMMENT '提交人IP'",
             },
             "paper_plane": {
@@ -449,10 +449,6 @@ class DatabaseManager:
                 "status": "`status` tinyint NOT NULL DEFAULT '1' COMMENT '1生效中 2已过期 3已撤销'",
                 "pay_status": "`pay_status` tinyint NOT NULL DEFAULT '0' COMMENT '0未支付 1已支付'",
                 "pay_method": "`pay_method` varchar(32) DEFAULT NULL COMMENT '支付方式'",
-            },
-            # 线上行为：举报页需要展示提交人 IP
-            "user_report": {
-                "submit_ip": "`submit_ip` varchar(64) DEFAULT NULL COMMENT '提交人IP'",
             },
         }
 
@@ -748,7 +744,7 @@ class DatabaseManager:
             "active_wechat": "ADD UNIQUE KEY `uk_customer_lead_active_wechat` (`active_wechat`)",
         }
         try:
-            cursor.execute(f"SHOW TABLES LIKE 'customer_lead'")
+            cursor.execute("SHOW TABLES LIKE 'customer_lead'")
             if not cursor.fetchone():
                 return
             for column, spec in column_specs.items():
@@ -3456,7 +3452,7 @@ class DatabaseManager:
     def _ensure_optional_index(self, cursor, table_name: str, index_name: str, definition: str) -> None:
         """幂等创建索引：表不存在或索引已存在时静默跳过。"""
         try:
-            cursor.execute(f"SHOW TABLES LIKE %s", (table_name,))
+            cursor.execute("SHOW TABLES LIKE %s", (table_name,))
             if not cursor.fetchone():
                 return
             cursor.execute(f"SHOW INDEX FROM `{table_name}` WHERE Key_name = %s", (index_name,))
