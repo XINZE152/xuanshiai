@@ -88,6 +88,30 @@ class MemberStatusResponse(BaseModel):
     reason: str
 
 
+class MemberProfileUpdate(BaseModel):
+    """后台统一修改会员基础、认证和隐私信息。未提交字段保持不变。"""
+
+    nickname: str | None = Field(default=None, max_length=64)
+    avatar: str | None = Field(default=None, max_length=255)
+    status: Literal[1, 2, 3] | None = None
+    is_married: Literal[0, 1, 2, 3] | None = None
+    is_single_pledge: bool | None = None
+    real_name: str | None = Field(default=None, max_length=64)
+    auth_status: Literal[0, 1, 2, 3] | None = None
+    house_verified: Literal[0, 1, 2, 3] | None = None
+    education_verified: Literal[0, 1, 2, 3] | None = None
+    match_status: Literal[1, 2, 3, 4, 5] | None = None
+    only_vip_can_see_detail: bool | None = None
+    show_profile: bool | None = None
+    reason: str = Field(min_length=1, max_length=255)
+
+
+class MemberProfileUpdateResponse(BaseModel):
+    user_id: int
+    updated_fields: list[str]
+    reason: str
+
+
 class MemberStatistics(BaseModel):
     total: int
     male: int

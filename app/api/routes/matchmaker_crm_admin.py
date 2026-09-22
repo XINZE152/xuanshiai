@@ -357,3 +357,4 @@ async def member_status(member_id: int = Path(..., ge=1), body: MemberStatusUpda
     await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id, reason) VALUES (:actor, 'member.status.update', 'user', :id, :reason)"), {"actor": current.account.id, "id": member_id, "reason": body.reason})
     await db.commit()
     return MemberStatusResponse(id=member_id, status=body.status, reason=body.reason)
+

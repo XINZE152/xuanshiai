@@ -44,6 +44,23 @@
 
 ## 2. 行为流水查询
 
+### 2.0 页面行为接口拆分
+
+截图中的每个 Tab 使用独立接口，不通过 `category` 合并：
+
+| 页面行为 | 接口 | `member_id` 含义 |
+|---|---|---|
+| 浏览过谁 | `GET /api/v1/admin/members/browse-history` | 发起浏览的用户 |
+| 被谁浏览 | `GET /api/v1/admin/members/visitors` | 被浏览的用户 |
+| 收藏了谁 | `GET /api/v1/admin/members/favorites` | 发起收藏的用户 |
+| 谁收藏我 | `GET /api/v1/admin/members/favorites/received` | 被收藏的用户 |
+| 给谁爆灯 | `GET /api/v1/admin/members/superlikes` | 发起爆灯的用户 |
+| 谁给我爆灯 | `GET /api/v1/admin/members/superlikes/received` | 被爆灯的用户 |
+| 赠送礼物 | `GET /api/v1/admin/members/gifts` | 赠送礼物的用户 |
+| 收到礼物 | `GET /api/v1/admin/members/gifts/received` | 收到礼物的用户 |
+
+所有接口均支持 `page`、`page_size`、`member_id`，权限均为 `matchmaker.member.read`。不传 `member_id` 查询全部用户，传入正整数查询指定用户；用户不存在返回 `404`。
+
 ### 2.1 `GET /api/v1/admin/members/behavior-events`
 
 查询线上行为流水（五类共用同一行结构，未使用字段为 `null`）。
@@ -65,6 +82,7 @@
 | `page_size` | query | int | 否 | `20` | `1 ≤ page_size ≤ 100` | 每页条数 |
 | `category` | query | string | 否 | `browse` | 正则 `^(browse\|favorite\|superlike\|gift\|report)$` | 行为类别，切换 Tab 时传 |
 | `search` | query | string | 否 | — | 长度 ≤ 64 | 会员关键字：匹配**发起方**昵称 / 手机号 / 会员编号（`G000123` 或纯数字 `000123`） |
+| `member_id` | query | int | 否 | — | `member_id ≥ 1` | 按发起行为的单个会员过滤；不传则查询全部会员。与 `search` 同时传入时以会员 ID 和关键字同时过滤 |
 | `min_times` | query | int | 否 | — | `1 ≤ min_times ≤ 1000` | 浏览次数下限，**仅 `category=browse` 生效**；页面「3次以上浏览」传 `3`、「5次以上浏览」传 `5` |
 | `status` | query | int | 否 | — | `0 ≤ status ≤ 2` | 举报处理状态，**仅 `category=report` 生效**：`0` 待处理 / `1` 已处理 / `2` 驳回 |
 | `pay_status` | query | int | 否 | — | `0 ≤ pay_status ≤ 1` | 支付状态，**仅 `category=superlike` / `gift` 生效**：`0` 未支付 / `1` 已支付 |
@@ -79,6 +97,15 @@
 GET /api/v1/admin/members/behavior-events?page=1&page_size=20&category=browse&min_times=3&search=000123
 Authorization: Bearer <access-token>
 ```
+
+查询单个会员（五类行为共用同一返回结构）：
+
+```http
+GET /api/v1/admin/members/123/behavior-events?page=1&page_size=20&category=gift
+Authorization: Bearer <access-token>
+```
+
+`/behavior-events` 是全量查询接口；增加 `member_id=123` 可得到相同的单会员过滤结果。路径版单会员接口会先校验会员存在，不存在返回 `404`。
 
 **非法示例**（`category` 不在枚举内 → `422`）：
 
@@ -373,10 +400,12 @@ DELETE /api/v1/admin/members/behavior-events/browse/10231
 | 方法 | 路径 | 权限 | 用途 |
 |---|---|---|---|
 | GET | `/api/v1/admin/members/behavior-events` | `matchmaker.member.read` | 五类行为流水分页查询 |
+| GET | `/api/v1/admin/members/{member_id}/behavior-events` | `matchmaker.member.read` | 单个会员五类行为流水分页查询 |
 | DELETE | `/api/v1/admin/members/behavior-events/{category}/{event_id}` | `matchmaker.member.manage` | 删除爆灯 / 礼物 / 举报记录 |
 
 ## 5. 变更记录
 
 | 版本 | 日期 | 变更前 | 变更后 | 影响范围 |
 |---|---|---|---|---|
+| v1.1 | 2026-09-22 | 仅支持全量行为查询，单会员旧接口字段不完整 | 全量接口新增 `member_id` 过滤；新增 `/admin/members/{member_id}/behavior-events`，复用五类完整字段和筛选规则 | 管理端行为页可分别查询全部会员或单个会员；旧路径保持兼容 |
 | v1.0 | 2026-09-11 | 无本文档；前端 `/love-user-behavior` 为硬编码假数据；后端仅有 `GET /admin/members/behavior/all`（四类、字段不全、无调用方） | 新增本文档；新增 `/admin/members/behavior-events`（五类完整字段 + 筛选）与删除端点；前端页面接入真实接口 | 前端 `love-user-behavior/page.tsx`、`admin-endpoints.ts`；后端新增 `schemas/services/routes/member_behavior_admin.py` 并在 `app/api/router.py` 注册；数据库新增 `user_gift_record` 表、`user_boost` 补 `pay_status`/`pay_method`/`status`、`user_report` 补 `submit_ip`（均走 `database_setup_marriage.py` 幂等补列） |

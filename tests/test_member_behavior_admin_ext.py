@@ -25,13 +25,26 @@ BASE = "/api/v1/admin/members"
 
 def test_new_behavior_routes_are_registered() -> None:
     paths = client.get("/openapi.json").json()["paths"]
+    for path in (
+        f"{BASE}/browse-history",
+        f"{BASE}/visitors",
+        f"{BASE}/favorites",
+        f"{BASE}/favorites/received",
+        f"{BASE}/superlikes",
+        f"{BASE}/superlikes/received",
+        f"{BASE}/gifts",
+        f"{BASE}/gifts/received",
+    ):
+        assert "get" in paths[path]
     assert "get" in paths[f"{BASE}/behavior-events"]
+    assert "get" in paths[f"{BASE}/{{member_id}}/behavior-events"]
     assert "delete" in paths[f"{BASE}/behavior-events/{{category}}/{{event_id}}"]
 
 
 def test_behavior_routes_require_authentication() -> None:
     # 读接口需 matchmaker.member.read，未登录应 401
     assert client.get(f"{BASE}/behavior-events").status_code == 401
+    assert client.get(f"{BASE}/123/behavior-events").status_code == 401
     # 删除接口需 matchmaker.member.manage，未登录应 401
     assert client.delete(f"{BASE}/behavior-events/superlike/1").status_code == 401
 
@@ -55,6 +68,15 @@ def test_behavior_category_enum_constrained_in_schema() -> None:
     assert "superlike" in del_category["schema"]["pattern"]
     assert "gift" in del_category["schema"]["pattern"]
     assert "report" in del_category["schema"]["pattern"]
+
+
+def test_behavior_query_supports_single_member_filter() -> None:
+    spec = client.get("/openapi.json").json()
+    params = spec["paths"][f"{BASE}/behavior-events"]["get"]["parameters"]
+    member_id = next(p for p in params if p["name"] == "member_id")
+    assert member_id["required"] is False
+    schema = member_id["schema"]
+    assert schema.get("minimum") == 1 or any(item.get("minimum") == 1 for item in schema.get("anyOf", []))
 
 
 # ─── 返回模型可构造 ─────────────────────────────────────────────

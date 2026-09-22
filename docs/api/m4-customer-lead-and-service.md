@@ -56,6 +56,8 @@
 
 落点：`app/db/business_schema.py`（CREATE TABLE）+ `database_setup_marriage.py::DatabaseManager._ensure_m4_columns`（旧库幂等补列，已注册进迁移链）。
 
+生产部署注意：`staging` / `production` 必须关闭 `AUTO_INIT_DB`，因此不能依赖应用启动自动补列。发布 M4 客源线索代码前，请在目标数据库执行 `migrations/m4_m7/20260922_01_customer_lead_m4_columns_up.sql`，并确认 `customer_lead.promoter_id`、`customer_lead.audit_status` 及 `idx_customer_lead_promoter` 已存在。执行后再滚动重启应用。回滚脚本为同目录的 `*_down.sql`，仅允许在应用已回退且完成数据备份、依赖检查后执行。
+
 其余端点复用已有表：
 
 - `customer_lead` / `customer_lead_follow_up` / `customer_lead_abandonment` / `customer_lead_tag` / `customer_lead_tag_relation`

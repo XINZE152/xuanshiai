@@ -114,10 +114,13 @@ def _row(category: str, row: dict[str, Any]) -> MemberBehaviorItem:
     return MemberBehaviorItem(**payload)
 
 
-def _build(category: str, search: str | None, min_times: int | None, report_status: int | None, pay_status: int | None) -> tuple[str, str, dict[str, Any]]:
+def _build(category: str, search: str | None, min_times: int | None, report_status: int | None, pay_status: int | None, member_id: int | None = None, direction: str = "sent") -> tuple[str, str, dict[str, Any]]:
     """返回 (data_sql, count_sql, params)。params 会再补 limit/offset。"""
     params: dict[str, Any] = {}
     where = ["1 = 1"]
+    if member_id is not None:
+        where.append(("u.id" if direction == "sent" else "t.id") + " = :member_id")
+        params["member_id"] = member_id
     if search:
         # 支持「按昵称搜」与「按编号搜」（编号为 G + 6 位左补零，也兼容纯数字）
         where.append(
@@ -146,7 +149,9 @@ def _build(category: str, search: str | None, min_times: int | None, report_stat
             f"t.avatar AS target_avatar, COUNT(*) AS browse_times, MAX(h.created_at) AS occurred_at "
             f"{base} ORDER BY occurred_at DESC, event_id DESC LIMIT :limit OFFSET :offset"
         )
-        count_sql = f"SELECT COUNT(*) FROM (SELECT h.user_id, h.target_user_id {base}) x"
+        # 派生表必须一并暴露 browse_times 别名，否则 HAVING browse_times >= :min_times
+        # 在 count 查询里解析不到该列（MySQL 1054），「浏览次数下限」一开就 500。
+        count_sql = f"SELECT COUNT(*) FROM (SELECT h.user_id, h.target_user_id, COUNT(*) AS browse_times {base}) x"
         return data_sql, count_sql, params
 
     if category == "favorite":
@@ -232,10 +237,12 @@ async def list_behavior(
     min_times: int | None = None,
     report_status: int | None = None,
     pay_status: int | None = None,
+    member_id: int | None = None,
+    direction: str = "sent",
 ) -> MemberBehaviorPage:
     if category not in _CATEGORIES:
         raise HTTPException(400, detail=f"不支持的行为类别：{category}")
-    data_sql, count_sql, params = _build(category, search, min_times, report_status, pay_status)
+    data_sql, count_sql, params = _build(category, search, min_times, report_status, pay_status, member_id, direction)
     rows = await db.execute(
         text(data_sql), {**params, "limit": page_size, "offset": (page - 1) * page_size}
     )

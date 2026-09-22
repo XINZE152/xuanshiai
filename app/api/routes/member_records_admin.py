@@ -1,5 +1,6 @@
-"""Read-only record feeds used by the member CRM detail workspace."""
+"""Record feeds and controlled updates used by the member CRM detail workspace."""
 
+import json
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
 from app.db.session import get_db
+from app.schemas.matchmaker_crm_admin import MemberProfileUpdate, MemberProfileUpdateResponse
 
 router = APIRouter(prefix="/admin/members")
 
@@ -87,6 +89,13 @@ class MemberMatchQuotaResponse(BaseModel):
     used_count: int
     refunded_count: int
     updated_at: datetime | None = None
+
+
+class MemberMatchQuotaUpdate(BaseModel):
+    """直接设置会员剩余牵线次数。"""
+
+    available_count: int = Field(..., ge=0, le=1000000, description="修改后的剩余牵线次数")
+    reason: str = Field(..., min_length=1, max_length=255, description="后台修改理由")
 
 
 class MemberDatingRecordItem(BaseModel):
@@ -189,6 +198,88 @@ async def match_quota(
     if not row:
         return MemberMatchQuotaResponse(user_id=member_id, available_count=0, used_count=0, refunded_count=0)
     return MemberMatchQuotaResponse(**dict(row))
+
+
+@router.patch("/{member_id}/match-quota", response_model=MemberMatchQuotaResponse, summary="修改会员剩余牵线次数")
+async def update_match_quota(
+    member_id: int = Path(..., ge=1, description="会员 ID"),
+    body: MemberMatchQuotaUpdate = ...,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MemberMatchQuotaResponse:
+    """直接设置剩余次数，使用行锁并记录后台审计。"""
+    current.require("matchmaker.member.manage")
+    await _ensure_member(db, member_id)
+    row = (await db.execute(text("""SELECT id, available_count, used_count, refunded_count
+        FROM matchmaker_service_quota WHERE user_id = :id FOR UPDATE"""), {"id": member_id})).mappings().first()
+    before = dict(row) if row else {"available_count": 0, "used_count": 0, "refunded_count": 0}
+    if row:
+        await db.execute(text("""UPDATE matchmaker_service_quota
+            SET available_count = :available_count, updated_at = UTC_TIMESTAMP() WHERE id = :id"""), {
+            "available_count": body.available_count, "id": row["id"],
+        })
+    else:
+        await db.execute(text("""INSERT INTO matchmaker_service_quota
+            (user_id, available_count, used_count, refunded_count)
+            VALUES (:user_id, :available_count, 0, 0)"""), {
+            "user_id": member_id, "available_count": body.available_count,
+        })
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id, reason, before_json, after_json)
+        VALUES (:actor, 'member.match_quota.update', 'matchmaker_service_quota', :user_id, :reason, :before_json, :after_json)"""), {
+        "actor": current.account.id,
+        "user_id": member_id,
+        "reason": body.reason,
+        "before_json": __import__("json").dumps(before, ensure_ascii=False, default=str),
+        "after_json": __import__("json").dumps({"available_count": body.available_count}, ensure_ascii=False),
+    })
+    await db.commit()
+    result = (await db.execute(text("""SELECT user_id, available_count, used_count, refunded_count, updated_at
+        FROM matchmaker_service_quota WHERE user_id = :id"""), {"id": member_id})).mappings().one()
+    return MemberMatchQuotaResponse(**dict(result))
+
+
+@router.patch("/{member_id}/profile", response_model=MemberProfileUpdateResponse, summary="统一修改会员信息")
+async def update_member_profile(
+    member_id: int = Path(..., ge=1, description="会员 ID"),
+    body: MemberProfileUpdate = ...,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MemberProfileUpdateResponse:
+    """统一修改截图对应的会员基础、认证和隐私字段。"""
+    current.require("matchmaker.member.manage")
+    values = body.model_dump(exclude_unset=True)
+    reason = values.pop("reason")
+    if not values:
+        raise HTTPException(422, detail="至少提供一个需要修改的字段")
+    locked = (await db.execute(text("SELECT id FROM users WHERE id = :id FOR UPDATE"), {"id": member_id})).scalar()
+    if not locked:
+        raise HTTPException(404, detail="会员不存在")
+
+    user_fields = {key: values[key] for key in ("nickname", "avatar", "status", "is_married", "is_single_pledge") if key in values}
+    auth_fields = {key: values[key] for key in ("real_name", "auth_status", "house_verified", "education_verified") if key in values}
+    privacy_fields = {key: values[key] for key in ("match_status", "only_vip_can_see_detail", "show_profile") if key in values}
+    if user_fields:
+        assignments = ", ".join(f"{key} = :{key}" for key in user_fields)
+        await db.execute(text(f"UPDATE users SET {assignments}, updated_at = UTC_TIMESTAMP() WHERE id = :user_id"), {**user_fields, "user_id": member_id})
+    if auth_fields:
+        columns = ", ".join(["user_id", *auth_fields])
+        placeholders = ", ".join([":user_id", *(f":{key}" for key in auth_fields)])
+        updates = ", ".join(f"{key} = VALUES({key})" for key in auth_fields)
+        await db.execute(text(f"INSERT INTO user_auth ({columns}) VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {updates}, updated_at = UTC_TIMESTAMP()"), {"user_id": member_id, **auth_fields})
+    if privacy_fields:
+        columns = ", ".join(["user_id", *privacy_fields])
+        placeholders = ", ".join([":user_id", *(f":{key}" for key in privacy_fields)])
+        updates = ", ".join(f"{key} = VALUES({key})" for key in privacy_fields)
+        await db.execute(text(f"INSERT INTO user_privacy ({columns}) VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {updates}, updated_at = UTC_TIMESTAMP()"), {"user_id": member_id, **privacy_fields})
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id, reason, after_json)
+        VALUES (:actor, 'member.profile.update', 'user', :user_id, :reason, :after_json)"""), {
+        "actor": current.account.id, "user_id": member_id, "reason": reason,
+        "after_json": json.dumps(values, ensure_ascii=False, default=str),
+    })
+    await db.commit()
+    return MemberProfileUpdateResponse(user_id=member_id, updated_fields=list(values), reason=reason)
 
 
 @router.get("/{member_id}/recommend-history", response_model=MemberRecommendationHistoryPage, summary="查询会员已添加的推荐名单")
