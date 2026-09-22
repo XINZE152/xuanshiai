@@ -1,6 +1,6 @@
 ﻿# AI 军师接口
 
-更新时间：2026-09-07
+更新时间：2026-09-22
 
 接口前缀：`/api/v1/ai/advisor`。当前为文字情感军师 MVP 后端框架，军师类型固定为 `relationship`。所有接口需要登录；创建、查询和生成建议需要有效会员。AI 只提供建议，不主动发送消息，不作医疗、法律、金融或心理诊断。
 
@@ -12,7 +12,7 @@
 |---|---:|---|---|
 | `Authorization` | 是 | Bearer 登录令牌 | `Bearer <token>` |
 | `Content-Type` | 有请求体时是 | 固定 `application/json` | `application/json` |
-| `Idempotency-Key` | 否 | 当前框架预留，正式幂等存储待产品口径冻结后补齐 | `advisor-20260823-001` |
+| `Idempotency-Key` | 否 | 相同用户和会话的成功结果可按现有唯一约束回读；并发冲突回滚当前扣额并回读首次成功结果 | `advisor-20260922-001` |
 
 **通用错误**：
 

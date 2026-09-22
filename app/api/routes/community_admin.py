@@ -162,6 +162,13 @@ async def create_banner(
 ) -> CommunityBannerAdminResponse:
     _require_global_write(current)
     values = {**body.model_dump(), "is_active": int(body.is_active)}
+    conflict = await db.execute(text("""SELECT id FROM config_banner
+        WHERE position=:position AND is_active=1
+          AND (:start_at IS NULL OR end_at IS NULL OR end_at > :start_at)
+          AND (:end_at IS NULL OR start_at IS NULL OR start_at < :end_at)
+        LIMIT 1 FOR UPDATE"""), values)
+    if conflict.scalar():
+        raise HTTPException(409, detail="同一位置和时间段已有生效中的 Banner")
     result = await db.execute(text("""INSERT INTO config_banner
         (title, image_url, link_type, link_value, sort, position, is_active, start_at, end_at)
         VALUES (:title, :image_url, :link_type, :link_value, :sort, :position, :is_active, :start_at, :end_at)"""), values)
@@ -186,6 +193,13 @@ async def update_banner(
     if not existing:
         raise HTTPException(404, detail="社区 Banner 不存在")
     values = {**body.model_dump(), "is_active": int(body.is_active), "id": banner_id}
+    conflict = await db.execute(text("""SELECT id FROM config_banner
+        WHERE position=:position AND is_active=1 AND id<>:id
+          AND (:start_at IS NULL OR end_at IS NULL OR end_at > :start_at)
+          AND (:end_at IS NULL OR start_at IS NULL OR start_at < :end_at)
+        LIMIT 1 FOR UPDATE"""), values)
+    if conflict.scalar():
+        raise HTTPException(409, detail="同一位置和时间段已有生效中的 Banner")
     await db.execute(text("""UPDATE config_banner SET title=:title, image_url=:image_url,
         link_type=:link_type, link_value=:link_value, sort=:sort, position=:position,
         is_active=:is_active, start_at=:start_at, end_at=:end_at, updated_at=UTC_TIMESTAMP()

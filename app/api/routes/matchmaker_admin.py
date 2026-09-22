@@ -29,6 +29,32 @@ from sqlalchemy import text
 router = APIRouter(prefix="/admin/matchmaker")
 
 
+def _matchmaker_scope_filter(
+    current: CurrentMatchmakerAdmin,
+    params: dict[str, object],
+    subject_sql: str,
+    alias: str,
+) -> str:
+    """Build a scope predicate for a service-matchmaker subject expression."""
+    scope = current.scope_condition(
+        organization_column=f"{alias}_org.id",
+        params=params,
+        user_column=subject_sql,
+    )
+    if current.account.data_scope in ("ALL",) or "*" in current.permissions:
+        return scope
+    if current.account.data_scope == "SELF":
+        return scope
+    return (
+        f"EXISTS (SELECT 1 FROM organization_member {alias}_om "
+        f"JOIN organization {alias}_org ON {alias}_org.id = {alias}_om.organization_id "
+        f"AND {alias}_org.org_type = 'store' "
+        f"WHERE {alias}_om.user_id = {subject_sql} "
+        f"AND {alias}_om.role_code = 'store_matchmaker' "
+        f"AND {alias}_om.status = 1 AND {scope})"
+    )
+
+
 @router.post("/auth/login", response_model=MatchmakerAdminTokenResponse, summary="红娘后台账号密码登录")
 async def admin_login(request: Request, body: MatchmakerAdminLoginRequest, db: AsyncSession = Depends(get_db)) -> MatchmakerAdminTokenResponse:
     return await login(db, body, request.client.host if request.client else None, request.headers.get("user-agent"))
@@ -108,13 +134,17 @@ def _legacy_actor(current: CurrentMatchmakerAdmin) -> CurrentUser:
 
 @router.get("/statistics", response_model=MatchmakerStatistics, summary="查询红娘后台统计")
 async def statistics(current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MatchmakerStatistics:
+    current.require("matchmaker.read")
+    params: dict[str, object] = {}
+    apply_scope = _matchmaker_scope_filter(current, params, "a.user_id", "stats_apply")
+    service_scope = _matchmaker_scope_filter(current, params, "s.matchmaker_id", "stats_service")
     result = await db.execute(text("""SELECT
-        (SELECT COUNT(*) FROM user_matchmaker_apply WHERE application_type = 'service_matchmaker' AND status IN (1, 2, 3)) AS total,
-        (SELECT COUNT(*) FROM user_matchmaker_apply a JOIN user_role r ON r.user_id = a.user_id AND r.role_code = 'service_matchmaker' AND r.status = 1 WHERE a.application_type = 'service_matchmaker' AND a.status = 1) AS available,
-        (SELECT COUNT(*) FROM matchmaker_service WHERE status = 0) AS pending_services,
-        (SELECT COUNT(*) FROM matchmaker_service WHERE status = 1) AS active_services,
-        (SELECT COUNT(*) FROM matchmaker_service WHERE status = 2) AS completed_services,
-        (SELECT COUNT(*) FROM matchmaker_service WHERE status = 3) AS cancelled_services"""))
+        (SELECT COUNT(*) FROM user_matchmaker_apply a WHERE a.application_type = 'service_matchmaker' AND a.status IN (1, 2, 3) AND """ + apply_scope + """ ) AS total,
+        (SELECT COUNT(*) FROM user_matchmaker_apply a JOIN user_role r ON r.user_id = a.user_id AND r.role_code = 'service_matchmaker' AND r.status = 1 WHERE a.application_type = 'service_matchmaker' AND a.status = 1 AND """ + apply_scope + """ ) AS available,
+        (SELECT COUNT(*) FROM matchmaker_service s WHERE s.status = 0 AND """ + service_scope + """ ) AS pending_services,
+        (SELECT COUNT(*) FROM matchmaker_service s WHERE s.status = 1 AND """ + service_scope + """ ) AS active_services,
+        (SELECT COUNT(*) FROM matchmaker_service s WHERE s.status = 2 AND """ + service_scope + """ ) AS completed_services,
+        (SELECT COUNT(*) FROM matchmaker_service s WHERE s.status = 3 AND """ + service_scope + """ ) AS cancelled_services"""), params)
     return MatchmakerStatistics(**dict(result.mappings().one()))
 
 

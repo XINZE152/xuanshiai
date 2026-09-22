@@ -96,7 +96,7 @@ async def get_matchmaker(
     db: AsyncSession = Depends(get_db),
 ) -> MatchmakerStaffDetail:
     _guard(current)
-    return await service.get_staff(db, matchmaker_id)
+    return await service.get_staff(db, matchmaker_id, current)
 
 
 @router.put("/matchmakers/{matchmaker_id}", response_model=MatchmakerStaffDetail)
@@ -187,7 +187,7 @@ async def get_work_report(
 ) -> MatchmakerWorkReport:
     _guard(current)
     start, end = _dates(from_date, to_date)
-    return await service.work_report(db, matchmaker_id, start, end)
+    return await service.work_report(db, matchmaker_id, start, end, current)
 
 
 @router.get("/matchmakers/{matchmaker_id}/report", response_model=MatchmakerDetailReport)
@@ -200,7 +200,7 @@ async def get_report(
 ) -> MatchmakerDetailReport:
     _guard(current)
     start, end = _dates(from_date, to_date)
-    return await service.report(db, matchmaker_id, start, end)
+    return await service.report(db, matchmaker_id, start, end, current)
 
 
 @router.post("/matchmakers/{matchmaker_id}/poster", response_model=MatchmakerPosterResponse)
@@ -210,7 +210,7 @@ async def create_poster(
     db: AsyncSession = Depends(get_db),
 ) -> MatchmakerPosterResponse:
     _guard(current)
-    await service.get_staff(db, matchmaker_id)
+    await service.get_staff(db, matchmaker_id, current)
     return await service.poster(matchmaker_id)
 
 
