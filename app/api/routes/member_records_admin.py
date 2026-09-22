@@ -89,6 +89,54 @@ class MemberMatchQuotaResponse(BaseModel):
     updated_at: datetime | None = None
 
 
+class MemberDatingRecordItem(BaseModel):
+    """会员详情约会记录；from/to 始终标识双方会员。"""
+
+    id: int
+    request_id: int
+    scheduled_at: datetime | None = None
+    location: str | None = None
+    status: str
+    cancel_reason: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    from_user_id: int
+    from_nickname: str | None = None
+    to_user_id: int
+    to_nickname: str | None = None
+
+
+class MemberDatingRecordPage(BaseModel):
+    items: list[MemberDatingRecordItem]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
+
+
+class MemberMeetingRequestItem(BaseModel):
+    id: int
+    user_id: int
+    user_nickname: str | None = None
+    target_user_id: int
+    target_nickname: str | None = None
+    service_id: int | None = None
+    matchmaker_id: int | None = None
+    organization_id: int | None = None
+    status: str
+    note: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class MemberMeetingRequestPage(BaseModel):
+    items: list[MemberMeetingRequestItem]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
+
+
 class MemberCallRecordCreate(BaseModel):
     direction: str = Field(default="OUTBOUND", pattern="^(INBOUND|OUTBOUND)$")
     status: str = Field(default="COMPLETED", pattern="^(COMPLETED|MISSED|FAILED)$")
@@ -196,15 +244,66 @@ async def create_recommendation(
     return MemberRecommendationResponse(**dict(row))
 
 
-@router.get("/{member_id}/dating-records")
-async def dating_records(member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
+@router.get("/{member_id}/dating-records", response_model=MemberDatingRecordPage, summary="查询会员约会记录")
+async def dating_records(
+    member_id: int = Path(..., ge=1),
+    page: int = _paging()[0],
+    page_size: int = _paging()[1],
+    status_group: str | None = Query(None, pattern="^(all|waiting|not_met|met)$", description="all全部，waiting待见面，not_met未见面，met成功见面"),
+    status: str | None = Query(None, pattern="^(SCHEDULED|REMINDED|CHECKED_IN|COMPLETED|CANCELLED|NO_SHOW)$"),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MemberDatingRecordPage:
     await _ensure_member(db, member_id)
-    return await _page(db, """SELECT r.id, r.request_id, r.scheduled_at, r.location, r.status, r.cancel_reason, r.created_at,
-        q.user_id, q.target_user_id, u.nickname AS target_nickname
+    filters = ["(q.user_id = :id OR q.target_user_id = :id)"]
+    if status:
+        filters.append("r.status = :status")
+    elif status_group == "waiting":
+        filters.append("r.status IN ('SCHEDULED', 'REMINDED')")
+    elif status_group == "not_met":
+        filters.append("r.status IN ('CANCELLED', 'NO_SHOW')")
+    elif status_group == "met":
+        filters.append("r.status IN ('CHECKED_IN', 'COMPLETED')")
+    where = " AND ".join(filters)
+    params = {"id": member_id, "limit": page_size, "offset": (page - 1) * page_size}
+    if status:
+        params["status"] = status
+    try:
+        rows = await db.execute(text(f"""SELECT r.id, r.request_id, r.scheduled_at, r.location, r.status, r.cancel_reason, r.created_at, r.updated_at,
+        q.user_id AS from_user_id, uf.nickname AS from_nickname, q.target_user_id AS to_user_id, ut.nickname AS to_nickname
         FROM meeting_record r JOIN meeting_request q ON q.id = r.request_id
-        LEFT JOIN users u ON u.id = CASE WHEN q.user_id = :id THEN q.target_user_id ELSE q.user_id END
-        WHERE q.user_id = :id OR q.target_user_id = :id ORDER BY r.scheduled_at DESC, r.id DESC LIMIT :limit OFFSET :offset""",
-        "SELECT COUNT(*) FROM meeting_record r JOIN meeting_request q ON q.id = r.request_id WHERE q.user_id = :id OR q.target_user_id = :id", member_id, page, page_size)
+        LEFT JOIN users uf ON uf.id = q.user_id LEFT JOIN users ut ON ut.id = q.target_user_id
+        WHERE {where} ORDER BY r.scheduled_at DESC, r.id DESC LIMIT :limit OFFSET :offset"""), params)
+        total = int((await db.execute(text(f"SELECT COUNT(*) FROM meeting_record r JOIN meeting_request q ON q.id = r.request_id WHERE {where}"), {"id": member_id, **({"status": status} if status else {})})).scalar() or 0)
+        return MemberDatingRecordPage(items=[MemberDatingRecordItem(**dict(row)) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
+    except SQLAlchemyError:
+        await db.rollback()
+        return MemberDatingRecordPage(items=[], page=page, page_size=page_size, total=0, has_more=False)
+
+
+@router.get("/{member_id}/meeting-requests", response_model=MemberMeetingRequestPage, summary="查询会员约见申请")
+async def meeting_requests(
+    member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1],
+    status: str | None = Query(None, pattern="^(SUBMITTED|CONTACTED|ACCEPTED|DECLINED|CLOSED)$"),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db),
+) -> MemberMeetingRequestPage:
+    await _ensure_member(db, member_id)
+    status_clause = " AND q.status = :status" if status else ""
+    params = {"id": member_id, "limit": page_size, "offset": (page - 1) * page_size}
+    if status:
+        params["status"] = status
+    try:
+        rows = await db.execute(text(f"""SELECT q.id, q.user_id, uf.nickname AS user_nickname, q.target_user_id,
+            ut.nickname AS target_nickname, q.service_id, q.matchmaker_id, q.organization_id, q.status, q.note,
+            q.created_at, q.updated_at FROM meeting_request q
+            LEFT JOIN users uf ON uf.id = q.user_id LEFT JOIN users ut ON ut.id = q.target_user_id
+            WHERE (q.user_id = :id OR q.target_user_id = :id){status_clause}
+            ORDER BY q.created_at DESC, q.id DESC LIMIT :limit OFFSET :offset"""), params)
+        total = int((await db.execute(text(f"SELECT COUNT(*) FROM meeting_request q WHERE (q.user_id = :id OR q.target_user_id = :id){status_clause}"), {"id": member_id, **({"status": status} if status else {})})).scalar() or 0)
+        return MemberMeetingRequestPage(items=[MemberMeetingRequestItem(**dict(row)) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
+    except SQLAlchemyError:
+        await db.rollback()
+        return MemberMeetingRequestPage(items=[], page=page, page_size=page_size, total=0, has_more=False)
 
 
 @router.get("/{member_id}/media-records")

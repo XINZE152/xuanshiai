@@ -103,6 +103,7 @@ async def admin_meetings(
     page_size: int = Query(20, ge=1, le=100),
     status: str | None = Query(None, max_length=32),
     search: str | None = Query(None, max_length=64, description="昵称/编号/手机/姓名"),
+    member_id: int | None = Query(None, ge=1, description="指定会员 ID；不传则查询全部约会记录"),
     organizer_id: int | None = Query(None, ge=1),
     met: str | None = Query(None, pattern="^(met|wait)$"),
     from_date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
@@ -111,7 +112,7 @@ async def admin_meetings(
     db: AsyncSession = Depends(get_db),
 ) -> MeetingRecordAdminPage:
     admin.require("meeting.read")
-    return await admin_list_meetings(db, page, page_size, status, search, organizer_id, from_date, to_date, met)
+    return await admin_list_meetings(db, page, page_size, status, search, organizer_id, from_date, to_date, met, member_id)
 
 
 @admin_router.post("", response_model=MeetingRecordResponse, status_code=201, summary="添加约会（约会管理）")

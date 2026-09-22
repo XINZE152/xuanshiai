@@ -330,6 +330,7 @@ async def admin_list_meetings(
     from_date: str | None = None,
     to_date: str | None = None,
     met: str | None = None,
+    member_id: int | None = None,
 ) -> MeetingRecordAdminPage:
     where = ["1 = 1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
@@ -339,6 +340,9 @@ async def admin_list_meetings(
     if organizer_id:
         where.append("mr.organizer_id = :organizer_id")
         params["organizer_id"] = organizer_id
+    if member_id:
+        where.append("(rq.user_id = :member_id OR rq.target_user_id = :member_id)")
+        params["member_id"] = member_id
     if met == "met":
         where.append("mr.status IN ('CHECKED_IN', 'COMPLETED')")
     elif met == "wait":
