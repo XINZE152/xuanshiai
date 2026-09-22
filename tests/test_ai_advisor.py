@@ -109,3 +109,14 @@ def test_advisor_database_contract_contains_idempotency_and_audit() -> None:
     assert "uk_ai_advisor_message_idempotency" in message_sql
     assert "quota_refunded" in audit_sql
     assert "error_detail" in audit_sql
+
+
+def test_advisor_serializes_idempotent_requests_and_replays_insert_conflicts() -> None:
+    import inspect
+    from app.services import ai_advisor as service
+
+    source = inspect.getsource(service.get_advice)
+    assert "FOR UPDATE" in source
+    assert "IntegrityError" in source
+    assert "_refund_quota_safely(quota_key)" in source
+    assert "status='success'" in source

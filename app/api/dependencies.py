@@ -169,6 +169,10 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
     method = request.method.upper()
     if path.endswith("/auth/me") or path.endswith("/auth/logout") or "/auth/" in path:
         return None
+    if path == "/api/v1/admin/dashboard/stats":
+        return "matchmaker.read"
+    if path == "/api/v1/admin/matchmaker/statistics":
+        return "matchmaker.read"
     if "/accounts" in path:
         return "matchmaker.account.manage"
     if "/members" in path:

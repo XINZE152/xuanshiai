@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -316,7 +317,9 @@ async def _rollback_safely(db: AsyncSession) -> None:
         logger.exception("advisor_audit_rollback_failed")
 
 
-async def _refund_quota_safely(quota_key: str) -> bool:
+async def _refund_quota_safely(quota_key: str | None) -> bool:
+    if not quota_key:
+        return False
     try:
         await refund_daily(quota_key)
         return True
@@ -337,8 +340,9 @@ async def get_advice(
     idempotency_key: str | None = None,
 ) -> AdvisorAdviceResponse:
     await _require_vip(db, user_id)
+    session_lock = " FOR UPDATE" if idempotency_key else ""
     session = (await db.execute(text("""SELECT id, chat_session_id FROM ai_advisor_session
-        WHERE id=:session_id AND user_id=:user_id AND status=1"""), {
+        WHERE id=:session_id AND user_id=:user_id AND status=1""" + session_lock), {
         "session_id": session_id,
         "user_id": user_id,
     })).mappings().first()
@@ -428,7 +432,8 @@ async def get_advice(
         data = _normalize_result(parse_json(raw), request)
         if data["risk_level"] == "high":
             raise _AdvisorRiskBlocked()
-        result = await db.execute(text("""INSERT INTO ai_advisor_message
+        try:
+            result = await db.execute(text("""INSERT INTO ai_advisor_message
             (session_id, user_id, role, scenario, input_text, output_json, risk_level, status,
              model_name, prompt_version, knowledge_version, request_id, idempotency_key, latency_ms, quota_consumed)
             VALUES (:session_id, :user_id, 'assistant', :scenario, :input_text, :output_json, :risk_level, 'success',
@@ -444,8 +449,24 @@ async def get_advice(
             "knowledge_version": settings.ai_advisor_knowledge_version,
             "request_id": request_id,
             "idempotency_key": idempotency_key,
-            "latency_ms": int((time.monotonic() - started) * 1000),
-        })
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            })
+        except IntegrityError:
+            await db.rollback()
+            await _refund_quota_safely(quota_key)
+            quota_key = None
+            existing = (await db.execute(text("""SELECT id, session_id, scenario, output_json, created_at
+                FROM ai_advisor_message
+                WHERE session_id=:session_id AND user_id=:user_id
+                  AND idempotency_key=:idempotency_key AND status='success'
+                LIMIT 1"""), {
+                "session_id": session_id,
+                "user_id": user_id,
+                "idempotency_key": idempotency_key,
+            })).mappings().first()
+            if existing:
+                return _response_from_stored(existing)
+            raise
         await db.execute(text("UPDATE ai_advisor_session SET updated_at=UTC_TIMESTAMP() WHERE id=:id"), {"id": session_id})
         await _write_call_log(
             db,
