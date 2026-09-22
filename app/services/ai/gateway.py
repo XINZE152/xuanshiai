@@ -36,6 +36,7 @@ from app.services.ai.base import (
     GatewayCallRecord,
     ModerationResult,
     NarrativeResult,
+    ProfileCardSummarizeResult,
     ProviderError,
     ProviderErrorKind,
     ReplyResult,
@@ -553,4 +554,14 @@ class AIGateway:
         return await self.invoke(
             context, "generate_reply", request,
             response_type=ReplyResult,
+        )
+
+    async def generate_profile_card_draft(
+        self, context: AITaskContext, request: Any
+    ) -> InvokeOutcome[ProfileCardSummarizeResult]:
+        return await self.invoke(
+            context,
+            "generate_profile_card_draft",
+            request,
+            response_type=ProfileCardSummarizeResult,
         )

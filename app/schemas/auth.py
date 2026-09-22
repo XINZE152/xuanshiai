@@ -17,6 +17,35 @@ MbtiType = Literal[
 ]
 
 
+QA_QUESTION_TEXTS: dict[int, str] = {
+    1: "你理想中的另一半是什么样的",
+    2: "喜欢什么运动",
+    3: "你期待的爱情是什么样子的",
+}
+
+
+class ProfileQaAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: Literal[1, 2, 3]
+    question: str | None = Field(default=None, max_length=64)
+    answer: str = Field(default="", max_length=300)
+
+    @field_validator("answer", mode="before")
+    @classmethod
+    def normalize_answer(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @model_validator(mode="after")
+    def fill_question_text(self) -> ProfileQaAnswer:
+        if not self.question:
+            self.question = QA_QUESTION_TEXTS[int(self.question_id)]
+        return self
+
+
+
 class SmsSendRequest(BaseModel):
     phone: str = Field(pattern=r"^1[3-9]\d{9}$", examples=["13812345678"], description="11位大陆手机号")
     purpose: Literal["login", "bind_phone"] = "login"
@@ -132,12 +161,16 @@ class ProfileUpdateRequest(BaseModel):
         max_length=5,
         description="兼容字段：0～5 个性格选项，新客户端使用 personal_tags",
     )
+    qa_answers: list[ProfileQaAnswer] | None = Field(
+        default=None,
+        max_length=3,
+        description="关于我问答，question_id 仅允许 1–3，answer 最多 300 字；空数组清空",
+    )
     mbti: MbtiType | None = None
     tag_selections: dict[str, list[str]] | None = Field(
         default=None,
         description="扩展标签分类映射，不替代兴趣标签和性格标签",
     )
-
     @field_validator("personal_tags", "interest_tags", "personality_tags")
     @classmethod
     def validate_tags(cls, value: list[str] | None, info) -> list[str] | None:
@@ -181,6 +214,10 @@ class ProfileUpdateRequest(BaseModel):
             raise ValueError("性格标签请通过 personal_tags 或 personality_tags 提交")
         if any(tag not in PERSONALITY_OPTIONS for tag in self.personality_tags or []):
             raise ValueError("personality_tags 只能包含性格标签")
+        if self.qa_answers is not None:
+            ids = [item.question_id for item in self.qa_answers]
+            if len(ids) != len(set(ids)):
+                raise ValueError("qa_answers 的 question_id 不能重复")
         return self
 
     @field_validator("tag_selections")
@@ -255,6 +292,7 @@ class ProfileResponse(BaseModel):
     residence_district_code: str | None
     residence_display: str | None = None
     self_intro: str | None
+    qa_answers: list[ProfileQaAnswer] = Field(default_factory=list, description="关于我问答，不计资料完整度")
     personal_tags: list[str] = Field(default_factory=list, description="合并去重后的有效兴趣标签")
     custom_tags: list[str] = Field(default_factory=list, description="本人创建并通过校验的自定义标签")
     custom_tag_categories: dict[str, str] = Field(default_factory=dict, description="自定义标签到兴趣分区 key 的映射")

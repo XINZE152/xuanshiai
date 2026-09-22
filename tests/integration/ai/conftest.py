@@ -153,6 +153,7 @@ async def sweep_test_users(
                 "DELETE FROM ai_search_draft WHERE user_id BETWEEN 9876543000 AND 9876549999",
                 "DELETE FROM ai_profile_draft_field WHERE draft_id IN (SELECT draft_id FROM ai_profile_draft WHERE user_id BETWEEN 9876543000 AND 9876549999)",
                 "DELETE FROM ai_profile_draft WHERE user_id BETWEEN 9876543000 AND 9876549999",
+                "DELETE FROM ai_profile_card_draft WHERE user_id BETWEEN 9876543000 AND 9876549999",
                 "DELETE FROM ai_profile_build_invite WHERE user_id BETWEEN 9876543000 AND 9876549999",
                 "DELETE FROM ai_profile_candidate WHERE user_id BETWEEN 9876543000 AND 9876549999",
                 "DELETE FROM ai_profile_turn WHERE user_id BETWEEN 9876543000 AND 9876549999",

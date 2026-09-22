@@ -1200,7 +1200,8 @@ def test_hard_field_mappings_cover_the_allowlist() -> None:
     assert filters.education_min == 4
     assert filters.height_min == 160
     assert filters.height_max == 180
-    assert filters.income_min == 2
+    # income_band gte 2（月5千-1万档）换算为年收入下界 6 万——档位号不得当元直通。
+    assert filters.income_min == 60_000
     assert ("occupation_group", "技术") in compiled.soft_terms
     assert ("lifestyle_tags", "健身") in compiled.soft_terms
     assert ("relationship_goal", "marriage") in compiled.soft_terms
@@ -1875,6 +1876,32 @@ def test_search_feature_disabled_returns_503() -> None:
     assert response.json()["detail"]["code"] == "AI_FEATURE_DISABLED"
 
 
+def test_delete_search_snapshot_still_works_when_search_feature_disabled(
+    search_store,
+) -> None:
+    """删除搜索快照是治理类：功能关闭时仍返回 202 并创建 cleanup 任务。"""
+    search_store.snapshots["ss-delete-off"] = {
+        "snapshot_id": "ss-delete-off",
+        "draft_id": "draft-delete-off",
+        "user_id": 10,
+        "invalidated_at": None,
+    }
+    _override_auth(search_store)
+    try:
+        response = client.delete(
+            "/api/v1/ai/search-snapshots/ss-delete-off",
+            headers={"Idempotency-Key": "search-del-01"},
+        )
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["cleanup_requested"] is True
+    assert body["task_id"]
+    assert search_store.snapshots["ss-delete-off"]["invalidated_at"] is not None
+
+
 # ----------------------------------------------------------------------
 # Worker handler 注册
 # ----------------------------------------------------------------------
@@ -2001,7 +2028,7 @@ async def test_snapshot_results_have_zero_hard_condition_violations(
         SearchCondition(
             field_key="income_band",
             operator="gte",
-            value=8000,
+            value=3,
             kind="hard",
             user_action="confirmed",
         ),
@@ -2019,7 +2046,7 @@ async def test_snapshot_results_have_zero_hard_condition_violations(
         residence_city_code="330100",
         education_level=5,
         height=172,
-        income=15000.0,
+        income=150000.0,
         is_married=1,
     )
     await search_store.seed_projection(100, {})
@@ -2028,7 +2055,7 @@ async def test_snapshot_results_have_zero_hard_condition_violations(
     await search_store.seed_candidate(102, birthday="1996-05-20", residence_city_code="440100")
     await search_store.seed_candidate(103, birthday="1996-05-20", education_level=2)
     await search_store.seed_candidate(104, birthday="1996-05-20", height=150)
-    await search_store.seed_candidate(105, birthday="1996-05-20", income=1000.0)
+    await search_store.seed_candidate(105, birthday="1996-05-20", income=50000.0)
     await search_store.seed_candidate(106, birthday="1996-05-20", is_married=2)
 
     snapshot_id = await _confirm_seeded_draft(
@@ -2530,14 +2557,18 @@ async def test_old_cursor_invalid_after_generation_switch(search_store) -> None:
     前端重新拉第一页。"""
     await search_store.seed_consent()
     await search_store.seed_revision()
-    await search_store.seed_candidate(
-        42,
-        birthday="1996-05-20",
-        residence_city_code="330100",
-        education_level=4,
-        interest_tags=["户外"],
-    )
-    await search_store.seed_projection(42, {"interest_tags": ["户外"]})
+    # 物化首页 next_cursor 仅在 total > SEARCH_PAGE_SIZE_DEFAULT(20) 时生成：
+    # 播种 24 个候选，让 cursor 分支与 generation 失效断言真实执行（与
+    # integration 用例 test_real_old_cursor_invalid_after_generation_switch 同口径）。
+    for uid in range(42, 66):
+        await search_store.seed_candidate(
+            uid,
+            birthday="1996-05-20",
+            residence_city_code="330100",
+            education_level=4,
+            interest_tags=["户外"],
+        )
+        await search_store.seed_projection(uid, {"interest_tags": ["户外"]})
     db = search_store.session
     draft = await create_search_draft(
         db, 10, "喜欢户外的人", "manual", "zh-CN", "idem-old-cursor-001"
@@ -2722,3 +2753,47 @@ async def test_compiled_filters_only_use_server_side_fields() -> None:
         "age_min": 25,
         "age_max": 35,
     }
+
+
+@pytest.mark.asyncio
+async def test_generation_advances_when_hard_condition_partial_runs(
+    search_store,
+) -> None:
+    """回归：hard 条件下 partial 初筛集参与物化时，代次仍须单调递增。
+
+    缺陷历史：``_materialize_partial_results`` 以 generation=0 复用
+    ``(snapshot_id, target_user_id)`` 唯一键 upsert，会把上一轮完整集行的
+    generation 覆盖为 0。若 ``_load_active_generation`` 在该写入之后读取，
+    MAX(generation) 落到 0，new_generation 恒为 1，旧 cursor 永不失效。
+    mock 解析的搜索条件含 city_code/age 等 hard 字段，恰好覆盖这条路径。
+    """
+    await search_store.seed_consent()
+    await search_store.seed_revision()
+    for uid in range(42, 66):
+        await search_store.seed_candidate(
+            uid,
+            birthday="1996-05-20",
+            residence_city_code="330100",
+            education_level=4,
+            interest_tags=["户外"],
+        )
+        await search_store.seed_projection(uid, {"interest_tags": ["户外"]})
+    db = search_store.session
+    draft = await create_search_draft(
+        db, 10, "喜欢户外的人", "manual", "zh-CN", "idem-gen-partial-001"
+    )
+    draft_row = search_store.drafts[draft.draft_id]
+    draft_row["status"] = "awaiting_confirmation"
+    await _run_parse(search_store, draft.draft_id)
+    for row in search_store.conditions[draft.draft_id]:
+        row["user_action"] = "confirmed"
+    snapshot = await confirm_search_draft(
+        db, draft.draft_id, 10, 0, "idem-gen-partial-002"
+    )
+    page1 = await materialize_search_snapshot(db, snapshot.snapshot_id, 10)
+    gen1 = await _load_active_generation(db, snapshot.snapshot_id)
+    assert gen1 >= 1
+    page2 = await materialize_search_snapshot(db, snapshot.snapshot_id, 10)
+    gen2 = await _load_active_generation(db, snapshot.snapshot_id)
+    assert gen2 == gen1 + 1
+    assert page2.total == page1.total

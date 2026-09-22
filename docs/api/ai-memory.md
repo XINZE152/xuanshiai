@@ -367,6 +367,107 @@
 | 404 | `MEMORY_GRANT_NOT_FOUND` | 授权不存在或属于他人 | 刷新授权列表 |
 | 422 | `AI_INPUT_INVALID` | Idempotency-Key 缺失、长度非法、含内部空白或控制字符 | 生成合法新 key 后重试 |
 
+## 7. 记忆生命周期：暂停使用 / 删除并忘记
+
+决策 2(a) 要求「停止使用」与「真正忘记」是两个入口、两种生命周期。**不允许同一个
+按钮文案承诺删除、实现却只撤读取许可。**
+
+### 7.1 暂停使用
+
+`POST /api/v1/ai/memory/pause`
+
+| 位置 | 参数 | 类型 | 必填 | 校验规则 | 业务含义 |
+| --- | --- | --- | --- | --- | --- |
+| header | Idempotency-Key | string | 是 | 1–128；不得含空白或控制字符 | 统一写操作输入门禁 |
+
+- **语义**：撤销该 owner 的**全部**投影授权，读端立刻不可读（读取门复核授权）；
+  **不删任何数据、不建清理任务、不动 `ai_consent_grant`**。
+- **可恢复**：重新授予 `profile_text_extract` 授权后，授权生产者会为全部消费维度
+  重新授予，读取即恢复。
+- **成功状态码**：200。返回 `status="paused"`、`revoked_grants`（本次撤销维度数）、
+  `data_purged=false`。
+- 幂等：无 active 授权时 `revoked_grants=0`，不报错。
+
+### 7.2 删除并忘记
+
+`POST /api/v1/ai/memory/forget`
+
+| 位置 | 参数 | 类型 | 必填 | 校验规则 | 业务含义 |
+| --- | --- | --- | --- | --- | --- |
+| header | Idempotency-Key | string | 是 | 1–128；不得含空白或控制字符 | 统一输入门禁 + 任务回放键 |
+
+- **语义**：同一事务内撤销全部投影授权（立刻不可读）并创建 `cleanup` 任务
+  （`scope="memory"`）；物理清理由 Worker 执行。**不可恢复。**
+- **成功状态码**：200。返回 `status="forget_scheduled"`、`cleanup_task_id`、
+  `revoked_grants`、`recoverable=false`。
+- 同一 Idempotency-Key 回放同一任务（不重复撤销）。
+
+### 7.2.1 错误
+
+| HTTP | 错误码 | 触发条件 | 前端处理建议 |
+| --- | --- | --- | --- |
+| 401 | （鉴权失败，非业务码） | 未登录或 Bearer Token 无效 | 重新登录 |
+| 422 | `AI_INPUT_INVALID` | Idempotency-Key 缺失、长度不在 1–128，或含空白/控制字符 | 生成合法新 key 后重试；pause 与 forget 相同 |
+
+这两个入口不经过 AI 功能开关：功能关闭时仍返回上表，不返回 `503 AI_FEATURE_DISABLED`。forget 的同一 Idempotency-Key 回放同一清理任务，不因 key 冲突返回 409。
+
+### 7.3 逐表清理行为（`scope="memory"`）
+
+清理按 **owner 序号围栏** 限定范围：只处理序号水位 `<= fence_seq` 的行。
+
+| 对象 | 行为 |
+| --- | --- |
+| `ai_memory_event` | 物理删除（含 `source_quote` / `source_ref` 原始引文），条件 `server_seq <= fence_seq` |
+| `ai_memory_observation` | 物理删除，条件 `last_event_seq <= fence_seq` |
+| `ai_memory_insight` / `ai_memory_state` | 同上（物理删除 + 围栏） |
+| `ai_memory_claim` | 先把 `value_json` 置 NULL、`status='expired'`（内容清除真实落库），随后删除行；两者都带围栏 |
+| `ai_memory_projection` | 有围栏时**只删已失效（`status <> 'active'`）** 的投影——撤回的同步半部已把旧代投影置 invalidated，重建的新代投影仍是 active，必须保留 |
+| `ai_memory_suppression` | **保留行**；`last_event_id` / `last_event_seq` 清为占位（被引用的 event 已删除） |
+| `ai_memory_projection_grant` | **保留行**，`status='revoked'` + `revoked_at`（审计） |
+| `ai_memory_owner_sequence` | **有围栏时保留**；仅无围栏的全量清理（账号注销）才删除 |
+| `ai_consent_grant` | **完全保留**（撤回记录本身是合规证据） |
+
+**围栏口径（关键安全语义）**：记忆内核没有「同步阶段打 marker」半部（event 账本
+append-only + 视图行 `status`），因此用 **owner 序号水位** 作围栏。围栏值
+`fence_seq` 必须**在撤回/删除发生的那个事务里**读取并冻结（写入事件或任务
+payload），**不能**等到清理任务执行时再读——否则期间用户重新授权并写入的新记忆
+会被一并删除且不可恢复。
+
+围栏取 **`ai_memory_owner_sequence.next_seq - 1`**（已分配的最大序号），不是
+`next_seq`：后者是「下一个待分配」值，事件写入时先拿它当 `server_seq` 再递增；
+若用 `next_seq` 当围栏，`server_seq <= fence_seq` 会连**撤回后写入的第一条**
+新事件一起删掉。序号行不存在时围栏为 `0`（= 从未写入过记忆 → 什么都不删），
+这与「无围栏 = 全量清理」是两种不同语义，不可混用。
+
+`fence_seq` 为 `None` 表示全量清理，仅账号注销（`user` / `account_deleted`）使用：
+owner 已不存在，不会再有新行。**记忆相关 scope 缺少围栏时退化为「不清」而非
+「全删」**（`derivation_outbox._effective_memory_fence`，fail-closed）：误删不可
+恢复、少删可重试。清理**不 commit**，由调用方（cleanup 任务事务）统一提交。
+
+**清理也随既有撤回路径生效**：`purge_ai_resources` 的 `profile` / `consent_profile`
+同样触发记忆清理（围栏随事件 payload 传递）；`user`（账号注销）走全量清理；
+其余 scope（如 `compatibility`）不触发。
+
+### 7.4 旧事实重用规则（待定）
+
+当前投影重建的事实来源过滤条件是：
+
+```sql
+SELECT ... FROM ai_memory_claim
+WHERE owner_user_id = :owner_user_id
+  AND subject IN (...)
+  AND status = 'confirmed'
+ORDER BY claim_id
+```
+
+除 `status='confirmed'` 外**没有**授权代际 / 时间窗过滤（见
+`memory/projections.py` 的 `_SQL_CLAIMS_CONFIRMED`）。因此在「暂停使用 → 重新授权」
+路径上，撤回前形成的历史 claim 只要仍是 `confirmed`，就会**再次**被纳入新投影。
+是否允许这种重用属**待产品 / 合规确认**事项（决策 3）；本轮不改 schema、不加列。
+
+注意：选择「删除并忘记」后该 owner 的 claim 已物理删除，故重用问题在该路径**不再
+成立**——受影响的只有「暂停使用 → 重新授权」这一条路径。
+
 ## 8. 状态流转与兼容策略
 
 ### 8.1 Claim 状态机（冻结）

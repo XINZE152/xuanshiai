@@ -206,10 +206,11 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
         "gender": gender,
         "marriage": await users_group("CASE users.is_married WHEN 0 THEN '未婚' WHEN 1 THEN '已婚' WHEN 2 THEN '离异' WHEN 3 THEN '丧偶' ELSE '未填写' END"),
         "age": await users_group("CASE WHEN users.birthday IS NULL THEN '未填写' WHEN TIMESTAMPDIFF(YEAR, users.birthday, CURDATE()) < 26 THEN '25岁以下' WHEN TIMESTAMPDIFF(YEAR, users.birthday, CURDATE()) <= 30 THEN '26岁-30岁' WHEN TIMESTAMPDIFF(YEAR, users.birthday, CURDATE()) <= 35 THEN '31岁-35岁' WHEN TIMESTAMPDIFF(YEAR, users.birthday, CURDATE()) <= 40 THEN '36岁-40岁' WHEN TIMESTAMPDIFF(YEAR, users.birthday, CURDATE()) <= 45 THEN '41岁-45岁' ELSE '46岁以上' END"),
-        "education": await users_group("CASE profile.education_level WHEN 1 THEN '初中' WHEN 2 THEN '技校' WHEN 3 THEN '高中' WHEN 4 THEN '大专' WHEN 5 THEN '本科' WHEN 6 THEN '硕士' WHEN 7 THEN '博士' ELSE '不限' END", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
+        "education": await users_group("CASE profile.education_level WHEN 1 THEN '高中及以下' WHEN 2 THEN '大专' WHEN 3 THEN '本科' WHEN 4 THEN '硕士' WHEN 5 THEN '博士' ELSE '未填写' END", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
         "house": await users_group("COALESCE(NULLIF(profile.house, ''), '未填写')", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
         "car": await users_group("COALESCE(NULLIF(profile.car, ''), '未填写')", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
-        "income": await users_group("CASE WHEN profile.income IS NULL THEN '不限' WHEN profile.income < 3000 THEN '3千元以下' WHEN profile.income < 5000 THEN '3-5千元' WHEN profile.income < 8000 THEN '5-8千元' WHEN profile.income < 10000 THEN '8千-1万元' ELSE '1万元以上' END", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
+        # p.income 是年收入（元）（编辑写入域），按年口径分桶展示。
+        "income": await users_group("CASE WHEN profile.income IS NULL THEN '不限' WHEN profile.income < 100000 THEN '10万以下' WHEN profile.income < 200000 THEN '10-20万' WHEN profile.income < 500000 THEN '20-50万' WHEN profile.income < 1000000 THEN '50-100万' ELSE '100万以上' END", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
         # user_auth.realname_status: 0未认证 1认证中 2通过 3失败 4人工复核 5撤销 → 仅 2 记为已实名
         "realname": await users_group("CASE WHEN users.is_real_name = 1 OR auth.realname_status = 2 THEN '已实名' ELSE '未实名' END", "LEFT JOIN user_auth auth ON auth.user_id = users.id"),
         "occupation": await users_group("COALESCE(NULLIF(profile.occupation, ''), '不限')", "LEFT JOIN user_profile profile ON profile.user_id = users.id"),
@@ -349,7 +350,7 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
             "age": "CASE WHEN preference.age_min IS NULL AND preference.age_max IS NULL THEN '不限' WHEN preference.age_max IS NULL THEN CONCAT(preference.age_min, '岁以上') WHEN preference.age_min IS NULL THEN CONCAT(preference.age_max, '岁以下') ELSE CONCAT(preference.age_min, '-', preference.age_max, '岁') END",
             "marriage": "CASE preference.marriage_status WHEN 1 THEN '未婚' WHEN 2 THEN '离异' WHEN 3 THEN '丧偶' ELSE '不限' END",
             "height": "CASE WHEN preference.height_min IS NULL AND preference.height_max IS NULL THEN '不限' WHEN preference.height_max IS NULL THEN CONCAT(preference.height_min, 'cm以上') WHEN preference.height_min IS NULL THEN CONCAT(preference.height_max, 'cm以下') ELSE CONCAT(preference.height_min, '-', preference.height_max, 'cm') END",
-            "education": "CASE preference.education_min WHEN 1 THEN '初中' WHEN 2 THEN '技校' WHEN 3 THEN '高中' WHEN 4 THEN '大专' WHEN 5 THEN '本科' WHEN 6 THEN '硕士' WHEN 7 THEN '博士' ELSE '不限' END",
+            "education": "CASE preference.education_min WHEN 1 THEN '高中及以下' WHEN 2 THEN '大专' WHEN 3 THEN '本科' WHEN 4 THEN '硕士' WHEN 5 THEN '博士' ELSE '不限' END",
             "housing": "CASE preference.housing_requirement WHEN 1 THEN '有房' WHEN 2 THEN '无房可接受' ELSE '不限' END",
             "smoking": "CASE preference.smoking_requirement WHEN 1 THEN '不抽烟' WHEN 2 THEN '可接受' ELSE '不限' END",
             "drinking": "CASE preference.drinking_requirement WHEN 1 THEN '不喝酒' WHEN 2 THEN '可接受' ELSE '不限' END",

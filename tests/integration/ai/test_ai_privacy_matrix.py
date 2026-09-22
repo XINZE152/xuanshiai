@@ -186,7 +186,7 @@ async def _seed_ready_reads(db: AsyncSession) -> tuple[str, str]:
         "marriage_status": "single",
         "education_level": 4,
         "height_cm": 172,
-        "income_band": 12000,
+        "income_band": 3,
         "interest_tags": ["旅行"],
         "relationship_goal": "marriage",
     }
@@ -196,7 +196,7 @@ async def _seed_ready_reads(db: AsyncSession) -> tuple[str, str]:
         "marriage_status": ("single",),
         "education_level": {"min": 3},
         "height_cm": {"min": 160, "max": 180},
-        "income_band": {"min": 10000},
+        "income_band": {"min": 3},
         "interest_tags": ("旅行",),
         "relationship_goal": ("marriage",),
     }

@@ -33,10 +33,10 @@ from app.schemas.ai_common import AiConsentGrantRequest
 from app.schemas.ai_profile import (
     ProfileDraftFieldPatchRequest,
     ProfileFieldPatchAction,
-    ProfileSubject,
 )
 from app.services.ai.consents import grant_consent
 from app.services.ai.profile import confirm_profile_draft, publish_profile_draft
+from app.services.voice import gateway as voice_gateway_mod
 from app.workers import ai_worker
 
 TEST_DATABASE_URL = os.getenv(
@@ -54,6 +54,23 @@ _TURNS = (
     "我想认真交往，以结婚为目标。",
     "我目前未婚，本科学历，身高一米七二。",
 )
+
+
+class _NoNetworkVoiceProvider:
+    """显式 fake 语音 provider：本测试不触发任何语音调用，误调用即失败。"""
+
+    async def transcribe(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("ws_chain 测试不应触发语音转写")
+
+    async def synthesize(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("ws_chain 测试不应触发语音合成")
+
+    async def stream_transcribe(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("ws_chain 测试不应触发流式语音识别")
+
+
+def _fake_voice_provider_factory(*args: object, **kwargs: object):
+    return _NoNetworkVoiceProvider()
 
 
 def _make_token() -> str:
@@ -128,6 +145,12 @@ async def test_ws_journey_full_chain_invite_confirm_publish_project(
     worker_engine, worker_factory = _factory()
     monkeypatch.setattr(voice_moxiang, "_db_session_factory", ws_factory)
     monkeypatch.setattr(ai_worker, "session_factory", worker_factory)
+    # VoiceGateway.__init__ 在构造期即校验 AI_ALIYUN_VOICE_* 配置（缺 key 时
+    # ProviderError），干净检出无 .env 必炸；且真实语音调用属于外部付费调用。
+    # 本测试不触发语音链路——在 gateway 的工厂缝注入 fake，误调用即失败。
+    monkeypatch.setattr(
+        voice_gateway_mod, "get_voice_provider", _fake_voice_provider_factory
+    )
 
     client = TestClient(app)
     token = _make_token()

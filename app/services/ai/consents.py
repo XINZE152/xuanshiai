@@ -23,6 +23,7 @@ from app.services.ai.memory.consent_producers import (
     PRODUCER_CONSENT_SCOPE,
     run_projection_producer_safely,
 )
+from app.services.ai.memory.purge import current_owner_sequence
 from app.services.ai.profile import PROFILE_POLICY_REVISION
 from app.services.ai.tasks import enqueue_task
 from app.services.revisions import RevisionKind, RevisionVector, increment_revision_and_enqueue
@@ -104,8 +105,13 @@ def _decode_operation(row: dict[str, Any], digest: str) -> AiConsentOperationRes
     return AiConsentOperationResponse.model_validate(payload)
 
 
-def _cleanup_payload(scope: str, user_id: int, revision: RevisionVector) -> dict[str, Any]:
-    return {
+def _cleanup_payload(
+    scope: str,
+    user_id: int,
+    revision: RevisionVector,
+    fence_seq: int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "scope": "consent",
         "resource_id": f"consent:{user_id}:{scope}",
         "version": revision.as_dict(),
@@ -113,6 +119,11 @@ def _cleanup_payload(scope: str, user_id: int, revision: RevisionVector) -> dict
             datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=15)
         ).isoformat(),
     }
+    # 记忆清理围栏：撤回事务内冻结的序号水位，供 cleanup_handler 透传给
+    # purge_ai_resources（缺失会让记忆清理 fail-closed 退化为不清）。
+    if fence_seq is not None:
+        payload["fence_seq"] = int(fence_seq)
+    return payload
 
 
 def _consent_tombstone(user_id: int, scope: str, granted_at: datetime) -> str:
@@ -209,6 +220,7 @@ async def _enqueue_consent_cleanup(
     scope: str,
     idempotency_key: str,
     revision: RevisionVector,
+    fence_seq: int | None = None,
 ) -> str:
     cleanup_key = f"consent:{scope}:{idempotency_key}"
     # 对完整键做 SHA256 再截断到 128 字符，避免长 Idempotency-Key 直接截断后碰撞
@@ -234,7 +246,7 @@ async def _enqueue_consent_cleanup(
         {
             "task_id": task.task_id,
             "payload_summary": json.dumps(
-                _cleanup_payload(scope, user_id, revision),
+                _cleanup_payload(scope, user_id, revision, fence_seq),
                 ensure_ascii=False,
             ),
         },
@@ -265,6 +277,14 @@ async def _invalidate_revoked_scope(
             text(
                 "UPDATE ai_profile_draft SET status = 'deleted', updated_at = UTC_TIMESTAMP() "
                 "WHERE user_id = :user_id AND status <> 'deleted'"
+            ),
+            {"user_id": user_id},
+        )
+        await db.execute(
+            text(
+                "UPDATE ai_profile_card_draft SET status = 'discarded', "
+                "updated_at = UTC_TIMESTAMP() "
+                "WHERE user_id = :user_id AND status NOT IN ('discarded', 'applied')"
             ),
             {"user_id": user_id},
         )
@@ -325,6 +345,12 @@ async def _invalidate_revoked_scope(
             ),
             {"user_id": user_id},
         )
+        # 修复清单 §3.7.3：猜你喜欢建议缓存的 key 未携带授权状态，撤回必须同步
+        # 使其立即失效（不等 cleanup 任务）。只递增代际，不逐键 SCAN/DELETE；
+        # 迟到的旧任务发布时对不上代际，同样不会写进新代际的 key。
+        from app.services.ai.search import invalidate_search_suggest_cache
+
+        await invalidate_search_suggest_cache(int(user_id))
     elif scope == "compatibility_shadow":
         await db.execute(
             text(
@@ -512,6 +538,9 @@ async def revoke_consent(
                 ),
             },
         )
+        # 记忆清理围栏：撤回事务内读取的序号水位，随事件传给消费者，使其只清
+        # 旧代记忆——撤回后重新授权新建的记忆不会被迟到的清理任务误删。
+        memory_fence = await current_owner_sequence(db, user_id)
         revision = await increment_revision_and_enqueue(
             db,
             user_id,
@@ -519,6 +548,7 @@ async def revoke_consent(
             (f"ai_consent_revoked:{scope}",),
             "ai_consent_revoked",
             priority=10,
+            payload_extra={"fence_seq": memory_fence},
         )
         # Phase 3 授权生产者：撤回同一事务内同步撤销全部投影授权并立即失效
         # active 投影；读端另有 consent/snapshot 复核门兜底。
@@ -532,7 +562,7 @@ async def revoke_consent(
             )
         await _invalidate_revoked_scope(db, user_id, scope)
         cleanup_task_id = await _enqueue_consent_cleanup(
-            db, user_id, scope, idempotency_key, revision
+            db, user_id, scope, idempotency_key, revision, memory_fence
         )
         status = "revoked"
         consent = None

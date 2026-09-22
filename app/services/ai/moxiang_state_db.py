@@ -149,7 +149,7 @@ class MoxiangStateSqlRepository:
         result = await self._db.execute(
             sql_text(
                 "SELECT turn_id, session_id, client_turn_id, user_id, turn_no, role, "
-                "answer_text, created_at "
+                "answer_text, voice_reply_metadata, created_at "
                 f"FROM ai_profile_turn WHERE {where} ORDER BY turn_no DESC LIMIT :limit"
             ),
             params,
@@ -170,6 +170,7 @@ class MoxiangStateSqlRepository:
                     "turn_no": int(m["turn_no"]),
                     "role": str(m["role"]),
                     "answer_text": str(m["answer_text"]),
+                    "voice_reply_metadata": m["voice_reply_metadata"],
                     "created_at": m["created_at"],
                 }
             )

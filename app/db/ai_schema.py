@@ -182,6 +182,7 @@ AI_TABLES = {
             `answer_text` text NOT NULL COMMENT '原始回答，不入普通日志',
             `status` varchar(24) NOT NULL DEFAULT 'saved',
             `source_type` varchar(24) DEFAULT NULL,
+            `voice_reply_metadata` json DEFAULT NULL COMMENT '实时语音 v2 回复元数据（生成/播放状态），非语音行为 NULL',
             `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (`id`),
@@ -407,6 +408,55 @@ AI_TABLES = {
             KEY `idx_ai_search_result_snapshot_generation` (`snapshot_id`, `generation`, `stale`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 搜索结果卡片引用、满足数与证据'
     """,
+    "ai_search_suggest_publish": """
+        CREATE TABLE IF NOT EXISTS `ai_search_suggest_publish` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `user_id` bigint unsigned NOT NULL,
+            `task_id` varchar(64) NOT NULL,
+            `generation` char(64) NOT NULL COMMENT '发布代际：与读取端当前代际不一致时不得发布/读取',
+            `suggestions_json` json NOT NULL COMMENT '已归纳搜索词（≤5 条），不含原文与条目摘要',
+            `consent_snapshot_json` json DEFAULT NULL COMMENT '发布时的 search_parse 授权快照',
+            `source_revision_json` json DEFAULT NULL COMMENT '发布时的五维版本向量快照',
+            `status` varchar(24) NOT NULL DEFAULT 'staged' COMMENT 'staged/published/superseded',
+            `staged_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `published_at` datetime DEFAULT NULL,
+            `expires_at` datetime NOT NULL COMMENT '发布后 TTL（staged 行由清理按期回收）',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_ai_search_suggest_publish_task` (`task_id`),
+            KEY `idx_ai_search_suggest_publish_user` (`user_id`, `status`),
+            KEY `idx_ai_search_suggest_publish_expires` (`expires_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 猜你喜欢建议的待发布暂存与发布证据'
+    """,
+    "ai_profile_card_draft": """
+        CREATE TABLE IF NOT EXISTS `ai_profile_card_draft` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `draft_id` varchar(64) NOT NULL,
+            `user_id` bigint unsigned NOT NULL,
+            `task_id` varchar(64) DEFAULT NULL,
+            `source_revision_id` bigint unsigned DEFAULT NULL,
+            `status` varchar(24) NOT NULL DEFAULT 'queued' COMMENT 'queued/running/ready/partial/applied/discarded/failed',
+            `expected_revision` int unsigned NOT NULL DEFAULT '1' COMMENT '乐观锁，单调递增',
+            `fields_json` json DEFAULT NULL COMMENT '受控草稿字段，不含事实栏与原文 prompt',
+            `prompt_version` varchar(32) DEFAULT NULL,
+            `schema_version` varchar(32) NOT NULL DEFAULT 'profile-card-summarize-v1',
+            `model_name` varchar(64) DEFAULT NULL,
+            `token_cost` decimal(10,6) DEFAULT NULL,
+            `applied_meta` json DEFAULT NULL COMMENT '采用痕迹：AI 生成 / 经用户修改，不 ALTER user_profile',
+            `last_operation_idempotency_key` varchar(128) DEFAULT NULL,
+            `last_operation_request_digest` char(64) DEFAULT NULL,
+            `last_operation_response_json` json DEFAULT NULL,
+            `generated_at` datetime DEFAULT NULL,
+            `applied_at` datetime DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_ai_profile_card_draft_id` (`draft_id`),
+            KEY `idx_ai_profile_card_draft_user_status` (`user_id`, `status`, `updated_at`),
+            KEY `idx_ai_profile_card_draft_task` (`task_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='成稿反哺资料卡开放文本草稿'
+    """,
     "ai_feature_projection": """
         CREATE TABLE IF NOT EXISTS `ai_feature_projection` (
             `id` bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -444,7 +494,7 @@ AI_TABLES = {
             `snapshot_id` varchar(64) NOT NULL,
             `viewer_user_id` bigint unsigned NOT NULL,
             `target_user_id` bigint unsigned NOT NULL,
-            `algorithm_version` varchar(32) NOT NULL DEFAULT 'compatibility-rule-v1',
+            `algorithm_version` varchar(32) NOT NULL DEFAULT 'compatibility-rule-v2',
             `snapshot_hash` char(64) NOT NULL,
             `status` varchar(24) NOT NULL DEFAULT 'ready' COMMENT 'ready/stale/blocked/coverage_insufficient',
             `score_semantics` varchar(48) NOT NULL DEFAULT 'rule_based_reference_shadow',

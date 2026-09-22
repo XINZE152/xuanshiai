@@ -23,6 +23,10 @@ class AiFeature(str, Enum):
     VOICE = "voice"
     VOICE_CONVERSATION = "voice_conversation"
     RECOMMEND = "recommend"
+    # 军师（legacy 栈 ``ai_provider.complete``）。与其它 feature 共用
+    # ``require_ai_feature``：master 总闸 + ``ai_enabled`` + 生产审批门。
+    # 不得再只看 ``ai_enabled`` 而绕过 fail-closed（修复清单 §3.12.4）。
+    ADVISOR = "advisor"
 
 
 class AiFeatureDisabledError(Exception):
@@ -52,6 +56,9 @@ def is_ai_feature_enabled(feature: AiFeature, settings: Settings) -> bool:
         return settings.ai_voice_enabled
     if feature is AiFeature.RECOMMEND:
         return settings.ai_recommend_enabled
+    if feature is AiFeature.ADVISOR:
+        # 复用既有 ``ai_enabled``，不另开开关；master 总闸在本函数入口已检查。
+        return settings.ai_enabled
     if feature is AiFeature.VOICE_CONVERSATION:
         # 实时对话模式依赖基础语音门禁 + 对话开关同时打开。
         return settings.ai_voice_enabled and settings.ai_voice_conversation_enabled

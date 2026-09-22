@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user
@@ -43,8 +43,6 @@ def _request_id() -> str:
 def _error_response(
     code: str, message: str, status_code: int, *, retryable: bool = False
 ) -> HTTPException:
-    from fastapi import HTTPException
-
     detail = AiErrorResponse(
         code=code,
         message=message,
@@ -80,7 +78,10 @@ async def get_recommendations_route(
 ) -> RecommendationPage:
     """读取当前用户的推荐快照；miss 时触发后台重建（下次读取可得）。
 
-    读取面只见 ``status='ready'`` 且未过期的最新 generation；miss 入队为
+    读取面只见 ``status='ready'`` 且未过期的最新 generation，且每个候选在
+    返回前重新过可见性与授权/投影资格门（双向拉黑、隐藏、封禁、审核、
+    ``profile_text_extract`` 撤回、投影失效即时生效，与物化同口径）；被过滤
+    后可能返回短页或空列表，``rank_no`` 保留物化代内名次。miss 入队为
     同日幂等任务（``recommend-view-{user}-{日期}``），重复 GET 不重复入队。
     """
     _require_recommend_feature()

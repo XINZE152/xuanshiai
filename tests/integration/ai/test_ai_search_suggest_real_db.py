@@ -22,10 +22,10 @@ from app.services.ai.search import (
     SEARCH_SUGGEST_TASK_TYPE,
     generate_search_suggestions,
     get_search_suggestions,
+    publish_search_suggest,
     search_suggest_handler,
 )
 from app.services.ai.tasks import (
-    AiTaskRecord,
     claim_tasks,
     complete_task,
     enqueue_task,
@@ -49,6 +49,7 @@ async def _clean(db: AsyncSession, user_id: int) -> None:
     await db.execute(text("DELETE FROM ai_task WHERE task_type = 'search_suggest'"))
     for statement in (
         "DELETE FROM ai_task WHERE owner_user_id = :user_id",
+        "DELETE FROM ai_search_suggest_publish WHERE user_id = :user_id",
         "DELETE FROM ai_feature_projection WHERE subject_user_id = :user_id",
         "DELETE FROM derivation_outbox WHERE aggregate_id = :user_id",
         "DELETE FROM ai_consent_operation WHERE user_id = :user_id",
@@ -149,6 +150,24 @@ async def test_real_search_suggest_generate_handler_read_and_replay(
         0,
     )
     await _seed_projection(real_db_session, USER_SUGGEST)
+    # 第二批契约：生成建议需要 search_parse 授权（读取本人已确认资料）。
+    await grant_consent(
+        real_db_session,
+        USER_SUGGEST,
+        "search_parse",
+        AiConsentGrantRequest(
+            consent_version="search-parse-v1", policy_revision=POLICY_REVISION
+        ),
+        f"suggest-search-grant-{USER_SUGGEST}",
+        0,
+    )
+    await real_db_session.execute(
+        text(
+            "UPDATE user_revision_state SET privacy_revision = privacy_revision "
+            "WHERE user_id = :user_id"
+        ),
+        {"user_id": USER_SUGGEST},
+    )
     await real_db_session.commit()
 
     # 生成任务。
@@ -177,6 +196,19 @@ async def test_real_search_suggest_generate_handler_read_and_replay(
         )
         assert handler_result is not None
         assert handler_result[0] == "search-suggest:3"  # 去重 + 去空白后 3 条
+        # 第二批契约：handler 只暂存，不再写 Redis。
+        staged = (
+            await handler_db.execute(
+                text(
+                    "SELECT status, generation FROM ai_search_suggest_publish "
+                    "WHERE task_id = :task_id"
+                ),
+                {"task_id": started.task_id},
+            )
+        ).mappings().first()
+        assert staged is not None and staged["status"] == "staged"
+        # 代际 key 此刻还不存在（尚未发布）。
+        assert await real_redis.keys(f"ai:search_suggest:{USER_SUGGEST}:*") == []
         await handler_db.commit()
     async with factory() as finalize_db:
         completed = await complete_task(
@@ -185,7 +217,11 @@ async def test_real_search_suggest_generate_handler_read_and_replay(
         )
         assert completed.status.value == "succeeded"
         await finalize_db.commit()
-
+    # 完成期复核通过并提交之后才发布（Worker 的 _run_post_complete_publisher 等价步骤）。
+    async with factory() as publish_db:
+        published = await publish_search_suggest(publish_db, started.task_id)
+        assert published == "published"
+        await publish_db.commit()
     # GET：AI 缓存优先。
     async with factory() as read_db:
         read = await get_search_suggestions(read_db, USER_SUGGEST)
@@ -205,7 +241,39 @@ async def test_real_search_suggest_generate_handler_read_and_replay(
     assert replay.replayed is True
     assert replay.task_id == result.task_id
 
-    await real_redis.delete(f"ai:search_suggest:{USER_SUGGEST}")
+    # 清场：删掉本次发布的所有代际 key（新 key 带代际，无法用单一 key 删除）。
+    for key in await real_redis.keys(f"ai:search_suggest:{USER_SUGGEST}:*"):
+        await real_redis.delete(key)
+
+
+async def _grant_search_parse(db: AsyncSession, user_id: int) -> None:
+    """给测试用户补 search_parse 授权（第二批后生成建议要求该授权）。"""
+    row = (
+        await db.execute(
+            text("SELECT user_id FROM user_revision_state WHERE user_id = :user_id"),
+            {"user_id": user_id},
+        )
+    ).mappings().first()
+    if row is None:
+        await db.execute(
+            text(
+                "INSERT INTO user_revision_state "
+                "(user_id, profile_revision, preference_revision, privacy_revision, "
+                " relationship_revision, policy_revision) "
+                "VALUES (:user_id, 0, 0, 0, 0, 0)"
+            ),
+            {"user_id": user_id},
+        )
+    await grant_consent(
+        db,
+        user_id,
+        "search_parse",
+        AiConsentGrantRequest(
+            consent_version="search-parse-v1", policy_revision=POLICY_REVISION
+        ),
+        f"search-grant-{user_id}",
+        0,
+    )
 
 
 @pytest.mark.asyncio
@@ -216,8 +284,10 @@ async def test_real_search_suggest_degraded_and_rate_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _clean(real_db_session, USER_RATE)  # 清残留 suggest 任务
-    # 降级：无投影用户不建任务。
+    # 降级：已授权但无投影的用户不建任务。
     await _clean(real_db_session, USER_DEGRADED)
+    await _grant_search_parse(real_db_session, USER_DEGRADED)
+    await real_db_session.commit()
     result = await generate_search_suggestions(
         real_db_session, USER_DEGRADED, "client-degraded-key"
     )
@@ -231,6 +301,7 @@ async def test_real_search_suggest_degraded_and_rate_limit(
 
     # 频控：24h 窗口内任务数达上限（monkeypatch 为 2）时 400。
     await _clean(real_db_session, USER_RATE)
+    await _grant_search_parse(real_db_session, USER_RATE)
     await _seed_projection(real_db_session, USER_RATE)  # 有投影才会走到频控
     await real_db_session.commit()
     monkeypatch.setattr(search_module.settings, "ai_search_suggest_daily_limit", 2)

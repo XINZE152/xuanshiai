@@ -149,19 +149,19 @@ async def test_real_compatibility_persists_pair_provenance_and_blocks_revocation
         "marriage_status": "single",
         "education_level": 4,
         "height_cm": 172,
-        "income_band": 12000,
+        "income_band": 3,
         "interest_tags": ["travel"],
         "relationship_goal": "marriage",
     }
     preference_fields = {
         "age": {"min": 25, "max": 40},
         "city_code": ["330100"],
-        "marriage_status": "single",
+        "marriage_status": ["single"],
         "education_level": {"min": 3},
         "height_cm": {"min": 160, "max": 185},
-        "income_band": {"min": 8000},
+        "income_band": {"min": 2},
         "interest_tags": ["travel"],
-        "relationship_goal": "marriage",
+        "relationship_goal": ["marriage"],
     }
     for user_id, vector in ((VIEWER_ID, vector_viewer), (TARGET_ID, vector_target)):
         for kind, fields, visibility in (
@@ -241,7 +241,7 @@ async def test_real_compatibility_persists_pair_provenance_and_blocks_revocation
     assert json.loads(handler_snapshot["consent_snapshot_pair_json"])["viewer"]["version"] == "compatibility-shadow-v1"
 
     # G4-B shadow 守卫：写入恒定 display_eligible=0 + shadow 桶 + shadow 语义，
-    # 算法版本恒为 compatibility-rule-v1（后端保证不外显可读新兼容度）。
+    # 算法版本恒为 compatibility-rule-v2（后端保证不外显可读新兼容度）。
     shadow_row = (
         await real_db_session.execute(
             text(
@@ -254,7 +254,7 @@ async def test_real_compatibility_persists_pair_provenance_and_blocks_revocation
     assert int(shadow_row["display_eligible"] or 0) == 0
     assert shadow_row["experiment_bucket"] == "shadow"
     assert shadow_row["score_semantics"] == "rule_based_reference_shadow"
-    assert shadow_row["algorithm_version"] == "compatibility-rule-v1"
+    assert shadow_row["algorithm_version"] == "compatibility-rule-v2"
 
     ready = await read_compatibility_snapshot(real_db_session, VIEWER_ID, TARGET_ID)
     assert ready.status == CompatibilitySnapshotStatus.READY

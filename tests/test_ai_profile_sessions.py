@@ -92,6 +92,11 @@ class _MappingResult:
     def first(self) -> dict[str, Any] | None:
         return self._rows[0] if self._rows else None
 
+    def one(self) -> dict[str, Any]:
+        if not self._rows:
+            raise AssertionError("假库：one() 无行（真库此处会抛 NoResultFound）")
+        return self._rows[0]
+
     def all(self) -> list[dict[str, Any]]:
         return list(self._rows)
 
@@ -392,6 +397,15 @@ class FakeProfileSession:
         if "INSERT INTO ai_profile_draft" in sql:
             self._store.insert_draft(values)
             return _WriteResult(rowcount=1)
+        if "INSERT INTO derivation_outbox" in sql:
+            # 资料变更的 outbox 副作用（真实 DB 在提交后由 Worker 消费）。假库
+            # 只落内存供断言读取，语义与 test_ai_memory_ledger 的假库一致。
+            event_id = str(values["event_id"])
+            if event_id in self._store.outbox:
+                return _WriteResult(rowcount=0)
+            values = {**values, "published_at": _now()}
+            self._store.outbox[event_id] = values
+            return _WriteResult(rowcount=1)
         if "UPDATE ai_profile_session" in sql:
             self._store.apply_session_update(sql, values)
             return _WriteResult(rowcount=1)
@@ -429,6 +443,30 @@ class FakeProfileSession:
                 ]
                 row = candidates[-1] if candidates else None
             return _MappingResult([row] if row else [])
+        if "INSERT INTO user_revision_state" in sql:
+            # bump_revision 的 ODKU：真库在唯一键上原子递增目标列。假库按 SQL
+            # 文本里的列名判断要递增哪一维，保证"每次写入 +1"与真库一致。
+            user_id = int(values["user_id"])
+            row = self._store.revision_rows.setdefault(
+                user_id,
+                {
+                    "profile_revision": 0,
+                    "preference_revision": 0,
+                    "privacy_revision": 0,
+                    "relationship_revision": 0,
+                    "policy_revision": 0,
+                },
+            )
+            for column in (
+                "profile_revision",
+                "preference_revision",
+                "privacy_revision",
+                "relationship_revision",
+                "policy_revision",
+            ):
+                if f"{column} = {column} + 1" in sql:
+                    row[column] = int(row.get(column) or 0) + 1
+            return _WriteResult(rowcount=1)
         if "FROM user_revision_state" in sql:
             row = self._store.revision_rows.get(int(values["user_id"]))
             return _MappingResult([row] if row else [])
@@ -478,6 +516,18 @@ class FakeProfileSession:
                 }
             # 其余状态假库不模拟(测试目标只关心删除)
             return _MappingResult([])
+        # ---- 资料卡 apply 经 get_profile 读取相册/视频 ----
+        # 假库不维护 user_media 行,按"该用户没有媒体"返回空列表;需要媒体参与
+        # 完整度或公开态的场景自行 seed。
+        # ---- 记忆侧新增的读取（撤权生产者扫描 + 清理围栏）----
+        # 假库不模拟记忆授权表：返回空表示该 owner 无 active 授权；
+        # 序号表同样返回空（围栏 0 → 记忆清理退化为不清，不影响本组断言）。
+        if "FROM ai_memory_projection_grant" in sql:
+            return _MappingResult([])
+        if "FROM ai_memory_owner_sequence" in sql:
+            return _MappingResult([])
+        if "FROM user_media" in sql:
+            return _MappingResult([])
         raise AssertionError(f"unhandled sql: {sql}")
 
     async def commit(self) -> None:
@@ -506,6 +556,8 @@ class ProfileStore:
         self.revision_rows: dict[int, dict[str, Any]] = {}
         # Phase 4 P4-01: ai_profile_projection_status 假存储
         self.projection_status: dict[tuple[int, str], dict[str, Any]] = {}
+        # 资料变更 outbox 事件（INSERT INTO derivation_outbox 的落点）
+        self.outbox: dict[str, dict[str, Any]] = {}
         self.task_store = TaskStore()
         self.session = FakeProfileSession(self)
         self.db = self.session
@@ -1965,6 +2017,26 @@ def test_pause_resume_delete_api(monkeypatch, profile_store) -> None:
         _clear_overrides()
 
 
+def test_delete_profile_session_still_works_when_profile_feature_disabled(
+    profile_store,
+) -> None:
+    """删除画像会话是治理类：功能关闭时仍返回 202 并创建 cleanup 任务。"""
+    session = _seed_api_session(profile_store)
+    _override_auth(profile_store)
+    try:
+        response = client.delete(
+            f"/api/v1/ai/profile-sessions/{session['session_id']}",
+            headers={"Idempotency-Key": "delete-off-01"},
+        )
+    finally:
+        _clear_overrides()
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["cleanup_requested"] is True
+    assert body["task_id"]
+
+
 # ----------------------------------------------------------------------
 # 审查补齐：未登录 / 错误 subject / ideal_partner 主体隔离
 # ----------------------------------------------------------------------
@@ -2131,7 +2203,9 @@ async def test_mock_extraction_returns_subject_aware_ideal_partner_constraints()
     fields = {field.field_key: field for field in result.fields}
     assert all(field.subject is ProfileSubject.IDEAL_PARTNER for field in fields.values())
     assert fields["height_cm"].value == {"min": 160, "max": 180}
-    assert fields["income_band"].value == {"min": 10000, "max": None}
+    # 收入档位区间与个人同口径（0-6 月收入档）：「至少一万」→ 档位 3
+    # （PRODUCT.md：3=1万-2万）。此前写金额 10000 与评分器契约冲突。
+    assert fields["income_band"].value == {"min": 3, "max": None}
     assert fields["interest_tags"].value == ("旅行", "音乐")
     assert fields["height_cm"].source_span
     assert fields["height_cm"].schema_version == "profile-extract-v1"

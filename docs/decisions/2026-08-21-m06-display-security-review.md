@@ -1,7 +1,7 @@
 # M06 匹配度外显 — 安全/合规审查报告
 
 > **审查日期：** 2026-08-21
-> **审查范围：** D3 前提 2 —— 将 AI 匹配度（`compatibility-rule-v1`）从内部 shadow 解冻为对用户可见的「资料合拍参考」
+> **审查范围：** D3 前提 2 —— 将 AI 匹配度（`compatibility-rule-v2`）从内部 shadow 解冻为对用户可见的「资料合拍参考」
 > **裁决依据：** ADR `2026-08-20-ai-full-feature-baseline.md` D3、PRODUCT.md `ai-policy-2026-08-20-v2`
 > **前置 1 状态：** ✅ 已完成（`run_m06_shadow_validation.py` 真实 DeepSeek 端到端 PASS，coverage=0.6，score=69.84，display_eligible=0，consent 403 正常，legacy 未污染）
 > **审查结论：** CONDITIONAL PASS — 满足安全底线，附 3 项必须在生产外显前完成的整改条件
@@ -11,7 +11,7 @@
 | 对象 | 当前状态 | 外显后状态 |
 |---|---|---|
 | `ai_compatibility_snapshot.display_eligible` | 恒 0（shadow，不对用户可见） | 灰度切到 1（对用户可见） |
-| 对外命名 | 内部 `compatibility-rule-v1` | 固定「资料合拍参考」 |
+| 对外命名 | 内部 `compatibility-rule-v2` | 固定「资料合拍参考」 |
 | `match_score`/`legacy-rule-v1` | 旧推荐流使用，shadow 不触碰 | 外显期双读/排空，不突变 |
 | consent scope | `compatibility_shadow` | 见 §5 审查结论 |
 

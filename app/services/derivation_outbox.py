@@ -542,6 +542,30 @@ async def _mark_stale_best_effort(
             "%s stale marking failed user_id=%s; needs retry", table, params.get("user_id"), exc_info=True
         )
 
+async def _effective_memory_fence(
+    fence_seq: int | None, scope: str
+) -> int | None:
+    """解析记忆清理应使用的序号围栏（语义见 ``purge_memory_for_owner``）。
+
+    记忆内核没有「同步阶段打 marker」半部，因此围栏值必须**冻结在撤回事务里**
+    并随事件/任务 payload 传递到这里。
+
+    - 提供了 ``fence_seq``：使用它，清理只作用于该水位之前的事件。
+    - 未提供且 scope 是记忆相关（``memory`` / ``profile`` / ``consent_profile``）：
+      **拒绝清理**（返回 0），而不是全量删除。旧版本任务、手工构造的 payload 或
+      漏写围栏都在此收口——误删不可恢复、少删可重试，所以宁可少删。
+    - 仅账号注销（``user``：owner 不复存在，不会有「撤回后新建」的行）允许
+      无围栏全量清理。
+    """
+    if fence_seq is not None:
+        return int(fence_seq)
+    if scope in {"memory", "profile", "consent_profile"}:
+        logger.warning(
+            "memory_cleanup_missing_fence scope=%s; treating as no-op", scope
+        )
+        return 0
+    return None
+
 
 async def purge_ai_resources(
     db: AsyncSession,
@@ -551,6 +575,7 @@ async def purge_ai_resources(
     resource_id: str | None = None,
     subject: str | None = None,
     field_key: str | None = None,
+    fence_seq: int | None = None,
 ) -> None:
     """Physically remove scoped AI resources after synchronous invalidation.
 
@@ -761,6 +786,16 @@ async def purge_ai_resources(
             ),
             params,
         )
+        # 建议发布暂存：撤回/删除后不再需要，其中的建议内容属于本人资料派生。
+        # 本用户的 staged 与 published 行一并删除（Redis 缓存由 pattern 兜底）。
+        await db.execute(
+            text("DELETE FROM ai_search_suggest_publish WHERE user_id = :user_id"),
+            {"user_id": user_id},
+        )
+        await db.execute(
+            text("DELETE FROM ai_profile_card_draft WHERE user_id = :user_id"),
+            {"user_id": user_id},
+        )
         await db.execute(
             text(
                 "DELETE FROM ai_search_draft WHERE user_id = :user_id"
@@ -797,31 +832,90 @@ async def purge_ai_resources(
             {"user_id": user_id},
         )
 
+    # 记忆内核物理清理（第四批 §3.17）：账号注销 / 画像删除 / 授权撤回必须清
+    # 记忆，否则「删除并忘记」只在显式入口生效。scope="memory" 是 §3.17.5 的
+    # 显式「删除并忘记」入口；profile / consent_profile / user 是既有撤回路径
+    # （三者都已整体撤销 ``profile_text_extract``，与 owner 粒度一致）。
+    #
+    # 围栏口径：记忆内核没有「同步阶段打 marker」半部（event 账本 append-only
+    # + 视图行 status），改用**序号围栏**，见 ``ai/memory/purge.py`` 的模块
+    # docstring。``fence_seq`` 必须来自**撤回发生的事务**：
+    #   - 显式 forget：路由在同一事务内读取后写进任务 payload；
+    #   - 授权撤回：标记仍 active 的授权行（下面按 owner 判断），使清理在
+    #     「撤回后重新授权」的情形下自动退化为不清（重新授权会 upsert 复活
+    #     grant 行，旧代记忆保留——这正是「暂停使用 → 重新授权」的可恢复语义）。
+    # 无围栏（fence_seq=None）表示全量清理：仅账号注销（owner 不复存在，
+    # 不会再有新行）走此路径。
+    #
+    # 此处**不吞异常**：清理失败让 cleanup 任务按可重试失败收口，避免出现
+    # 「任务成功但记忆未清」的合规假账。
+    if scope == "memory" or scope in {"profile", "consent_profile", "user"}:
+        from app.services.ai.memory.purge import purge_memory_for_owner
+        effective_fence = await _effective_memory_fence(fence_seq, scope)
+        await purge_memory_for_owner(
+            db, user_id, scope=scope, fence_seq=effective_fence
+        )
+
     await _purge_ai_redis_cache(user_id)
     try:
         from app.services.ai.tasks import tombstone_owner_tasks
 
         await tombstone_owner_tasks(db, user_id, task_type="cleanup")
     except Exception:
-        logger.warning("ai_cleanup_task_tombstone_failed user_id=%s", user_id, exc_info=True)
+        logger.warning(
+            "ai_cleanup_task_tombstone_failed user_id=%s", user_id, exc_info=True
+        )
+
+
+def _ai_redis_cache_patterns(user_id: int) -> tuple[str, ...]:
+    """该用户 AI 缓存的清理 pattern（契约测试据此锁死覆盖面）。
+
+    修复清单 §3.7.5：原 patterns 漏掉 `ai:search_suggest:{uid}`，导致猜你喜欢
+    建议缓存在撤回/清理后永不失效（C-05）。这里额外覆盖代际格式与代际计数键；
+    `tests/test_ai_search_suggest_lifecycle.py` 断言“建议缓存每个 key 生产者都
+    至少被一条 pattern 覆盖”，防止同类漏改再次发生。
+    """
+    return (
+        f"ai:search:parse:{user_id}:*",
+        f"ai:cache:{user_id}:*",
+        f"ai:*:{user_id}:*",
+        # 建议缓存：旧格式（无代际）与代际格式（`:*` 覆盖任意 generation）。
+        f"ai:search_suggest:{user_id}",
+        f"ai:search_suggest:{user_id}:*",
+        # 建议代际计数键：一并清除，避免清理后旧代际计数残留。
+        f"ai:search_suggest-generation:*:{user_id}",
+    )
 
 
 async def _purge_ai_redis_cache(user_id: int) -> None:
     """Best-effort deletion of user-scoped AI cache keys."""
     from app.core.redis import redis_client
 
-    patterns = (
-        f"ai:search:parse:{user_id}:*",
-        f"ai:cache:{user_id}:*",
-        f"ai:*:{user_id}:*",
-    )
     try:
-        for pattern in patterns:
+        for pattern in _ai_redis_cache_patterns(user_id):
             keys = [key async for key in redis_client.scan_iter(match=pattern)]
             if keys:
                 await redis_client.delete(*keys)
     except Exception:  # noqa: BLE001 - Redis is a cache, MySQL remains authoritative
         logger.warning("ai_cleanup_redis_unavailable user_id=%s", user_id)
+
+
+def _payload_fence(event: DerivationEvent) -> int | None:
+    """从事件 payload 读取撤回事务里冻结的序号围栏（缺失返回 None）。
+
+    事件可能来自更早版本（无该键）或经手工构造：``None`` 会让
+    ``_effective_memory_fence`` 对记忆相关 scope 退化为不清，而不是误删。
+    """
+    raw = (event.payload or {}).get("fence_seq")
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "derivation_fence_unparsable event_id=%s", event.event_id
+        )
+        return None
 
 
 async def _profile_deleted_cleanup(db: AsyncSession, event: DerivationEvent) -> None:
@@ -833,11 +927,14 @@ async def _profile_deleted_cleanup(db: AsyncSession, event: DerivationEvent) -> 
         event.source_revision,
         subject=(event.payload or {}).get("subject"),
     )
+    # 记忆清理围栏来自**撤回事务**写入的事件 payload（见 delete_ai_profile）。
+    # 事件缺失围栏时 ``_effective_memory_fence`` 会退化为不清（fail-closed）。
     await purge_ai_resources(
         db,
         event.aggregate_id,
         scope="profile",
         subject=(event.payload or {}).get("subject"),
+        fence_seq=_payload_fence(event),
     )
 
 
@@ -883,7 +980,12 @@ async def _consent_revoked_cleanup(db: AsyncSession, event: DerivationEvent) -> 
         "compatibility_display": "consent_compatibility_display",
     }.get(scope)
     if cleanup_scope:
-        await purge_ai_resources(db, event.aggregate_id, scope=cleanup_scope)
+        await purge_ai_resources(
+            db,
+            event.aggregate_id,
+            scope=cleanup_scope,
+            fence_seq=_payload_fence(event),
+        )
     else:
         await _mark_derived_results_stale(db, event.aggregate_id)
 

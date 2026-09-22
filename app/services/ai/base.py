@@ -338,6 +338,40 @@ class NarrativeResult(BaseModel):
     conclusion: str | None = Field(default=None, min_length=1, max_length=300)
 
 
+@dataclass(frozen=True)
+class ProfileCardSummarizeRequest:
+    personal_fields: tuple[dict[str, Any], ...]
+    narrative: dict[str, Any]
+    ideal_partner_summary: str | None = None
+    consent_version: str = "profile-text-v1"
+    policy_revision: str = "ai-policy-2026-08-07-v1"
+
+
+class ProfileCardDraftFieldResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(default="", max_length=500)
+    candidates: tuple[str, ...] = ()
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    source_ref: str | None = Field(default=None, max_length=64)
+
+
+class ProfileCardSummarizeResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = Field(default="profile-card-summarize-v1", min_length=1, max_length=32)
+    prompt_version: str = Field(default="profile-card-summarize-v1", min_length=1, max_length=32)
+    self_intro: ProfileCardDraftFieldResult = Field(default_factory=ProfileCardDraftFieldResult)
+    qa_1_partner: ProfileCardDraftFieldResult = Field(default_factory=ProfileCardDraftFieldResult)
+    qa_3_love: ProfileCardDraftFieldResult = Field(default_factory=ProfileCardDraftFieldResult)
+    qa_2_sports_candidates: ProfileCardDraftFieldResult = Field(
+        default_factory=ProfileCardDraftFieldResult
+    )
+    interest_tag_candidates: ProfileCardDraftFieldResult = Field(
+        default_factory=ProfileCardDraftFieldResult
+    )
+
+
 class AIProvider(Protocol):
     """Provider adapter interface. One implementation in phase 1: MockAIProvider."""
 
@@ -368,6 +402,10 @@ class AIProvider(Protocol):
     async def compare_compatibility(
         self, request: CompatibilityCompareRequest
     ) -> CompatibilityCompareResult: ...
+
+    async def generate_profile_card_draft(
+        self, request: ProfileCardSummarizeRequest
+    ) -> ProfileCardSummarizeResult: ...
 
 
 @dataclass(frozen=True)

@@ -251,7 +251,7 @@ class DatabaseManager:
                 "house_fail_reason": "`house_fail_reason` varchar(255) DEFAULT NULL",
                 "house_submitted_at": "`house_submitted_at` datetime DEFAULT NULL",
                 "house_reviewed_at": "`house_reviewed_at` datetime DEFAULT NULL",
-                # 会员认证：实名/学历/房产认证审核所需字段
+                # 会员认证审核字段（421ff28 引入；曾因重复键被静默丢失，现并入本条目）
                 "face_method": "`face_method` varchar(32) DEFAULT NULL COMMENT '验证方式 动作活检/照片比对'",
                 "face_vendor": "`face_vendor` varchar(64) DEFAULT NULL COMMENT '人脸服务商'",
                 "face_score": "`face_score` decimal(5,2) DEFAULT NULL COMMENT '人脸比对得分'",
@@ -293,6 +293,7 @@ class DatabaseManager:
                 "location_visible": "`location_visible` tinyint NOT NULL DEFAULT '0'",
                 "interest_tags": "`interest_tags` json DEFAULT NULL",
                 "personality_tags": "`personality_tags` json DEFAULT NULL",
+                "qa_answers": "`qa_answers` json DEFAULT NULL COMMENT '关于我问答 [{question_id,question,answer}]'",
                 "completion_algorithm_version": "`completion_algorithm_version` varchar(32) DEFAULT NULL",
                 "completion_calculated_at": "`completion_calculated_at` datetime DEFAULT NULL",
                 "matchmaker_note": "`matchmaker_note` varchar(2000) DEFAULT NULL COMMENT '红娘说（后台红娘对会员的备注）'",
@@ -365,7 +366,7 @@ class DatabaseManager:
                 "action": "`action` varchar(32) NOT NULL DEFAULT 'none' COMMENT 'none|hide_content|restore_content|dismiss'",
                 "reviewed_by": "`reviewed_by` bigint unsigned DEFAULT NULL COMMENT '原举报审核人'",
                 "reviewed_at": "`reviewed_at` datetime DEFAULT NULL COMMENT '举报审核时间'",
-                # 线上行为：举报页需要展示提交人 IP
+                # 举报页需要展示提交人 IP（曾因重复键被静默丢失，现并入本条目）
                 "submit_ip": "`submit_ip` varchar(64) DEFAULT NULL COMMENT '提交人IP'",
             },
             "paper_plane": {
@@ -457,10 +458,6 @@ class DatabaseManager:
                 "status": "`status` tinyint NOT NULL DEFAULT '1' COMMENT '1生效中 2已过期 3已撤销'",
                 "pay_status": "`pay_status` tinyint NOT NULL DEFAULT '0' COMMENT '0未支付 1已支付'",
                 "pay_method": "`pay_method` varchar(32) DEFAULT NULL COMMENT '支付方式'",
-            },
-            # 线上行为：举报页需要展示提交人 IP
-            "user_report": {
-                "submit_ip": "`submit_ip` varchar(64) DEFAULT NULL COMMENT '提交人IP'",
             },
         }
 
@@ -756,7 +753,7 @@ class DatabaseManager:
             "active_wechat": "ADD UNIQUE KEY `uk_customer_lead_active_wechat` (`active_wechat`)",
         }
         try:
-            cursor.execute(f"SHOW TABLES LIKE 'customer_lead'")
+            cursor.execute("SHOW TABLES LIKE 'customer_lead'")
             if not cursor.fetchone():
                 return
             for column, spec in column_specs.items():
@@ -1345,7 +1342,7 @@ class DatabaseManager:
                     `id` bigint unsigned NOT NULL AUTO_INCREMENT,
                     `user_id` bigint unsigned NOT NULL,
                     `height` int DEFAULT NULL COMMENT '身高cm',
-                    `income` decimal(10,2) DEFAULT NULL COMMENT '月收入',
+                    `income` decimal(10,2) DEFAULT NULL COMMENT '年收入（元，编辑档位写入域）',
                     `intention_level` tinyint DEFAULT NULL COMMENT '客户意向：1低 2中 3高',
                     `hometown` varchar(64) DEFAULT NULL COMMENT '家乡',
                     `residence` varchar(64) DEFAULT NULL COMMENT '现居地',
@@ -1355,6 +1352,7 @@ class DatabaseManager:
                     `constellation` varchar(16) DEFAULT NULL COMMENT '星座',
                     `tags` json DEFAULT NULL COMMENT '个性标签 ["颜控","宠物"]',
                     `self_intro` text COMMENT '自我介绍',
+                    `qa_answers` json DEFAULT NULL COMMENT '关于我问答 [{question_id,question,answer}]',
                     `love_view` text COMMENT '爱情观',
                     `ideal_partner` text COMMENT '理想另一半',
                     `wechat` varchar(128) DEFAULT NULL COMMENT '会员微信号（后台受控展示）',
@@ -2893,7 +2891,7 @@ class DatabaseManager:
                     `gender` tinyint DEFAULT NULL,
                     `height` int DEFAULT NULL,
                     `income_level` tinyint DEFAULT NULL COMMENT '收入等级 1-5',
-                    `education_level` tinyint DEFAULT NULL COMMENT '学历等级 1博士 2硕士 3本科 4大专 5高中',
+                    `education_level` tinyint DEFAULT NULL COMMENT '学历等级 1高中及以下 2大专 3本科 4硕士 5博士（编辑写入域，education_min>=语义为及以上）',
                     `city_code` varchar(32) DEFAULT NULL COMMENT '城市编码',
                     `hometown_city` varchar(32) DEFAULT NULL COMMENT '家乡城市',
                     `mbti_ei` tinyint DEFAULT NULL COMMENT 'E/I 0-100',
@@ -3477,7 +3475,7 @@ class DatabaseManager:
     def _ensure_optional_index(self, cursor, table_name: str, index_name: str, definition: str) -> None:
         """幂等创建索引：表不存在或索引已存在时静默跳过。"""
         try:
-            cursor.execute(f"SHOW TABLES LIKE %s", (table_name,))
+            cursor.execute("SHOW TABLES LIKE %s", (table_name,))
             if not cursor.fetchone():
                 return
             cursor.execute(f"SHOW INDEX FROM `{table_name}` WHERE Key_name = %s", (index_name,))

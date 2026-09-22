@@ -116,19 +116,19 @@ async def _seed_user(
         "marriage_status": "single",
         "education_level": 4,
         "height_cm": 175,
-        "income_band": 15000,
+        "income_band": 3,
         "interest_tags": ["travel", "hiking"],
         "relationship_goal": "marriage",
     }
     preference_fields = {
         "age": {"min": 25, "max": 40},
         "city_code": ["330100"],
-        "marriage_status": "single",
+        "marriage_status": ["single"],
         "education_level": {"min": 3},
         "height_cm": {"min": 160, "max": 185},
-        "income_band": {"min": 8000},
+        "income_band": {"min": 2},
         "interest_tags": ["travel"],
-        "relationship_goal": "marriage",
+        "relationship_goal": ["marriage"],
     }
     for kind, fields in (
         ("personal_compatibility", profile_fields),

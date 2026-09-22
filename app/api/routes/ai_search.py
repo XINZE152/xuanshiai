@@ -14,7 +14,8 @@
 ``SearchInputInvalid`` → 400 ``AI_INPUT_INVALID``；这两个异常都由纯编译/输入
 校验产生，异常路径不触发数据库查询。畸形/跨查询 cursor → 400
 ``INVALID_CANDIDATE_CURSOR``（与 discovery 路由一致）。未登录 401、非本人/
-不存在统一 404、开关关闭 503 ``AI_FEATURE_DISABLED``。普通响应不携带原文、
+不存在统一 404、生成/读取开关关闭 503 ``AI_FEATURE_DISABLED``；删除搜索快照
+不依赖功能开关（治理类，AI 关闭后仍可清理）。普通响应不携带原文、
 provider trace 或密钥。
 """
 
@@ -51,7 +52,6 @@ from app.services.ai.search import (
     SearchInputInvalid,
     SearchPolicyDenied,
     SearchQuotaExceeded,
-    SearchResultStale,
     SearchSnapshotNotFound,
     confirm_search_draft,
     create_search_draft,
@@ -351,8 +351,6 @@ async def get_search_results_route(
         )
     except SearchSnapshotNotFound as exc:
         raise _error_response(exc.code, exc.message, exc.status_code) from exc
-    except SearchResultStale as exc:
-        raise _error_response(exc.code, exc.message, exc.status_code) from exc
     except InvalidCandidateCursor as exc:
         # 文档 §6：跨查询/伪造/过长的 cursor → 400 INVALID_CANDIDATE_CURSOR，
         # 与手工 discovery 路由（app/services/discovery.py）的映射一致。
@@ -376,7 +374,6 @@ async def delete_search_snapshot_route(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> CleanupTaskAccepted:
     """软删除快照：同步不可读 + cleanup 任务。"""
-    _require_search_feature()
     _check_idempotency_key(idempotency_key)
     try:
         task = await delete_search_snapshot(

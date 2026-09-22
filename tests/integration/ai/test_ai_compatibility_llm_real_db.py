@@ -135,19 +135,19 @@ async def _seed_pair(db: AsyncSession, *, target_consent: bool = True) -> None:
         "marriage_status": "single",
         "education_level": 4,
         "height_cm": 172,
-        "income_band": 12000,
+        "income_band": 3,
         "interest_tags": ["travel"],
         "relationship_goal": "marriage",
     }
     preference_fields = {
         "age": {"min": 25, "max": 40},
         "city_code": ["330100"],
-        "marriage_status": "single",
+        "marriage_status": ["single"],
         "education_level": {"min": 3},
         "height_cm": {"min": 160, "max": 185},
-        "income_band": {"min": 8000},
+        "income_band": {"min": 2},
         "interest_tags": ["travel"],
-        "relationship_goal": "marriage",
+        "relationship_goal": ["marriage"],
     }
     for user_id, vector in ((VIEWER_ID, _VECTOR_VIEWER), (TARGET_ID, _VECTOR_TARGET)):
         for kind, fields in (
