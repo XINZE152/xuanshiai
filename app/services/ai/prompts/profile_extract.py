@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from app.schemas.ai_profile import ProfileSubject
+from app.services.ai.prompts.structured_skeleton import wrap_structured_prompt
 
 # 个人画像（personal）字段类型契约，与 PERSONAL_FACT_FIELD_KINDS 一致。
 _PERSONAL_FIELD_GUIDE = {
@@ -145,7 +146,7 @@ def build_profile_extract_prompt(
             "也要把能对应到该字段的信息写进 fields，不要因为不够正式就输出空数组。\n\n"
         )
 
-    return (
+    return wrap_structured_prompt(
         f"{_SYSTEM_HEADER}\n\n"
         f"当前抽取目标：{subject_label}。\n"
         f"可抽取的字段及其值格式：\n{field_lines}\n\n"
@@ -352,7 +353,7 @@ def build_profile_master_extract_prompt(
             "\n本会话已沉淀的候选（不要重复输出语义相同的内容，除非用户带来新细节）：\n"
             f"{existing_digest}\n"
         )
-    return (
+    return wrap_structured_prompt(
         f"{_MASTER_SYSTEM_HEADER}\n\n"
         f"建构目标：{subject_label}。\n"
         f"可固化的白名单字段及其值格式：\n{field_lines}\n\n"
@@ -386,7 +387,7 @@ def build_profile_update_clarify_prompt(
             f"本摘要不含 field_key，仅作语义参考，replaces_field_key 由系统按\n"
             f"语义最接近的既有条目回填）：\n{entry_digest}\n"
         )
-    return (
+    return wrap_structured_prompt(
         f"{_UPDATE_SYSTEM_HEADER}\n\n"
         f"更新目标：{subject_label}。\n"
         f"{digest_block}\n"

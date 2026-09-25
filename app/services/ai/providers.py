@@ -474,6 +474,23 @@ class MockAIProvider:
             yield ("content", f"这是 mock 回复。你刚才说：{preview}")
         yield ("finish", "stop")
 
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = False,
+    ) -> str:
+        """非流式确定性回复，文本与 stream_chat 的 content 段一致。"""
+        self._check_failure("chat")
+        last_user = ""
+        for item in reversed(messages):
+            if item.get("role") == "user":
+                last_user = item.get("content") or ""
+                break
+        preview = last_user.replace("\n", " ").strip()[:24] or "（空输入）"
+        if json_mode:
+            return '{"reply_text":"好的，记下啦。那你现在生活在哪个城市呀？"}'
+        return f"这是 mock 回复。你刚才说：{preview}"
     # ------------------------------------------------------------------
     # Deterministic fixture accessor (used by the acceptance test)
     # ------------------------------------------------------------------
@@ -966,6 +983,49 @@ class _OpenAICompatProvider:
         content = response.choices[0].message.content
         return _parse_json_response(content)
 
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = False,
+    ) -> str:
+        """非流式 chat。只返回非空 content，不记录原文或供应商响应。"""
+        client = self._ensure_client()
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "max_tokens": self._max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            response = await client.chat.completions.create(**kwargs)
+        except (
+            _RateLimitError,
+            _APITimeoutError,
+            _APIConnectionError,
+            _AuthenticationError,
+            _PermissionDeniedError,
+            _BadRequestError,
+            _APIStatusError,
+            _APIError,
+        ) as exc:
+            raise self._map_openai_exception(exc) from exc
+        if not response.choices:
+            raise ProviderError(
+                code="AI_INPUT_INVALID",
+                message="provider 返回空 choices",
+                kind=ProviderErrorKind.NON_RETRYABLE,
+            )
+        content = response.choices[0].message.content
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderError(
+                code="AI_INPUT_INVALID",
+                message="provider 返回空内容",
+                kind=ProviderErrorKind.NON_RETRYABLE,
+            )
+        return content
+
     async def stream_chat(
         self,
         messages: list[dict[str, str]],
@@ -1084,20 +1144,24 @@ class _OpenAICompatProvider:
             field_key = item.get("field_key", "")
             if field_key not in request.allowlist:
                 continue
-            fields.append(
-                ExtractedField(
-                    field_key=field_key,
-                    subject=subject,
-                    value=item.get("value"),
-                    source_quote=item.get("source_quote"),
-                    confidence=_safe_confidence(item.get("confidence")),
-                    needs_confirmation=True,
-                    confirmation_status="suggested",
-                    schema_version=_PROFILE_SCHEMA_VERSION,
-                    prompt_version=_PROFILE_PROMPT_VERSION,
-                    policy_revision=request.policy_revision,
+            try:
+                fields.append(
+                    ExtractedField(
+                        field_key=field_key,
+                        subject=subject,
+                        value=item.get("value"),
+                        source_quote=item.get("source_quote"),
+                        confidence=_safe_confidence(item.get("confidence")),
+                        needs_confirmation=True,
+                        confirmation_status="suggested",
+                        schema_version=_PROFILE_SCHEMA_VERSION,
+                        prompt_version=_PROFILE_PROMPT_VERSION,
+                        policy_revision=request.policy_revision,
+                    )
                 )
-            )
+            except (ValidationError, ValueError):
+                _drop_invalid_extract_item("profile_extract", item)
+                continue
         # WP-P1：条目通道。category 先归一再校验（批次3 #9），content 由
         # ExtractedEntry 的 Pydantic 校验把关（9 枚举 + ≤200 字）；归一后
         # 仍非法的条目整条丢弃并留痕，不让坏数据进草稿。

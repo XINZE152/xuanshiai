@@ -14,6 +14,7 @@ faithfulness 边界（对齐方案 §六 WP-C1 与工作区 LLM 纪律）：
 from __future__ import annotations
 
 from app.services.ai.base import CompatibilityCompareRequest
+from app.services.ai.prompts.structured_skeleton import wrap_structured_prompt
 
 _PROMPT_TEMPLATE = """你是一名严谨的婚恋匹配分析师。请根据下面两位用户的已确认画像资料，分别评估两个方向的互相适合概率（0-100 整数）。
 
@@ -52,7 +53,7 @@ def _section(title: str, fields: str, digest: str | None) -> str:
 
 def build_compatibility_compare_prompt(request: CompatibilityCompareRequest) -> str:
     """组装双向精算 prompt（faithfulness 约束内嵌，输出仅限 JSON）。"""
-    return _PROMPT_TEMPLATE.format(
+    return wrap_structured_prompt(_PROMPT_TEMPLATE.format(
         viewer_personal=_section(
             "结构化字段：", request.viewer_personal, request.viewer_personal_digest
         ),
@@ -65,4 +66,4 @@ def build_compatibility_compare_prompt(request: CompatibilityCompareRequest) -> 
         target_ideal=_section(
             "结构化字段：", request.target_ideal, request.target_ideal_digest
         ),
-    )
+    ))

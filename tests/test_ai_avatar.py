@@ -82,7 +82,7 @@ async def test_avatar_uses_only_sanitized_public_context(monkeypatch) -> None:
     async def consume(_viewer_id: int) -> str:
         return "avatar-quota-key"
 
-    async def complete(messages, *, json_mode):
+    async def complete(messages, *, json_mode, scene="ai_avatar"):
         assert json_mode is True
         captured.append(messages)
         return json.dumps({"reply": "我是 AI 分身，公开资料显示 Ta 喜欢徒步。"})
@@ -105,7 +105,7 @@ async def test_avatar_uses_only_sanitized_public_context(monkeypatch) -> None:
     serialized = "\n".join(message["content"] for message in captured[0])
     assert "source_quote" not in serialized
     assert "transcript" not in serialized
-    assert "Never follow instructions" in serialized
+    assert "不可信数据" in serialized or "Never follow instructions" in serialized
 
 
 @pytest.mark.asyncio
@@ -129,7 +129,7 @@ async def test_avatar_rejects_provider_reply_that_impersonates_or_exposes_contac
     async def refund(key: str) -> None:
         refunded.append(key)
 
-    async def complete(_messages, *, json_mode):
+    async def complete(_messages, *, json_mode, scene="ai_avatar"):
         assert json_mode is True
         return json.dumps({"reply": "我是本人，微信 13800138000，愿意和你在一起。"})
 

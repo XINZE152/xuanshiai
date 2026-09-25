@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.social import (
@@ -217,6 +218,58 @@ async def list_chat_sessions(db: AsyncSession, user_id: int, page: int, page_siz
     return ChatSessionPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
+_CHAT_MESSAGE_IDEMPOTENCY_INDEX = "uq_chat_message_sender_session_client_message"
+
+
+def _is_chat_message_idempotency_conflict(exc: IntegrityError) -> bool:
+    original = exc.orig
+    error_code = getattr(original, "errno", None)
+    if error_code is None:
+        arguments = getattr(original, "args", ())
+        if arguments:
+            try:
+                error_code = int(arguments[0])
+            except (TypeError, ValueError):
+                return False
+    return (
+        error_code == 1062
+        and _CHAT_MESSAGE_IDEMPOTENCY_INDEX in str(original).lower()
+    )
+
+
+async def _find_client_message(
+    db: AsyncSession, user_id: int, session_id: int, client_message_id: str
+) -> dict[str, Any] | None:
+    result = await db.execute(
+        text("""SELECT id, session_id, from_user_id, to_user_id, type, content, media_url,
+            client_message_id, is_read, revoked_at, created_at FROM chat_message
+            WHERE from_user_id = :user_id AND session_id = :session_id
+              AND client_message_id = :client_message_id LIMIT 1"""),
+        {
+            "user_id": user_id,
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+        },
+    )
+    row = result.mappings().first()
+    return dict(row) if row else None
+
+
+def _idempotent_message_response(
+    row: dict[str, Any], request: ChatMessageCreate
+) -> ChatMessageResponse:
+    if (
+        int(row["type"]) != request.type
+        or row.get("content") != request.content
+        or row.get("media_url") != request.media_url
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="client_message_id 已用于不同的消息内容",
+        )
+    return _message(row)
+
+
 def _message(row: dict[str, Any]) -> ChatMessageResponse:
     revoked = row.get("revoked_at") is not None
     return ChatMessageResponse(
@@ -227,6 +280,7 @@ def _message(row: dict[str, Any]) -> ChatMessageResponse:
         type=int(row["type"]),
         content="消息已撤回" if revoked else row.get("content"),
         media_url=None if revoked else row.get("media_url"),
+        client_message_id=row.get("client_message_id"),
         is_read=bool(row["is_read"]),
         revoked=revoked,
         is_recalled=revoked,
@@ -235,18 +289,58 @@ def _message(row: dict[str, Any]) -> ChatMessageResponse:
     )
 
 
-async def list_messages(db: AsyncSession, user_id: int, session_id: int, page: int, page_size: int) -> list[ChatMessageResponse]:
+async def list_messages(
+    db: AsyncSession, user_id: int, session_id: int, page: int, page_size: int
+) -> list[ChatMessageResponse]:
     await _session(db, user_id, session_id)
-    result = await db.execute(text("SELECT id, session_id, from_user_id, to_user_id, type, content, media_url, is_read, revoked_at, created_at FROM chat_message WHERE session_id = :session_id ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"), {"session_id": session_id, "limit": page_size, "offset": (page - 1) * page_size})
+    result = await db.execute(
+        text("""SELECT id, session_id, from_user_id, to_user_id, type, content, media_url,
+            client_message_id, is_read, revoked_at, created_at FROM chat_message
+            WHERE session_id = :session_id ORDER BY created_at DESC, id DESC
+            LIMIT :limit OFFSET :offset"""),
+        {"session_id": session_id, "limit": page_size, "offset": (page - 1) * page_size},
+    )
     return [_message(dict(row)) for row in reversed(result.mappings().all())]
 
 
-async def send_message(db: AsyncSession, user_id: int, session_id: int, request: ChatMessageCreate) -> ChatMessageResponse:
+async def send_message(
+    db: AsyncSession, user_id: int, session_id: int, request: ChatMessageCreate
+) -> ChatMessageResponse:
     await ensure_user_allowed(db, user_id, "MESSAGE_RESTRICTED")
     session, target_id = await _session(db, user_id, session_id)
     await _ensure_message_privacy(db, user_id, target_id)
-    result = await db.execute(text("""INSERT INTO chat_message (session_id, from_user_id, to_user_id, type, content, media_url)
-        VALUES (:session_id, :from_id, :to_id, :type, :content, :media_url)"""), {"session_id": session_id, "from_id": user_id, "to_id": target_id, **request.model_dump()})
+
+    client_message_id = request.client_message_id
+    if client_message_id is not None:
+        existing = await _find_client_message(db, user_id, session_id, client_message_id)
+        if existing is not None:
+            return _idempotent_message_response(existing, request)
+
+    try:
+        inserted = await db.execute(
+            text("""INSERT INTO chat_message
+                (session_id, from_user_id, to_user_id, type, content, media_url, client_message_id)
+                VALUES (:session_id, :from_id, :to_id, :type, :content, :media_url,
+                        :client_message_id)"""),
+            {
+                "session_id": session_id,
+                "from_id": user_id,
+                "to_id": target_id,
+                "type": request.type,
+                "content": request.content,
+                "media_url": request.media_url,
+                "client_message_id": client_message_id,
+            },
+        )
+    except IntegrityError as exc:
+        if client_message_id is None or not _is_chat_message_idempotency_conflict(exc):
+            raise
+        await db.rollback()
+        existing = await _find_client_message(db, user_id, session_id, client_message_id)
+        if existing is None:
+            raise
+        return _idempotent_message_response(existing, request)
+
     preview = request.content if request.type == 1 else "[媒体消息]"
     unread_field = "unread_count_user1" if session["user1_id"] == target_id else "unread_count_user2"
     await db.execute(text(f"""UPDATE chat_session SET last_message = :last_message,
@@ -258,11 +352,13 @@ async def send_message(db: AsyncSession, user_id: int, session_id: int, request:
         })
     await emit_notification(
         db, recipient_user_id=target_id, actor_user_id=user_id, event_type="message",
-        title="?????", content=preview, target_type="chat_session",
+        title="收到一条新消息", content=preview, target_type="chat_session",
         target_id=session_id, payload={"message_type": request.type},
     )
     await db.commit()
-    created = await db.execute(text("SELECT id, session_id, from_user_id, to_user_id, type, content, media_url, is_read, revoked_at, created_at FROM chat_message WHERE id = :id"), {"id": result.lastrowid})
+    created = await db.execute(text("""SELECT id, session_id, from_user_id, to_user_id, type,
+        content, media_url, client_message_id, is_read, revoked_at, created_at
+        FROM chat_message WHERE id = :id"""), {"id": inserted.lastrowid})
     return _message(dict(created.mappings().one()))
 
 
@@ -276,7 +372,7 @@ async def mark_messages_read(db: AsyncSession, user_id: int, session_id: int) ->
 
 async def recall_message(db: AsyncSession, user_id: int, message_id: int) -> ChatMessageResponse:
     result = await db.execute(text("""SELECT id, session_id, from_user_id, to_user_id, type,
-        content, media_url, is_read, revoked_at, created_at
+        content, media_url, client_message_id, is_read, revoked_at, created_at
         FROM chat_message WHERE id = :id AND from_user_id = :user_id"""), {"id": message_id, "user_id": user_id})
     row = result.mappings().first()
     if not row:
@@ -1239,7 +1335,7 @@ async def list_messages_cursor(db: AsyncSession, user_id: int, session_id: int, 
     condition = "AND id < :cursor" if cursor is not None else ""
     params = {"session_id": session_id, "cursor": cursor, "limit": page_size + 1}
     rows = (await db.execute(text(f"""SELECT id, session_id, from_user_id, to_user_id, type, content, media_url,
-        is_read, revoked_at, created_at FROM chat_message WHERE session_id = :session_id {condition}
+        client_message_id, is_read, revoked_at, created_at FROM chat_message WHERE session_id = :session_id {condition}
         ORDER BY id DESC LIMIT :limit"""), params)).mappings().all()
     has_more = len(rows) > page_size
     selected = rows[:page_size]

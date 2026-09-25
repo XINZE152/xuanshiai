@@ -95,7 +95,7 @@ async def assistant_message(db: AsyncSession, user_id: int, session_id: int, con
         context = "\n".join(f"{'我' if int(r['from_user_id']) == user_id else '对方'}：{r['content']}" for r in reversed(rows))
         result = await db.execute(text("INSERT INTO ai_assistant_message (session_id,role,content) VALUES (:sid,'user',:content)"), {"sid": session_id, "content": content})
         prompt = f"你是婚恋沟通助手，只提供沟通建议，不做医疗、法律或高风险决定。\n聊天记录：\n{context}\n用户问题：{content}"
-        answer = await complete([{"role": "system", "content": "你是谨慎、尊重隐私的婚恋沟通助手。"}, {"role": "user", "content": prompt}])
+        answer = await complete([{"role": "system", "content": "你是谨慎、尊重隐私的婚恋沟通助手。"}, {"role": "user", "content": prompt}], scene="assistant_message")
         result = await db.execute(text("INSERT INTO ai_assistant_message (session_id,role,content) VALUES (:sid,'assistant',:content)"), {"sid": session_id, "content": answer})
         await db.execute(text("UPDATE ai_assistant_session SET updated_at=UTC_TIMESTAMP() WHERE id=:id"), {"id": session_id})
         await db.commit()
@@ -116,7 +116,7 @@ async def polish_profile(db: AsyncSession, user_id: int, request: AIProfilePolis
     await _require_vip(db, user_id)
     quota_key = await _consume_ai_quota(db, user_id, "polish", settings.ai_daily_polish_limit)
     try:
-        content = await complete([{"role": "system", "content": "你只润色用户提供的原文，不添加未提供的事实。输出JSON：polished(string), changed_points(array[string])。"}, {"role": "user", "content": f"PROFILE_POLISH style={request.style} max_length={request.max_length}\n{request.content}"}], json_mode=True)
+        content = await complete([{"role": "system", "content": "你只润色用户提供的原文，不添加未提供的事实。输出JSON：polished(string), changed_points(array[string])。"}, {"role": "user", "content": f"PROFILE_POLISH style={request.style} max_length={request.max_length}\n{request.content}"}], json_mode=True, scene="profile_polish")
         data = parse_json(content)
         polished = str(data.get("polished") or request.content).strip()[:request.max_length]
         points = data.get("changed_points") if isinstance(data.get("changed_points"), list) else []
@@ -261,7 +261,9 @@ async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProf
             )},
         ],
         json_mode=True,
+        scene="thoughtfulness",
     )
+    data = parse_json(raw)
     data = parse_json(raw)
 
     # 模型偶尔会在资料未变化时复读上一版；追加一次明确的重写指令，保证手动重分析确实重新生成。
@@ -277,6 +279,7 @@ async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProf
                 )},
             ],
             json_mode=True,
+            scene="thoughtfulness",
         )
         data = parse_json(raw)
     try:
@@ -324,7 +327,7 @@ async def parse_search(db: AsyncSession, user_id: int, request: AISearchRequest)
     await _require_vip(db, user_id)
     quota_key = await _consume_ai_quota(db, user_id, "search", settings.ai_daily_search_limit)
     try:
-        raw = await complete([{"role": "system", "content": "把自然语言婚恋搜索转换为JSON。只允许输出 filters、normalized_query、unresolved。filters只能包含 gender,age_min,age_max,city_code,marriage_status,education_min,height_min,height_max,income_min,income_max,tag。不要编造城市编码。"}, {"role": "user", "content": f"SEARCH_PARSE\n{request.query}"}], json_mode=True)
+        raw = await complete([{"role": "system", "content": "把自然语言婚恋搜索转换为JSON。只允许输出 filters、normalized_query、unresolved。filters只能包含 gender,age_min,age_max,city_code,marriage_status,education_min,height_min,height_max,income_min,income_max,tag。不要编造城市编码。"}, {"role": "user", "content": f"SEARCH_PARSE\n{request.query}"}], json_mode=True, scene="search_parse")
         data = parse_json(raw)
         filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
         allowed = set(DiscoveryFilters.model_fields) | {"tag"}
@@ -378,7 +381,7 @@ async def match_page(db: AsyncSession, user_id: int, match_type: MatchType, page
         selected = scored[start:start + page_size]
         items: list[AIMatchItem] = []
         for score, row, breakdown in selected:
-            explanation = await complete([{"role": "system", "content": "根据给定分项生成简短、客观的JSON，不夸大成功概率。输出 reason(string), suggestions(array[string])。"}, {"role": "user", "content": f"MATCH_EXPLAIN type={match_type} score={score} breakdown={json.dumps(breakdown, ensure_ascii=False)}"}], json_mode=True)
+            explanation = await complete([{"role": "system", "content": "根据给定分项生成简短、客观的JSON，不夸大成功概率。输出 reason(string), suggestions(array[string])。"}, {"role": "user", "content": f"MATCH_EXPLAIN type={match_type} score={score} breakdown={json.dumps(breakdown, ensure_ascii=False)}"}], json_mode=True, scene="match_explain")
             data = parse_json(explanation)
             items.append(AIMatchItem(user_id=int(row["user_id"]), nickname=row.get("nickname"), avatar=row.get("avatar"), match_type=match_type, match_score=score, score_breakdown=breakdown, match_reason=str(data.get("reason") or "资料存在一定匹配点"), suggestions=[str(x) for x in data.get("suggestions", []) if isinstance(x, str)][:3]))
         return AIMatchPage(match_type=match_type, items=items, page=page, page_size=page_size, total=len(scored), has_more=start + page_size < len(scored))

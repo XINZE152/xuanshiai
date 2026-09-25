@@ -16,9 +16,10 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.profile_tags import ALL_TAG_OPTIONS
+from app.services.ai.prompts.structured_skeleton import wrap_structured_prompt
 
 PROFILE_CARD_SCHEMA_VERSION = "profile-card-summarize-v1"
-PROFILE_CARD_PROMPT_VERSION = "profile-card-summarize-v1"
+PROFILE_CARD_PROMPT_VERSION = "profile-card-summarize-v2"
 
 _CONTACT_HINTS = ("微信", "微信号", "vx", "v信", "手机号", "电话", "加我")
 
@@ -92,7 +93,7 @@ def build_profile_card_summarize_prompt(
     """构造资料卡草稿 prompt；输入不含用户标识或 turn 原文。"""
     catalog = "、".join(sorted(ALL_TAG_OPTIONS))
     partner = str(ideal_partner_summary or "").strip() or "（无）"
-    return (
+    return wrap_structured_prompt(
         f"{_SYSTEM_HEADER}\n\n"
         f"已确认的本人画像字段：\n{_fields_to_block(personal_fields)}\n\n"
         f"已确认的叙事成稿：\n{_narrative_to_block(narrative)}\n\n"

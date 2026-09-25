@@ -335,7 +335,7 @@ async def test_llm_reply_used_when_gateway_returns_text(
     # generate_reply 被调用，参数含本轮转写文本。
     call_context = orch.ai_gateway.generate_reply.await_args.args[0]
     call_kwargs = orch.ai_gateway.generate_reply.await_args.args[1]
-    assert call_context.prompt_version == "moxiang-voice-reply-v2"
+    assert call_context.prompt_version == "moxiang-voice-reply-v3"
     assert call_kwargs.transcript == "我今年28岁"
     assert call_kwargs.field_key == "age"
 

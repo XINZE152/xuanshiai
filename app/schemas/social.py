@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SocialUser(BaseModel):
@@ -55,6 +55,18 @@ class ChatMessageCreate(BaseModel):
     type: Literal[1, 2, 3, 4, 5, 6] = 1
     content: str | None = Field(default=None, max_length=5000)
     media_url: str | None = Field(default=None, max_length=500)
+    client_message_id: str | None = Field(default=None, max_length=128)
+
+    @field_validator("client_message_id", mode="before")
+    @classmethod
+    def trim_client_message_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("client_message_id 不能是空白")
+        return value
 
     @model_validator(mode="after")
     def validate_content(self):
@@ -75,6 +87,7 @@ class ChatMessageResponse(BaseModel):
     type: int
     content: str | None
     media_url: str | None
+    client_message_id: str | None = None
     is_read: bool
     revoked: bool
     is_recalled: bool = False

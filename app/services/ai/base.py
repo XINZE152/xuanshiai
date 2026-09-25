@@ -407,6 +407,9 @@ class AIProvider(Protocol):
         self, request: ProfileCardSummarizeRequest
     ) -> ProfileCardSummarizeResult: ...
 
+    async def chat(
+        self, messages: list[dict[str, str]], *, json_mode: bool = False
+    ) -> str: ...
 
 @dataclass(frozen=True)
 class ReplyRequest:

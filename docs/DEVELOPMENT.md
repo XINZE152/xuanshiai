@@ -128,6 +128,10 @@ python database_setup_marriage.py
 
 该脚本使用 `CREATE TABLE IF NOT EXISTS`，但生产环境仍应先备份并在发布窗口执行；真实支付、提现和第三方回调配置不能使用开发环境 Mock。
 
+### 聊天消息幂等键迁移
+
+生产/预发布环境保持 `AUTO_INIT_DB=false`，发布前对已选定并备份的目标库执行 `migrations/chat/20260923_01_chat_message_idempotency_up.sql`，再执行对应 `verify.sql` 并按 `migrations/chat/README.md` 核验；不得在未确认目标环境前执行。开发/测试初始化会通过 `database_setup_marriage.py` 幂等补齐该列与唯一键。回滚步骤见同目录 `README.md`，down 会删除新列中已写入的幂等键。
+
 生产或预发布环境必须配置：
 
 ```env

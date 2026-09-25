@@ -1870,6 +1870,7 @@ class DatabaseManager:
                     `type` tinyint DEFAULT '1' COMMENT '1文本 2图片 3语音 4视频 5小程序卡片 6系统消息',
                     `content` text COMMENT '消息内容',
                     `media_url` varchar(500) DEFAULT NULL COMMENT '媒体文件URL',
+                    `client_message_id` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL COMMENT '客户端消息幂等键',
                     `is_read` tinyint DEFAULT '0' COMMENT '是否已读 0否 1是',
                     `read_at` datetime DEFAULT NULL,
                     `revoked_at` datetime DEFAULT NULL COMMENT '撤回时间（NULL表示未撤回）',
@@ -1878,7 +1879,8 @@ class DatabaseManager:
                     PRIMARY KEY (`id`),
                     KEY `idx_session` (`session_id`),
                     KEY `idx_from_to` (`from_user_id`,`to_user_id`),
-                    KEY `idx_created_at` (`created_at`)
+                    KEY `idx_created_at` (`created_at`),
+                    UNIQUE KEY `uq_chat_message_sender_session_client_message` (`from_user_id`, `session_id`, `client_message_id`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='聊天消息'
             """,
             # AI 分身会话与真人聊天完全隔离，不参与消息列表和未读计数。
@@ -3244,6 +3246,7 @@ class DatabaseManager:
 
         # 兼容已存在的旧库：CREATE TABLE IF NOT EXISTS 不会补齐新增字段。
         self._ensure_required_columns(cursor)
+        self._ensure_chat_message_idempotency(cursor)
         self._ensure_admin_home_columns(cursor)
         self._ensure_member_crm_columns(cursor)
         # M4 客源线索（promoter_id/audit_status）与会员服务（meeting_record.member_visible/sms_remind）
@@ -3352,6 +3355,31 @@ class DatabaseManager:
                     f"ALTER TABLE `{table_name}` ADD COLUMN `{column_name}` {definition}"
                 )
                 logger.info("已为 %s 补充会员 CRM 字段 %s", table_name, column_name)
+
+    def _ensure_chat_message_idempotency(self, cursor) -> None:
+        """旧 chat_message 表添加可空客户端幂等键与复合唯一约束。"""
+        cursor.execute("SHOW FULL COLUMNS FROM `chat_message` LIKE %s", ("client_message_id",))
+        column = cursor.fetchone()
+        if not column:
+            cursor.execute(
+                "ALTER TABLE `chat_message` ADD COLUMN `client_message_id` "
+                "varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL "
+                "COMMENT '客户端消息幂等键' AFTER `media_url`"
+            )
+        elif len(column) > 2 and column[2] != "utf8mb4_bin":
+            cursor.execute(
+                "ALTER TABLE `chat_message` MODIFY COLUMN `client_message_id` "
+                "varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL "
+                "COMMENT '客户端消息幂等键' AFTER `media_url`"
+            )
+
+        index_name = "uq_chat_message_sender_session_client_message"
+        cursor.execute("SHOW INDEX FROM `chat_message` WHERE Key_name = %s", (index_name,))
+        if not cursor.fetchone():
+            cursor.execute(
+                "ALTER TABLE `chat_message` ADD UNIQUE KEY "
+                f"`{index_name}` (`from_user_id`, `session_id`, `client_message_id`)"
+            )
 
     def _ensure_m4_columns(self, cursor) -> None:
         """M4 客源线索 / 会员服务补充字段（旧库幂等补齐）。"""

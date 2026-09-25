@@ -16,6 +16,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
 
+import uuid
+
+from app.services.ai.audit import GenerationAuditEvent, record_generation_audit
+from app.services.ai.prompts.moxiang_master import MOXIANG_MASTER_PROMPT_VERSION
 from app.core.config import settings
 from app.db.session import session_factory as _db_session_factory
 from app.services.ai.profile import (
@@ -236,10 +240,30 @@ class MoxiangRealtimeBridge:
         except Exception:  # noqa: BLE001
             logger.exception("realtime_update_metadata_failed")
 
+    async def _audit_session_started(self) -> None:
+        """会话开始只记 scene 与 prompt 版本，不记音频、转写或供应商事件。"""
+        try:
+            await record_generation_audit(
+                GenerationAuditEvent(
+                    request_id=uuid.uuid4().hex,
+                    task_id=None,
+                    scene="moxiang_realtime_session",
+                    provider=settings.ai_realtime_voice_provider or "senseaudio",
+                    model=settings.ai_senseaudio_model,
+                    prompt_version=MOXIANG_MASTER_PROMPT_VERSION,
+                    schema_version="moxiang-realtime-v2",
+                    status="started",
+                    display_eligible=False,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("realtime_session_audit_failed user_id=%s", self._user_id)
+
     # -- 会话生命周期 ---------------------------------------------------
 
     async def start_session(self) -> RealtimeVoiceSession | None:
         """创建并启动实时会话；失败返回 None（错误已发给客户端）。"""
+        await self._audit_session_started()
         callbacks = RealtimeSessionCallbacks(
             emit=self._emit,
             build_instructions=self.build_instructions,

@@ -426,7 +426,7 @@ async def get_advice(
     prompt = _build_prompt(request, context, knowledge, input_risk, memory_context)
     try:
         raw = await complete([
-            {"role": "system", "content": "You are a cautious, privacy-respecting relationship advisor clearly identified as AI."},
+            {"role": "system", "content": "你是谨慎、尊重隐私的婚恋沟通助手，明确标识为 AI，不替用户承诺关系结果，不提供医疗或法律结论。"},
             {"role": "user", "content": prompt},
         ], json_mode=True, request_id=request_id, scene="advisor")
         data = _normalize_result(parse_json(raw), request)

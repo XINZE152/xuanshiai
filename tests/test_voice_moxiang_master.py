@@ -25,8 +25,11 @@ from app.services.voice.master_orchestrator import (
 from app.services.ai.prompts.moxiang_master import AI_ROLE_NAME
 
 
-def _make_mock_ai_gateway() -> MagicMock:
-    return MagicMock()
+def _make_mock_ai_gateway(provider: object | None = None) -> MagicMock:
+    gateway = MagicMock()
+    if provider is not None:
+        gateway.stream_chat = provider.stream_chat
+    return gateway
 
 
 def _make_mock_voice_gateway(
@@ -54,6 +57,7 @@ class _FakeProvider:
 
     async def stream_chat(
         self,
+        context,
         messages: list[dict[str, str]],
         *,
         json_mode: bool = False,
@@ -71,13 +75,10 @@ async def test_stream_reply_normal_path():
         ("finish", "stop"),
     ])
     orchestrator = MoxiangMasterOrchestrator(
-        ai_gateway=_make_mock_ai_gateway(),
+        ai_gateway=_make_mock_ai_gateway(provider),
         voice_gateway=_make_mock_voice_gateway(),
     )
     with patch(
-        "app.services.voice.master_orchestrator.get_provider",
-        return_value=provider,
-    ), patch(
         "app.services.voice.master_orchestrator.settings"
     ) as mock_settings:
         mock_settings.ai_provider = "mock"
@@ -104,13 +105,10 @@ async def test_multi_turn_history_accumulation():
     """多轮对话历史累积，超过上限时截断到最近轮次。"""
     provider = _FakeProvider([("content", "嗯"), ("finish", "stop")])
     orchestrator = MoxiangMasterOrchestrator(
-        ai_gateway=_make_mock_ai_gateway(),
+        ai_gateway=_make_mock_ai_gateway(provider),
         voice_gateway=_make_mock_voice_gateway(),
     )
     with patch(
-        "app.services.voice.master_orchestrator.get_provider",
-        return_value=provider,
-    ), patch(
         "app.services.voice.master_orchestrator.settings"
     ) as mock_settings:
         mock_settings.ai_provider = "mock"
@@ -141,17 +139,14 @@ async def test_narrative_context_injected():
 
     original_stream_chat = provider.stream_chat
 
-    async def capture_stream_chat(messages, *, json_mode=False):
+    async def capture_stream_chat(context, messages, *, json_mode=False):
         captured_messages.extend(messages)
-        async for item in original_stream_chat(messages, json_mode=json_mode):
+        async for item in original_stream_chat(context, messages, json_mode=json_mode):
             yield item
 
-    provider.stream_chat = capture_stream_chat  # type: ignore
+    orchestrator.ai_gateway.stream_chat = capture_stream_chat  # type: ignore
 
     with patch(
-        "app.services.voice.master_orchestrator.get_provider",
-        return_value=provider,
-    ), patch(
         "app.services.voice.master_orchestrator.settings"
     ) as mock_settings:
         mock_settings.ai_provider = "mock"
@@ -178,16 +173,13 @@ async def test_stream_reply_injects_requested_subject_into_system_prompt():
     )
     captured_messages: list[dict[str, str]] = []
 
-    async def capture_stream_chat(messages, *, json_mode=False):
+    async def capture_stream_chat(context, messages, *, json_mode=False):
         captured_messages.extend(messages)
         for item in provider._chunks:
             yield item
 
-    provider.stream_chat = capture_stream_chat  # type: ignore
+    orchestrator.ai_gateway.stream_chat = capture_stream_chat  # type: ignore
     with patch(
-        "app.services.voice.master_orchestrator.get_provider",
-        return_value=provider,
-    ), patch(
         "app.services.voice.master_orchestrator.settings"
     ) as mock_settings:
         mock_settings.ai_provider = "mock"
@@ -252,7 +244,7 @@ async def test_bump_generation_discards_stale_reply():
             self._chunks = chunks
             self._orch = orchestrator
 
-        async def stream_chat(self, messages, *, json_mode=False):
+        async def stream_chat(self, context, messages, *, json_mode=False):
             for kind, text in self._chunks:
                 if kind == "content" and text == "第二段":
                     self._orch.bump_generation()
@@ -266,11 +258,9 @@ async def test_bump_generation_discards_stale_reply():
         [("content", "第一段"), ("content", "第二段"), ("finish", "stop")],
         orchestrator,
     )
+    orchestrator.ai_gateway.stream_chat = provider.stream_chat  # type: ignore
 
     with patch(
-        "app.services.voice.master_orchestrator.get_provider",
-        return_value=provider,
-    ), patch(
         "app.services.voice.master_orchestrator.settings"
     ) as mock_settings:
         mock_settings.ai_provider = "mock"

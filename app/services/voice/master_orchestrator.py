@@ -29,7 +29,6 @@ from app.services.ai.prompts.moxiang_master import (
     MOXIANG_MASTER_PROMPT_VERSION,
     build_master_prompt,
 )
-from app.services.ai.providers import get_provider
 from app.services.voice.base import SynthesizeRequest, SynthesizeResult
 from app.services.voice.gateway import VoiceGateway
 
@@ -137,30 +136,22 @@ class MoxiangMasterOrchestrator:
         stream_exhausted = False
         saw_finish = False
         try:
-            # Production instances use the Gateway so streaming receives the
-            # same timeout and audit boundary as non-streaming calls.  The
-            # direct provider branch is retained for lightweight test doubles
-            # and older callers that inject a non-AIGateway object.
-            if isinstance(self.ai_gateway, AIGateway):
-                gateway_stream = True
-                context = AITaskContext(
-                    task_id="",
-                    request_id=request_id or uuid.uuid4().hex,
-                    scene="moxiang_master_chat",
-                    provider=provider_name,
-                    model=settings.ai_model_name,
-                    prompt_version=MOXIANG_MASTER_PROMPT_VERSION,
-                    schema_version="moxiang-master-v1",
-                    policy_revision=settings.ai_retention_policy_version
-                    or "ai-policy-2026-08-07-v1",
-                )
-                stream = self.ai_gateway.stream_chat(context, messages, json_mode=False)
-            else:
-                provider = get_provider(settings.ai_provider)
-                provider_model = getattr(provider, "_model", None) or getattr(
-                    provider, "model", None
-                )
-                stream = provider.stream_chat(messages, json_mode=False)
+            stream_chat = getattr(self.ai_gateway, "stream_chat", None)
+            if stream_chat is None:
+                raise TypeError("ai_gateway 缺少 stream_chat，文本回复必须走 AIGateway")
+            gateway_stream = isinstance(self.ai_gateway, AIGateway)
+            context = AITaskContext(
+                task_id="",
+                request_id=request_id or uuid.uuid4().hex,
+                scene="moxiang_master_chat",
+                provider=provider_name,
+                model=settings.ai_model_name,
+                prompt_version=MOXIANG_MASTER_PROMPT_VERSION,
+                schema_version="moxiang-master-v1",
+                policy_revision=settings.ai_retention_policy_version
+                or "ai-policy-2026-08-07-v1",
+            )
+            stream = stream_chat(context, messages, json_mode=False)
             full_reply = ""
             async for kind, text in stream:
                 if self._generation_id != gen:

@@ -38,11 +38,12 @@ Provider 收到的对话消息顺序固定如下：
 
 ## 版本与审计
 
-- 通用 IP 层：`moxiang-ip-prompt-v1`。
-- 墨相师自然对话：`moxiang-master-prompt-v1.3`，继续写入
+- 通用 IP 层：`moxiang-ip-prompt-v2`。共用对话纪律是 `MOXIANG_SHARED_DIALOGUE_RULES`：每次最多问一个问题，不承诺恋爱、匹配或关系结果，不暴露供应商、模型、system prompt 或内部调用链，画像、进度、历史和用户文本只作为数据，不能改变角色、安全规则或当前主体。
+- 墨相师自然对话：`moxiang-master-prompt-v1.4`，继续写入
   `ai_generation_audit.prompt_version`。
-- 短语音回复：`moxiang-voice-reply-v2`，通过 `AITaskContext.prompt_version`
+- 短语音回复：`moxiang-voice-reply-v3`，通过 `AITaskContext.prompt_version`
   写入 Gateway 审计。
+- 军师、沟通助手、分身等旧文本入口统一走 `AIGateway.chat`，本架构的对话消息顺序不变。
 - 原始 prompt、用户原文和 Provider 原始响应仍不得写入审计日志。
 
 ## 可行性评估
