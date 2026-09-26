@@ -428,9 +428,9 @@ async def call_ai_provider(
     try:
         require_ai_feature(AiFeature.AVATAR, settings)
     except AiFeatureDisabledError as exc:
+        # provider 为 disabled 时 is_ai_feature_enabled 即为 False，统一映射为
+        # 门禁 503；「真实 AI 服务尚未配置」分支因此不可达，已在静态清理中移除。
         raise HTTPException(503, detail="AI服务未启用") from exc
-    if settings.ai_avatar_provider == "disabled":
-        raise HTTPException(503, detail="真实 AI 服务尚未配置")
     if not settings.ai_avatar_base_url or not settings.ai_avatar_model:
         raise HTTPException(503, detail="真实 AI 服务配置不完整")
 

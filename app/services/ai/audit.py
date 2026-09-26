@@ -217,7 +217,6 @@ def _persist_audit_row_sync(event: GenerationAuditEvent) -> None:
         logger.debug("ai_audit_skip_unparseable_db_url request_id=%s", event.request_id)
         return
     try:
-        import pymysql
 
         statement, values = _audit_row(event)
         conn = _thread_local_connection(params)

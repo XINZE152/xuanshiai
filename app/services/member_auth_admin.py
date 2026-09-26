@@ -765,17 +765,23 @@ async def update_auth_type(db: AsyncSession, type_id: int, body: AuthTypeUpdate,
     sets: list[str] = []
     params: dict[str, Any] = {"id": type_id}
     if body.name is not None:
-        sets.append("name = :name"); params["name"] = body.name
+        sets.append("name = :name")
+        params["name"] = body.name
     if body.icon_url is not None:
-        sets.append("icon_url = :icon_url"); params["icon_url"] = body.icon_url
+        sets.append("icon_url = :icon_url")
+        params["icon_url"] = body.icon_url
     if body.description is not None:
-        sets.append("description = :description"); params["description"] = body.description
+        sets.append("description = :description")
+        params["description"] = body.description
     if body.require_realname is not None:
-        sets.append("require_realname = :require_realname"); params["require_realname"] = int(body.require_realname)
+        sets.append("require_realname = :require_realname")
+        params["require_realname"] = int(body.require_realname)
     if body.sort is not None:
-        sets.append("sort = :sort"); params["sort"] = body.sort
+        sets.append("sort = :sort")
+        params["sort"] = body.sort
     if body.status is not None:
-        sets.append("status = :status"); params["status"] = body.status
+        sets.append("status = :status")
+        params["status"] = body.status
     if not sets:
         # 无字段变更，直接返回当前记录
         row = (await db.execute(text("SELECT id, name, icon_url, description, require_realname, sort, status, created_at, updated_at FROM config_auth_type WHERE id = :id"), {"id": type_id})).mappings().first()

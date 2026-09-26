@@ -26,6 +26,7 @@ from app.schemas.ai_advisor import (
     AdvisorSuggestion,
 )
 from app.services.ai_provider import complete, parse_json
+from app.services.ai.gateway import _redact_provider_message
 from app.services.content_filter import assert_text_allowed
 from app.services.ai.memory.consumers import CounselorMemoryAdapter
 from app.services.ai.features import memory_projection_read_mode
@@ -310,6 +311,19 @@ def _exception_detail(exc: HTTPException) -> str:
     return f"HTTP {exc.status_code}: {exc.detail}"
 
 
+def _controlled_error_detail(exc: Exception) -> str:
+    """受控审计摘要（对齐 _exception_detail 与 PROJECT_RULES 3.2）。
+
+    非 HTTP 异常只记 ``type(exc).__name__`` + 结构化且脱敏后的摘要：摘要复用
+    ``gateway._redact_provider_message``（非结构化文本一律置空），杜绝
+    IntegrityError/StatementError 等把完整 SQL 与绑定参数（含用户原文）吸入
+    审计表；写入前限长到 error_detail 列容量 varchar(500)。
+    """
+    summary = _redact_provider_message(str(exc))
+    detail = f"{type(exc).__name__}: {summary}" if summary else type(exc).__name__
+    return detail[:500]
+
+
 async def _rollback_safely(db: AsyncSession) -> None:
     try:
         await db.rollback()
@@ -525,7 +539,7 @@ async def get_advice(
                 latency_ms=int((time.monotonic() - started) * 1000),
                 quota_consumed=True,
                 quota_refunded=refunded,
-                error_detail=str(exc),
+                error_detail=_controlled_error_detail(exc),
             )
             await db.commit()
         except Exception:
