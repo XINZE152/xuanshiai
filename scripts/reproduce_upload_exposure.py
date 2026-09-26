@@ -30,12 +30,14 @@ def main() -> None:
         fixtures = {
             "42/follow-up-img-example.webp": b"private-follow-up-image-sentinel",
             "42/follow-up-voice-example.mp3": b"private-follow-up-voice-sentinel",
+            "42/audio/example.mp3": b"private-user-voice-sentinel",
             "42/photo-example.webp": b"ordinary-public-image-sentinel",
         }
-        # 私有类（跟进附件）匿名直连必须 403；公开类保持 200 且字节一致。
+        # 私有类（跟进附件/用户语音）匿名直连必须 403；公开类保持 200 且字节一致。
         expected_status = {
             "42/follow-up-img-example.webp": 403,
             "42/follow-up-voice-example.mp3": 403,
+            "42/audio/example.mp3": 403,
             "42/photo-example.webp": 200,
         }
         for relative_path, payload in fixtures.items():

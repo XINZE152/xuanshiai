@@ -35,6 +35,7 @@ _USER_QUERY_KEY = "user"
 _REVISION_QUERY_KEY = "revision"
 
 MEDIA_CATEGORY_FOLLOW_UP = "follow_up"
+MEDIA_CATEGORY_AUDIO = "audio"
 
 
 class MediaAccessUnavailable(Exception):
@@ -53,6 +54,14 @@ def _match_follow_up_path(relative: str) -> bool:
     return rest.startswith("follow-up-img-") or rest.startswith("follow-up-voice-")
 
 
+def _match_audio_path(relative: str) -> bool:
+    """用户语音：``{user_id}/audio/*``（media.upload_media 生成路径）。"""
+    first, _, rest = relative.partition("/")
+    if not (first.isascii() and first.isdigit()):
+        return False
+    return rest.startswith("audio/")
+
+
 @dataclass(frozen=True)
 class MediaCategory:
     """一类私有媒体的路径匹配器；查看者状态钩子按类别名查注册表。"""
@@ -63,6 +72,7 @@ class MediaCategory:
 
 _MEDIA_CATEGORIES: tuple[MediaCategory, ...] = (
     MediaCategory(name=MEDIA_CATEGORY_FOLLOW_UP, match=_match_follow_up_path),
+    MediaCategory(name=MEDIA_CATEGORY_AUDIO, match=_match_audio_path),
 )
 
 
@@ -93,9 +103,38 @@ async def _admin_account_active(viewer_id: int, db: AsyncSession | None = None) 
         raise MediaAccessUnavailable() from exc
 
 
+async def _user_active(viewer_id: int, db: AsyncSession | None = None) -> bool:
+    """语音类查看者是登录用户：users.status 必须仍为 1（与
+    audio_access._current_revision 同一状态查询模式，不含隐私修订联动）。"""
+    if viewer_id <= 0:
+        raise MediaAccessDenied()
+    if db is None and session_factory is None:
+        raise MediaAccessUnavailable()
+
+    async def _read(session: AsyncSession) -> bool:
+        value = await session.scalar(
+            text("SELECT status FROM users WHERE id = :id"),
+            {"id": viewer_id},
+        )
+        if value is None:
+            raise MediaAccessDenied()
+        return int(value) == 1
+
+    try:
+        if db is not None:
+            return await _read(db)
+        async with session_factory() as session:
+            return await _read(session)
+    except MediaAccessDenied:
+        raise
+    except Exception as exc:
+        raise MediaAccessUnavailable() from exc
+
+
 # 查看者状态钩子：签名通过后按类别校验查看者当前是否仍有权读取。
 _MEDIA_VIEWER_HOOKS: dict[str, Callable[[int, AsyncSession | None], Awaitable[bool]]] = {
     MEDIA_CATEGORY_FOLLOW_UP: _admin_account_active,
+    MEDIA_CATEGORY_AUDIO: _user_active,
 }
 
 
@@ -152,6 +191,24 @@ def sign_media_url(
             ("signature", _media_signature(category, relative, expires, viewer, revision)),
         )
     )
+    return urlunsplit(("", "", parsed.path, urlencode(query), parsed.fragment))
+
+
+def strip_media_signature(media_url: str) -> str:
+    """剥离签名 query 参数，返回入库用的原始 URL（幂等）。
+
+    客户端提交的媒体 URL 可能是签名 URL（upload_media 响应）；提交边界统一
+    剥离后入库，保证 DB 永远存原始 URL，读取端按当前查看者重签。
+    """
+    try:
+        parsed = urlsplit(media_url)
+    except ValueError:
+        return media_url
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key not in {"expires", "signature", _USER_QUERY_KEY, _REVISION_QUERY_KEY}
+    ]
     return urlunsplit(("", "", parsed.path, urlencode(query), parsed.fragment))
 
 
@@ -234,12 +291,14 @@ async def verify_media_access(
 
 
 __all__ = [
+    "MEDIA_CATEGORY_AUDIO",
     "MEDIA_CATEGORY_FOLLOW_UP",
     "MEDIA_URL_TTL_SECONDS",
     "MediaAccessDenied",
     "MediaAccessUnavailable",
     "categorize_media_path",
     "sign_media_url",
+    "strip_media_signature",
     "verify_media_access",
     "verify_media_signature",
 ]

@@ -47,6 +47,7 @@ from app.schemas.admin import (
     ReportReviewResponse,
 )
 from app.services.discovery import _ensure_target, _target_rows
+from app.services.media_access import MEDIA_CATEGORY_AUDIO, sign_media_url, strip_media_signature
 from app.services.notifications import emit_notification
 from app.services.profile import _calculate_age
 from app.services.restrictions import ensure_user_allowed
@@ -256,22 +257,36 @@ async def _find_client_message(
 
 
 def _idempotent_message_response(
-    row: dict[str, Any], request: ChatMessageCreate
+    row: dict[str, Any], request: ChatMessageCreate, viewer: int
 ) -> ChatMessageResponse:
+    # DB 存的是剥离签名后的原始 URL，与客户端提交的签名 URL 比较前先归一化。
+    submitted_media = (
+        strip_media_signature(request.media_url) if request.media_url else request.media_url
+    )
     if (
         int(row["type"]) != request.type
         or row.get("content") != request.content
-        or row.get("media_url") != request.media_url
+        or row.get("media_url") != submitted_media
     ):
         raise HTTPException(
             status_code=409,
             detail="client_message_id 已用于不同的消息内容",
         )
-    return _message(row)
+    return _message(row, viewer=viewer)
 
 
-def _message(row: dict[str, Any]) -> ChatMessageResponse:
+def _message(row: dict[str, Any], viewer: int | None = None) -> ChatMessageResponse:
+    """消息投影；``viewer`` 为当前登录用户时按其重签语音 media_url（type=3）。
+
+    ``viewer=None`` 仅限无 users 语义的调用方（如后台审计视图）——此类调用
+    保持原始 URL（直连 403），管理端语音回放限制见 message_admin.py 登记。
+    """
     revoked = row.get("revoked_at") is not None
+    media_url = None if revoked else row.get("media_url")
+    if viewer is not None and media_url:
+        media_url = sign_media_url(
+            str(media_url), category=MEDIA_CATEGORY_AUDIO, viewer=viewer
+        )
     return ChatMessageResponse(
         id=int(row["id"]),
         session_id=int(row["session_id"]),
@@ -279,7 +294,7 @@ def _message(row: dict[str, Any]) -> ChatMessageResponse:
         to_user_id=int(row["to_user_id"]),
         type=int(row["type"]),
         content="消息已撤回" if revoked else row.get("content"),
-        media_url=None if revoked else row.get("media_url"),
+        media_url=media_url,
         client_message_id=row.get("client_message_id"),
         is_read=bool(row["is_read"]),
         revoked=revoked,
@@ -300,7 +315,7 @@ async def list_messages(
             LIMIT :limit OFFSET :offset"""),
         {"session_id": session_id, "limit": page_size, "offset": (page - 1) * page_size},
     )
-    return [_message(dict(row)) for row in reversed(result.mappings().all())]
+    return [_message(dict(row), viewer=user_id) for row in reversed(result.mappings().all())]
 
 
 async def send_message(
@@ -314,7 +329,7 @@ async def send_message(
     if client_message_id is not None:
         existing = await _find_client_message(db, user_id, session_id, client_message_id)
         if existing is not None:
-            return _idempotent_message_response(existing, request)
+            return _idempotent_message_response(existing, request, viewer=user_id)
 
     try:
         inserted = await db.execute(
@@ -328,7 +343,10 @@ async def send_message(
                 "to_id": target_id,
                 "type": request.type,
                 "content": request.content,
-                "media_url": request.media_url,
+                # 提交边界剥离签名参数：DB 永远存原始 URL，读取端按当前查看者重签。
+                "media_url": strip_media_signature(request.media_url)
+                if request.media_url
+                else request.media_url,
                 "client_message_id": client_message_id,
             },
         )
@@ -339,7 +357,7 @@ async def send_message(
         existing = await _find_client_message(db, user_id, session_id, client_message_id)
         if existing is None:
             raise
-        return _idempotent_message_response(existing, request)
+        return _idempotent_message_response(existing, request, viewer=user_id)
 
     preview = request.content if request.type == 1 else "[媒体消息]"
     unread_field = "unread_count_user1" if session["user1_id"] == target_id else "unread_count_user2"
@@ -359,7 +377,7 @@ async def send_message(
     created = await db.execute(text("""SELECT id, session_id, from_user_id, to_user_id, type,
         content, media_url, client_message_id, is_read, revoked_at, created_at
         FROM chat_message WHERE id = :id"""), {"id": inserted.lastrowid})
-    return _message(dict(created.mappings().one()))
+    return _message(dict(created.mappings().one()), viewer=user_id)
 
 
 async def mark_messages_read(db: AsyncSession, user_id: int, session_id: int) -> None:
@@ -390,7 +408,7 @@ async def recall_message(db: AsyncSession, user_id: int, message_id: int) -> Cha
         payload={"message_id": message_id},
     )
     await db.commit()
-    return _message(dict(row))
+    return _message(dict(row), viewer=user_id)
 
 
 async def revoke_message(db: AsyncSession, user_id: int, message_id: int) -> None:
@@ -1339,7 +1357,7 @@ async def list_messages_cursor(db: AsyncSession, user_id: int, session_id: int, 
         ORDER BY id DESC LIMIT :limit"""), params)).mappings().all()
     has_more = len(rows) > page_size
     selected = rows[:page_size]
-    items = [_message(dict(row)) for row in reversed(selected)]
+    items = [_message(dict(row), viewer=user_id) for row in reversed(selected)]
     return ChatMessagePage(items=items, next_cursor=int(selected[-1]["id"]) if has_more and selected else None, has_more=has_more)
 
 
