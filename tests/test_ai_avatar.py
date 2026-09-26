@@ -194,6 +194,8 @@ async def test_avatar_rejects_non_memory_mode_before_reading_profile(monkeypatch
 
     monkeypatch.setattr(service, "memory_projection_read_mode", lambda: "shadow")
 
+    # 默认 503 之二（记忆投影未开启）：状态码 503、detail 固定为
+    # 「AI分身记忆服务尚未就绪」。
     with pytest.raises(HTTPException, match="记忆服务尚未就绪") as error:
         await service.reply_from_public_profile(
             object(),
@@ -202,6 +204,7 @@ async def test_avatar_rejects_non_memory_mode_before_reading_profile(monkeypatch
             request=AvatarReplyRequest(question="Ta 平时喜欢什么？"),
         )
     assert error.value.status_code == 503
+    assert error.value.detail == "AI分身记忆服务尚未就绪"
 
 
 def test_message_request_trims_and_limits_content() -> None:
@@ -519,6 +522,8 @@ async def test_provider_receives_only_server_built_public_context(
 
 @pytest.mark.asyncio
 async def test_disabled_provider_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认 503 之一（AI 门禁）：provider disabled 在 require_ai_feature 即被
+    拦下，状态码 503、detail 固定为「AI服务未启用」。"""
     monkeypatch.setattr(ai_avatar.settings, "ai_avatar_provider", "disabled")
     context = ai_avatar.AiAvatarContext(
         profile=AiAvatarProfileResponse(id=2, name="测试用户"),
@@ -527,6 +532,25 @@ async def test_disabled_provider_fails_closed(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(HTTPException) as exc_info:
         await ai_avatar.call_ai_provider(context, [], "你好")
     assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "AI服务未启用"
+
+
+@pytest.mark.asyncio
+async def test_master_switch_off_fails_closed_with_stable_503_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认 503 之一（AI 门禁）的 master 关触发形态：状态码 503、detail
+    固定为「AI服务未启用」，与 provider 未配置/生产审批未通过共用文案。"""
+    monkeypatch.setattr(ai_avatar.settings, "ai_master_enabled", False)
+    monkeypatch.setattr(ai_avatar.settings, "ai_avatar_provider", "openai_compatible")
+    context = ai_avatar.AiAvatarContext(
+        profile=AiAvatarProfileResponse(id=2, name="测试用户"),
+        public_posts=(),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await ai_avatar.call_ai_provider(context, [], "你好")
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "AI服务未启用"
 
 
 def test_ai_avatar_routes_and_tables_are_declared() -> None:
