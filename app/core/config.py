@@ -324,6 +324,10 @@ class Settings(BaseSettings):
     # 生产 fail-closed：``ai_enabled`` 计入 any_ai_enabled。运行时仍走
     # ``require_ai_feature(AiFeature.ADVISOR)``（master + ai_enabled + 审批门）。
     ai_enabled: bool = False
+    # dev/testing 在 ai_enabled=false 时回退本地 mock 的总开关（可观测化）：
+    # 置 false 后 dev/testing 的 mock 回退改为 503「AI服务未启用」。生产环境
+    # 本就 fail-closed 禁止 mock，不受此开关影响。默认 true 保持既有 dev 行为。
+    ai_allow_mock_fallback: bool = True
     ai_base_url: str = "https://api.deepseek.com/v1"
     ai_api_key: SecretStr | None = None
     ai_model: str = "deepseek-chat"

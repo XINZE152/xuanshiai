@@ -115,6 +115,19 @@ async def assistant_message(db: AsyncSession, user_id: int, session_id: int, con
 async def polish_profile(db: AsyncSession, user_id: int, request: AIProfilePolishRequest) -> AIProfilePolishResponse:
     await _require_vip(db, user_id)
     quota_key = await _consume_ai_quota(db, user_id, "polish", settings.ai_daily_polish_limit)
+    # mock 回退判定与 ai_provider.complete() 的回退分支为同一布尔式（not
+    # ai_enabled and is_test_mode and ai_allow_mock_fallback）：全部成立时
+    # complete() 才返回原文截断 300 字回显，这里显式留痕避免 mock 降级静默
+    # 发生；flag=false 时 complete() 抛 503，不得谎报降级。
+    if (
+        not settings.ai_enabled
+        and settings.is_test_mode
+        and settings.ai_allow_mock_fallback
+    ):
+        logger.warning(
+            "ai_mock_fallback scene=profile_polish user_id=%s mode=echo_truncated_300",
+            user_id,
+        )
     try:
         content = await complete([{"role": "system", "content": "你只润色用户提供的原文，不添加未提供的事实。输出JSON：polished(string), changed_points(array[string])。"}, {"role": "user", "content": f"PROFILE_POLISH style={request.style} max_length={request.max_length}\n{request.content}"}], json_mode=True, scene="profile_polish")
         data = parse_json(content)

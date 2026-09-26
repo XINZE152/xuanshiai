@@ -424,6 +424,15 @@ async def get_advice(
 
     quota_key = await _consume_quota(user_id)
     prompt = _build_prompt(request, context, knowledge, input_risk, memory_context)
+    # mock 回退判定与 ai_provider.complete() 的回退分支为同一布尔式（不得另
+    # 行发明判定）：not ai_enabled and is_test_mode and ai_allow_mock_fallback
+    # 全部成立时本次答复才来自本地 mock，落库 model_name 写 "mock-fallback"
+    # 使审计可区分 mock 与真实调用（纯 DB 内部字段语义）。
+    mock_fallback = (
+        not settings.ai_enabled
+        and settings.is_test_mode
+        and settings.ai_allow_mock_fallback
+    )
     try:
         raw = await complete([
             {"role": "system", "content": "你是谨慎、尊重隐私的婚恋沟通助手，明确标识为 AI，不替用户承诺关系结果，不提供医疗或法律结论。"},
@@ -444,7 +453,7 @@ async def get_advice(
             "input_text": request.incoming_message,
             "output_json": json.dumps(data, ensure_ascii=False),
             "risk_level": data["risk_level"],
-            "model_name": settings.ai_model,
+            "model_name": "mock-fallback" if mock_fallback else settings.ai_model,
             "prompt_version": settings.ai_advisor_prompt_version,
             "knowledge_version": settings.ai_advisor_knowledge_version,
             "request_id": request_id,
