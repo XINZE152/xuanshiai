@@ -27,6 +27,10 @@ class AiFeature(str, Enum):
     # ``require_ai_feature``：master 总闸 + ``ai_enabled`` + 生产审批门。
     # 不得再只看 ``ai_enabled`` 而绕过 fail-closed（修复清单 §3.12.4）。
     ADVISOR = "advisor"
+    # AI 分身（独立 ``ai_avatar_provider``/``ai_avatar_base_url`` 直连栈）。
+    # master 总闸 + ``ai_avatar_provider != "disabled"`` + 生产审批门；生产
+    # 审批检查判分身自己的 provider，不借用 legacy ``ai_provider`` 状态。
+    AVATAR = "avatar"
 
 
 class AiFeatureDisabledError(Exception):
@@ -62,19 +66,30 @@ def is_ai_feature_enabled(feature: AiFeature, settings: Settings) -> bool:
     if feature is AiFeature.VOICE_CONVERSATION:
         # 实时对话模式依赖基础语音门禁 + 对话开关同时打开。
         return settings.ai_voice_enabled and settings.ai_voice_conversation_enabled
+    if feature is AiFeature.AVATAR:
+        # 分身复用既有 ai_avatar_provider 开关，不另开开关；master 总闸在本
+        # 函数入口已检查。provider 为 disabled 即视为未启用。
+        return settings.ai_avatar_provider != "disabled"
     return False
 
 
-def _production_approvals_ok(settings: Settings) -> bool:
+def _production_approvals_ok(settings: Settings, feature: AiFeature) -> bool:
     """Fail closed in production when approvals or provider are not ready."""
     if settings.environment != "production":
         return True
-    return bool(
+    approvals = bool(
         settings.ai_policy_approved
         and settings.ai_provider_approved
         and settings.ai_retention_policy_version
-        and settings.ai_provider != "mock"
     )
+    if not approvals:
+        return False
+    if feature is AiFeature.AVATAR:
+        # 分身有自己的 provider 通道，生产审批检查判分身 provider 本身，
+        # 不借用 legacy ``ai_provider`` 的状态（avatar-only 配置不被军师
+        # provider 误拦；未知/禁用值一律 fail closed）。
+        return settings.ai_avatar_provider not in {"disabled", "mock"}
+    return settings.ai_provider != "mock"
 
 
 def require_ai_feature(feature: AiFeature, settings: Settings) -> None:
@@ -86,7 +101,7 @@ def require_ai_feature(feature: AiFeature, settings: Settings) -> None:
     """
     if not is_ai_feature_enabled(feature, settings):
         raise AiFeatureDisabledError(feature)
-    if not _production_approvals_ok(settings):
+    if not _production_approvals_ok(settings, feature):
         raise AiFeatureDisabledError(feature)
 
 

@@ -39,6 +39,7 @@ from app.services.ai.memory.consumers import (
     context_to_provider_messages,
 )
 from app.services.ai.audit import GenerationAuditEvent, record_generation_audit
+from app.services.ai.flags import AiFeature, AiFeatureDisabledError, require_ai_feature
 from app.services.ai_provider import complete, parse_json
 from app.services.content_filter import assert_text_allowed, decide_text
 from app.services.idempotency import abort as abort_idempotency
@@ -420,6 +421,14 @@ async def call_ai_provider(
     history: list[dict[str, str]],
     question: str,
 ) -> str:
+    # 运行时 fail-closed 门禁：启用分身需 AI_MASTER_ENABLED=true 且
+    # ai_avatar_provider 非 disabled；生产环境还要求三道审批齐备且分身
+    # provider 可用（与启动校验 _validate_ai_feature_gates 双保险）。开发/
+    # 测试环境不受审批门影响。
+    try:
+        require_ai_feature(AiFeature.AVATAR, settings)
+    except AiFeatureDisabledError as exc:
+        raise HTTPException(503, detail="AI服务未启用") from exc
     if settings.ai_avatar_provider == "disabled":
         raise HTTPException(503, detail="真实 AI 服务尚未配置")
     if not settings.ai_avatar_base_url or not settings.ai_avatar_model:
