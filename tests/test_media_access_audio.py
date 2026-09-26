@@ -57,10 +57,12 @@ def _http_scope(query_string: bytes = b"") -> dict[str, object]:
 
 
 def _active_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
+    kind = media_access.VIEWER_KIND_USER
+
     async def active(viewer_id: int, db=None) -> bool:
         return True
 
-    monkeypatch.setitem(media_access._MEDIA_VIEWER_HOOKS, "audio", active)
+    monkeypatch.setitem(media_access._MEDIA_VIEWER_HOOKS, ("audio", kind), active)
 
 
 @pytest.mark.asyncio
@@ -120,10 +122,12 @@ async def test_deactivated_user_signature_is_rejected_with_403(
     files = _ProtectedStorageFiles(directory=str(upload_dir))
     signed = _signed_url(monkeypatch, viewer=42)
 
+    kind = media_access.VIEWER_KIND_USER
+
     async def denied(viewer_id: int, db=None) -> bool:
         return False
 
-    monkeypatch.setitem(media_access._MEDIA_VIEWER_HOOKS, "audio", denied)
+    monkeypatch.setitem(media_access._MEDIA_VIEWER_HOOKS, ("audio", kind), denied)
     response = await files.get_response(
         _AUDIO, _http_scope(urlsplit(signed).query.encode("ascii"))
     )

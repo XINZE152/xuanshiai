@@ -7,6 +7,12 @@ from pydantic import ValidationError
 
 from app.core.config import settings
 from app.services.auth import accept_agreement
+from app.services.media_access import (
+    MEDIA_CATEGORY_CERT,
+    VIEWER_KIND_ADMIN,
+    VIEWER_KIND_USER,
+    sign_media_url,
+)
 from app.services.profile import _image_outputs, _media_url, _read_limited, _user_media_dir, _write_bytes
 import uuid
 
@@ -20,7 +26,21 @@ from app.schemas.certifications import (
 from app.schemas.admin import CertificationReviewRequest, CertificationReviewResponse
 
 
-async def list_certification_reviews(db: AsyncSession, *, page: int, page_size: int, kind: str | None = None, status: int | None = None, search: str | None = None) -> CertificationReviewPage:
+def _sign_cert_material(material: str | None, viewer: int, kind: str) -> str | None:
+    """认证材料按当前查看者重签（响应层重签，DB 存原始 URL）。
+
+    ``kind`` 区分本人（user，users 表语义）与认证审核管理员（admin，
+    matchmaker_admin_account 表语义）；非本地存储路径（如婚姻认证的
+    user_confirmed_unmarried 标记串）原样返回。
+    """
+    if not material:
+        return material
+    return sign_media_url(
+        str(material), category=MEDIA_CATEGORY_CERT, viewer=viewer, kind=kind
+    )
+
+
+async def list_certification_reviews(db: AsyncSession, *, page: int, page_size: int, viewer: int, kind: str | None = None, status: int | None = None, search: str | None = None) -> CertificationReviewPage:
     fields = {
         "education": ("education_verified", "education_cert", "education_submitted_at", "education_reviewed_at", "education_fail_reason"),
         "house": ("house_verified", "house_cert", "house_submitted_at", "house_reviewed_at", "house_fail_reason"),
@@ -44,7 +64,7 @@ async def list_certification_reviews(db: AsyncSession, *, page: int, page_size: 
             ua.{submitted_field} AS submitted_at, ua.{reviewed_field} AS reviewed_at, ua.{reason_field} AS fail_reason
             FROM user_auth ua JOIN users u ON u.id = ua.user_id
             WHERE {where} ORDER BY ua.{submitted_field} ASC, ua.user_id ASC"""), params)).mappings().all()
-        items.extend(CertificationReviewItem(user_id=int(row["user_id"]), nickname=row["nickname"], kind=current_kind, status=int(row["status"]), material_submitted=bool(row["material"]), material=row["material"], submitted_at=row["submitted_at"], reviewed_at=row["reviewed_at"], fail_reason=row["fail_reason"]) for row in rows)
+        items.extend(CertificationReviewItem(user_id=int(row["user_id"]), nickname=row["nickname"], kind=current_kind, status=int(row["status"]), material_submitted=bool(row["material"]), material=_sign_cert_material(row["material"], viewer, VIEWER_KIND_ADMIN), submitted_at=row["submitted_at"], reviewed_at=row["reviewed_at"], fail_reason=row["fail_reason"]) for row in rows)
     items.sort(key=lambda item: (item.submitted_at is None, item.submitted_at, item.user_id))
     total = len(items)
     offset = (page - 1) * page_size
@@ -57,18 +77,21 @@ def _item(kind: str, row: dict, material: str | None) -> dict:
             "next_action": "等待平台审核" if status == 1 else ("无需操作" if status == 2 else ("重新提交材料" if status == 3 else "提交认证材料"))}
 
 
-def _single_pledge_item(row: dict) -> dict:
+def _single_pledge_item(row: dict, viewer: int | None = None, kind: str = VIEWER_KIND_USER) -> dict:
     if not row:
         return _item("single_pledge", {}, None)
     internal_status = int(row.get("status") or 0)
     public_status = 1 if internal_status == 0 else (2 if internal_status == 1 else 3)
+    material = row.get("file_url")
+    if material and viewer is not None:
+        material = _sign_cert_material(material, viewer, kind)
     return {
         **_item("single_pledge", {
             "status": public_status,
             "submitted_at": row.get("created_at"),
             "reviewed_at": row.get("reviewed_at"),
             "fail_reason": row.get("remark"),
-        }, row.get("file_url")),
+        }, material),
         "title": row.get("title"),
         "content": row.get("content"),
     }
@@ -84,10 +107,10 @@ async def get_certifications(db: AsyncSession, user_id: int) -> CertificationsRe
         FROM user_commitment_sign WHERE user_id=:id ORDER BY id DESC LIMIT 1"""), {"id": user_id})
     pledge = pledge_result.mappings().first() or {}
     return CertificationsResponse(
-        education={**_item("education", {"status": row.get("education_verified"), "submitted_at": row.get("education_submitted_at"), "reviewed_at": row.get("education_reviewed_at"), "fail_reason": row.get("education_fail_reason")}, row.get("education_cert")), "education": row.get("education"), "school": row.get("school")},
-        house=_item("house", {"status": row.get("house_verified"), "submitted_at": row.get("house_submitted_at"), "reviewed_at": row.get("house_reviewed_at"), "fail_reason": row.get("house_fail_reason")}, row.get("house_cert")),
-        marriage=_item("marriage", {"status": row.get("marriage_verified"), "submitted_at": row.get("marriage_submitted_at"), "reviewed_at": row.get("marriage_reviewed_at"), "fail_reason": row.get("marriage_fail_reason")}, row.get("marriage_cert")),
-        single_pledge=_single_pledge_item(pledge),
+        education={**_item("education", {"status": row.get("education_verified"), "submitted_at": row.get("education_submitted_at"), "reviewed_at": row.get("education_reviewed_at"), "fail_reason": row.get("education_fail_reason")}, _sign_cert_material(row.get("education_cert"), user_id, VIEWER_KIND_USER)), "education": row.get("education"), "school": row.get("school")},
+        house=_item("house", {"status": row.get("house_verified"), "submitted_at": row.get("house_submitted_at"), "reviewed_at": row.get("house_reviewed_at"), "fail_reason": row.get("house_fail_reason")}, _sign_cert_material(row.get("house_cert"), user_id, VIEWER_KIND_USER)),
+        marriage=_item("marriage", {"status": row.get("marriage_verified"), "submitted_at": row.get("marriage_submitted_at"), "reviewed_at": row.get("marriage_reviewed_at"), "fail_reason": row.get("marriage_fail_reason")}, _sign_cert_material(row.get("marriage_cert"), user_id, VIEWER_KIND_USER)),
+        single_pledge=_single_pledge_item(pledge, viewer=user_id, kind=VIEWER_KIND_USER),
     )
 
 

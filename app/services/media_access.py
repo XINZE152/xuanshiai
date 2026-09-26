@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -29,13 +30,23 @@ from app.services.voice.audio_access import (
     verify_voice_audio_access,
 )
 
+logger = logging.getLogger(__name__)
+
 MEDIA_URL_TTL_SECONDS = AUDIO_URL_TTL_SECONDS
 _STORAGE_PREFIX = "/storage/uploads/"
 _USER_QUERY_KEY = "user"
 _REVISION_QUERY_KEY = "revision"
+_KIND_QUERY_KEY = "kind"
 
 MEDIA_CATEGORY_FOLLOW_UP = "follow_up"
 MEDIA_CATEGORY_AUDIO = "audio"
+MEDIA_CATEGORY_CERT = "cert"
+MEDIA_CATEGORY_ADMIN = "admin"
+
+# 查看者类型：user=登录用户（users 表语义），admin=后台账号
+# （matchmaker_admin_account 表语义）。类型纳入签名消息防篡改。
+VIEWER_KIND_USER = "user"
+VIEWER_KIND_ADMIN = "admin"
 
 
 class MediaAccessUnavailable(Exception):
@@ -62,17 +73,60 @@ def _match_audio_path(relative: str) -> bool:
     return rest.startswith("audio/")
 
 
+def _match_cert_path(relative: str) -> bool:
+    """认证材料：与公开照片同目录，按文件名前缀区分
+    ``{user_id}/education-cert-*``、``{user_id}/house-cert-*``、
+    ``{user_id}/single-pledge-*``（certifications._store_certification_image 生成）。"""
+    first, _, rest = relative.partition("/")
+    if not (first.isascii() and first.isdigit()):
+        return False
+    return rest.startswith(("education-cert-", "house-cert-", "single-pledge-"))
+
+
+def _match_admin_path(relative: str) -> bool:
+    """后台资源：``admin/*``（matchmaker_staff_admin.common_upload 生成）。"""
+    return relative.startswith("admin/")
+
+
 @dataclass(frozen=True)
 class MediaCategory:
-    """一类私有媒体的路径匹配器；查看者状态钩子按类别名查注册表。"""
+    """一类私有媒体：路径匹配器 + 允许的查看者类型。
+
+    ``default_kind`` 为签发端未显式指定类型时的缺省（cert 双语义无缺省，
+    必须显式传 kind）。
+    """
 
     name: str
     match: Callable[[str], bool]
+    allowed_kinds: tuple[str, ...]
+    default_kind: str | None
 
 
 _MEDIA_CATEGORIES: tuple[MediaCategory, ...] = (
-    MediaCategory(name=MEDIA_CATEGORY_FOLLOW_UP, match=_match_follow_up_path),
-    MediaCategory(name=MEDIA_CATEGORY_AUDIO, match=_match_audio_path),
+    MediaCategory(
+        name=MEDIA_CATEGORY_FOLLOW_UP,
+        match=_match_follow_up_path,
+        allowed_kinds=(VIEWER_KIND_ADMIN,),
+        default_kind=VIEWER_KIND_ADMIN,
+    ),
+    MediaCategory(
+        name=MEDIA_CATEGORY_AUDIO,
+        match=_match_audio_path,
+        allowed_kinds=(VIEWER_KIND_USER,),
+        default_kind=VIEWER_KIND_USER,
+    ),
+    MediaCategory(
+        name=MEDIA_CATEGORY_CERT,
+        match=_match_cert_path,
+        allowed_kinds=(VIEWER_KIND_USER, VIEWER_KIND_ADMIN),
+        default_kind=None,
+    ),
+    MediaCategory(
+        name=MEDIA_CATEGORY_ADMIN,
+        match=_match_admin_path,
+        allowed_kinds=(VIEWER_KIND_ADMIN,),
+        default_kind=VIEWER_KIND_ADMIN,
+    ),
 )
 
 
@@ -131,26 +185,46 @@ async def _user_active(viewer_id: int, db: AsyncSession | None = None) -> bool:
         raise MediaAccessUnavailable() from exc
 
 
-# 查看者状态钩子：签名通过后按类别校验查看者当前是否仍有权读取。
-_MEDIA_VIEWER_HOOKS: dict[str, Callable[[int, AsyncSession | None], Awaitable[bool]]] = {
-    MEDIA_CATEGORY_FOLLOW_UP: _admin_account_active,
-    MEDIA_CATEGORY_AUDIO: _user_active,
+# 查看者状态钩子：签名通过后按 (类别, 查看者类型) 校验查看者当前是否仍有权读取。
+_MEDIA_VIEWER_HOOKS: dict[tuple[str, str], Callable[[int, AsyncSession | None], Awaitable[bool]]] = {
+    (MEDIA_CATEGORY_FOLLOW_UP, VIEWER_KIND_ADMIN): _admin_account_active,
+    (MEDIA_CATEGORY_AUDIO, VIEWER_KIND_USER): _user_active,
+    (MEDIA_CATEGORY_CERT, VIEWER_KIND_USER): _user_active,
+    (MEDIA_CATEGORY_CERT, VIEWER_KIND_ADMIN): _admin_account_active,
+    (MEDIA_CATEGORY_ADMIN, VIEWER_KIND_ADMIN): _admin_account_active,
 }
 
 
 def categorize_media_path(relative_path: str) -> str | None:
     """Return the private category owning a storage-relative path, else None."""
+    category = _category_by_path(relative_path)
+    return category.name if category else None
+
+
+def _category_by_path(relative_path: str) -> MediaCategory | None:
     normalized = relative_path.lstrip("/")
     for category in _MEDIA_CATEGORIES:
         if category.match(normalized):
-            return category.name
+            return category
     return None
 
 
+def _category_by_name(name: str) -> MediaCategory:
+    for category in _MEDIA_CATEGORIES:
+        if category.name == name:
+            return category
+    raise ValueError(f"unknown media category: {name}")
+
+
 def _media_signature(
-    category: str, relative_path: str, expires: int, viewer: int, revision: int
+    category: str,
+    kind: str,
+    relative_path: str,
+    expires: int,
+    viewer: int,
+    revision: int,
 ) -> str:
-    message = f"{category}\n{relative_path}\n{expires}\n{viewer}\n{revision}".encode("utf-8")
+    message = f"{category}\n{kind}\n{relative_path}\n{expires}\n{viewer}\n{revision}".encode("utf-8")
     return hmac.new(
         settings.secret_key.encode("utf-8"), message, hashlib.sha256
     ).hexdigest()
@@ -161,10 +235,15 @@ def sign_media_url(
     *,
     category: str,
     viewer: int,
+    kind: str | None = None,
     revision: int = 0,
     expires_seconds: int = MEDIA_URL_TTL_SECONDS,
 ) -> str:
-    """Sign one local private media URL for a viewer; non-member URLs pass through."""
+    """Sign one local private media URL for a viewer; non-member URLs pass through.
+
+    ``kind`` 为查看者类型（user/admin）；缺省取类别 default_kind，cert 类
+    双语义必须显式指定。
+    """
     try:
         parsed = urlsplit(media_url)
     except ValueError:
@@ -172,8 +251,12 @@ def sign_media_url(
     if parsed.scheme or parsed.netloc or not parsed.path.startswith(_STORAGE_PREFIX):
         return media_url
     relative = parsed.path[len(_STORAGE_PREFIX) :].lstrip("/")
+    category_def = _category_by_name(category)
     if categorize_media_path(relative) != category:
         return media_url
+    resolved_kind = kind if kind is not None else category_def.default_kind
+    if resolved_kind is None or resolved_kind not in category_def.allowed_kinds:
+        raise ValueError(f"viewer kind {kind!r} is not allowed for category {category!r}")
     if viewer <= 0 or revision < 0 or expires_seconds <= 0:
         raise ValueError("invalid private media URL signing context")
     expires = int(time.time()) + min(expires_seconds, MEDIA_URL_TTL_SECONDS)
@@ -181,14 +264,22 @@ def sign_media_url(
     query = [
         (key, value)
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-        if key not in {"expires", "signature", _USER_QUERY_KEY, _REVISION_QUERY_KEY}
+        if key
+        not in {
+            "expires",
+            "signature",
+            _USER_QUERY_KEY,
+            _REVISION_QUERY_KEY,
+            _KIND_QUERY_KEY,
+        }
     ]
     query.extend(
         (
             ("expires", str(expires)),
+            (_KIND_QUERY_KEY, resolved_kind),
             (_USER_QUERY_KEY, str(viewer)),
             (_REVISION_QUERY_KEY, str(revision)),
-            ("signature", _media_signature(category, relative, expires, viewer, revision)),
+            ("signature", _media_signature(category, resolved_kind, relative, expires, viewer, revision)),
         )
     )
     return urlunsplit(("", "", parsed.path, urlencode(query), parsed.fragment))
@@ -207,7 +298,14 @@ def strip_media_signature(media_url: str) -> str:
     query = [
         (key, value)
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-        if key not in {"expires", "signature", _USER_QUERY_KEY, _REVISION_QUERY_KEY}
+        if key
+        not in {
+            "expires",
+            "signature",
+            _USER_QUERY_KEY,
+            _REVISION_QUERY_KEY,
+            _KIND_QUERY_KEY,
+        }
     ]
     return urlunsplit(("", "", parsed.path, urlencode(query), parsed.fragment))
 
@@ -241,12 +339,16 @@ def verify_media_signature(
     category: str,
     now: int | None = None,
 ) -> bool:
-    """Verify viewer, path, category and expiry without leaking failure detail."""
+    """Verify viewer kind, viewer, path, category and expiry without leaking detail."""
     normalized = relative_path.lstrip("/")
+    category_def = _category_by_name(category)
     raw_expires = _single(query, "expires")
     raw_signature = _single(query, "signature")
+    raw_kind = _single(query, _KIND_QUERY_KEY)
     identity = _signed_media_identity(query)
     if raw_expires is None or raw_signature is None or identity is None:
+        return False
+    if raw_kind is None or raw_kind not in category_def.allowed_kinds:
         return False
     if not raw_expires.isascii() or not raw_expires.isdecimal():
         return False
@@ -255,7 +357,7 @@ def verify_media_signature(
     if str(expires) != raw_expires or expires <= current or expires > current + MEDIA_URL_TTL_SECONDS:
         return False
     viewer, revision = identity
-    expected = _media_signature(category, normalized, expires, viewer, revision)
+    expected = _media_signature(category, raw_kind, normalized, expires, viewer, revision)
     return hmac.compare_digest(expected, raw_signature)
 
 
@@ -275,27 +377,44 @@ async def verify_media_access(
             return await verify_voice_audio_access(normalized, query)
         except VoiceAudioUnavailable as exc:
             raise MediaAccessUnavailable() from exc
-    category_name = categorize_media_path(normalized)
-    if category_name is None:
+    category_def = _category_by_path(normalized)
+    if category_def is None:
         return True
-    if not verify_media_signature(normalized, query, category=category_name):
+    raw_signature = _single(query, "signature")
+    if raw_signature is None:
+        # 未签名观测：私有类直连记录类别与相对路径（不记 query 不记内容），
+        # 为 REVIEW §6 完整迁移提供证据。
+        logger.warning(
+            "unsigned_private_media_access category=%s path=%s",
+            category_def.name,
+            normalized,
+        )
+    if not verify_media_signature(normalized, query, category=category_def.name):
         return False
     identity = _signed_media_identity(query)
-    if identity is None:
+    raw_kind = _single(query, _KIND_QUERY_KEY)
+    if identity is None or raw_kind is None:
         return False
     viewer, _revision = identity
+    hook = _MEDIA_VIEWER_HOOKS.get((category_def.name, raw_kind))
+    if hook is None:
+        return False
     try:
-        return await _MEDIA_VIEWER_HOOKS[category_name](viewer, None)
+        return await hook(viewer, None)
     except MediaAccessDenied:
         return False
 
 
 __all__ = [
+    "MEDIA_CATEGORY_ADMIN",
     "MEDIA_CATEGORY_AUDIO",
+    "MEDIA_CATEGORY_CERT",
     "MEDIA_CATEGORY_FOLLOW_UP",
     "MEDIA_URL_TTL_SECONDS",
     "MediaAccessDenied",
     "MediaAccessUnavailable",
+    "VIEWER_KIND_ADMIN",
+    "VIEWER_KIND_USER",
     "categorize_media_path",
     "sign_media_url",
     "strip_media_signature",

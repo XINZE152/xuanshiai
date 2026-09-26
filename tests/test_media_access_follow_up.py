@@ -56,7 +56,11 @@ def _active_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
     async def active(viewer_id: int, db=None) -> bool:
         return True
 
-    monkeypatch.setitem(media_access._MEDIA_VIEWER_HOOKS, "follow_up", active)
+    monkeypatch.setitem(
+        media_access._MEDIA_VIEWER_HOOKS,
+        (MEDIA_CATEGORY_FOLLOW_UP, "admin"),
+        active,
+    )
 
 
 def _write_fixture(upload_dir: Path, relative: str, payload: bytes) -> None:
@@ -134,10 +138,12 @@ async def test_disabled_admin_signature_is_rejected_with_403(
     files = _ProtectedStorageFiles(directory=str(upload_dir))
     signed = _signed_url(monkeypatch, viewer=7)
 
+    kind = media_access.VIEWER_KIND_ADMIN
+
     async def denied(viewer_id: int, db=None) -> bool:
         return False
 
-    monkeypatch.setitem(media_access._MEDIA_VIEWER_HOOKS, "follow_up", denied)
+    monkeypatch.setitem(media_access._MEDIA_VIEWER_HOOKS, ("follow_up", kind), denied)
     response = await files.get_response(
         _PRIVATE_IMAGE, _http_scope(urlsplit(signed).query.encode("ascii"))
     )
@@ -154,10 +160,12 @@ async def test_db_outage_fails_closed_with_503(
     files = _ProtectedStorageFiles(directory=str(upload_dir))
     signed = _signed_url(monkeypatch, viewer=7)
 
+    kind = media_access.VIEWER_KIND_ADMIN
+
     async def unavailable(viewer_id: int, db=None) -> bool:
         raise MediaAccessUnavailable()
 
-    monkeypatch.setitem(media_access._MEDIA_VIEWER_HOOKS, "follow_up", unavailable)
+    monkeypatch.setitem(media_access._MEDIA_VIEWER_HOOKS, ("follow_up", kind), unavailable)
     response = await files.get_response(
         _PRIVATE_IMAGE, _http_scope(urlsplit(signed).query.encode("ascii"))
     )
