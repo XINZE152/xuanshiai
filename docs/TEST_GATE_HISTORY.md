@@ -23,6 +23,7 @@
 - **当前归属判断**：本轮后端工作树未修改 `migrations/` 或该测试；属于存量迁移资产/基线问题，不能归因于消息或媒体改动。
 - **修复要求**：确认目标迁移是否应恢复为受控的 up/down 成对文件，或更新测试以匹配已批准的迁移目录；必须先核对数据库发布与回滚策略，不能只创建空文件满足断言。
 - **回归命令**：`python -m pytest tests/test_m4_m7_column_migration.py -q`
+- **处置结果（2026-09-27）**：已补齐受控迁移资产 `migrations/m4_m7/20260916_01_m4_m7_backoffice_columns_{up,down,verify}.sql` 与 `README.md`，逐条镜像 `database_setup_marriage.py` 的 `_ensure_m4..m7` helper（`database_setup_marriage.py:3384-3502`）。发布与回滚方式见 `migrations/m4_m7/README.md`；`down` 恢复 `commission_entry.order_id NOT NULL` 仅当表内无 `order_id IS NULL` 数据时执行，否则脚本跳过该步并输出 `rollback_blocked` 提示。已在 `compose.ai-test.yml` 的独立测试 MySQL（127.0.0.1:3307）一次性临时库上完成 up×2（幂等）/verify/down×2（幂等）/再 up/NULL 数据回滚阻塞的全路径演练后删除临时库。
 
 ### 2. 生产 Mock 支付错误契约不一致
 

@@ -10,6 +10,7 @@ from app.schemas.auth import (
     PreferenceUpdateRequest,
     ProfileUpdateRequest,
 )
+from app.core.profile_tags import ALL_TAG_OPTIONS
 from app.services.profile import COMPLETION_RULES, IMAGE_MAX_PIXELS, _image_outputs
 
 
@@ -19,17 +20,19 @@ def test_completion_weights_total_100() -> None:
 
 
 def test_profile_validates_mbti_height_and_tags() -> None:
+    interest_tags = ["力量训练", "周末徒步", "街头摄影"]
+    assert all(tag in ALL_TAG_OPTIONS for tag in interest_tags)
     request = ProfileUpdateRequest(
         height=175,
         is_married=1,
         mbti="INTJ",
-        interest_tags=["健身", "旅行", "摄影"],
+        interest_tags=interest_tags,
         personality_tags=["内向但真诚", "温柔细心", "独立自信"],
-        tag_selections={"sports": ["健身", "跑步"], "arts_leisure": ["摄影"]},
+        tag_selections={"sports": ["力量训练", "跑步"], "arts": ["街头摄影"]},
     )
     assert request.mbti == "INTJ"
-    assert request.tag_selections["sports"] == ["健身", "跑步"]
-    assert request.interest_tags == ["健身", "旅行", "摄影"]
+    assert request.tag_selections["sports"] == ["力量训练", "跑步"]
+    assert request.interest_tags == ["力量训练", "周末徒步", "街头摄影"]
     assert request.personality_tags == ["内向但真诚", "温柔细心", "独立自信"]
 
     with pytest.raises(ValidationError):
