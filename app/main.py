@@ -22,11 +22,7 @@ from app.api.routes.admin_home import legacy_router as admin_home_legacy_router
 from app.core.config import settings
 from app.core.logging import configure_logging, request_id_context
 from app.db.session import engine
-from app.services.voice.audio_access import (
-    VoiceAudioUnavailable,
-    is_private_voice_path,
-    verify_voice_audio_access,
-)
+from app.services.media_access import MediaAccessUnavailable, verify_media_access
 
 configure_logging(settings)
 logger = logging.getLogger(__name__)
@@ -34,18 +30,18 @@ REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 class _ProtectedStorageFiles(StaticFiles):
-    """Keep AI voice temporary files out of the anonymous static surface."""
+    """Keep private media (AI voice TTS, follow-up attachments, ...) out of
+    the anonymous static surface; category decisions live in media_access."""
 
     async def get_response(self, path: str, scope):
-        if is_private_voice_path(path):
-            raw_query = scope.get("query_string", b"")
-            query = parse_qs(raw_query.decode("ascii", errors="ignore"))
-            try:
-                allowed = await verify_voice_audio_access(path, query)
-            except VoiceAudioUnavailable:
-                return Response(status_code=503)
-            if not allowed:
-                return Response(status_code=403)
+        raw_query = scope.get("query_string", b"")
+        query = parse_qs(raw_query.decode("ascii", errors="ignore"))
+        try:
+            allowed = await verify_media_access(path, query)
+        except MediaAccessUnavailable:
+            return Response(status_code=503)
+        if not allowed:
+            return Response(status_code=403)
         return await super().get_response(path, scope)
 
 
