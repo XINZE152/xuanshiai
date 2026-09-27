@@ -729,17 +729,17 @@ async def create_matchmaker_rating(
     row = (await db.execute(text("""SELECT id, user_id, matchmaker_id, order_id, status
         FROM matchmaker_service WHERE id = :id FOR UPDATE"""), {"id": service_id})).mappings().first()
     if not row:
-        raise HTTPException(404, detail="??????")
+        raise HTTPException(404, detail="牵线服务不存在")
     if int(row["user_id"]) != current.id:
-        raise HTTPException(403, detail="???????????")
+        raise HTTPException(403, detail="仅服务本人可以评价")
     if int(row["status"]) != 2:
-        raise HTTPException(409, detail="??????????")
+        raise HTTPException(409, detail="服务尚未完成，暂不能评价")
     paid = await db.execute(text("SELECT 1 FROM payment_order WHERE id = :id AND type = 3 AND status = 1 LIMIT 1"), {"id": row.get("order_id")})
     if row.get("order_id") and not paid.scalar():
-        raise HTTPException(409, detail="?????????")
+        raise HTTPException(409, detail="服务订单未支付，暂不能评价")
     duplicate = await db.execute(text("SELECT id FROM matchmaker_rating WHERE service_id = :service_id AND user_id = :user_id LIMIT 1"), {"service_id": service_id, "user_id": current.id})
     if duplicate.scalar():
-        raise HTTPException(409, detail="??????")
+        raise HTTPException(409, detail="该服务已评价过，请勿重复评价")
     result = await db.execute(text("""INSERT INTO matchmaker_rating
         (service_id, user_id, matchmaker_id, score, content)
         VALUES (:service_id, :user_id, :matchmaker_id, :score, :content)"""), {"service_id": service_id, "user_id": current.id, "matchmaker_id": row["matchmaker_id"], **request.model_dump()})

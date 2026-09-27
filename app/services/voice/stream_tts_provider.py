@@ -32,7 +32,6 @@ from app.services.voice.providers import (
     _AliyunAPIError,
     _AliyunAuthError,
     _AliyunConnectionError,
-    _AliyunRateLimitError,
     _AliyunTimeoutError,
     _AliyunVoiceError,
 )
@@ -117,7 +116,6 @@ class AliyunStreamTTSClient:
         """AccessKey 换取 NLS Token，缓存到过期前刷新（与 ASR client 同源）。"""
         from app.services.voice.stream_provider import (
             _TOKEN_REFRESH_MARGIN_SECONDS,
-            _TOKEN_TTL_SECONDS,
         )
 
         if self._token_cache is not None:

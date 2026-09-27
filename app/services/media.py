@@ -11,6 +11,7 @@ from fastapi import HTTPException, UploadFile
 
 from app.core.config import settings
 from app.schemas.community import MediaUploadResponse
+from app.services.media_access import MEDIA_CATEGORY_AUDIO, sign_media_url
 
 AUDIO_MAX_BYTES = 5 * 1024 * 1024
 ALLOWED_AUDIO_TYPES = {
@@ -92,7 +93,14 @@ async def upload_media(user_id: int, file: UploadFile, purpose: str) -> MediaUpl
     async with aiofiles.open(path, "wb") as output:
         await output.write(data)
     return MediaUploadResponse(
-        url=_media_url(user_id, relative.replace("\\", "/")),
+        # 签名仍以 /storage/uploads/ 开头，可通过 schemas 的服务端前缀校验
+        # 进入 payload；DB 存签名 URL（含 query，voice_url 列 varchar(500)
+        # 容得下），挂载层按上传者账号状态验签。
+        url=sign_media_url(
+            _media_url(user_id, relative.replace("\\", "/")),
+            category=MEDIA_CATEGORY_AUDIO,
+            viewer=user_id,
+        ),
         content_type=content_type,
         size=len(data),
         purpose=purpose_norm,

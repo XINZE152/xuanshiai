@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.services.media_access import MEDIA_CATEGORY_FOLLOW_UP, sign_media_url
 from app.schemas.member_follow_up_admin import (
     MemberFollowUp,
     MemberFollowUpImportResult,
@@ -576,10 +577,28 @@ LEFT JOIN users mk ON mk.id = f.created_by
 """
 
 
+def _sign_follow_up_media(item: MemberFollowUp, viewer: int) -> MemberFollowUp:
+    """响应层重签：DB 存原始 URL，返回给当前管理员的跟进附件 URL 附带短期
+    签名（TTL 300s）；过期后重新调用本接口获取新 URL。"""
+    item.images = [
+        sign_media_url(url, category=MEDIA_CATEGORY_FOLLOW_UP, viewer=viewer)
+        for url in item.images
+    ]
+    if item.voice_url:
+        item.voice_url = sign_media_url(
+            item.voice_url, category=MEDIA_CATEGORY_FOLLOW_UP, viewer=viewer
+        )
+    return item
+
+
 async def get_member_follow_ups(
-    db: AsyncSession, member_id: int, page: int, page_size: int
+    db: AsyncSession, member_id: int, page: int, page_size: int, *, viewer: int
 ) -> MemberFollowUpPage:
-    """查询单个会员的跟进记录（含图片/录音与跟进红娘称呼），倒序分页。"""
+    """查询单个会员的跟进记录（含图片/录音与跟进红娘称呼），倒序分页。
+
+    ``viewer`` 为当前后台账号 id：附件 URL 按其重签，挂载层验签时校验该
+    账号仍处于启用状态。
+    """
     if not await db.scalar(text("SELECT 1 FROM users WHERE id = :id"), {"id": member_id}):
         raise HTTPException(404, detail="会员不存在")
     params: dict[str, Any] = {"uid": member_id, "limit": page_size, "offset": (page - 1) * page_size}
@@ -590,7 +609,10 @@ async def get_member_follow_ups(
     total = int(
         (await db.scalar(text("SELECT COUNT(*) FROM member_follow_up WHERE user_id = :uid"), {"uid": member_id})) or 0
     )
-    items = [_build_follow_up_row(row) for row in rows.mappings().all()]
+    items = [
+        _sign_follow_up_media(_build_follow_up_row(row), viewer)
+        for row in rows.mappings().all()
+    ]
     return MemberFollowUpPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
@@ -689,4 +711,4 @@ async def create_follow_up_with_media(
     row = (
         await db.execute(text(f"{_FOLLOW_UP_SELECT} WHERE f.id = :id"), {"id": follow_id})
     ).mappings().one()
-    return _build_follow_up_row(row)
+    return _sign_follow_up_media(_build_follow_up_row(row), actor_id)

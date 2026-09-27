@@ -3366,7 +3366,7 @@ class DatabaseManager:
                 "varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL "
                 "COMMENT '客户端消息幂等键' AFTER `media_url`"
             )
-        elif len(column) > 2 and column[2] != "utf8mb4_bin":
+        elif column["Collation"] != "utf8mb4_bin":
             cursor.execute(
                 "ALTER TABLE `chat_message` MODIFY COLUMN `client_message_id` "
                 "varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL "

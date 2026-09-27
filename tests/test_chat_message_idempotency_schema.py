@@ -8,6 +8,11 @@ from database_setup_marriage import DatabaseManager
 
 
 class SchemaCursor:
+    """模拟 initialize_database 的真实游标形态（pymysql DictCursor，见
+    database_setup_marriage.py 的 initialize_database）：SHOW FULL COLUMNS 返回
+    以列名为 key 的 dict；历史上本 fake 曾返回元组，掩盖了 `column[2]` 在
+    DictCursor 下必 KeyError: 2 的缺陷。"""
+
     def __init__(
         self,
         *,
@@ -19,24 +24,28 @@ class SchemaCursor:
         self.index_exists = index_exists
         self.column_collation = column_collation
         self.statements: list[tuple[str, Any]] = []
-        self._next_row: tuple[Any, ...] | None = None
+        self._next_row: dict[str, Any] | None = None
 
     def execute(self, statement: str, params: Any = None) -> None:
         self.statements.append((statement, params))
         if statement.startswith("SHOW FULL COLUMNS FROM `chat_message`"):
             self._next_row = (
-                ("client_message_id", "varchar(128)", self.column_collation)
+                {
+                    "Field": "client_message_id",
+                    "Type": "varchar(128)",
+                    "Collation": self.column_collation,
+                }
                 if self.column_exists
                 else None
             )
         elif statement.startswith("SHOW INDEX FROM `chat_message`"):
             self._next_row = (
-                ("uq_chat_message_sender_session_client_message",)
+                {"Key_name": "uq_chat_message_sender_session_client_message"}
                 if self.index_exists
                 else None
             )
 
-    def fetchone(self) -> tuple[Any, ...] | None:
+    def fetchone(self) -> dict[str, Any] | None:
         row = self._next_row
         self._next_row = None
         return row

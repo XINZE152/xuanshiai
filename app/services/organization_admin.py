@@ -240,7 +240,6 @@ _STORE_USER_SCOPE = (
 async def store_report_summary(db: AsyncSession, store_id: int) -> StoreReportSummary:
     """分店报表 9 张统计卡（口径与平台首页 dashboard 保持一致）。"""
     store = await get_store_admin(db, store_id)
-    user_scope = _STORE_USER_SCOPE.format(col="u.id")
     membership_scope = _STORE_USER_SCOPE.format(col="m.user_id")
     order_scope = _STORE_USER_SCOPE.format(col="po.user_id")
     row = (await db.execute(text(f"""SELECT

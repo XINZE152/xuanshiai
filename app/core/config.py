@@ -324,6 +324,10 @@ class Settings(BaseSettings):
     # 生产 fail-closed：``ai_enabled`` 计入 any_ai_enabled。运行时仍走
     # ``require_ai_feature(AiFeature.ADVISOR)``（master + ai_enabled + 审批门）。
     ai_enabled: bool = False
+    # dev/testing 在 ai_enabled=false 时回退本地 mock 的总开关（可观测化）：
+    # 置 false 后 dev/testing 的 mock 回退改为 503「AI服务未启用」。生产环境
+    # 本就 fail-closed 禁止 mock，不受此开关影响。默认 true 保持既有 dev 行为。
+    ai_allow_mock_fallback: bool = True
     ai_base_url: str = "https://api.deepseek.com/v1"
     ai_api_key: SecretStr | None = None
     ai_model: str = "deepseek-chat"
@@ -489,6 +493,29 @@ class Settings(BaseSettings):
                 # legacy 军师直连栈：只开 ai_enabled 也必须走审批门，
                 # 不得绕过生产 fail-closed（修复清单 §3.12.4）。
                 self.ai_enabled,
+                # AI 分身：开启即继承下方共用门禁（SECRET_KEY/DEBUG/DOCS/
+                # 三道审批），不得绕过生产 fail-closed。
+                self.ai_avatar_provider != "disabled",
+            )
+        )
+        # provider 专项检查（deepseek/dots key 与 mock 禁令）保护的是共享
+        # settings.ai_provider——其消费者覆盖 legacy complete() 直连栈与现代栈
+        # AIGateway（gateway 直接从 settings 解析 provider），因此卫兵取加入
+        # avatar 之前的原十项开关原样：仅 avatar-only 的生产配置跳过这三项
+        # （分身走独立的 ai_avatar_base_url/provider），其余一切现存配置的
+        # 启动行为逐条不变。
+        provider_checks_on = any(
+            (
+                self.ai_master_enabled,
+                self.ai_profile_enabled,
+                self.ai_search_enabled,
+                self.ai_compatibility_shadow_enabled,
+                self.ai_recommend_enabled,
+                self.ai_voice_enabled,
+                self.ai_voice_conversation_enabled,
+                self.ai_realtime_voice_enabled,
+                self.ai_moxiang_journey_enabled,
+                self.ai_enabled,
             )
         )
         if not any_ai_enabled:
@@ -497,16 +524,16 @@ class Settings(BaseSettings):
             raise ValueError("生产环境启用 AI 必须配置至少 32 位非占位 SECRET_KEY")
         if self.debug or self.docs_enabled:
             raise ValueError("生产环境启用 AI 必须关闭 DEBUG、DOCS_ENABLED")
-        if self.ai_provider == "deepseek" and not self.ai_deepseek_api_key:
+        if provider_checks_on and self.ai_provider == "deepseek" and not self.ai_deepseek_api_key:
             raise ValueError("生产环境启用 DeepSeek AI 必须配置 AI_DEEPSEEK_API_KEY")
-        if self.ai_provider == "dots" and not self.ai_dots_api_key:
+        if provider_checks_on and self.ai_provider == "dots" and not self.ai_dots_api_key:
             raise ValueError("生产环境启用 Dots AI 必须配置 AI_DOTS_API_KEY")
         if not self.ai_approvals_complete():
             raise ValueError(
                 "生产环境启用 AI 功能必须同时满足 ai_policy_approved、"
                 "ai_provider_approved 和 ai_retention_policy_version"
             )
-        if self.ai_provider == "mock":
+        if provider_checks_on and self.ai_provider == "mock":
             raise ValueError("生产环境禁止使用 mock AI Provider")
         if self.ai_voice_conversation_enabled:
             # 实时对话模式同样需要三道审批门禁。

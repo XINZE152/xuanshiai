@@ -68,7 +68,7 @@ async def certification_reviews(
     status: Literal[1, 2, 3] = Query(1), admin: CurrentUser = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ) -> CertificationReviewPage:
-    return await list_certification_reviews(db, page=page, page_size=page_size, kind=kind, status=status)
+    return await list_certification_reviews(db, page=page, page_size=page_size, viewer=admin.id, kind=kind, status=status)
 
 
 @router.get("/users/{user_id}/restrictions", response_model=RestrictionPage, summary="查询用户限制记录")

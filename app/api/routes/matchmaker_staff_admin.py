@@ -29,6 +29,7 @@ from app.schemas.matchmaker_staff_admin import (
     StoreDictItem,
 )
 from app.services import matchmaker_staff_admin as service
+from app.services.media_access import MEDIA_CATEGORY_ADMIN, sign_media_url
 from app.services.profile import _image_outputs, _read_limited
 from uuid import uuid4
 from pathlib import Path as FilePath
@@ -262,5 +263,13 @@ async def common_upload(
     target.write_bytes(output)
     (directory / f"{name}-thumb.webp").write_bytes(thumbnail)
     return CommonUploadResponse(
-        url=f"/storage/uploads/admin/{name}.webp", content_type="image/webp", size=len(output)
+        # 后台资源仅后台签发链路：URL 按当前管理员签发（kind=admin），挂载层
+        # 验签时校验该账号仍处于启用状态。
+        url=sign_media_url(
+            f"/storage/uploads/admin/{name}.webp",
+            category=MEDIA_CATEGORY_ADMIN,
+            viewer=current.account.id,
+        ),
+        content_type="image/webp",
+        size=len(output),
     )

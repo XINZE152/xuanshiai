@@ -135,7 +135,7 @@ service 层（`admin_list_orders` 等）用 `if start_time:`（truthy 检查）�
 `POST /api/v1/admin/finance/credit-grants → 404`
 
 ### 根因
-**生产后端服务未重启加载 M9 代码**。M9 的 credit-grants 端点在 `app/api/routes/finance.py` 已完整实现并通过 12/12 pytest，但生产服务器（`/home/xuanshiai/app/main.py`）仍跑的是 M9 之前版本，没有这个路由。
+**生产后端服务未重启加载 M9 代码**，且 M9 交付本身存在接线缺陷：`app/api/routes/finance.py` 的 handler 调用了 `admin_grant_credits` 但导入块漏了该名字（ruff F821，2026-09-25 的 `docs/TEST_GATE_HISTORY.md` 已登记），真实调用会以 NameError 500 失败。当时 `tests/test_m9_system_finance_ext.py` 的 12/12 pytest 只覆盖路由注册（OpenAPI 断言不执行 handler）、入参校验与 service 层逻辑，未能发现该缺陷。该导入已于 2026-09-27 补齐，并新增 `tests/test_finance_admin_routes.py` 路由级接线回归（含『发放目标为空 404』分支）。生产服务器（`/home/xuanshiai/app/main.py`）当时仍跑 M9 之前版本，没有这个路由。
 
 ### 处理
 代码侧无需改动（M9 已交付）。**需用户在生产环境重启后端服务**：

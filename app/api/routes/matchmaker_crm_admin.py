@@ -249,7 +249,7 @@ async def member_certification_reviews(
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    return (await list_certification_reviews(db, page=page, page_size=page_size, kind=kind, status=status, search=search)).model_dump()
+    return (await list_certification_reviews(db, page=page, page_size=page_size, viewer=current.account.id, kind=kind, status=status, search=search)).model_dump()
 
 
 @router.patch("/members/{member_id}/certifications/{kind}/review")

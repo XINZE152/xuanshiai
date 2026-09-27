@@ -17,7 +17,6 @@ from app.schemas.member_media_admin import (
     MemberIntroItem,
     MemberIntroPage,
     MemberIntroUpdate,
-    MemberMediaItem,
     MemberMediaPage,
     MemberMediaReplace,
     MemberMediaReview,

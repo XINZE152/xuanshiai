@@ -4,6 +4,7 @@
 
 ### 变更记录
 
+- 2026-09-27（预览响应建模）：`POST /profile-drafts/{draft_id}/preview` 与 `GET /profile-previews/{preview_id}` 响应由裸 dict 建模为 `ProfilePreviewResponse`（7 键）/`ProfilePreviewDetailResponse`（10 键），运行时键集与状态码零变化，仅 OpenAPI 类型化；响应契约新增 §9A。文档此前未覆盖该两端的字段级契约，本次按真实返回键集补全。
 - 2026-08-08：新增 6 个 `/api/v1/ai/profile-sessions*` 路径；错误统一为 `AiErrorDetail` 形状（含 `request_id`）；普通响应不携带原文、provider trace 或密钥。本期仅会话/回答/草稿抽取；字段确认、发布、历史与删除传播由后续任务提供。
 - 2026-08-08：新增 6 个草稿确认/发布/历史/删除路径（§7-§12）；发布只接受 `confirmed` 字段并写不可变 `ai_profile_revision`；删除在同步响应前令草稿与派生结果不可读；补上创建会话错误表缺失的 `409 PROFILE_SESSION_STALE` 行。
 - 2026-08-08（Task 12 纠偏）：§8 PATCH 错误表、§9 publish 错误表补 `409 RESULT_STALE` 行；§13 稳定错误码总表补 `RESULT_STALE`。删除不递增草稿 `expected_revision`，客户端持旧 revision 操作已删除草稿返回 `409 RESULT_STALE`（守卫先于乐观锁），而非文档此前声称的 `DRAFT_VERSION_CONFLICT`。
@@ -970,6 +971,51 @@ Idempotency-Key: profile-publish-20260807-02
 | 409 | `TASK_IDEMPOTENCY_CONFLICT` | 同 Idempotency-Key 不同 payload | false | 更换 key 或复用原响应 |
 | 401 | — | 未登录或 Token 失效 | false | 引导重新登录 |
 | 503 | `AI_FEATURE_DISABLED` | 功能开关/批准门禁未满足 | false | 展示稳定禁用状态 |
+
+---
+
+## 9A. 草稿预览（Phase 3 P3-01）
+
+两个既有端点（见 AI能力.md 路径索引）；2026-09-27 起响应建模为
+`ProfilePreviewResponse` / `ProfilePreviewDetailResponse`（运行时键集与建模
+前逐键一致，仅 OpenAPI 类型化）。
+
+### `POST /api/v1/ai/profile-drafts/{draft_id}/preview`（202）
+
+生成/复用当前 `(draft_id, expected_revision)` 的预览；请求 body `{"expected_revision": <int>}`。
+
+响应键集（7 键）：
+
+| 键 | 类型 | 说明 |
+| --- | --- | --- |
+| `preview_id` | string | 预览 ID（同 `(draft_id, expected_revision)` 复用） |
+| `draft_id` | string | 所属草稿 ID |
+| `expected_revision` | int | 生成时校验的草稿修订号 |
+| `subject` | string | 画像主体（personal/ideal_partner） |
+| `status` | string | 预览状态（`active/confirmed/stale/failed`，见 `PREVIEW_STATUSES`） |
+| `content` | string | 预览正文 |
+| `task_id` | string/null | 关联任务 ID（无则 null） |
+
+### `GET /api/v1/ai/profile-previews/{preview_id}`（200）
+
+读取本人预览（越权/不存在 → 404）。响应键集（10 键）= 上述 7 键追加：
+
+| 键 | 类型 | 说明 |
+| --- | --- | --- |
+| `last_error` | string/null | 最近一次生成失败原因 |
+| `created_at` | string/null | 创建时间（DB 字符串） |
+| `updated_at` | string/null | 更新时间（DB 字符串） |
+
+### 错误
+
+| HTTP | 稳定错误码 | 触发条件 |
+| --- | --- | --- |
+| 400 | `AI_INPUT_INVALID` | body 非 JSON 对象；`expected_revision` 非负整数缺失 |
+| 404 | `DRAFT_NOT_FOUND` / `PREVIEW_NOT_FOUND` | 草稿/预览不存在或不属于当前用户 |
+| 409 | `DRAFT_VERSION_CONFLICT` | `expected_revision` 不匹配 |
+| 503 | `AI_TEMPORARILY_UNAVAILABLE` | 生成/读取失败（retryable） |
+
+错误响应结构统一为 `AiErrorResponse`（`code/message/request_id/retryable/retry_after_ms`）。
 
 ---
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Any
 
@@ -12,6 +13,8 @@ from app.core.config import settings
 from app.services.ai.base import AITaskContext
 from app.services.ai.flags import AiFeature, AiFeatureDisabledError, require_ai_feature
 from app.services.ai.gateway import AIGateway
+
+logger = logging.getLogger(__name__)
 
 
 async def complete(
@@ -24,12 +27,22 @@ async def complete(
     """Call the shared AI gateway under the existing advisor gate.
 
     ``ai_enabled=False`` in development/testing still returns the local mock
-    (existing contract).  Any real call requires ``require_ai_feature(ADVISOR)``
-    so master + ``ai_enabled`` + production approvals cannot be bypassed.
-    Generation audit is owned by ``AIGateway.chat`` and must not be repeated here.
+    (existing contract) unless ``ai_allow_mock_fallback`` is disabled, in
+    which case it fails closed with 503.  Any real call requires
+    ``require_ai_feature(ADVISOR)`` so master + ``ai_enabled`` + production
+    approvals cannot be bypassed.  Generation audit is owned by
+    ``AIGateway.chat`` and must not be repeated here.
     """
     if not settings.ai_enabled:
-        if settings.is_test_mode:
+        # Mock 回退判定（唯一实现）：dev/testing 且 ai_allow_mock_fallback=true
+        # 时回退本地 mock，其余一律 503 fail closed。ai_advisor/ai_assistant
+        # 的审计口径引用同一布尔式，不得另行发明判定。
+        if settings.is_test_mode and settings.ai_allow_mock_fallback:
+            logger.warning(
+                "ai_mock_fallback scene=%s request_id=%s mode=local_mock",
+                scene,
+                request_id,
+            )
             return _mock_response(messages, json_mode=json_mode)
         raise HTTPException(503, detail="AI服务未启用")
     try:

@@ -1,7 +1,11 @@
-"""手动风险复现：验证静态上传根目录的匿名可读边界。
+"""手动风险复现：验证 /storage/uploads 私有类媒体止损与公开类边界。
 
 运行：python -m scripts.reproduce_upload_exposure
 只写入 tempfile，不启动服务、不连接数据库、不读取本机上传目录。
+
+止损已实施（MEDIA_STORAGE_ACCESS_REVIEW.md §5 第 1 步）：跟进附件类
+（{member_id}/follow-up-img-*、follow-up-voice-*）匿名直连返回 403；
+公开资料媒体保持匿名 200。
 """
 
 import os
@@ -26,7 +30,15 @@ def main() -> None:
         fixtures = {
             "42/follow-up-img-example.webp": b"private-follow-up-image-sentinel",
             "42/follow-up-voice-example.mp3": b"private-follow-up-voice-sentinel",
+            "42/audio/example.mp3": b"private-user-voice-sentinel",
             "42/photo-example.webp": b"ordinary-public-image-sentinel",
+        }
+        # 私有类（跟进附件/用户语音）匿名直连必须 403；公开类保持 200 且字节一致。
+        expected_status = {
+            "42/follow-up-img-example.webp": 403,
+            "42/follow-up-voice-example.mp3": 403,
+            "42/audio/example.mp3": 403,
+            "42/photo-example.webp": 200,
         }
         for relative_path, payload in fixtures.items():
             target = Path(directory) / relative_path
@@ -35,13 +47,19 @@ def main() -> None:
 
         # 不进入 lifespan；AUTO_INIT_DB=false 双保险，禁止初始化数据库。
         client = TestClient(create_app())
-        for relative_path, expected in fixtures.items():
+        for relative_path, payload in fixtures.items():
             url = f"/storage/uploads/{relative_path}"
             response = client.get(url)  # 无 Cookie、Authorization 或其他身份信息
-            print(f"anonymous GET {url}: {response.status_code}, bytes_match={response.content == expected}")
-            assert response.status_code == 200 and response.content == expected, (
-                f"预期当前版本暴露 {url}；若已封闭，请改用封闭性回归测试"
+            expected = expected_status[relative_path]
+            bytes_match = response.content == payload
+            print(f"anonymous GET {url}: {response.status_code}, bytes_match={bytes_match}")
+            assert response.status_code == expected, (
+                f"预期 {url} 匿名访问返回 {expected}；实际 {response.status_code}"
             )
+            if expected == 200:
+                assert bytes_match, f"公开类 {url} 字节不一致"
+            else:
+                assert response.content != payload, f"私有类 {url} 403 响应体不应是原文件"
         traversal = client.get('/storage/uploads/../outside.txt')
         missing = client.get('/storage/uploads/42/does-not-exist.webp')
         print(f'anonymous traversal GET: {traversal.status_code}')
