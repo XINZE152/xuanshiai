@@ -613,3 +613,31 @@ class ProfileNarrativeRead(BaseModel):
     history_observations: list[ProfileNarrativeHistoryObservation] = []
     # 写在最后：整份画像的概括性收束（旧画像无此字段时为空串）。
     conclusion: str = ""
+
+
+# ----------------------------------------------------------------------
+# Phase 3 P3-01：草稿预览响应（建模前为裸 dict；键集与历史返回逐键一致）
+# ----------------------------------------------------------------------
+
+class ProfilePreviewResponse(BaseModel):
+    """`POST /profile-drafts/{draft_id}/preview` 响应（202）。
+
+    status 值域为 ``PREVIEW_STATUSES``（active/confirmed/stale/failed）；
+    建模保持 str 以免对历史行引入额外校验失败面。
+    """
+
+    preview_id: str
+    draft_id: str
+    expected_revision: int
+    subject: str
+    status: str = Field(description="预览状态：active/confirmed/stale/failed")
+    content: str
+    task_id: str | None = None
+
+
+class ProfilePreviewDetailResponse(ProfilePreviewResponse):
+    """`GET /profile-previews/{preview_id}` 响应：create 键集追加诊断与时间戳。"""
+
+    last_error: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None

@@ -51,6 +51,8 @@ from app.schemas.ai_profile import (
     ProfilePublishedFieldsPage,
     ProfileSessionModeRequest,
     ProfileSessionRead,
+    ProfilePreviewDetailResponse,
+    ProfilePreviewResponse,
     ProfileSkipQuestionRequest,
     ProfileSubject,
     ProfileTurnCreateRequest,
@@ -704,6 +706,7 @@ async def publish_profile_draft_route(
 @router.post(
     "/profile-drafts/{draft_id}/preview",
     status_code=status.HTTP_202_ACCEPTED,
+    response_model=ProfilePreviewResponse,
     summary="生成/复用草稿预览(Phase 3 P3-01)",
 )
 async def create_profile_preview_route(
@@ -711,7 +714,7 @@ async def create_profile_preview_route(
     payload: dict | None = Body(default=None),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> dict:
+) -> ProfilePreviewResponse:
     """为当前草稿 revision 生成/复用预览。
 
     请求 body: ``{"expected_revision": <int>}`` —— 必须等于 draft.expected_revision。
@@ -762,27 +765,28 @@ async def create_profile_preview_route(
             retryable=True,
         ) from exc
     await db.commit()
-    return {
-        "preview_id": rec.preview_id,
-        "draft_id": rec.draft_id,
-        "expected_revision": rec.expected_revision,
-        "subject": rec.subject,
-        "status": rec.status,
-        "content": rec.content,
-        "task_id": rec.task_id,
-    }
+    return ProfilePreviewResponse(
+        preview_id=rec.preview_id,
+        draft_id=rec.draft_id,
+        expected_revision=rec.expected_revision,
+        subject=rec.subject,
+        status=rec.status,
+        content=rec.content,
+        task_id=rec.task_id,
+    )
 
 
 @router.get(
     "/profile-previews/{preview_id}",
     status_code=status.HTTP_200_OK,
+    response_model=ProfilePreviewDetailResponse,
     summary="读取草稿预览(Phase 3 P3-01)",
 )
 async def get_profile_preview_route(
     preview_id: str = Path(..., min_length=1, max_length=96),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> dict:
+) -> ProfilePreviewDetailResponse:
     """读取本人预览;越权/不存在 → 404。"""
     _require_profile_feature()
     try:
@@ -803,18 +807,18 @@ async def get_profile_preview_route(
         raise _error_response(
             "PREVIEW_NOT_FOUND", "预览不存在或不属于当前用户", status.HTTP_404_NOT_FOUND
         )
-    return {
-        "preview_id": rec.preview_id,
-        "draft_id": rec.draft_id,
-        "expected_revision": rec.expected_revision,
-        "subject": rec.subject,
-        "status": rec.status,
-        "content": rec.content,
-        "task_id": rec.task_id,
-        "last_error": rec.last_error,
-        "created_at": rec.created_at,
-        "updated_at": rec.updated_at,
-    }
+    return ProfilePreviewDetailResponse(
+        preview_id=rec.preview_id,
+        draft_id=rec.draft_id,
+        expected_revision=rec.expected_revision,
+        subject=rec.subject,
+        status=rec.status,
+        content=rec.content,
+        task_id=rec.task_id,
+        last_error=rec.last_error,
+        created_at=rec.created_at,
+        updated_at=rec.updated_at,
+    )
 
 
 @router.get(

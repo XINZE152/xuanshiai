@@ -17,6 +17,12 @@ from typing import Any
 
 import pytest
 
+from app.main import app
+from app.schemas.ai_profile import (
+    ProfilePreviewDetailResponse,
+    ProfilePreviewResponse,
+)
+
 
 def _await(coro: Any) -> Any:
     """同步驱动 async 函数;Phase 3 单元测试不引入 pytest-asyncio。"""
@@ -274,3 +280,50 @@ def test_confirm_publish_mismatched_revision_raises() -> None:
                 repo=repo,
             )
         )
+
+# ---------------- OpenAPI 响应建模断言（裸 dict → response_model） ----------------
+
+
+def test_preview_endpoints_reference_typed_response_models() -> None:
+    spec = app.openapi()
+    schemas = spec["components"]["schemas"]
+    paths = spec["paths"]
+    create_ref = paths["/api/v1/ai/profile-drafts/{draft_id}/preview"]["post"][
+        "responses"
+    ]["202"]["content"]["application/json"]["schema"]["$ref"]
+    get_ref = paths["/api/v1/ai/profile-previews/{preview_id}"]["get"]["responses"][
+        "200"
+    ]["content"]["application/json"]["schema"]["$ref"]
+    create_schema = schemas[create_ref.split("/")[-1]]
+    detail_schema = schemas[get_ref.split("/")[-1]]
+
+    # create 响应键集与历史裸 dict 返回逐键一致（7 键）
+    assert set(create_schema["properties"]) == {
+        "preview_id", "draft_id", "expected_revision",
+        "subject", "status", "content", "task_id",
+    }
+    assert create_schema["required"] == [
+        "preview_id", "draft_id", "expected_revision",
+        "subject", "status", "content",
+    ]
+    # detail 键集 = create 键集 + last_error/created_at/updated_at
+    assert set(detail_schema["properties"]) == {
+        *create_schema["properties"], "last_error", "created_at", "updated_at",
+    }
+    assert detail_schema["required"] == create_schema["required"]
+
+    # status 为自由字符串（不收窄 Literal，避免对历史行引入校验失败面）
+    assert create_schema["properties"]["status"]["type"] == "string"
+    assert "active/confirmed/stale/failed" in create_schema["properties"]["status"]["description"]
+
+
+def test_preview_routes_attach_response_model() -> None:
+    # app.routes 在新版 Starlette/FastAPI 中为惰性 _IncludedRouter，业务
+    # APIRoute 需从模块级 router 对象上断言。
+    from app.api.routes import ai_profile as ai_profile_routes
+
+    routes = {route.path: route for route in ai_profile_routes.router.routes}
+    create_route = routes["/profile-drafts/{draft_id}/preview"]
+    get_route = routes["/profile-previews/{preview_id}"]
+    assert create_route.response_model is ProfilePreviewResponse
+    assert get_route.response_model is ProfilePreviewDetailResponse
