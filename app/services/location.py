@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,6 +19,8 @@ from app.schemas.location import (
     NearbyUserItem,
     NearbyUserResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 LOCATION_GEO_KEY = "location:online:users"
 LOCATION_TTL_SECONDS = 150
@@ -90,10 +93,35 @@ async def set_location_sharing(db: AsyncSession, user_id: int, request: Location
 
 
 async def remove_online_location(user_id: int) -> None:
-    try:
-        await redis_client.zrem(LOCATION_GEO_KEY, str(user_id))
-    except RedisError:
-        pass
+    """从 GEO 索引移除成员（停用共享时调用）；Redis 抖动重试一次，失败可观测但不抛。
+
+    正确性影响登记：LOCATION_GEO_KEY 的 TTL（expire）是 key 级且会被任意用户
+    update_location 续期，zrem 失败的成员会无限期残留于 GEO 索引；
+    set_location_sharing(enabled=True) 只改 DB 不 geoadd，重开共享会以 Redis
+    中残留的过期坐标复活（nearby 的 location_visible=1 过滤仅在停用期掩盖）。
+    因此这里不再静默吞错：单次重试吸收 Redis 抖动，仍失败输出 WARNING
+    （含 user_id 与操作语义，不记坐标），坐标复活面收窄为 Redis 持续故障期。
+    仍不向调用方抛错——DB 已提交，停用期由 location_visible=1 过滤兜底，
+    保持停用操作的成功语义。
+    """
+    attempts = 2
+    for attempt in range(1, attempts + 1):
+        try:
+            await redis_client.zrem(LOCATION_GEO_KEY, str(user_id))
+            return
+        except RedisError:
+            logger.warning(
+                "location_online_removal_failed user_id=%s attempt=%d/%d "
+                "operation=remove_from_geo_index",
+                user_id,
+                attempt,
+                attempts,
+            )
+    logger.warning(
+        "location_online_removal_gave_up user_id=%s 成员仍残留于 GEO 索引，"
+        "重开共享前可能以过期坐标复活",
+        user_id,
+    )
 
 
 async def nearby_users(db: AsyncSession, viewer_id: int, latitude: float, longitude: float,
