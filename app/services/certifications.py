@@ -41,6 +41,10 @@ def _sign_cert_material(material: str | None, viewer: int, kind: str) -> str | N
 
 
 async def list_certification_reviews(db: AsyncSession, *, page: int, page_size: int, viewer: int, kind: str | None = None, status: int | None = None, search: str | None = None) -> CertificationReviewPage:
+    """认证审核列表：UNION ALL 单条 SQL 完成
+    跨 kind 过滤 + 全局排序 + 分页（排序键与原 Python 实现逐项一致：
+    submitted_at NULL 置后、submitted_at、user_id，kind 为跨 kind 平局决胜）；
+    total 用同 WHERE 的各分支 COUNT 求和；签名仅对当页行执行。"""
     fields = {
         "education": ("education_verified", "education_cert", "education_submitted_at", "education_reviewed_at", "education_fail_reason"),
         "house": ("house_verified", "house_cert", "house_submitted_at", "house_reviewed_at", "house_fail_reason"),
@@ -49,26 +53,71 @@ async def list_certification_reviews(db: AsyncSession, *, page: int, page_size: 
     kinds = [kind] if kind else list(fields)
     if any(value not in fields for value in kinds):
         raise HTTPException(422, detail="不支持的认证类型")
-    items: list[CertificationReviewItem] = []
+
+    filter_params: dict[str, object] = {}
+    branches: list[str] = []
+    count_branches: list[str] = []
     for current_kind in kinds:
         status_field, material_field, submitted_field, reviewed_field, reason_field = fields[current_kind]
         where = f"ua.{material_field} IS NOT NULL"
-        params: dict[str, object] = {}
         if status is not None:
             where += f" AND ua.{status_field} = :status"
-            params["status"] = status
         if search:
             where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
-            params["search"] = search
-        rows = (await db.execute(text(f"""SELECT ua.user_id, u.nickname, ua.{status_field} AS status, ua.{material_field} AS material,
-            ua.{submitted_field} AS submitted_at, ua.{reviewed_field} AS reviewed_at, ua.{reason_field} AS fail_reason
+        branches.append(
+            f"""SELECT ua.user_id, u.nickname, '{current_kind}' AS kind,
+                ua.{status_field} AS status, ua.{material_field} AS material,
+                ua.{submitted_field} AS submitted_at, ua.{reviewed_field} AS reviewed_at,
+                ua.{reason_field} AS fail_reason
             FROM user_auth ua JOIN users u ON u.id = ua.user_id
-            WHERE {where} ORDER BY ua.{submitted_field} ASC, ua.user_id ASC"""), params)).mappings().all()
-        items.extend(CertificationReviewItem(user_id=int(row["user_id"]), nickname=row["nickname"], kind=current_kind, status=int(row["status"]), material_submitted=bool(row["material"]), material=_sign_cert_material(row["material"], viewer, VIEWER_KIND_ADMIN), submitted_at=row["submitted_at"], reviewed_at=row["reviewed_at"], fail_reason=row["fail_reason"]) for row in rows)
-    items.sort(key=lambda item: (item.submitted_at is None, item.submitted_at, item.user_id))
-    total = len(items)
-    offset = (page - 1) * page_size
-    return CertificationReviewPage(items=items[offset:offset + page_size], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
+            WHERE {where}"""
+        )
+        count_branches.append(
+            "SELECT COUNT(*) AS total"
+            " FROM user_auth ua JOIN users u ON u.id = ua.user_id"
+            f" WHERE {where}"
+        )
+    if status is not None:
+        filter_params["status"] = status
+    if search:
+        filter_params["search"] = search
+
+    count_sql = "SELECT COALESCE(SUM(total), 0) AS total FROM (\n" + "\nUNION ALL\n".join(count_branches) + "\n) AS kind_counts"
+    total = int((await db.execute(text(count_sql), dict(filter_params))).scalar() or 0)
+
+    union_sql = "\nUNION ALL\n".join(branches)
+    page_params = {**filter_params, "limit": page_size, "offset": (page - 1) * page_size}
+    rows = (await db.execute(
+        text(
+            f"""SELECT user_id, nickname, kind, status, material, submitted_at, reviewed_at, fail_reason
+            FROM ({union_sql}) AS review_rows
+            ORDER BY (submitted_at IS NULL) ASC, submitted_at ASC, user_id ASC, kind ASC
+            LIMIT :limit OFFSET :offset"""
+        ),
+        page_params,
+    )).mappings().all()
+
+    items = [
+        CertificationReviewItem(
+            user_id=int(row["user_id"]),
+            nickname=row["nickname"],
+            kind=str(row["kind"]),
+            status=int(row["status"]),
+            material_submitted=bool(row["material"]),
+            material=_sign_cert_material(row["material"], viewer, VIEWER_KIND_ADMIN),
+            submitted_at=row["submitted_at"],
+            reviewed_at=row["reviewed_at"],
+            fail_reason=row["fail_reason"],
+        )
+        for row in rows
+    ]
+    return CertificationReviewPage(
+        items=items,
+        page=page,
+        page_size=page_size,
+        total=total,
+        has_more=page * page_size < total,
+    )
 def _item(kind: str, row: dict, material: str | None) -> dict:
     status = int(row.get("status") or 0)
     return {"kind": kind, "status": status, "material_submitted": bool(material), "material": material,
