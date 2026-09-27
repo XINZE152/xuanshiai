@@ -403,7 +403,7 @@ async def recall_message(db: AsyncSession, user_id: int, message_id: int) -> Cha
         row["revoked_at"] = refreshed.scalar()
     await emit_notification(
         db, recipient_user_id=int(row["to_user_id"]), actor_user_id=user_id,
-        event_type="message_recalled", title="?????", content="?????????",
+        event_type="message_recalled", title="消息已撤回", content="对方撤回了一条消息",
         target_type="chat_session", target_id=int(row["session_id"]),
         payload={"message_id": message_id},
     )
@@ -1388,8 +1388,8 @@ async def create_chat_session_request(db: AsyncSession, user_id: int, session_id
          "expire_at": expire_at})
     await emit_notification(
         db, recipient_user_id=target_id, actor_user_id=user_id,
-        event_type="chat_session_request", title="??????",
-        content="????????????", target_type="chat_session_request",
+        event_type="chat_session_request", title="新的会话请求",
+        content="对方向你发起了会话请求，请及时处理", target_type="chat_session_request",
         target_id=int(result.lastrowid), payload={"request_type": request.request_type},
     )
     await db.commit()
@@ -1425,8 +1425,8 @@ async def respond_chat_session_request(db: AsyncSession, user_id: int, request_i
     recipient_id = int(row["requester_id"]) if user_id == int(row["responder_id"]) else int(row["responder_id"])
     await emit_notification(
         db, recipient_user_id=recipient_id, actor_user_id=user_id,
-        event_type="chat_session_request_result", title="????????",
-        content=f"????????{status}", target_type="chat_session_request",
+        event_type="chat_session_request_result", title="会话请求处理结果",
+        content=f"会话请求状态更新：{status}", target_type="chat_session_request",
         target_id=request_id, payload={"status": status, "request_type": row["request_type"]},
     )
     await db.commit()
