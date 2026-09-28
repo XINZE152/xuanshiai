@@ -14,7 +14,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.services.ai.prompts.moxiang_ip import build_moxiang_dialogue_messages
+from app.services.ai.prompts.moxiang_ip import (
+    MOXIANG_SHARED_DIALOGUE_RULES,
+    build_moxiang_dialogue_messages,
+)
 
 # 对话常用字段的中文语义（与画像抽取 field_key 对齐）。
 _FIELD_LABELS = {
@@ -32,13 +35,14 @@ _FIELD_LABELS = {
 
 # 单轮回复长度上限（字符）：TTS 播放节奏约束，超长会导致用户等待感明显。
 _REPLY_MAX_CHARS = 30
-MOXIANG_VOICE_REPLY_PROMPT_VERSION = "moxiang-voice-reply-v2"
+MOXIANG_VOICE_REPLY_PROMPT_VERSION = "moxiang-voice-reply-v3"
 
 _VOICE_REPLY_TASK_RULES = (
+    f"{MOXIANG_SHARED_DIALOGUE_RULES}\n"
     "当前任务是生成一条适合语音播放的极短画像对话回复。"
     "先用自然口语接住用户本轮真正表达的新信息或纠正，再视语境追问一个最值得了解的点；"
     "用户拒绝或只是在纠正时不要强行追问。不要机械重复「记下了」「好的」「明白了」。"
-    f"回复不超过 {_REPLY_MAX_CHARS} 个汉字，最多一个问题，无引号、列表、表情或 Markdown。"
+    f"回复不超过 {_REPLY_MAX_CHARS} 个汉字，无引号、列表、表情或 Markdown，不编造用户未提供的信息。"
     '最终只输出 JSON：{"reply_text":"给用户的回复"}，不得输出分析或额外字段。'
 )
 

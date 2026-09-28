@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -25,6 +26,7 @@ from app.schemas.ai_advisor import (
     AdvisorSuggestion,
 )
 from app.services.ai_provider import complete, parse_json
+from app.services.ai.gateway import _redact_provider_message
 from app.services.content_filter import assert_text_allowed
 from app.services.ai.memory.consumers import CounselorMemoryAdapter
 from app.services.ai.features import memory_projection_read_mode
@@ -309,6 +311,19 @@ def _exception_detail(exc: HTTPException) -> str:
     return f"HTTP {exc.status_code}: {exc.detail}"
 
 
+def _controlled_error_detail(exc: Exception) -> str:
+    """受控审计摘要（对齐 _exception_detail 与 PROJECT_RULES 3.2）。
+
+    非 HTTP 异常只记 ``type(exc).__name__`` + 结构化且脱敏后的摘要：摘要复用
+    ``gateway._redact_provider_message``（非结构化文本一律置空），杜绝
+    IntegrityError/StatementError 等把完整 SQL 与绑定参数（含用户原文）吸入
+    审计表；写入前限长到 error_detail 列容量 varchar(500)。
+    """
+    summary = _redact_provider_message(str(exc))
+    detail = f"{type(exc).__name__}: {summary}" if summary else type(exc).__name__
+    return detail[:500]
+
+
 async def _rollback_safely(db: AsyncSession) -> None:
     try:
         await db.rollback()
@@ -316,7 +331,9 @@ async def _rollback_safely(db: AsyncSession) -> None:
         logger.exception("advisor_audit_rollback_failed")
 
 
-async def _refund_quota_safely(quota_key: str) -> bool:
+async def _refund_quota_safely(quota_key: str | None) -> bool:
+    if not quota_key:
+        return False
     try:
         await refund_daily(quota_key)
         return True
@@ -337,8 +354,9 @@ async def get_advice(
     idempotency_key: str | None = None,
 ) -> AdvisorAdviceResponse:
     await _require_vip(db, user_id)
+    session_lock = " FOR UPDATE" if idempotency_key else ""
     session = (await db.execute(text("""SELECT id, chat_session_id FROM ai_advisor_session
-        WHERE id=:session_id AND user_id=:user_id AND status=1"""), {
+        WHERE id=:session_id AND user_id=:user_id AND status=1""" + session_lock), {
         "session_id": session_id,
         "user_id": user_id,
     })).mappings().first()
@@ -420,15 +438,25 @@ async def get_advice(
 
     quota_key = await _consume_quota(user_id)
     prompt = _build_prompt(request, context, knowledge, input_risk, memory_context)
+    # mock 回退判定与 ai_provider.complete() 的回退分支为同一布尔式（不得另
+    # 行发明判定）：not ai_enabled and is_test_mode and ai_allow_mock_fallback
+    # 全部成立时本次答复才来自本地 mock，落库 model_name 写 "mock-fallback"
+    # 使审计可区分 mock 与真实调用（纯 DB 内部字段语义）。
+    mock_fallback = (
+        not settings.ai_enabled
+        and settings.is_test_mode
+        and settings.ai_allow_mock_fallback
+    )
     try:
         raw = await complete([
-            {"role": "system", "content": "You are a cautious, privacy-respecting relationship advisor clearly identified as AI."},
+            {"role": "system", "content": "你是谨慎、尊重隐私的婚恋沟通助手，明确标识为 AI，不替用户承诺关系结果，不提供医疗或法律结论。"},
             {"role": "user", "content": prompt},
         ], json_mode=True, request_id=request_id, scene="advisor")
         data = _normalize_result(parse_json(raw), request)
         if data["risk_level"] == "high":
             raise _AdvisorRiskBlocked()
-        result = await db.execute(text("""INSERT INTO ai_advisor_message
+        try:
+            result = await db.execute(text("""INSERT INTO ai_advisor_message
             (session_id, user_id, role, scenario, input_text, output_json, risk_level, status,
              model_name, prompt_version, knowledge_version, request_id, idempotency_key, latency_ms, quota_consumed)
             VALUES (:session_id, :user_id, 'assistant', :scenario, :input_text, :output_json, :risk_level, 'success',
@@ -439,13 +467,29 @@ async def get_advice(
             "input_text": request.incoming_message,
             "output_json": json.dumps(data, ensure_ascii=False),
             "risk_level": data["risk_level"],
-            "model_name": settings.ai_model,
+            "model_name": "mock-fallback" if mock_fallback else settings.ai_model,
             "prompt_version": settings.ai_advisor_prompt_version,
             "knowledge_version": settings.ai_advisor_knowledge_version,
             "request_id": request_id,
             "idempotency_key": idempotency_key,
-            "latency_ms": int((time.monotonic() - started) * 1000),
-        })
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            })
+        except IntegrityError:
+            await db.rollback()
+            await _refund_quota_safely(quota_key)
+            quota_key = None
+            existing = (await db.execute(text("""SELECT id, session_id, scenario, output_json, created_at
+                FROM ai_advisor_message
+                WHERE session_id=:session_id AND user_id=:user_id
+                  AND idempotency_key=:idempotency_key AND status='success'
+                LIMIT 1"""), {
+                "session_id": session_id,
+                "user_id": user_id,
+                "idempotency_key": idempotency_key,
+            })).mappings().first()
+            if existing:
+                return _response_from_stored(existing)
+            raise
         await db.execute(text("UPDATE ai_advisor_session SET updated_at=UTC_TIMESTAMP() WHERE id=:id"), {"id": session_id})
         await _write_call_log(
             db,
@@ -495,7 +539,7 @@ async def get_advice(
                 latency_ms=int((time.monotonic() - started) * 1000),
                 quota_consumed=True,
                 quota_refunded=refunded,
-                error_detail=str(exc),
+                error_detail=_controlled_error_detail(exc),
             )
             await db.commit()
         except Exception:

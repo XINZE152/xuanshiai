@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.schemas.ai_profile import PROFILE_ENTRY_CATEGORY_LABELS, ProfileSubject
+from app.services.ai.prompts.structured_skeleton import wrap_structured_prompt
 
 # 维度定义（personal 和 ideal_partner 共用同一套维度卡片）
 _DIMENSIONS = {
@@ -187,7 +188,7 @@ def build_profile_narrative_prompt(
 
     has_previous = "有上一版本可对比" if previous_fields else "这是首次发布，没有上一版本"
 
-    return (
+    return wrap_structured_prompt(
         f"{_SYSTEM_HEADER}\n\n"
         f"这次要写的是：{subject_label}。\n"
         f"历史状态：{has_previous}。\n\n"

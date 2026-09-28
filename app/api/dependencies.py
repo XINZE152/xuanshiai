@@ -139,7 +139,7 @@ class CurrentMatchmakerAdmin:
         }
         allowed = aliases.get(permission, {permission})
         if "*" not in self.permissions and not (allowed & self.permissions):
-            raise HTTPException(status_code=403, detail="????????")
+            raise HTTPException(status_code=403, detail=f"缺少权限：{permission}")
 
 
     def scope_condition(
@@ -155,11 +155,11 @@ class CurrentMatchmakerAdmin:
             return "1 = 1"
         if scope == "SELF":
             if user_column is None:
-                raise HTTPException(status_code=403, detail="?????????????")
+                raise HTTPException(status_code=403, detail="当前账号为 SELF 数据范围，该接口缺少用户维度")
             params["scope_user_id"] = self.account.matchmaker_user_id or self.account.id
             return f"{user_column} = :scope_user_id"
         if not self.account.organization_id:
-            raise HTTPException(status_code=403, detail="?????????????")
+            raise HTTPException(status_code=403, detail="当前账号未绑定组织，无法访问该数据")
         params["scope_organization_id"] = self.account.organization_id
         return f"{organization_column} = :scope_organization_id"
 
@@ -169,6 +169,10 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
     method = request.method.upper()
     if path.endswith("/auth/me") or path.endswith("/auth/logout") or "/auth/" in path:
         return None
+    if path == "/api/v1/admin/dashboard/stats":
+        return "matchmaker.read"
+    if path == "/api/v1/admin/matchmaker/statistics":
+        return "matchmaker.read"
     if "/accounts" in path:
         return "matchmaker.account.manage"
     if "/members" in path:

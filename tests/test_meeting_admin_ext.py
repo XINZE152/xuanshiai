@@ -6,10 +6,6 @@
 - service 函数 admin_options / admin_delete_request / admin_delete_meeting 的核心行为
 """
 
-from unittest.mock import AsyncMock, MagicMock
-
-import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -55,8 +51,6 @@ def test_admin_endpoints_require_authentication() -> None:
 
 def test_admin_options_request_status_enum_complete() -> None:
     """服务层 admin_options 暴露的 request_status 枚举必须含 5 个值。"""
-    from app.schemas.meeting import MeetingRequestAdminPage
-
     # MeetingRequestAdminPage 不暴露 status 字段枚举，从 service 源码断言
     import inspect
 
@@ -93,3 +87,10 @@ def test_admin_delete_request_exists_when_id_missing_returns_404() -> None:
 
     source = inspect.getsource(meeting_service.admin_delete_request)
     assert "404" in source
+
+
+def test_schedule_meeting_blocks_duplicate_active_record() -> None:
+    import inspect
+
+    source = inspect.getsource(meeting_service.schedule_meeting)
+    assert "已有进行中的安排" in source

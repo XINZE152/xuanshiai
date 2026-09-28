@@ -32,7 +32,7 @@ uv run uvicorn app.main:app --reload
 - `http://127.0.0.1:8000/api/v1/health`
 - `http://127.0.0.1:8000/docs`
 
-前端联调：小程序默认打测试服 `https://xhztest.xyz`；本机联调把 `xuanshiai-vue/api/config.uts` 的 `API_BASE_URL` 临时改为 `http://127.0.0.1:8000`。H5 冒烟常见端口是 `http://localhost:8080`（不是 `:5173`）。CORS 在 `.env` 的 `CORS_ORIGINS_RAW`。
+前端联调：当前 `xuanshiai-vue/api/config.uts` 的 `API_BASE_URL` 是 `http://127.0.0.1:8000`，与本仓默认本地服务一致。测试服 `https://xhztest.xyz` 不是当前工作区默认值。H5 冒烟常见端口是 `http://localhost:8080`（不是 `:5173`）。CORS 在 `.env` 的 `CORS_ORIGINS_RAW`。
 
 AI 画像 / 搜索 / 匹配度 / 语音默认关闭；未批准时返回 `503 AI_FEATURE_DISABLED`。生产禁止 mock provider。
 

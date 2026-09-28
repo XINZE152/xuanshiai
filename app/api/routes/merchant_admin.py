@@ -1,6 +1,7 @@
 """Merchant alliance (商家联盟) routes for the back office (M7-B)."""
 
 from fastapi import APIRouter, Depends, Path, Query, Response
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin

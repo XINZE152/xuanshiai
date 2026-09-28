@@ -10,7 +10,7 @@ from openpyxl import Workbook
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser, get_current_admin, get_current_matchmaker_admin
+from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
 from app.db.session import get_db
 from app.schemas.activity_admin import (
     ActivityAdminCreate,
@@ -22,7 +22,6 @@ from app.schemas.activity_admin import (
     ActivitySignupAdminItem,
     ActivitySignupAdminPage,
     ActivitySignupStatistics,
-    ActivitySignupStatusUpdate,
     ActivitySignupUpdate,
     ActivityStatusUpdate,
 )

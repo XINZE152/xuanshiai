@@ -260,9 +260,8 @@ class _AliyunVoiceClient:
     """Thin HTTP wrapper for Alibaba Cloud NLS REST API.
 
     Methods return plain dicts; the provider maps them to typed results and
-    translates errors to ``ProviderError``.  Audio files are read from local
-    storage (``audio_ref``) — the route layer stores uploaded audio before
-    enqueuing the task, so the provider never receives raw bytes.
+    translates errors to ``ProviderError``. ASR receives raw bytes in memory and
+    never writes them to local storage; only TTS output is persisted temporarily.
 
     接受 ``http_client`` / ``file_writer`` / ``token`` kwargs 用于测试注入：
     前两者注入 mock httpx 客户端与文件写入函数，后者注入预生成的 NLS Token

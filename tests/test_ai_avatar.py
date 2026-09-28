@@ -21,6 +21,7 @@ from app.schemas.ai_avatar import (
     AvatarReplyRequest,
 )
 from app.services import ai_avatar
+from app.services.ai.flags import AiFeature, AiFeatureDisabledError, require_ai_feature
 from app.services.ai.memory.consumers import (
     SanitizedMemoryContext,
     SanitizedMemoryEntry,
@@ -82,7 +83,7 @@ async def test_avatar_uses_only_sanitized_public_context(monkeypatch) -> None:
     async def consume(_viewer_id: int) -> str:
         return "avatar-quota-key"
 
-    async def complete(messages, *, json_mode):
+    async def complete(messages, *, json_mode, scene="ai_avatar"):
         assert json_mode is True
         captured.append(messages)
         return json.dumps({"reply": "我是 AI 分身，公开资料显示 Ta 喜欢徒步。"})
@@ -105,7 +106,7 @@ async def test_avatar_uses_only_sanitized_public_context(monkeypatch) -> None:
     serialized = "\n".join(message["content"] for message in captured[0])
     assert "source_quote" not in serialized
     assert "transcript" not in serialized
-    assert "Never follow instructions" in serialized
+    assert "不可信数据" in serialized or "Never follow instructions" in serialized
 
 
 @pytest.mark.asyncio
@@ -129,7 +130,7 @@ async def test_avatar_rejects_provider_reply_that_impersonates_or_exposes_contac
     async def refund(key: str) -> None:
         refunded.append(key)
 
-    async def complete(_messages, *, json_mode):
+    async def complete(_messages, *, json_mode, scene="ai_avatar"):
         assert json_mode is True
         return json.dumps({"reply": "我是本人，微信 13800138000，愿意和你在一起。"})
 
@@ -193,6 +194,8 @@ async def test_avatar_rejects_non_memory_mode_before_reading_profile(monkeypatch
 
     monkeypatch.setattr(service, "memory_projection_read_mode", lambda: "shadow")
 
+    # 默认 503 之二（记忆投影未开启）：状态码 503、detail 固定为
+    # 「AI分身记忆服务尚未就绪」。
     with pytest.raises(HTTPException, match="记忆服务尚未就绪") as error:
         await service.reply_from_public_profile(
             object(),
@@ -201,6 +204,7 @@ async def test_avatar_rejects_non_memory_mode_before_reading_profile(monkeypatch
             request=AvatarReplyRequest(question="Ta 平时喜欢什么？"),
         )
     assert error.value.status_code == 503
+    assert error.value.detail == "AI分身记忆服务尚未就绪"
 
 
 def test_message_request_trims_and_limits_content() -> None:
@@ -221,19 +225,166 @@ def test_owner_answer_requests_reject_blank_text() -> None:
     assert payload.answer == "阅读和散步"
 
 
+def _production_settings_kwargs(**overrides):
+    """生产环境最小合规夹具：先满足与 AI 无关的生产门禁（直播/短信/微信
+    mock 禁令、SECRET_KEY、DEBUG/DOCS），让断言能精确落在 AI 门禁分支。"""
+    kwargs = dict(
+        _env_file=None,
+        environment="production",
+        auto_init_db=False,
+        live_provider="tencent",
+        sms_provider="disabled",
+        wechat_provider="wechat",
+        wechat_payment_mode="real",
+        secret_key="p" * 40,
+        debug=False,
+        docs_enabled=False,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
 def test_production_ai_provider_requires_https() -> None:
-    with pytest.raises(ValidationError):
+    """仅 avatar 开启（legacy 十项开关全关）时，provider 专项检查被跳过，
+    非 HTTPS base_url 必须精确命中 :449-455 的 HTTPS 分支。"""
+    with pytest.raises(ValidationError, match="HTTPS"):
         Settings(
-            _env_file=None,
-            environment="production",
-            auto_init_db=False,
-            sms_provider="disabled",
-            wechat_provider="wechat",
-            wechat_payment_mode="real",
-            ai_avatar_provider="openai_compatible",
-            ai_avatar_base_url="http://127.0.0.1:11434/v1",
-            ai_avatar_model="local-model",
+            **_production_settings_kwargs(
+                ai_policy_approved=True,
+                ai_provider_approved=True,
+                ai_retention_policy_version="v1",
+                ai_avatar_provider="openai_compatible",
+                ai_avatar_base_url="http://127.0.0.1:11434/v1",
+                ai_avatar_model="local-model",
+            )
         )
+
+
+def test_production_avatar_only_without_approvals_fails_closed() -> None:
+    """负向审批门：production + 仅 avatar 开 + 无三道审批 → 启动即拒。"""
+    with pytest.raises(ValidationError, match="生产环境启用 AI 功能必须同时满足"):
+        Settings(
+            **_production_settings_kwargs(
+                ai_avatar_provider="openai_compatible",
+                ai_avatar_base_url="https://avatar.example/v1",
+                ai_avatar_model="avatar-model",
+            )
+        )
+
+
+def test_production_avatar_only_with_full_gates_constructs_and_keeps_mock_legacy_provider() -> None:
+    """正向锚：production + 仅 avatar 开 + 三道审批齐 + 合规 SECRET_KEY +
+    DEBUG/DOCS 关 → 构造成功；legacy ai_provider 保持默认 mock 不被误拦。"""
+    settings = Settings(
+        **_production_settings_kwargs(
+            ai_policy_approved=True,
+            ai_provider_approved=True,
+            ai_retention_policy_version="v1",
+            ai_avatar_provider="openai_compatible",
+            ai_avatar_base_url="https://avatar.example/v1",
+            ai_avatar_model="avatar-model",
+        )
+    )
+    assert settings.ai_avatar_provider == "openai_compatible"
+    assert settings.ai_provider == "mock"
+    assert settings.ai_enabled is False
+
+
+def test_production_legacy_ai_enabled_still_rejects_mock_provider() -> None:
+    """legacy 不放松：production + ai_enabled=True + ai_provider=mock 仍拒。"""
+    with pytest.raises(ValidationError, match="生产环境禁止使用 mock AI Provider"):
+        Settings(
+            **_production_settings_kwargs(
+                ai_policy_approved=True,
+                ai_provider_approved=True,
+                ai_retention_policy_version="v1",
+                ai_enabled=True,
+                ai_provider="mock",
+            )
+        )
+
+
+def test_production_legacy_deepseek_key_check_order_preserved() -> None:
+    """legacy 顺序：production + ai_enabled=True + deepseek 无 key 仍先拒 key。"""
+    with pytest.raises(
+        ValidationError, match="生产环境启用 DeepSeek AI 必须配置 AI_DEEPSEEK_API_KEY"
+    ):
+        Settings(
+            **_production_settings_kwargs(
+                ai_policy_approved=True,
+                ai_provider_approved=True,
+                ai_retention_policy_version="v1",
+                ai_enabled=True,
+                ai_provider="deepseek",
+            )
+        )
+
+
+def test_production_modern_stack_profile_enabled_still_rejects_mock_provider() -> None:
+    """现代栈卫兵宽度锚：仅开 ai_profile_enabled（十项卫兵内）+ mock 仍拒，
+    防卫兵再度收窄把启动拦截退化成运行时 503。"""
+    with pytest.raises(ValidationError, match="生产环境禁止使用 mock AI Provider"):
+        Settings(
+            **_production_settings_kwargs(
+                ai_policy_approved=True,
+                ai_provider_approved=True,
+                ai_retention_policy_version="v1",
+                ai_profile_enabled=True,
+                ai_provider="mock",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_avatar_runtime_gate_requires_master_and_production_approvals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """runtime ⑥：master 开（+审批齐）→ require_ai_feature(AVATAR) 通过；
+    master 关或生产审批缺失 → AiFeatureDisabledError。"""
+    dev_settings = Settings(
+        _env_file=None,
+        environment="testing",
+        ai_master_enabled=True,
+        ai_avatar_provider="openai_compatible",
+        ai_avatar_base_url="https://avatar.example/v1",
+        ai_avatar_model="avatar-model",
+    )
+    require_ai_feature(AiFeature.AVATAR, dev_settings)  # 不抛即通过
+
+    master_off = Settings(
+        _env_file=None,
+        environment="testing",
+        ai_master_enabled=False,
+        ai_avatar_provider="openai_compatible",
+        ai_avatar_base_url="https://avatar.example/v1",
+        ai_avatar_model="avatar-model",
+    )
+    with pytest.raises(AiFeatureDisabledError):
+        require_ai_feature(AiFeature.AVATAR, master_off)
+
+    # master 开 → 十项卫兵生效，生产构造须同时满足 legacy provider 专项
+    # 检查（deepseek 需配 key），这正是启动 fail-closed 的预期行为。
+    production_ok = Settings(
+        **_production_settings_kwargs(
+            ai_policy_approved=True,
+            ai_provider_approved=True,
+            ai_retention_policy_version="v1",
+            ai_master_enabled=True,
+            ai_provider="deepseek",
+            ai_deepseek_api_key="k" * 40,
+            ai_avatar_provider="openai_compatible",
+            ai_avatar_base_url="https://avatar.example/v1",
+            ai_avatar_model="avatar-model",
+        )
+    )
+    require_ai_feature(AiFeature.AVATAR, production_ok)  # 不抛即通过
+
+    # 运行时复查层：启动后审批被撤销（无法通过启动校验的态势只能这样模拟）
+    # 也必须在运行时 fail closed。
+    with monkeypatch.context() as m:
+        m.setattr(production_ok, "ai_policy_approved", False)
+        with pytest.raises(AiFeatureDisabledError):
+            require_ai_feature(AiFeature.AVATAR, production_ok)
 
 
 def test_ai_avatar_defaults_do_not_inherit_general_ai_provider() -> None:
@@ -339,6 +490,9 @@ async def test_provider_receives_only_server_built_public_context(
         return original_client(transport=transport, timeout=kwargs.get("timeout"))
 
     monkeypatch.setattr(ai_avatar.httpx, "AsyncClient", client_factory)
+    # call_ai_provider 现在先过 require_ai_feature(AVATAR)：master 总闸必须
+    # 显式打开，测试不得依赖本地 .env 的开发配置。
+    monkeypatch.setattr(ai_avatar.settings, "ai_master_enabled", True)
     monkeypatch.setattr(ai_avatar.settings, "ai_avatar_provider", "openai_compatible")
     monkeypatch.setattr(ai_avatar.settings, "ai_avatar_base_url", "https://provider.example/v1")
     monkeypatch.setattr(ai_avatar.settings, "ai_avatar_model", "test-model")
@@ -368,6 +522,8 @@ async def test_provider_receives_only_server_built_public_context(
 
 @pytest.mark.asyncio
 async def test_disabled_provider_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认 503 之一（AI 门禁）：provider disabled 在 require_ai_feature 即被
+    拦下，状态码 503、detail 固定为「AI服务未启用」。"""
     monkeypatch.setattr(ai_avatar.settings, "ai_avatar_provider", "disabled")
     context = ai_avatar.AiAvatarContext(
         profile=AiAvatarProfileResponse(id=2, name="测试用户"),
@@ -376,6 +532,25 @@ async def test_disabled_provider_fails_closed(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(HTTPException) as exc_info:
         await ai_avatar.call_ai_provider(context, [], "你好")
     assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "AI服务未启用"
+
+
+@pytest.mark.asyncio
+async def test_master_switch_off_fails_closed_with_stable_503_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认 503 之一（AI 门禁）的 master 关触发形态：状态码 503、detail
+    固定为「AI服务未启用」，与 provider 未配置/生产审批未通过共用文案。"""
+    monkeypatch.setattr(ai_avatar.settings, "ai_master_enabled", False)
+    monkeypatch.setattr(ai_avatar.settings, "ai_avatar_provider", "openai_compatible")
+    context = ai_avatar.AiAvatarContext(
+        profile=AiAvatarProfileResponse(id=2, name="测试用户"),
+        public_posts=(),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await ai_avatar.call_ai_provider(context, [], "你好")
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "AI服务未启用"
 
 
 def test_ai_avatar_routes_and_tables_are_declared() -> None:

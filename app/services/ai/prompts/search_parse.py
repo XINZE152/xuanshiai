@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from app.services.ai.prompts.structured_skeleton import wrap_structured_prompt
+
 # 每个字段允许的 operator，与 FIELD_OPERATOR_ALLOWLIST 一致。
 _FIELD_OPERATOR_GUIDE = {
     "age": "between（{\"min\": 最小, \"max\": 最大}）/ gte（最小）/ lte（最大）",
@@ -65,7 +67,7 @@ def build_search_parse_prompt(query_text: str) -> str:
         for key, values in _ENUM_VALUES.items()
     )
 
-    return (
+    return wrap_structured_prompt(
         f"{_SYSTEM_HEADER}\n\n"
         f"可用字段及其操作符：\n{field_lines}\n\n"
         f"枚举字段的合法取值：\n{enum_lines}\n\n"

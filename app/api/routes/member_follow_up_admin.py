@@ -82,7 +82,7 @@ async def _ensure_member(db: AsyncSession, user_id: int) -> None:
 @router.get("/{member_id}/follow-ups", response_model=MemberFollowUpPage, summary="查询会员跟进记录")
 async def list_follow_ups(member_id: int = Path(..., ge=1), page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=100), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberFollowUpPage:
     current.require("matchmaker.member.read")
-    return await service.get_member_follow_ups(db, member_id, page, page_size)
+    return await service.get_member_follow_ups(db, member_id, page, page_size, viewer=current.account.id)
 
 
 @router.post("/{member_id}/follow-ups", response_model=MemberFollowUp, status_code=201, summary="新增会员跟进记录")

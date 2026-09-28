@@ -42,6 +42,10 @@ def _message_scope(admin: CurrentMatchmakerAdmin, params: dict[str, object]) -> 
 def _message_item(row: dict) -> AdminMessageItem:
     data = dict(row)
     data["content"] = _redact_content(data.get("content"))
+    # 语音 media_url 保持 DB 原始 URL，不按管理员重签：audio 类验签钩子
+    # （media_access._user_active）查 users 表语义，与管理员后台账号不匹配，
+    # 强行重签会产生永久 403 的假签名。已登记限制：管理端语音回放不可用，
+    # 需要听证走既有运维手段；如需支持须以独立管理端钩子类别专项设计。
     return AdminMessageItem(**data)
 
 
@@ -88,9 +92,10 @@ async def moderate_admin_message(
     reason: str,
 ) -> AdminMessageItem:
     params: dict[str, object] = {"id": message_id}
+    scope = _message_scope(admin, params)
     row = (await db.execute(text("""SELECT id, session_id, from_user_id, to_user_id, type,
         content, media_url, is_read, revoked_at, created_at FROM chat_message
-        WHERE id=:id FOR UPDATE"""), params)).mappings().first()
+        WHERE id=:id AND """ + scope + """ FOR UPDATE"""), params)).mappings().first()
     if not row:
         raise HTTPException(404, detail="\u6d88\u606f\u4e0d\u5b58\u5728")
     before = dict(row)

@@ -18,6 +18,8 @@ from app.schemas.admin_ticket import (
     AdminTicketStatusUpdate,
 )
 from app.schemas.user_cancellation_admin import UserCancellationItem, UserCancellationReview
+from app.services import user_cancellation_admin as cancellation_service
+from app.services.revisions import RevisionKind
 
 
 client = TestClient(app)
@@ -130,3 +132,91 @@ def test_admin_ticket_status_update_accepts_valid_values() -> None:
     for s in ("待处理", "处理中", "已处理"):
         body = AdminTicketStatusUpdate(status=s)  # type: ignore[arg-type]
         assert body.status == s
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approve, expected_user_status", [(True, 3), (False, 1)])
+async def test_review_cancellation_bumps_privacy_revision_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    approve: bool,
+    expected_user_status: int,
+) -> None:
+    class _Result:
+        def __init__(self, row: dict[str, object] | None) -> None:
+            self._row = row
+
+        def mappings(self) -> "_Result":
+            return self
+
+        def first(self) -> dict[str, object] | None:
+            return self._row
+
+    class _Db:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+            self.commits = 0
+
+        async def execute(self, statement: object, params: object) -> _Result:
+            del params
+            self.statements.append(str(statement))
+            if len(self.statements) == 1:
+                return _Result({"id": 7, "user_id": 42, "status": "pending"})
+            return _Result(None)
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    db = _Db()
+    revision_calls: list[tuple[object, ...]] = []
+
+    async def fake_increment(
+        _db: object,
+        user_id: int,
+        kind: RevisionKind,
+        changed_fields: tuple[str, ...],
+        event_type: str,
+        priority: int,
+        **kwargs: object,
+    ) -> None:
+        del _db, kwargs
+        revision_calls.append(
+            (user_id, kind, changed_fields, event_type, priority)
+        )
+
+    result_item = UserCancellationItem(
+        id=7,
+        user_id=42,
+        status="approved" if approve else "cancelled",
+        created_at="2026-01-01 00:00:00",
+        updated_at="2026-01-01 00:00:00",
+    )
+
+    async def fake_get_cancellation(_db: object, cancellation_id: int) -> UserCancellationItem:
+        assert cancellation_id == 7
+        return result_item
+
+    monkeypatch.setattr(
+        cancellation_service,
+        "increment_revision_and_enqueue",
+        fake_increment,
+    )
+    monkeypatch.setattr(
+        cancellation_service,
+        "get_cancellation",
+        fake_get_cancellation,
+    )
+
+    result = await cancellation_service.review_cancellation(
+        db,
+        cancellation_id=7,
+        admin_id=9,
+        approve=approve,
+        note="privacy regression",
+    )
+
+    assert result.status == ("approved" if approve else "cancelled")
+    assert revision_calls == [
+        (42, RevisionKind.PRIVACY, ("account_status",), "account_state_changed", 10)
+    ]
+    assert f"SET status = {expected_user_status}" in db.statements[1]
+    assert db.commits == 1

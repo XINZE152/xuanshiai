@@ -69,6 +69,37 @@ def decode_live_ws_ticket(token: str) -> dict[str, str]:
     return payload
 
 
+def create_ai_ws_ticket(user_id: int, session_id: int, ticket_id: str, expires_seconds: int) -> str:
+    """Create a short-lived ticket dedicated to AI voice WebSocket handshakes."""
+    now = datetime.now(UTC)
+    payload = {
+        "sub": str(user_id),
+        "sid": str(session_id),
+        "jti": ticket_id,
+        "typ": "ai_ws_ticket",
+        "iat": now,
+        "exp": now + timedelta(seconds=expires_seconds),
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
+
+
+def decode_ai_ws_ticket(token: str) -> dict[str, str]:
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
+    except JWTError as exc:
+        raise ValueError("无效或已过期的 AI WebSocket 凭证") from exc
+    if (
+        payload.get("typ") != "ai_ws_ticket"
+        or not payload.get("sub")
+        or not payload.get("sid")
+        or not payload.get("jti")
+        or not isinstance(payload.get("iat"), int)
+        or not isinstance(payload.get("exp"), int)
+    ):
+        raise ValueError("无效的 AI WebSocket 凭证")
+    return payload
+
+
 def random_token() -> str:
     return secrets.token_urlsafe(48)
 

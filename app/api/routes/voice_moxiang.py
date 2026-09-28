@@ -100,7 +100,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import text as sql_text
 
 from app.core.config import settings
-from app.core.security import decode_access_token
+from app.services.voice.auth import VoiceTicketDenied, VoiceTicketUnavailable, authenticate_voice_ticket
 from app.db.session import session_factory as _db_session_factory
 from app.services.ai.flags import AiFeature, require_ai_feature
 from app.services.ai.gateway import AIGateway
@@ -115,7 +115,6 @@ from app.services.ai.profile import (
     persist_master_assistant_reply,
 )
 from app.services.ai.journey import (
-    compose_journey_build_context,
     list_session_candidates,
     maybe_create_build_invite,
     resolve_journey_invite,
@@ -132,6 +131,11 @@ from app.services.voice.base import (
     StreamTranscribeRequest,
 )
 from app.services.voice.gateway import VoiceGateway
+from app.services.voice.audio_access import (
+    VoiceAudioDenied,
+    VoiceAudioUnavailable,
+    sign_voice_audio_for_user,
+)
 from app.services.voice.master_orchestrator import MoxiangMasterOrchestrator
 from app.services.voice.providers import (
     _AliyunVoiceError,
@@ -151,6 +155,11 @@ from app.services.voice.realtime.moxiang_bridge import (
     realtime_gate_error,
     realtime_watchdog,
     release_session_slot,
+)
+from app.services.voice.realtime.context import (
+    build_journey_context as _journey_build_context,
+    load_master_history as _load_master_history,
+    send_json as _send_json,
 )
 
 logger = logging.getLogger(__name__)
@@ -192,18 +201,8 @@ def _check_journey_feature() -> str | None:
     return None
 
 
-def _authenticate_ws(token: str) -> dict[str, str] | None:
-    try:
-        return decode_access_token(token)
-    except (ValueError, KeyError):
-        return None
 
 
-async def _send_json(ws: WebSocket, message: dict[str, Any]) -> None:
-    try:
-        await ws.send_text(json.dumps(message, ensure_ascii=False))
-    except Exception:  # noqa: BLE001
-        logger.debug("moxiang_ws_send_failed: connection likely closed")
 
 
 async def _send_error(
@@ -247,27 +246,6 @@ async def _load_narrative_context(user_id: int) -> str:
         return ""
 
 
-async def _journey_build_context(session_id: str, subject: str) -> str | None:
-    """Project the session's candidates into 知遇's build-mode context.
-
-    Returns None when there is no journey session or the read fails, so the
-    caller leaves the orchestrator in pure-chat mode rather than crashing the
-    reply path on a context-refresh hiccup.
-    """
-    if not session_id or _db_session_factory is None:
-        return None
-    try:
-        async with _db_session_factory() as db:
-            return await compose_journey_build_context(
-                db, session_id=session_id, subject=subject
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "moxiang_build_context_failed session_id=%s err=%s",
-            session_id,
-            type(exc).__name__,
-        )
-        return None
 
 
 async def _push_streamed_reply(
@@ -339,29 +317,6 @@ _CANDIDATE_TERMINAL_STATUSES = frozenset(
 _TASK_EVENT_POLL_SCHEDULE = (0.5,) * 60 + (2.0,) * 180
 
 
-async def _load_master_history(
-    db: Any, session_id: str, *, limit: int = 24
-) -> list[dict[str, str]]:
-    """Load the recent persisted master dialogue in chronological order."""
-    result = await db.execute(
-        sql_text(
-            "SELECT role, answer_text FROM ai_profile_turn "
-            "WHERE session_id = :session_id AND status = 'saved' "
-            "ORDER BY turn_no DESC LIMIT :limit"
-        ),
-        {"session_id": session_id, "limit": limit},
-    )
-    rows = list(result.mappings().all())
-    rows.reverse()
-    return [
-        {
-            "role": str(row.get("role") or ""),
-            "content": str(row.get("answer_text") or ""),
-        }
-        for row in rows
-        if str(row.get("role") or "") in {"user", "assistant"}
-        and str(row.get("answer_text") or "").strip()
-    ]
 
 
 async def _push_journey_progress(
@@ -753,29 +708,26 @@ async def _finish_journey_turn(
 @router.websocket("/moxiang-master")
 async def moxiang_master_conversation(
     ws: WebSocket,
-    token: str = Query(default=""),
+    ticket: str = Query(default=""),
 ) -> None:
     """墨相师·AI 引路人 对话 WebSocket 端点。
 
-    鉴权：query 参数 ``token`` 传 JWT。
+    鉴权：query 参数 ``ticket`` 传一次性 AI WebSocket 凭证。
     语音门禁：``ai_voice_conversation_enabled`` 关闭时仍允许文字模式
     （连接不拒绝，但 ``audio_start`` 会返回错误）。
     """
-    # JWT 鉴权
-    if not token:
-        await ws.close(
-            code=WS_CLOSE_POLICY_VIOLATION, reason="缺少 token 参数"
-        )
+    # 一次性凭证及数据库登录状态校验，失败时不接受连接。
+    if not ticket or len(ticket) > 4096:
+        await ws.close(code=WS_CLOSE_POLICY_VIOLATION, reason="缺少或无效的 ticket 参数")
         return
-    payload = _authenticate_ws(token)
-    if payload is None:
-        await ws.close(
-            code=WS_CLOSE_POLICY_VIOLATION,
-            reason="无效或已过期的访问令牌",
-        )
+    try:
+        user_id = await authenticate_voice_ticket(ticket)
+    except VoiceTicketDenied:
+        await ws.close(code=WS_CLOSE_POLICY_VIOLATION, reason="无效或已使用的凭证")
         return
-
-    user_id = int(payload["sub"])
+    except VoiceTicketUnavailable:
+        await ws.close(code=1011, reason="凭证服务暂时不可用")
+        return
     request_id = uuid.uuid4().hex
 
     await ws.accept()
@@ -1429,11 +1381,25 @@ async def moxiang_master_conversation(
                     )
                     continue
                 if spoken.tts_audio_url:
+                    try:
+                        audio_url = await sign_voice_audio_for_user(
+                            spoken.tts_audio_url, user_id
+                        )
+                    except VoiceAudioDenied:
+                        await _send_error(ws, "AI_POLICY_DENIED", "账号当前不可用")
+                        continue
+                    except VoiceAudioUnavailable:
+                        await _send_error(
+                            ws,
+                            "AI_TEMPORARILY_UNAVAILABLE",
+                            "音频访问暂时不可用",
+                        )
+                        continue
                     await _send_json(
                         ws,
                         {
                             "type": "tts_audio",
-                            "audio_url": spoken.tts_audio_url,
+                            "audio_url": audio_url,
                             "duration_ms": spoken.tts_duration_ms,
                         },
                     )

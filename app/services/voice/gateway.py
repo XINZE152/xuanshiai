@@ -264,6 +264,8 @@ class VoiceGateway:
     async def synthesize(
         self, context: AITaskContext, request: Any
     ) -> VoiceInvokeOutcome[SynthesizeResult]:
+        # URL 只在有当前用户身份的 HTTP/WS 响应边界签发，避免业务层提前
+        # 签发后在路由中重复签名并刷新过期时间。
         return await self.invoke(
             context, "synthesize", request,
             response_type=SynthesizeResult,

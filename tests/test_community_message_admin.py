@@ -1,6 +1,7 @@
 ﻿from datetime import datetime
 
 import pytest
+import inspect
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -70,3 +71,43 @@ def test_message_scope_is_parameterized() -> None:
 def test_message_content_redacts_phone_numbers() -> None:
     assert _redact_content("call 13812345678 now") == "call 1********** now"
     assert _redact_content(None) is None
+
+
+def test_message_moderation_uses_data_scope_filter() -> None:
+    from app.services import message_admin
+
+    source = inspect.getsource(message_admin.moderate_admin_message)
+    assert "_message_scope(admin, params)" in source
+    assert "AND \"\"\" + scope" in source
+
+
+@pytest.mark.asyncio
+async def test_message_moderation_hides_out_of_scope_message() -> None:
+    from app.services.message_admin import moderate_admin_message
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def first(self):
+            return None
+
+    class DB:
+        async def execute(self, statement, params=None):
+            sql = str(statement)
+            assert "scope_assignment.matchmaker_id=:scope_matchmaker_id" in sql
+            assert params == {"id": 99, "scope_matchmaker_id": 7}
+            return Result()
+
+    with pytest.raises(HTTPException) as exc:
+        await moderate_admin_message(DB(), _admin("SELF"), 99, "recall", "越权测试")
+    assert exc.value.status_code == 404
+
+
+def test_banner_admin_checks_overlapping_active_window() -> None:
+    from app.api.routes import community_admin
+
+    source = inspect.getsource(community_admin.create_banner)
+    update_source = inspect.getsource(community_admin.update_banner)
+    assert "同一位置和时间段已有生效中的 Banner" in source
+    assert "同一位置和时间段已有生效中的 Banner" in update_source

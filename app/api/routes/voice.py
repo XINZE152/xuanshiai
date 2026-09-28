@@ -1,6 +1,7 @@
 """语音（STT/TTS）路由（P-04 / Phase 4）。
 
 前缀 ``/api/v1/voice``（由 ``app/api/router.py`` 注册），共 2 个路径：
+- ``POST /voice/ws-ticket``：签发一次性 AI WebSocket 短时凭证
 
 - ``POST /voice/transcribe``：202 上传音频 → 异步转写任务 → 轮询 /ai/tasks/{id}
 - ``POST /voice/synthesize``：200 文本 → 同步语音合成 → 返回音频 URL
@@ -29,17 +30,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentUser, get_current_user
 from app.core.config import settings
 from app.core.logging import request_id_context
+from app.core.redis import redis_client
+from app.core.security import create_ai_ws_ticket, random_token
 from app.db.session import get_db
 from app.schemas.ai_common import AiErrorResponse, AiTaskStatus
 from app.services.ai.base import AITaskContext
 from app.services.ai.flags import AiFeature, AiFeatureDisabledError, require_ai_feature
 from app.services.ai.tasks import TaskError, enqueue_task
+from app.services.voice.auth import AI_WS_TICKET_TTL_SECONDS
 from app.services.voice.base import (
     MAX_TTS_TEXT_LENGTH,
     SynthesizeRequest,
     TranscribeRequest,
 )
 from app.services.voice.gateway import VoiceGateway
+from app.services.voice.audio_access import VoiceAudioDenied, VoiceAudioUnavailable, sign_voice_audio_for_user
 
 router = APIRouter()
 
@@ -90,6 +95,13 @@ class SynthesizeResponse(BaseModel):
 
 
 # ----------------------------------------------------------------------
+class VoiceWsTicketResponse(BaseModel):
+    """用于 /voice/conversation 或 /voice/moxiang-master 的一次性凭证。"""
+
+    ticket: str
+    expires_in: int = Field(..., description="凭证有效秒数")
+
+
 # 辅助
 # ----------------------------------------------------------------------
 
@@ -174,6 +186,35 @@ VOICE_TRANSCRIBE_TASK_TYPE = "voice_transcribe"
 # ----------------------------------------------------------------------
 # 路由
 # ----------------------------------------------------------------------
+
+
+@router.post(
+    "/ws-ticket",
+    response_model=VoiceWsTicketResponse,
+    summary="领取 AI 语音 WebSocket 一次性凭证",
+    description=(
+        "Bearer 登录；无请求体。返回 ticket 与 expires_in（秒）；"
+        "Redis 不可用返回 503。请先领取凭证，再在语音 WebSocket 的 ticket query 中使用一次。"
+    ),
+)
+async def voice_ws_ticket(
+    current: CurrentUser = Depends(get_current_user),
+) -> VoiceWsTicketResponse:
+    try:
+        await redis_client.ping()
+    except Exception as exc:
+        raise _error_response(
+            "AI_TEMPORARILY_UNAVAILABLE",
+            "凭证服务暂时不可用",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            retryable=True,
+        ) from exc
+    return VoiceWsTicketResponse(
+        ticket=create_ai_ws_ticket(
+            current.id, current.session_id, random_token(), AI_WS_TICKET_TTL_SECONDS
+        ),
+        expires_in=AI_WS_TICKET_TTL_SECONDS,
+    )
 
 
 @router.post(
@@ -343,8 +384,18 @@ async def synthesize_speech(
             retryable=outcome.retryable,
         )
 
+    try:
+        audio_url = await sign_voice_audio_for_user(
+            outcome.result.audio_url, current.id, db=db
+        )
+    except VoiceAudioDenied as exc:
+        raise _error_response("AI_POLICY_DENIED", "账号当前不可用", 403) from exc
+    except VoiceAudioUnavailable as exc:
+        raise _error_response(
+            "AI_TEMPORARILY_UNAVAILABLE", "音频访问暂时不可用", 503, retryable=True
+        ) from exc
     return SynthesizeResponse(
-        audio_url=outcome.result.audio_url,
+        audio_url=audio_url,
         audio_format=outcome.result.audio_format,
         duration_ms=outcome.result.duration_ms,
         expires_at=outcome.result.expires_at,

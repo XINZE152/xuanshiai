@@ -175,6 +175,9 @@ class RealtimeVoiceSession:
         self._late_audio_frames = 0
         self._dropped_uplink_frames = 0
         self._last_activity_ts = time.monotonic()
+        # 本轮会话起点：None 表示还没有成功建立的会话。
+        # 上游轮转（打断/失败重建）不重置，单次上限按本轮计。
+        self._session_started_at: float | None = None
 
     # ------------------------------------------------------------------
     # 对路由层暴露的事件入口（客户端消息驱动）
@@ -321,6 +324,23 @@ class RealtimeVoiceSession:
     @property
     def idle_seconds(self) -> float:
         return time.monotonic() - self._last_activity_ts
+
+    @property
+    def session_started_at(self) -> float | None:
+        """本轮会话起点（monotonic）；尚未成功建立时为 None。
+
+        连接可以先后承载多轮语音，单次时长上限与额度都按本轮计，
+        不按连接寿命计。上游轮转不重置该起点。
+        """
+        return self._session_started_at
+
+    @property
+    def session_elapsed_seconds(self) -> float:
+        """本轮已进行秒数；没有进行中的会话时为 0。"""
+        started = self._session_started_at
+        if started is None:
+            return 0.0
+        return max(0.0, time.monotonic() - started)
 
     @property
     def input_open(self) -> bool:
@@ -747,6 +767,8 @@ class RealtimeVoiceSession:
         self._start_uplink_task()
         self._input_open = True
         self._awaiting_final = False
+        if initial or self._session_started_at is None:
+            self._session_started_at = time.monotonic()
         # 无论首建还是轮转，就绪即广播 voice_ready：客户端只在收到它之后开麦。
         await self._emit(build_voice_ready_event())
         return True

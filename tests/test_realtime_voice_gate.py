@@ -19,6 +19,9 @@ def _production_base() -> dict[str, object]:
         "_env_file": None,
         "environment": "production",
         "auto_init_db": False,
+        "debug": False,
+        "docs_enabled": False,
+        "secret_key": "t" * 32,
         "sms_provider": "disabled",
         "wechat_provider": "wechat",
         "wechat_payment_mode": "real",
@@ -29,6 +32,7 @@ def _production_base() -> dict[str, object]:
         "ai_provider_approved": True,
         "ai_retention_policy_version": "ai-policy-2026-08-07-v1",
         "ai_provider": "deepseek",
+        "ai_deepseek_api_key": "test-deepseek-key",
     }
 
 

@@ -1,0 +1,72 @@
+name: Backend message and media core CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ENVIRONMENT: testing
+      AUTO_INIT_DB: "false"
+      # 不配置数据库服务/凭据；即使测试意外请求会话也不能写真实库。
+      DATABASE_URL: mysql+aiomysql://ci:ci@127.0.0.1:1/ci_unreachable
+      COMMUNITY_TEST_DATABASE_URL: ""
+      AI_TEST_DATABASE_URL: ""
+      UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-uploads
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install backend and dev dependencies
+        run: uv sync --locked --extra dev
+      # 全仓 Ruff 存量告警另行收敛；本门禁不跳过这些规则，只限定本阶段改动域。
+      - name: Ruff (message and media scope)
+        run: uv run --no-sync ruff check app/api/routes/social.py app/api/routes/discovery.py app/services/social.py app/services/media.py app/services/member_follow_up_admin.py scripts/reproduce_upload_exposure.py tests/test_social_features.py tests/test_social_message_idempotency.py tests/test_discovery_features.py tests/test_member_follow_up_media.py
+      - name: Message and media unit contracts (no integration/live/manual)
+        run: uv run --no-sync pytest tests/test_social_features.py tests/test_social_message_idempotency.py tests/test_discovery_features.py tests/test_member_follow_up_media.py -q
+
+  ai-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ENVIRONMENT: testing
+      AUTO_INIT_DB: "false"
+      DATABASE_URL: mysql+aiomysql://ci:ci@127.0.0.1:1/ci_unreachable
+      REDIS_URL: redis://127.0.0.1:1/5
+      UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-ai-uploads
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install backend and dev dependencies
+        run: uv sync --locked --extra dev
+      - name: Ruff (AI and voice scope)
+        run: >-
+          uv run --no-sync ruff check
+          app/api/routes/ai_compatibility.py app/api/routes/voice.py
+          app/api/routes/voice_moxiang.py app/api/routes/voice_ws.py
+          app/core/config.py app/core/security.py app/main.py
+          app/services/ai/providers.py app/services/voice/auth.py
+          app/services/voice/audio_access.py app/services/voice/gateway.py
+          app/services/voice/providers.py app/services/voice/realtime/context.py
+          app/services/voice/realtime/moxiang_bridge.py
+          tests/test_ai_api_contracts.py tests/test_ai_config_hardening.py
+          tests/test_ai_schema_and_provider.py tests/test_ai_voice_audio_access.py
+          tests/test_voice_auth.py tests/test_voice_cleanup.py
+          tests/test_voice_providers_aliyun.py tests/test_voice_ws.py
+      - name: AI and voice unit contracts
+        run: >-
+          uv run --no-sync pytest
+          tests/test_ai_schema_and_provider.py
+          tests/test_ai_api_contracts.py
+          tests/test_ai_config_hardening.py
+          tests/test_ai_voice_audio_access.py
+          tests/test_voice_auth.py
+          tests/test_voice_ws.py
+          tests/test_voice_providers_aliyun.py
+          tests/test_voice_cleanup.py -q

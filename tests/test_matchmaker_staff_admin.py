@@ -3,6 +3,8 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.main import app
+from app.api.dependencies import _matchmaker_admin_permission
+from app.api.routes.matchmaker_admin import _matchmaker_scope_filter
 from app.schemas.matchmaker_staff_admin import (
     MatchmakerPermissionsUpdate,
     MatchmakerStaffCreate,
@@ -10,6 +12,26 @@ from app.schemas.matchmaker_staff_admin import (
 
 
 client = TestClient(app)
+
+
+def test_matchmaker_statistics_routes_require_read_permission() -> None:
+    from starlette.requests import Request
+
+    for path in ("/api/v1/admin/dashboard/stats", "/api/v1/admin/matchmaker/statistics"):
+        request = Request({"type": "http", "method": "GET", "path": path, "headers": []})
+        assert _matchmaker_admin_permission(request) == "matchmaker.read"
+
+
+def test_matchmaker_statistics_scope_uses_existing_scope_condition() -> None:
+    from types import SimpleNamespace
+
+    current = SimpleNamespace(
+        account=SimpleNamespace(data_scope="SELF", matchmaker_user_id=9),
+        permissions=frozenset({"matchmaker.read"}),
+        scope_condition=lambda **kwargs: "a.user_id = :scope_user_id",
+    )
+    params: dict[str, object] = {}
+    assert _matchmaker_scope_filter(current, params, "a.user_id", "stats") == "a.user_id = :scope_user_id"
 
 
 def test_matchmaker_staff_admin_routes_are_registered() -> None:

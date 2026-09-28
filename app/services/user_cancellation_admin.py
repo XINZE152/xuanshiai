@@ -1,10 +1,11 @@
 """账号注销申请 后台业务逻辑。
 
 设计要点：
-- 「取消注销」是软动作（status='cancelled'），不修改 users 表；
+- 「取消注销」是软动作（status='cancelled'），清除注销时间并保持/恢复 `users.status=1`；
 - 「批准注销」是硬动作，写入 users.status=3 + deletion_* + 清空手机号尾 4 位之外的敏感字段，
   同时保留一条 approved 记录以便审计追溯。
 - 所有写入走 business_audit_log 通道。
+- 账号状态变更同时递增 privacy_revision，避免旧的私有音频 URL 在重新激活后恢复访问。
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from app.schemas.user_cancellation_admin import (
     UserCancellationPage,
     UserCancellationStatistics,
 )
+from app.services.revisions import RevisionKind, increment_revision_and_enqueue
 
 
 _BASE_SELECT = """
@@ -164,6 +166,14 @@ async def review_cancellation(
         new_status = "cancelled"
         action = "cancellation.reject"
 
+    await increment_revision_and_enqueue(
+        db,
+        user_id,
+        RevisionKind.PRIVACY,
+        ("account_status",),
+        "account_state_changed",
+        10,
+    )
     await db.execute(
         text(
             """UPDATE user_cancellation

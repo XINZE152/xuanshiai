@@ -2,8 +2,8 @@
 
 路径：``/api/v1/voice/conversation``。
 
-WebSocket 不经过 HTTP 中间件，需自行 JWT 鉴权（从 query 参数取 ``token``，
-复用 :func:`app.core.security.decode_access_token`）。生产环境 fail closed：
+WebSocket 不经过 HTTP 中间件，使用 ``ticket`` query 的一次性短时凭证；
+握手前检查登录 session 和账号状态。生产环境 fail closed：
 ``ai_voice_conversation_enabled`` 默认 false，生产环境连接时返回 close code 1008。
 
 消息协议（前后端共享契约）：
@@ -51,7 +51,7 @@ from typing import Any
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.core.config import settings
-from app.core.security import decode_access_token
+from app.services.voice.auth import VoiceTicketDenied, VoiceTicketUnavailable, authenticate_voice_ticket
 from app.db.session import session_factory as _db_session_factory
 from app.services.ai.flags import AiFeature, require_ai_feature
 from app.services.ai.gateway import AIGateway
@@ -73,6 +73,11 @@ from app.services.voice.conversation import (
     VoiceConversationOrchestrator,
 )
 from app.services.voice.gateway import VoiceGateway
+from app.services.voice.audio_access import (
+    VoiceAudioDenied,
+    VoiceAudioUnavailable,
+    sign_voice_audio_for_user,
+)
 from app.services.voice.providers import (
     _AliyunVoiceError,
     get_voice_provider,
@@ -108,16 +113,6 @@ def _require_conversation_feature() -> str | None:
     return None
 
 
-def _authenticate_ws(token: str) -> dict[str, str] | None:
-    """验证 JWT token，返回 payload 或 None（鉴权失败）。
-
-    WS 不经过 HTTP 中间件，需自行鉴权。复用
-    :func:`app.core.security.decode_access_token`。
-    """
-    try:
-        return decode_access_token(token)
-    except (ValueError, KeyError):
-        return None
 
 
 async def _send_json(ws: WebSocket, message: dict[str, Any]) -> None:
@@ -184,11 +179,11 @@ async def _push_streamed_reply(
 @router.websocket("/conversation")
 async def voice_conversation(
     ws: WebSocket,
-    token: str = Query(default=""),
+    ticket: str = Query(default=""),
 ) -> None:
     """实时半双工语音对话 WebSocket 端点。
 
-    鉴权：query 参数 ``token`` 传 JWT access token。
+    鉴权：query 参数 ``ticket`` 传一次性 AI WebSocket 凭证。
     门禁：``ai_voice_conversation_enabled`` 关闭时拒绝连接（close 1008）。
     """
     # 1. 门禁检查：fail closed。
@@ -200,20 +195,18 @@ async def voice_conversation(
         )
         return
 
-    # 2. JWT 鉴权。
-    if not token:
-        await ws.close(
-            code=WS_CLOSE_POLICY_VIOLATION, reason="缺少 token 参数"
-        )
+    # 2. 一次性凭证及数据库登录状态校验，失败时不接受连接。
+    if not ticket or len(ticket) > 4096:
+        await ws.close(code=WS_CLOSE_POLICY_VIOLATION, reason="缺少或无效的 ticket 参数")
         return
-    payload = _authenticate_ws(token)
-    if payload is None:
-        await ws.close(
-            code=WS_CLOSE_POLICY_VIOLATION, reason="无效或已过期的访问令牌"
-        )
+    try:
+        user_id = await authenticate_voice_ticket(ticket)
+    except VoiceTicketDenied:
+        await ws.close(code=WS_CLOSE_POLICY_VIOLATION, reason="无效或已使用的凭证")
         return
-
-    user_id = int(payload["sub"])
+    except VoiceTicketUnavailable:
+        await ws.close(code=WS_CLOSE_INTERNAL_ERROR, reason="凭证服务暂时不可用")
+        return
     request_id = uuid.uuid4().hex
 
     # 3. 接受连接。
@@ -422,11 +415,12 @@ async def voice_conversation(
                     seq = 0
                     async for url, dur in orchestrator.synthesize_streaming():
                         seq += 1
+                        audio_url = await sign_voice_audio_for_user(url, user_id)
                         await _send_json(
                             ws,
                             {
                                 "type": "tts_audio",
-                                "audio_url": url,
+                                "audio_url": audio_url,
                                 "duration_ms": dur,
                                 "seq": seq,
                                 "total": 0,
@@ -441,6 +435,14 @@ async def voice_conversation(
                         await _send_json(
                             ws, {"type": "tts_audio_done", "total": seq}
                         )
+                except VoiceAudioDenied:
+                    await _send_error(ws, "AI_POLICY_DENIED", "账号当前不可用")
+                    continue
+                except VoiceAudioUnavailable:
+                    await _send_error(
+                        ws, "AI_TEMPORARILY_UNAVAILABLE", "音频访问暂时不可用"
+                    )
+                    continue
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "voice_ws_streaming_tts_fallback request_id=%s "
@@ -458,11 +460,27 @@ async def voice_conversation(
                         )
                         continue
                     if spoken.tts_audio_url:
+                        try:
+                            audio_url = await sign_voice_audio_for_user(
+                                spoken.tts_audio_url, user_id
+                            )
+                        except VoiceAudioDenied:
+                            await _send_error(
+                                ws, "AI_POLICY_DENIED", "账号当前不可用"
+                            )
+                            continue
+                        except VoiceAudioUnavailable:
+                            await _send_error(
+                                ws,
+                                "AI_TEMPORARILY_UNAVAILABLE",
+                                "音频访问暂时不可用",
+                            )
+                            continue
                         await _send_json(
                             ws,
                             {
                                 "type": "tts_audio",
-                                "audio_url": spoken.tts_audio_url,
+                                "audio_url": audio_url,
                                 "duration_ms": spoken.tts_duration_ms,
                                 "seq": 1,
                                 "total": 1,

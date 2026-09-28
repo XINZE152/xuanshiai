@@ -1,6 +1,6 @@
 import pytest
 from fastapi import HTTPException
-from types import SimpleNamespace
+from sqlalchemy.exc import IntegrityError
 import json
 from datetime import datetime, timezone
 
@@ -155,3 +155,46 @@ async def test_refund_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(ai_advisor, "refund_daily", fail_refund)
     assert await ai_advisor._refund_quota_safely("advisor:quota") is False
+
+
+@pytest.mark.asyncio
+async def test_integrity_conflict_refunds_once_and_replays_winner(monkeypatch, advisor_stubs):
+    provider_calls = 0
+    refund_calls = 0
+    winner = {
+        "id": 10,
+        "session_id": 1,
+        "scenario": "reply",
+        "output_json": json.dumps({"analysis": "winner", "suggestions": [], "risk_level": "none"}),
+        "created_at": datetime.now(timezone.utc),
+    }
+
+    class ConflictDB(_DB):
+        async def execute(self, statement, params=None):
+            sql = str(statement)
+            if "FROM ai_advisor_session" in sql:
+                assert "FOR UPDATE" in sql
+                return _Result({"id": 1, "chat_session_id": None})
+            if "FROM ai_advisor_message" in sql and "idempotency_key" in sql:
+                return _Result(winner if self.rollback_calls else None)
+            if "INSERT INTO ai_advisor_message" in sql:
+                raise IntegrityError(sql, params, RuntimeError("duplicate"))
+            return _Result()
+
+    async def counted_complete(*args, **kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        return "{}"
+
+    async def counted_refund(*args):
+        nonlocal refund_calls
+        refund_calls += 1
+
+    monkeypatch.setattr(ai_advisor, "complete", counted_complete)
+    monkeypatch.setattr(ai_advisor, "refund_daily", counted_refund)
+    result = await ai_advisor.get_advice(
+        ConflictDB(), 1, 1, _request(), idempotency_key="advisor-race-key"
+    )
+    assert result.id == 10
+    assert provider_calls == 1
+    assert refund_calls == 1

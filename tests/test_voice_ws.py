@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,8 +18,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
-from app.core.security import create_token
 from app.main import app
+from app.services.voice.auth import VoiceTicketDenied
+from app.services.voice.audio_access import VoiceAudioDenied
 
 
 def _settings_dev(**overrides: Any) -> Settings:
@@ -35,15 +35,9 @@ def _settings_dev(**overrides: Any) -> Settings:
     base.update(overrides)
     return Settings(**base)
 
-
-def _make_access_token(user_id: int = 1, session_id: int = 1) -> str:
-    """生成一个有效的 JWT access token（供 WS 鉴权）。"""
-    return create_token(
-        user_id=user_id,
-        session_id=session_id,
-        token_type="access",
-        expires_delta=timedelta(hours=1),
-    )
+def _make_ticket() -> str:
+    """Return a test-only ticket; route authentication is mocked below."""
+    return "test-ticket"
 
 
 @pytest.fixture()
@@ -60,6 +54,19 @@ def dev_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setattr(flags_mod, "settings", settings, raising=False)
     return settings
 
+@pytest.fixture(autouse=True)
+def _fake_voice_ticket_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests bypass Redis/DB; auth service has dedicated tests."""
+
+    async def _authenticate(ticket: str) -> int:
+        if ticket == "invalid-token":
+            raise VoiceTicketDenied()
+        return 1
+
+    monkeypatch.setattr(
+        "app.api.routes.voice_ws.authenticate_voice_ticket", _authenticate
+    )
+
 
 # ----------------------------------------------------------------------
 # 门禁与鉴权
@@ -75,10 +82,10 @@ def test_gate_disabled_rejects_connection(
         ai_voice_enabled=True, ai_voice_conversation_enabled=False,
     )
     monkeypatch.setattr("app.api.routes.voice_ws.settings", settings)
-    token = _make_access_token()
+    ticket = _make_ticket()
     with pytest.raises(Exception):
         with client.websocket_connect(
-            f"/api/v1/voice/conversation?token={token}"
+            f"/api/v1/voice/conversation?ticket={ticket}"
         ) as ws:
             ws.receive_text()
 
@@ -96,7 +103,7 @@ def test_invalid_token_rejects(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.api.routes.voice_ws.settings", settings)
     with pytest.raises(Exception):
         with client.websocket_connect(
-            "/api/v1/voice/conversation?token=invalid-token"
+            "/api/v1/voice/conversation?ticket=invalid-token"
         ):
             pass
 
@@ -230,7 +237,7 @@ def _patch_streaming_tts(
 
         async def _raise_stream(self):
             raise raises("mock streaming failure")
-            yield  # noqa: unreachable — 让它成为 async generator
+            yield
 
         monkeypatch.setattr(
             VoiceConversationOrchestrator, "synthesize_streaming", _raise_stream
@@ -284,9 +291,9 @@ def test_conversation_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_provider(monkeypatch, fake_asr)
     _patch_conversation_gateways(monkeypatch)
 
-    token = _make_access_token()
+    ticket = _make_ticket()
     with client.websocket_connect(
-        f"/api/v1/voice/conversation?token={token}"
+        f"/api/v1/voice/conversation?ticket={ticket}"
     ) as ws:
         msgs = _open_turn(ws)
 
@@ -314,9 +321,9 @@ def test_listen_synthesizes_after_reply(monkeypatch: pytest.MonkeyPatch) -> None
     _patch_provider(monkeypatch, fake_asr)
     _patch_conversation_gateways(monkeypatch)
 
-    token = _make_access_token()
+    ticket = _make_ticket()
     with client.websocket_connect(
-        f"/api/v1/voice/conversation?token={token}"
+        f"/api/v1/voice/conversation?ticket={ticket}"
     ) as ws:
         msgs = _open_turn(ws)
         assert "tts_audio" not in [m["type"] for m in msgs]
@@ -324,6 +331,42 @@ def test_listen_synthesizes_after_reply(monkeypatch: pytest.MonkeyPatch) -> None
         tts = json.loads(ws.receive_text())
     assert tts["type"] == "tts_audio"
     assert tts["audio_url"] == "/tts/test.mp3"
+
+
+
+def test_listen_does_not_fallback_when_audio_access_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """旧签名/撤权不能触发第二次 TTS 合成。"""
+    settings = _settings_dev()
+    monkeypatch.setattr("app.api.routes.voice_ws.settings", settings)
+    monkeypatch.setattr("app.services.voice.gateway.settings", settings)
+    monkeypatch.setattr("app.services.ai.gateway.settings", settings)
+
+    fake_asr = FakeASRClient(
+        partials=["我今年", "我今年28岁"], final="我今年28岁，在北京工作"
+    )
+    _patch_provider(monkeypatch, fake_asr)
+    _, mock_voice_gateway = _patch_conversation_gateways(monkeypatch)
+    _patch_streaming_tts(monkeypatch, chunks=[("/storage/uploads/voice/tts/private.mp3", 1500)])
+    monkeypatch.setattr(
+        "app.api.routes.voice_ws.sign_voice_audio_for_user",
+        AsyncMock(side_effect=VoiceAudioDenied()),
+    )
+
+    with client.websocket_connect(
+        f"/api/v1/voice/conversation?ticket={_make_ticket()}"
+    ) as ws:
+        _open_turn(ws)
+        ws.send_text(json.dumps({"type": "listen"}))
+        message = json.loads(ws.receive_text())
+
+    assert message == {
+        "type": "error",
+        "code": "AI_POLICY_DENIED",
+        "message": "账号当前不可用",
+    }
+    mock_voice_gateway.synthesize.assert_not_called()
 
 
 def test_revise_text_reruns_without_stacking(
@@ -341,9 +384,9 @@ def test_revise_text_reruns_without_stacking(
     _patch_provider(monkeypatch, fake_asr)
     _patch_conversation_gateways(monkeypatch, reply_text="记下了，你在哪座城市？")
 
-    token = _make_access_token()
+    ticket = _make_ticket()
     with client.websocket_connect(
-        f"/api/v1/voice/conversation?token={token}"
+        f"/api/v1/voice/conversation?ticket={ticket}"
     ) as ws:
         _open_turn(ws)
         ws.send_text(json.dumps({"type": "revise_text", "text": "我住杭州"}))
@@ -367,9 +410,9 @@ def test_revise_text_empty_returns_error(monkeypatch: pytest.MonkeyPatch) -> Non
         lambda name: MagicMock(),
     )
 
-    token = _make_access_token()
+    ticket = _make_ticket()
     with client.websocket_connect(
-        f"/api/v1/voice/conversation?token={token}"
+        f"/api/v1/voice/conversation?ticket={ticket}"
     ) as ws:
         ws.send_text(json.dumps({
             "type": "session_start", "session_id": "s1", "field_key": "age",
@@ -398,9 +441,9 @@ def test_cancel_clears_state(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda **kw: mock_voice_gateway,
     )
 
-    token = _make_access_token()
+    ticket = _make_ticket()
     with client.websocket_connect(
-        f"/api/v1/voice/conversation?token={token}"
+        f"/api/v1/voice/conversation?ticket={ticket}"
     ) as ws:
         ws.send_text(json.dumps({
             "type": "session_start", "session_id": "s1", "field_key": "age",
@@ -441,9 +484,9 @@ def test_listen_streaming_tts(monkeypatch: pytest.MonkeyPatch) -> None:
         ],
     )
 
-    token = _make_access_token()
+    ticket = _make_ticket()
     with client.websocket_connect(
-        f"/api/v1/voice/conversation?token={token}"
+        f"/api/v1/voice/conversation?ticket={ticket}"
     ) as ws:
         _open_turn(ws)
         ws.send_text(json.dumps({"type": "listen"}))
@@ -476,9 +519,9 @@ def test_listen_streaming_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     # synthesize_streaming 抛异常，触发回退到 synthesize_current。
     _patch_streaming_tts(monkeypatch, raises=RuntimeError)
 
-    token = _make_access_token()
+    ticket = _make_ticket()
     with client.websocket_connect(
-        f"/api/v1/voice/conversation?token={token}"
+        f"/api/v1/voice/conversation?ticket={ticket}"
     ) as ws:
         _open_turn(ws)
         ws.send_text(json.dumps({"type": "listen"}))
@@ -503,15 +546,16 @@ def test_production_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """生产环境 ai_voice_conversation_enabled=false 时拒绝连接。"""
     settings = Settings(
         _env_file=None, environment="production", auto_init_db=False,
+        live_provider="tencent",
         sms_provider="disabled", wechat_provider="wechat",
         wechat_payment_mode="real",
         ai_voice_enabled=False, ai_voice_conversation_enabled=False,
     )
     monkeypatch.setattr("app.api.routes.voice_ws.settings", settings)
-    token = _make_access_token()
+    ticket = _make_ticket()
     with pytest.raises(Exception):
         with client.websocket_connect(
-            f"/api/v1/voice/conversation?token={token}"
+            f"/api/v1/voice/conversation?ticket={ticket}"
         ):
             pass
 

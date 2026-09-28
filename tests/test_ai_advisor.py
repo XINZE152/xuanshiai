@@ -1,10 +1,13 @@
 ﻿import json
+from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.api.routes import ai_advisor
 from app.schemas.ai_advisor import AdvisorAdviceRequest, AdvisorSessionCreate
+from app.services import ai_advisor as advisor_service
 from app.services.ai_advisor import _build_prompt, _normalize_result, _risk_level
 from app.services.ai_provider import _mock_response
 
@@ -109,3 +112,117 @@ def test_advisor_database_contract_contains_idempotency_and_audit() -> None:
     assert "uk_ai_advisor_message_idempotency" in message_sql
     assert "quota_refunded" in audit_sql
     assert "error_detail" in audit_sql
+
+
+def test_advisor_serializes_idempotent_requests_and_replays_insert_conflicts() -> None:
+    import inspect
+    from app.services import ai_advisor as service
+
+    source = inspect.getsource(service.get_advice)
+    assert "FOR UPDATE" in source
+    assert "IntegrityError" in source
+    assert "_refund_quota_safely(quota_key)" in source
+    assert "status='success'" in source
+
+
+# ---------------- 越权回归（cbfbee5 修复以来的覆盖补齐） ----------------
+
+
+class _ScalarResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar(self):
+        return self._value
+
+
+class _FakeAccessDb:
+    """仿 test_ai_gateway_chat.py 的 Fake 模式：仅驱动 _assert_chat_session_access
+    的 execute/scalar 交互，记录语句与绑定参数供授权谓词断言。"""
+
+    def __init__(self, scalar_value):
+        self._value = scalar_value
+        self.calls = []
+
+    async def execute(self, statement, params=None):
+        self.calls.append((str(statement), dict(params or {})))
+        return _ScalarResult(self._value)
+
+
+@pytest.mark.asyncio
+async def test_assert_chat_session_access_allows_bound_member() -> None:
+    """会话成员（user1 或 user2）查询命中时放行；授权谓词必须同时限定
+    会话 id 与双方成员字段，并绑定当前用户。"""
+    db = _FakeAccessDb(7)
+    await advisor_service._assert_chat_session_access(db, user_id=7, chat_session_id=42)
+    statement, params = db.calls[0]
+    assert "user1_id=:user_id OR user2_id=:user_id" in statement
+    assert params == {"session_id": 42, "user_id": 7}
+
+
+@pytest.mark.asyncio
+async def test_assert_chat_session_access_rejects_third_party_with_403() -> None:
+    """第三方（非 user1/user2）查询不命中时 403，detail 固定为
+    「无权读取该聊天会话」，不泄露会话是否存在。"""
+    db = _FakeAccessDb(None)
+    with pytest.raises(HTTPException) as exc_info:
+        await advisor_service._assert_chat_session_access(db, user_id=99, chat_session_id=42)
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "无权读取该聊天会话"
+
+
+@pytest.mark.asyncio
+async def test_require_vip_rejects_without_active_membership(monkeypatch) -> None:
+    async def _inactive(db, user_id):
+        return False
+
+    monkeypatch.setattr(advisor_service, "has_active_membership", _inactive)
+    with pytest.raises(HTTPException) as exc_info:
+        await advisor_service._require_vip(object(), 7)
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "AI功能仅限有效会员使用"
+
+
+@pytest.mark.asyncio
+async def test_require_vip_passes_with_active_membership(monkeypatch) -> None:
+    async def _active(db, user_id):
+        return True
+
+    monkeypatch.setattr(advisor_service, "has_active_membership", _active)
+    await advisor_service._require_vip(object(), 7)  # 不抛即放行
+
+
+# ---------------- 审计脱敏（兜底 except 不再吸入原始异常串） ----------------
+
+
+def test_controlled_error_detail_drops_unstructured_exception_text() -> None:
+    """非结构化异常文本（如 IntegrityError/StatementError 携带的完整 SQL 与
+    绑定参数）一律置空，只保留异常类型名。"""
+    raw = ("(pymysql.err.IntegrityError) (1062, \"Duplicate entry\") "
+           "[SQL: INSERT INTO ai_advisor_message (input_text) VALUES ('用户原文')]")
+    detail = advisor_service._controlled_error_detail(RuntimeError(raw))
+    assert detail == "RuntimeError"
+    assert "用户原文" not in detail
+    assert "INSERT INTO" not in detail
+
+
+def test_controlled_error_detail_keeps_redacted_structured_summary() -> None:
+    """结构化（JSON）异常文本可保留脱敏后的摘要；敏感键（如 phone）剔除。"""
+    exc = RuntimeError('{"note": "provider rejected", "phone": "13800138000"}')
+    detail = advisor_service._controlled_error_detail(exc)
+    assert detail.startswith("RuntimeError: ")
+    assert "provider rejected" in detail
+    assert "13800138000" not in detail
+
+
+def test_controlled_error_detail_capped_to_column_capacity() -> None:
+    """摘要写入前限长到 error_detail 列容量 varchar(500)。"""
+    exc = RuntimeError('{"note": "' + "x" * 2000 + '"}')
+    assert len(advisor_service._controlled_error_detail(exc)) <= 500
+
+
+def test_generic_exception_branch_writes_controlled_detail_only() -> None:
+    """兜底 except 必须走受控写入，禁止回退到 error_detail=str(exc)。"""
+    source = Path("app/services/ai_advisor.py").read_text(encoding="utf-8")
+    assert "error_detail=_controlled_error_detail(exc)" in source
+    assert "error_detail=str(exc)" not in source

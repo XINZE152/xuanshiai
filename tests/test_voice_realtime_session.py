@@ -428,3 +428,33 @@ async def test_close_marks_unknown_playback_and_persists_snapshot() -> None:
     if harness.persisted:
         _, metadata = harness.persisted[0]
         assert metadata["playback_status"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_session_clock_starts_once_and_survives_upstream_rotation() -> None:
+    """单次上限的起点在首次建连时记下，打断后重建上游不重置。"""
+    harness = Harness()
+    session = await start_ready_session(harness)
+    origin = session.session_started_at
+    assert origin is not None
+
+    transport = harness.transports[0]
+    await session.handle_voice_input_begin("ct-1")
+    transport.incoming.put_nowait(sa("speech.started"))
+    transport.incoming.put_nowait(sa("user.transcript.done", text="说一句"))
+    await harness.wait_for_event("input_closed")
+    transport.incoming.put_nowait(sa("assistant.text.delta", text="好"))
+    await harness.settle(40)
+
+    await session.handle_interrupt(session.active_generation_id)
+    await harness.settle(40)
+    assert len(harness.transports) == 2
+    harness.transports[-1].incoming.put_nowait(sa("ready", session_id="s-2"))
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while len(harness.events("voice_ready")) < 2:
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("轮转后未再次 voice_ready")
+        await asyncio.sleep(0.02)
+
+    assert session.session_started_at == origin
+    await session.aclose()

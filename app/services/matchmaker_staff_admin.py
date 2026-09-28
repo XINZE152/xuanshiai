@@ -158,7 +158,35 @@ async def list_staff(
     )
 
 
-async def get_staff(db: AsyncSession, matchmaker_id: int) -> MatchmakerStaffDetail:
+async def _assert_staff_scope(
+    db: AsyncSession, matchmaker_id: int, admin: CurrentMatchmakerAdmin
+) -> None:
+    params: dict[str, object] = {"id": matchmaker_id}
+    scope = admin.scope_condition(
+        organization_column="o.id", params=params, user_column="u.id"
+    )
+    exists = await db.execute(
+        text(
+            """SELECT 1
+            FROM users u
+            LEFT JOIN matchmaker_profile p ON p.user_id = u.id
+            LEFT JOIN organization_member om
+              ON om.user_id = u.id AND om.role_code = 'store_matchmaker' AND om.status = 1
+            LEFT JOIN organization o ON o.id = om.organization_id AND o.org_type = 'store'
+            WHERE u.id = :id AND p.deleted_at IS NULL AND """
+            + scope
+        ),
+        params,
+    )
+    if not exists.scalar():
+        raise HTTPException(404, detail="红娘不存在")
+
+
+async def get_staff(
+    db: AsyncSession, matchmaker_id: int, admin: CurrentMatchmakerAdmin | None = None
+) -> MatchmakerStaffDetail:
+    if admin is not None:
+        await _assert_staff_scope(db, matchmaker_id, admin)
     row = (
         (await db.execute(text(f"{SELECT_STAFF} AND u.id = :id"), {"id": matchmaker_id}))
         .mappings()
@@ -464,10 +492,16 @@ async def save_permissions(
 
 
 async def work_report(
-    db: AsyncSession, matchmaker_id: int, from_date: date, to_date: date
+    db: AsyncSession,
+    matchmaker_id: int,
+    from_date: date,
+    to_date: date,
+    admin: CurrentMatchmakerAdmin | None = None,
 ) -> MatchmakerWorkReport:
     if to_date < from_date or (to_date - from_date).days > 366:
         raise HTTPException(422, detail="日期范围必须为1至366天")
+    if admin is not None:
+        await _assert_staff_scope(db, matchmaker_id, admin)
     params = {"id": matchmaker_id, "from_date": from_date, "to_date": to_date + timedelta(days=1)}
     row = (
         (
@@ -500,9 +534,13 @@ async def work_report(
 
 
 async def report(
-    db: AsyncSession, matchmaker_id: int, from_date: date, to_date: date
+    db: AsyncSession,
+    matchmaker_id: int,
+    from_date: date,
+    to_date: date,
+    admin: CurrentMatchmakerAdmin | None = None,
 ) -> MatchmakerDetailReport:
-    work = await work_report(db, matchmaker_id, from_date, to_date)
+    work = await work_report(db, matchmaker_id, from_date, to_date, admin)
     return MatchmakerDetailReport(
         matchmaker_id=matchmaker_id,
         from_date=from_date,

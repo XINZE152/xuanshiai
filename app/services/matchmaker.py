@@ -371,11 +371,13 @@ async def get_service_request(
 async def activate_paid_service_order(db: AsyncSession, order_id: int) -> int:
     order_result = await db.execute(text("""SELECT po.id, po.user_id, po.matchmaker_id,
         po.service_product_id, po.service_request_id, po.service_requirement,
-        po.status, sp.service_type FROM payment_order po
+        po.type, po.status, sp.service_type FROM payment_order po
         JOIN matchmaker_service_product sp ON sp.id = po.service_product_id
         WHERE po.id = :id FOR UPDATE"""), {"id": order_id})
     order = order_result.mappings().first()
     if not order or order["service_product_id"] is None:
+        raise HTTPException(422, detail="订单不是红娘服务订单")
+    if int(order["type"] or 0) != 3:
         raise HTTPException(422, detail="订单不是红娘服务订单")
     if order["status"] != 1:
         raise HTTPException(409, detail="支付成功后才能开通红娘服务")
@@ -398,6 +400,11 @@ async def activate_paid_service_order(db: AsyncSession, order_id: int) -> int:
     })
     service_id = int(result.lastrowid)
     await db.execute(text("UPDATE payment_order SET service_request_id = :service_id WHERE id = :id"), {"service_id": service_id, "id": order_id})
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id, reason)
+        VALUES (:actor, 'matchmaker_service.activate', 'matchmaker_service', :service_id, '支付成功后开通服务')"""), {
+        "actor": order["user_id"], "service_id": service_id,
+    })
     await _notify(db, int(order["matchmaker_id"]), "matchmaker_service_request", "收到新的付费红娘服务", "有用户购买了你的红娘服务", service_id)
     return service_id
 
@@ -406,7 +413,7 @@ async def create_service_request(
     db: AsyncSession, current: CurrentUser, request: MatchmakerServiceRequestCreate
 ) -> MatchmakerServiceRequestResponse:
     order_result = await db.execute(text("""SELECT id, user_id, status, service_request_id,
-        service_requirement FROM payment_order WHERE order_no = :order_no FOR UPDATE"""), {"order_no": request.order_no})
+        service_requirement FROM payment_order WHERE order_no = :order_no AND type = 3 FOR UPDATE"""), {"order_no": request.order_no})
     order = order_result.mappings().first()
     if not order or int(order["user_id"]) != current.id:
         raise HTTPException(404, detail="红娘服务订单不存在")
@@ -632,6 +639,11 @@ async def update_service_request(
     await db.execute(text(f"""UPDATE matchmaker_service SET status = :status,
         feedback = :feedback, {start_at} {end_at} updated_at = UTC_TIMESTAMP()
         WHERE id = :id"""), {"status": request.status, "feedback": request.feedback, "id": service_id})
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id, reason)
+        VALUES (:actor, 'matchmaker_service.status', 'matchmaker_service', :service_id, :reason)"""), {
+        "actor": current.id, "service_id": service_id, "reason": f"status={request.status}",
+    })
     await _notify(db, row["user_id"], "matchmaker_service_updated", "牵线服务状态更新", "你的牵线申请状态已更新", service_id)
     await db.commit()
     updated = await db.execute(text(f"{SERVICE_SELECT} WHERE id = :id"), {"id": service_id})
@@ -717,17 +729,17 @@ async def create_matchmaker_rating(
     row = (await db.execute(text("""SELECT id, user_id, matchmaker_id, order_id, status
         FROM matchmaker_service WHERE id = :id FOR UPDATE"""), {"id": service_id})).mappings().first()
     if not row:
-        raise HTTPException(404, detail="??????")
+        raise HTTPException(404, detail="牵线服务不存在")
     if int(row["user_id"]) != current.id:
-        raise HTTPException(403, detail="???????????")
+        raise HTTPException(403, detail="仅服务本人可以评价")
     if int(row["status"]) != 2:
-        raise HTTPException(409, detail="??????????")
+        raise HTTPException(409, detail="服务尚未完成，暂不能评价")
     paid = await db.execute(text("SELECT 1 FROM payment_order WHERE id = :id AND type = 3 AND status = 1 LIMIT 1"), {"id": row.get("order_id")})
     if row.get("order_id") and not paid.scalar():
-        raise HTTPException(409, detail="?????????")
+        raise HTTPException(409, detail="服务订单未支付，暂不能评价")
     duplicate = await db.execute(text("SELECT id FROM matchmaker_rating WHERE service_id = :service_id AND user_id = :user_id LIMIT 1"), {"service_id": service_id, "user_id": current.id})
     if duplicate.scalar():
-        raise HTTPException(409, detail="??????")
+        raise HTTPException(409, detail="该服务已评价过，请勿重复评价")
     result = await db.execute(text("""INSERT INTO matchmaker_rating
         (service_id, user_id, matchmaker_id, score, content)
         VALUES (:service_id, :user_id, :matchmaker_id, :score, :content)"""), {"service_id": service_id, "user_id": current.id, "matchmaker_id": row["matchmaker_id"], **request.model_dump()})

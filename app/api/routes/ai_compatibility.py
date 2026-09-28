@@ -29,7 +29,7 @@ from app.api.dependencies import CurrentUser, get_current_user
 from app.core.config import settings
 from app.core.logging import request_id_context
 from app.db.session import get_db
-from app.schemas.ai_common import AiErrorResponse
+from app.schemas.ai_common import AiErrorDetail, AiErrorResponse
 from app.schemas.ai_compatibility import (
     CompatibilityRecomputeRequest,
     CompatibilitySnapshotRead,
@@ -96,6 +96,21 @@ def _check_idempotency_key(idempotency_key: str | None) -> None:
 
 @router.get(
     "/compatibility/{target_user_id}",
+    response_model=CompatibilitySnapshotRead,
+    responses={
+        status.HTTP_202_ACCEPTED: {
+            "model": CompatibilitySnapshotRecomputeRead,
+            "description": "未命中可用快照时返回异步精算任务",
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "model": AiErrorDetail,
+            "description": "目标用户当前不可见",
+        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": AiErrorDetail,
+            "description": "AI 功能关闭或生产门禁未满足",
+        },
+    },
     summary="查询与目标用户的资料合拍参考（未命中可 202 触发 AI 精算）",
 )
 async def get_compatibility_route(

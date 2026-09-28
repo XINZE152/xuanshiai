@@ -10,9 +10,9 @@ from app.services.ai.gateway import AIGateway
 from app.services.voice.master_orchestrator import MoxiangMasterOrchestrator
 
 
-def _orchestrator() -> MoxiangMasterOrchestrator:
+def _orchestrator(gateway: MagicMock | None = None) -> MoxiangMasterOrchestrator:
     return MoxiangMasterOrchestrator(
-        ai_gateway=MagicMock(),
+        ai_gateway=gateway or MagicMock(),
         voice_gateway=MagicMock(),
     )
 
@@ -20,19 +20,19 @@ def _orchestrator() -> MoxiangMasterOrchestrator:
 @pytest.mark.asyncio
 async def test_master_provider_initialization_failure_is_audited_without_name_error() -> None:
     audit = AsyncMock()
+    gateway = MagicMock()
+    gateway.stream_chat.side_effect = RuntimeError("provider unavailable")
     with patch(
-        "app.services.voice.master_orchestrator.get_provider",
-        side_effect=RuntimeError("provider unavailable"),
-    ), patch(
         "app.services.voice.master_orchestrator.record_generation_audit",
         audit,
     ), patch(
         "app.services.voice.master_orchestrator.settings"
     ) as settings:
         settings.ai_provider = "broken"
+        settings.ai_model_name = None
         settings.ai_retention_policy_version = "policy"
         with pytest.raises(RuntimeError, match="provider unavailable"):
-            async for _ in _orchestrator().stream_reply("hello", request_id="req"):
+            async for _ in _orchestrator(gateway).stream_reply("hello", request_id="req"):
                 pass
 
     event = audit.await_args.args[0]
@@ -48,20 +48,19 @@ async def test_master_audit_failure_does_not_mask_provider_failure() -> None:
         raise ValueError("provider failed")
         yield ("finish", "stop")
 
-    provider = MagicMock()
-    provider.stream_chat = fail_stream
+    gateway = MagicMock()
+    gateway.stream_chat = fail_stream
     with patch(
-        "app.services.voice.master_orchestrator.get_provider", return_value=provider
-    ), patch(
         "app.services.voice.master_orchestrator.record_generation_audit",
         AsyncMock(side_effect=OSError("audit down")),
     ), patch(
         "app.services.voice.master_orchestrator.settings"
     ) as settings:
         settings.ai_provider = "mock"
+        settings.ai_model_name = "test"
         settings.ai_retention_policy_version = "policy"
         with pytest.raises(ValueError, match="provider failed"):
-            async for _ in _orchestrator().stream_reply("hello"):
+            async for _ in _orchestrator(gateway).stream_reply("hello"):
                 pass
 
 
@@ -85,18 +84,17 @@ async def test_master_early_close_is_not_a_success_and_closes_provider_stream() 
             self.closed = True
 
     stream = _ClosableStream()
-    provider = MagicMock()
-    provider.stream_chat.return_value = stream
+    gateway = MagicMock()
+    gateway.stream_chat.return_value = stream
     audit = AsyncMock()
-    orchestrator = _orchestrator()
+    orchestrator = _orchestrator(gateway)
     with patch(
-        "app.services.voice.master_orchestrator.get_provider", return_value=provider
-    ), patch(
         "app.services.voice.master_orchestrator.record_generation_audit", audit
     ), patch(
         "app.services.voice.master_orchestrator.settings"
     ) as settings:
         settings.ai_provider = "mock"
+        settings.ai_model_name = "test"
         settings.ai_retention_policy_version = "policy"
         reply_stream = orchestrator.stream_reply("hello")
         assert await reply_stream.__anext__() == ("content", "partial")
@@ -120,20 +118,19 @@ async def test_master_close_cancellation_preserves_provider_error_and_audits() -
         async def aclose(self) -> None:
             raise __import__("asyncio").CancelledError()
 
-    provider = MagicMock()
-    provider.stream_chat.return_value = _BrokenClosableStream()
+    gateway = MagicMock()
+    gateway.stream_chat.return_value = _BrokenClosableStream()
     audit = AsyncMock()
     with patch(
-        "app.services.voice.master_orchestrator.get_provider", return_value=provider
-    ), patch(
         "app.services.voice.master_orchestrator.record_generation_audit", audit
     ), patch(
         "app.services.voice.master_orchestrator.settings"
     ) as settings:
         settings.ai_provider = "mock"
+        settings.ai_model_name = "test"
         settings.ai_retention_policy_version = "policy"
         with pytest.raises(ValueError, match="provider failed"):
-            async for _ in _orchestrator().stream_reply("hello"):
+            async for _ in _orchestrator(gateway).stream_reply("hello"):
                 pass
 
     event = audit.await_args.args[0]

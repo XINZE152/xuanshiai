@@ -1,7 +1,12 @@
-# 墨相师六维实时整理 WebSocket（2026-09-02）
+# 墨相师六维实时整理 WebSocket（2026-09-25）
 
 ## 变更记录
 
+- **2026-09-25，鉴权契约变更：** WebSocket 不再接受长期 access JWT query 参数。客户端必须先调用
+  `POST /api/v1/voice/ws-ticket`，再使用返回的 60 秒、单次 ticket 建立连接；服务端在
+  `accept()` 前消费 ticket，并复查登录 session 与账号状态。
+- **2026-09-25，临时音频访问：** 本地 `tts/`、`voice/tts/` 音频只返回带 300 秒 HMAC
+  签名的 URL；缺少、篡改或过期签名均不可读取。
 - **2026-09-02，破坏性变更：** `/api/v1/voice/moxiang-master` 不再接受
   `mode=profile_build`，统一改为 `mode=moxiang_journey`。旧 `progress`、
   `session_ready` 和聊天内即时确认候选已删除；客户端改处理 `journey_ready`、
@@ -12,16 +17,32 @@
 ## 1. 连接与鉴权
 
 **基本信息**：用于墨相师自然对话、最终文本/ASR 的异步候选抽取和六维进度推送。
-完整 URL：`GET wss://<host>/api/v1/voice/moxiang-master?token=<access_token>`；协议为
-WebSocket（无 HTTP 请求体）；需要登录，仅当前用户可访问自己的会话；成功握手
-`101 Switching Protocols`；消息是 UTF-8 JSON。
+连接前先用 Bearer access token 获取一次性凭证：
+
+```http
+POST /api/v1/voice/ws-ticket
+Authorization: Bearer <access_token>
+```
+
+成功响应为 `200 OK`：
+
+```json
+{"ticket":"<one-time-ticket>","expires_in":60}
+```
+
+随后连接：`GET wss://<host>/api/v1/voice/moxiang-master?ticket=<ticket>`；协议为
+WebSocket（无 HTTP 请求体），需要登录，仅当前用户可访问自己的会话；成功握手
+`101 Switching Protocols`；消息是 UTF-8 JSON。`/voice/ws-ticket` 不需要
+`Idempotency-Key`，Redis 不可用时返回 `503 AI_TEMPORARILY_UNAVAILABLE`。
 
 | 参数名 | 位置 | 类型 | 必填 | 默认值 | 校验规则 | 业务含义 | 合法/非法示例 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `token` | query | string | 是 | 无 | 有效 access JWT | 当前用户身份 | 合法：`?token=<jwt>`；非法：空值/过期 JWT |
+| `ticket` | query | string | 是 | 无 | 由 `/voice/ws-ticket` 签发；60 秒内且只能使用一次 | 当前用户的 WebSocket 临时身份 | 合法：`?ticket=<ticket>`；非法：空值、伪造、过期或重复 ticket |
 
-连接示例：`wss://api.example.com/api/v1/voice/moxiang-master?token=<access_token>`。
-无 HTTP body；缺失或失效 token 时以 `1008` 关闭。客户端不得把 token 写入日志。
+连接示例：`wss://api.example.com/api/v1/voice/moxiang-master?ticket=<ticket>`。
+客户端不得把 access token、ticket 或带签名的音频 URL 写入日志。缺失、无效、重复
+ticket，或 session 已撤销/账号已封禁时，在 `accept()` 前以 `1008` 关闭；Redis 或
+数据库不可用时以 `1011` 关闭。
 
 ## 2. 客户端消息
 
@@ -111,6 +132,20 @@ WebSocket（无 HTTP 请求体）；需要登录，仅当前用户可访问自�
 `build_invite`、`build_invite_resolved`、`confirm_card`、`publish_ready`、`ai_reply`、语音
 转写和错误消息沿用已有形状。邀请摘要只出现在正式邀请卡，不出现在聊天流。
 
+## 4.1 临时音频访问
+
+`listen` 返回的 `tts_audio.audio_url` 已由服务端签名。对于本地临时文件，URL 形如
+`/storage/uploads/tts/<file>.mp3?expires=<unix>&user=<user_id>&revision=<privacy_revision>&signature=<hmac>` 或
+`/storage/uploads/voice/tts/<file>.mp3?expires=<unix>&user=<user_id>&revision=<privacy_revision>&signature=<hmac>`；签名最长有效
+300 秒。`user` 是当前会话用户 ID，`revision` 是签发时读取的当前
+`privacy_revision`；HMAC 同时绑定规范化路径、`expires`、`user` 和 `revision`。
+这些参数由服务端生成，客户端必须完整使用返回 URL，不得删除、替换 query 参数、拼接自己的签名或把 URL 写入日志。
+
+- 只有本地 `tts/`、`voice/tts/` 路径进入站内签名边界；Provider 自有的外部音频 URL 原样返回，不改写其 query。
+- 下载时服务端先验签，再重新读取签名 `user` 的账号状态和当前 `privacy_revision`。缺少/篡改签名上下文、把 `user` 改成其他用户、旧 `revision`、撤回 AI consent、账号注销或过期 URL 均返回 `403`；注销后重新激活也不会使旧 URL 恢复访问。
+- 数据库不可用或无法确认账号状态/隐私修订返回 `503`；签名合法、状态和修订匹配且文件存在返回 `200`；文件已被 retention 清理返回 `404`。
+- ASR 上传音频在内存中直接调用 Provider，不生成可匿名读取的本地 ASR 文件。
+
 ## 4. 使用方法与业务规则
 
 1. 连接后先发 `session_start(mode=moxiang_journey)`；收到 `journey_ready` 再发对话或
@@ -126,17 +161,19 @@ WebSocket（无 HTTP 请求体）；需要登录，仅当前用户可访问自�
 6. 服务端必须显式启用 `ai_moxiang_journey_enabled`，且通过 `AiFeature.PROFILE` 的生产
    合规/provider/保留期门禁；禁用时不可回退到旧协议。
 7. 知遇每轮回复前按当前会话的整理进度、尚未确认的基础硬字段与已沉淀内容感知提问，
-   围绕空白处自然追问、不复述已确认信息（`build_context` 注入，纯聊模式不注入）。
+   围绕空白处自然追问、不复述已确认信息（`build_context` 注入）。
 
 ## 5. 错误与关闭
 
 | 传输层/业务码 | 触发条件 | 前端处理建议 |
 | --- | --- | --- |
-| close `1008` | token 缺失、无效或过期 | 重新登录后建立新连接 |
-| `AI_INPUT_INVALID` | 旧 mode、非法主体、空/过长文本、邀请参数错、重复接受 | 修正输入；旧客户端升级到 `moxiang_journey` |
+| close `1008` | ticket 缺失、无效、过期、重复，或 session/账号状态无效 | 重新获取 ticket；必要时重新登录 |
+| close `1011` | Redis 或数据库不可用，无法完成 ticket/状态校验 | 稍后重试，不要复用旧 ticket |
 | `AI_CONSENT_REQUIRED` | 授权缺失/撤回 | 引导重新授权 |
 | `AI_FEATURE_DISABLED` | 实时旅程或生产门禁未启用 | 展示不可用，不回退旧协议 |
 | `AI_TEMPORARILY_UNAVAILABLE` | 任务、数据库、ASR 或 provider 临时不可用 | 保留已显示进度，稍后重连；不要伪造进度 |
+| `AI_POLICY_DENIED` | `listen` 时账号撤回 AI consent、已注销，或签名 `user`/`revision` 已失效（含旧 revision） | 停止播放，不复用旧音频 URL；重新获取当前会话/音频 |
+| `AI_TEMPORARILY_UNAVAILABLE` | `listen` 时数据库故障，无法确认账号状态或当前 `privacy_revision` | 稍后重试，不复用旧音频 URL |
 
 错误示例：`{"type":"error","code":"AI_INPUT_INVALID","message":"请使用最新墨相师旅程"}`。
 

@@ -62,7 +62,7 @@ X-Request-ID: req_01J...                # 可选，1-128 位 [A-Za-z0-9._:-]，�
 
 ## 1. 查询与目标用户的资料合拍参考
 
-**基本信息**：返回当前用户对目标用户的 shadow 资料合拍参考；完整 URL `GET /api/v1/ai/compatibility/{target_user_id}`；HTTP Method `GET`；需要登录；请求 `Content-Type`：无请求体；响应 `Content-Type`：`application/json`；成功状态码 `200 OK`。
+**基本信息**：返回当前用户对目标用户的 shadow 资料合拍参考；完整 URL `GET /api/v1/ai/compatibility/{target_user_id}`；HTTP Method `GET`；需要登录；请求 `Content-Type`：无请求体；响应 `Content-Type`：`application/json`；成功状态码为 `200 OK`（已有可用快照）或 `202 Accepted`（未命中快照，已创建/复用异步精算任务）。
 
 ### 请求参数
 

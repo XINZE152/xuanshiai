@@ -154,9 +154,15 @@ async def test_ws_journey_full_chain_invite_confirm_publish_project(
 
     client = TestClient(app)
     token = _make_token()
+    ticket_response = client.post(
+        "/api/v1/voice/ws-ticket",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert ticket_response.status_code == 200, ticket_response.text
+    ticket = ticket_response.json()["ticket"]
     try:
         with client.websocket_connect(
-            f"/api/v1/voice/moxiang-master?token={token}"
+            f"/api/v1/voice/moxiang-master?ticket={ticket}"
         ) as ws:
             # 1) 会话建立：journey_ready + 时段化开场白（#1）。
             ws.send_json(

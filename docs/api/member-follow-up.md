@@ -500,12 +500,25 @@ POST /api/v1/admin/members/follow-ups/import
 
 依赖变更：新增第三方库 `openpyxl`（Excel 读写在服务端完成），已通过 `uv add openpyxl` 写入 `pyproject.toml` / `uv.lock`。
 
+### 4.1 跟进附件媒体签名（2026-09-27 匿名读取止损）
+
+既有端点 `GET /{member_id}/follow-ups` 与 `POST /{member_id}/follow-ups/media` 返回的 `images`/`voice_url` 是**带短期签名的 URL**：
+
+- URL 仍以 `/storage/uploads/{member_id}/...` 开头，追加 query 参数 `expires`、`kind`（固定 `admin`，查看者为后台账号）、`user`（签发时的管理员账号 id）、`revision`（固定 0）、`signature`（HMAC-SHA256）。
+- TTL **300 秒**：过期后不得重放旧 URL，**重新调用本模块接口获取新签名 URL**。
+- 签名绑定查看者（签发时的管理员账号）：该账号被停用后，已签发 URL 立即 `403`。
+- 直连旧 URL / 无签名 / 伪造 / 篡改 / 过期 → `403`；挂载层校验账号状态时数据库不可用 → `503`；**全链路无 `401`**。
+- 数据库仍保存原始 URL（零数据迁移），签名仅在响应层生成。
+
+前端交互提示：管理页面停留超过 5 分钟后，懒加载附件可能命中过期签名返回 `403`，应重新拉取跟进列表获取新 URL，而非原样重试旧 URL。
+
 ---
 
 ## 5. 变更记录
 
 | 日期 | 变更 | 变更前 | 变更后 | 影响范围 |
 |---|---|---|---|---|
+| 2026-09-27 | 跟进附件媒体匿名读取止损 | `images`/`voice_url` 返回原始 URL，知道 URL 即可匿名 `GET`（200） | 返回带短期签名（TTL 300s，含 `expires/kind/user/revision/signature` query）的 URL；直连旧 URL/无签名/过期/签发账号停用 → `403`，挂载层校验遇数据库故障 → `503`；数据库仍存原始 URL | `GET /{member_id}/follow-ups` 与 `POST /{member_id}/follow-ups/media` 两个既有端点；前端展示附件需在 URL 过期后重新拉取列表 |
 | 2026-09-11 | 跟进全览列表接口强化 | `GET /admin/members/follow-ups` 裸 SQL 返回弱类型 dict，仅支持 `search` | 强类型 `MemberFollowUpListPage`；新增 `keyword`/`intention_level`/`start_date`/`end_date`；行内新增 `member_code`/`avatar`/`matchmaker_name`/`method_label`/`intention_level`/`note` | 前端 `memberFollowUpList`；旧 `memberFollowUpsOverview`（客源线索页在用）行为不变 |
 | 2026-09-11 | 新增 3 个端点 | — | `GET /follow-ups/summary`、`GET /follow-ups/import-template`、`POST /follow-ups/import` | 会员CRM「跟进全览」「导入历史跟进」两页 |
 | 2026-09-11 | 新增依赖 | — | `openpyxl == 3.1.5` | 后端 Excel 解析/生成 |

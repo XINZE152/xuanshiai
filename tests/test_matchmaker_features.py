@@ -47,6 +47,15 @@ def test_matchmaker_paid_service_contracts() -> None:
         )
 
 
+def test_matchmaker_service_guards_and_audit_are_present() -> None:
+    import inspect
+    from app.services import matchmaker as service
+
+    assert "type" in inspect.getsource(service.activate_paid_service_order)
+    assert "matchmaker_service.activate" in inspect.getsource(service.activate_paid_service_order)
+    assert "matchmaker_service.status" in inspect.getsource(service.update_service_request)
+
+
 def test_matchmaker_routes_are_registered_and_require_authentication() -> None:
     paths = client.get("/openapi.json").json()["paths"]
     assert "/api/v1/matchmakers" in paths

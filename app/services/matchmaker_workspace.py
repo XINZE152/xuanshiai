@@ -79,10 +79,8 @@ from app.schemas.matchmaker_workspace import (
     WorkspaceMeetingRecordSummary,
     WorkspaceMeetingRequest,
     WorkspaceMeetingRequestPage,
-    WorkspaceIntroductionStatusUpdate,
     WorkspaceMeetingScheduleCreate,
     WorkspaceMeetingRecordStatusUpdate,
-    WorkspaceMeetingStatusUpdate,
     WorkspaceMetric,
 )
 

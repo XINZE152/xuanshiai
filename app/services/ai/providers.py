@@ -10,6 +10,7 @@ approval gate (``ai_policy_approved`` / ``ai_provider_approved`` / retention).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -19,7 +20,7 @@ from typing import Any
 from pydantic import SecretStr, ValidationError
 
 from app.core.config import settings
-from app.schemas.ai_profile import ProfileSubject, normalize_entry_category
+from app.schemas.ai_profile import PROFILE_ENTRY_CATEGORIES, ProfileSubject, normalize_entry_category
 from app.services.ai.audit import emit_ai_metric
 from app.services.ai.base import (
     AIProvider,
@@ -474,6 +475,23 @@ class MockAIProvider:
             yield ("content", f"这是 mock 回复。你刚才说：{preview}")
         yield ("finish", "stop")
 
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = False,
+    ) -> str:
+        """非流式确定性回复，文本与 stream_chat 的 content 段一致。"""
+        self._check_failure("chat")
+        last_user = ""
+        for item in reversed(messages):
+            if item.get("role") == "user":
+                last_user = item.get("content") or ""
+                break
+        preview = last_user.replace("\n", " ").strip()[:24] or "（空输入）"
+        if json_mode:
+            return '{"reply_text":"好的，记下啦。那你现在生活在哪个城市呀？"}'
+        return f"这是 mock 回复。你刚才说：{preview}"
     # ------------------------------------------------------------------
     # Deterministic fixture accessor (used by the acceptance test)
     # ------------------------------------------------------------------
@@ -636,14 +654,19 @@ def _drop_invalid_extract_item(scene: str, item: dict[str, Any]) -> None:
     """批次3 #9/#25：provider 边界丢弃非法条目时留痕，不再静默 continue。
 
     category 先经 :func:`normalize_entry_category` 归一；仍不合法的条目
-    被 Pydantic 拒绝后记 warning（含 prompt 场景与原始 category）并计入
+    被 Pydantic 拒绝后记 warning（仅记录受控元数据）并计入
     ``schema_invalid`` 指标，便于离线回归发现模型输出格式的漂移。
     """
+    content = str(item.get("content", ""))
+    content_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+    normalized_category = normalize_entry_category(item.get("category"))
+    category = normalized_category if normalized_category in PROFILE_ENTRY_CATEGORIES else "invalid"
     logger.warning(
-        "ai_extract_item_dropped scene=%s category=%r content_head=%r",
+        "ai_extract_item_dropped scene=%s category=%r content_len=%s content_sha256=%s",
         scene,
-        item.get("category"),
-        str(item.get("content", ""))[:40],
+        category,
+        len(content),
+        content_digest,
     )
     emit_ai_metric("schema_invalid", 1, {"scene": scene})
 
@@ -966,6 +989,49 @@ class _OpenAICompatProvider:
         content = response.choices[0].message.content
         return _parse_json_response(content)
 
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = False,
+    ) -> str:
+        """非流式 chat。只返回非空 content，不记录原文或供应商响应。"""
+        client = self._ensure_client()
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "max_tokens": self._max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            response = await client.chat.completions.create(**kwargs)
+        except (
+            _RateLimitError,
+            _APITimeoutError,
+            _APIConnectionError,
+            _AuthenticationError,
+            _PermissionDeniedError,
+            _BadRequestError,
+            _APIStatusError,
+            _APIError,
+        ) as exc:
+            raise self._map_openai_exception(exc) from exc
+        if not response.choices:
+            raise ProviderError(
+                code="AI_INPUT_INVALID",
+                message="provider 返回空 choices",
+                kind=ProviderErrorKind.NON_RETRYABLE,
+            )
+        content = response.choices[0].message.content
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderError(
+                code="AI_INPUT_INVALID",
+                message="provider 返回空内容",
+                kind=ProviderErrorKind.NON_RETRYABLE,
+            )
+        return content
+
     async def stream_chat(
         self,
         messages: list[dict[str, str]],
@@ -1084,20 +1150,24 @@ class _OpenAICompatProvider:
             field_key = item.get("field_key", "")
             if field_key not in request.allowlist:
                 continue
-            fields.append(
-                ExtractedField(
-                    field_key=field_key,
-                    subject=subject,
-                    value=item.get("value"),
-                    source_quote=item.get("source_quote"),
-                    confidence=_safe_confidence(item.get("confidence")),
-                    needs_confirmation=True,
-                    confirmation_status="suggested",
-                    schema_version=_PROFILE_SCHEMA_VERSION,
-                    prompt_version=_PROFILE_PROMPT_VERSION,
-                    policy_revision=request.policy_revision,
+            try:
+                fields.append(
+                    ExtractedField(
+                        field_key=field_key,
+                        subject=subject,
+                        value=item.get("value"),
+                        source_quote=item.get("source_quote"),
+                        confidence=_safe_confidence(item.get("confidence")),
+                        needs_confirmation=True,
+                        confirmation_status="suggested",
+                        schema_version=_PROFILE_SCHEMA_VERSION,
+                        prompt_version=_PROFILE_PROMPT_VERSION,
+                        policy_revision=request.policy_revision,
+                    )
                 )
-            )
+            except (ValidationError, ValueError):
+                _drop_invalid_extract_item("profile_extract", item)
+                continue
         # WP-P1：条目通道。category 先归一再校验（批次3 #9），content 由
         # ExtractedEntry 的 Pydantic 校验把关（9 枚举 + ≤200 字）；归一后
         # 仍非法的条目整条丢弃并留痕，不让坏数据进草稿。

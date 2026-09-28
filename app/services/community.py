@@ -46,6 +46,11 @@ from app.schemas.community import (
     PaperPlaneResponse,
     CommunityPostUpdate,
 )
+from app.services.media_access import (
+    MEDIA_CATEGORY_AUDIO,
+    sign_media_url,
+    strip_media_signature,
+)
 from app.services.community_media import (
     assert_owned_media_urls,
     bind_media,
@@ -1681,8 +1686,15 @@ def list_report_reasons() -> list[dict[str, str]]:
     return list(REPORT_REASONS)
 
 
-async def _paper_response(row: dict[str, Any]) -> PaperPlaneResponse:
+async def _paper_response(row: dict[str, Any], viewer: int) -> PaperPlaneResponse:
     duration = row.get("voice_duration_sec")
+    # 语音 URL 按当前查看者重签（响应层重签，DB 行保持原始 URL）；匿名查看
+    # 他人纸飞机时也一样，挂载层按该查看者账号状态验签。
+    voice_url = row.get("voice_url")
+    if voice_url:
+        voice_url = sign_media_url(
+            str(voice_url), category=MEDIA_CATEGORY_AUDIO, viewer=viewer
+        )
     return PaperPlaneResponse(
         id=int(row["id"]),
         content=row["content"] or "",
@@ -1691,7 +1703,7 @@ async def _paper_response(row: dict[str, Any]) -> PaperPlaneResponse:
         tags=_json_values(row.get("tags")),
         is_anonymous=bool(row["is_anonymous"]),
         reply_count=int(row.get("reply_count") or 0),
-        voice_url=row.get("voice_url"),
+        voice_url=voice_url,
         voice_duration_sec=int(duration) if duration is not None else None,
         created_at=row["created_at"],
     )
@@ -1782,7 +1794,10 @@ async def create_paper_plane(
                 "city": request.city,
                 "tags": json.dumps(request.tags, ensure_ascii=False),
                 "is_anonymous": int(request.is_anonymous),
-                "voice_url": request.voice_url,
+                # 提交边界剥离签名参数：DB 永远存原始 URL，读取端按当前查看者重签。
+                "voice_url": strip_media_signature(request.voice_url)
+                if request.voice_url
+                else None,
                 "voice_duration_sec": request.voice_duration_sec,
                 "expire_at": datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=24),
                 "moderation_status": 1 if decision.action != "manual_review" else 2,
@@ -1805,7 +1820,7 @@ async def create_paper_plane(
             text(_PAPER_SELECT + " WHERE id = :id"),
             {"id": plane_id},
         )
-        return await _paper_response(dict(created.mappings().one()))
+        return await _paper_response(dict(created.mappings().one()), viewer=user_id)
     except Exception:
         try:
             await db.rollback()
@@ -1839,7 +1854,7 @@ async def list_paper_planes(db: AsyncSession, user_id: int, page: int, page_size
         ),
         {"user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size},
     )
-    return [await _paper_response(dict(row)) for row in result.mappings().all()]
+    return [await _paper_response(dict(row), viewer=user_id) for row in result.mappings().all()]
 
 
 def _conversation_response(row: dict[str, Any], viewer_id: int) -> PaperPlaneConversationResponse:
@@ -2060,6 +2075,16 @@ async def _require_plane_conversation(
     return dict(row)
 
 
+def _signed_message_media_url(media_url: str | None, viewer: int) -> str | None:
+    """会话消息语音（type=3）按当前查看者重签；幂等剥离旧签名，存量原始行
+    与已签行均兼容；非 audio 类 URL 原样返回。"""
+    if not media_url:
+        return media_url
+    return sign_media_url(
+        str(media_url), category=MEDIA_CATEGORY_AUDIO, viewer=viewer
+    )
+
+
 async def list_paper_plane_messages(
     db: AsyncSession, user_id: int, conversation_id: int, page: int, page_size: int
 ) -> list[PaperPlaneMessageResponse]:
@@ -2091,7 +2116,7 @@ async def list_paper_plane_messages(
                 mine=int(row["from_user_id"]) == user_id,
                 content=row["content"] or "",
                 type=int(row["type"]),
-                media_url=row.get("media_url"),
+                media_url=_signed_message_media_url(row.get("media_url"), user_id),
                 voice_duration_sec=int(duration) if duration is not None else None,
                 created_at=row["created_at"],
             )
@@ -2140,6 +2165,10 @@ async def send_paper_plane_message(
                 raise HTTPException(409, detail="图片媒体已绑定或不可重复发送")
         media_url = str(media_rows[0]["file_url"])
         media_ids = [int(media_rows[0]["id"])]
+    elif request.type == 3 and media_url:
+        # 语音（type=3）提交边界剥离签名参数：DB 永远存原始 URL，读取端按
+        # 当前查看者重签（客户端提交的是 upload_media 的签名 URL）。
+        media_url = strip_media_signature(media_url)
     preview = request.content if request.type == 1 else ("[图片]" if request.type == 2 else "[语音]")
     result = await db.execute(
         text(
@@ -2193,7 +2222,7 @@ async def send_paper_plane_message(
         mine=int(row["from_user_id"]) == user_id,
         content=row["content"] or "",
         type=int(row["type"]),
-        media_url=row.get("media_url"),
+        media_url=_signed_message_media_url(row.get("media_url"), user_id),
         voice_duration_sec=int(duration) if duration is not None else None,
         created_at=row["created_at"],
     )

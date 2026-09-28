@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.social import (
@@ -46,6 +47,7 @@ from app.schemas.admin import (
     ReportReviewResponse,
 )
 from app.services.discovery import _ensure_target, _target_rows
+from app.services.media_access import MEDIA_CATEGORY_AUDIO, sign_media_url, strip_media_signature
 from app.services.notifications import emit_notification
 from app.services.profile import _calculate_age
 from app.services.restrictions import ensure_user_allowed
@@ -217,8 +219,74 @@ async def list_chat_sessions(db: AsyncSession, user_id: int, page: int, page_siz
     return ChatSessionPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
-def _message(row: dict[str, Any]) -> ChatMessageResponse:
+_CHAT_MESSAGE_IDEMPOTENCY_INDEX = "uq_chat_message_sender_session_client_message"
+
+
+def _is_chat_message_idempotency_conflict(exc: IntegrityError) -> bool:
+    original = exc.orig
+    error_code = getattr(original, "errno", None)
+    if error_code is None:
+        arguments = getattr(original, "args", ())
+        if arguments:
+            try:
+                error_code = int(arguments[0])
+            except (TypeError, ValueError):
+                return False
+    return (
+        error_code == 1062
+        and _CHAT_MESSAGE_IDEMPOTENCY_INDEX in str(original).lower()
+    )
+
+
+async def _find_client_message(
+    db: AsyncSession, user_id: int, session_id: int, client_message_id: str
+) -> dict[str, Any] | None:
+    result = await db.execute(
+        text("""SELECT id, session_id, from_user_id, to_user_id, type, content, media_url,
+            client_message_id, is_read, revoked_at, created_at FROM chat_message
+            WHERE from_user_id = :user_id AND session_id = :session_id
+              AND client_message_id = :client_message_id LIMIT 1"""),
+        {
+            "user_id": user_id,
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+        },
+    )
+    row = result.mappings().first()
+    return dict(row) if row else None
+
+
+def _idempotent_message_response(
+    row: dict[str, Any], request: ChatMessageCreate, viewer: int
+) -> ChatMessageResponse:
+    # DB 存的是剥离签名后的原始 URL，与客户端提交的签名 URL 比较前先归一化。
+    submitted_media = (
+        strip_media_signature(request.media_url) if request.media_url else request.media_url
+    )
+    if (
+        int(row["type"]) != request.type
+        or row.get("content") != request.content
+        or row.get("media_url") != submitted_media
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="client_message_id 已用于不同的消息内容",
+        )
+    return _message(row, viewer=viewer)
+
+
+def _message(row: dict[str, Any], viewer: int | None = None) -> ChatMessageResponse:
+    """消息投影；``viewer`` 为当前登录用户时按其重签语音 media_url（type=3）。
+
+    ``viewer=None`` 仅限无 users 语义的调用方（如后台审计视图）——此类调用
+    保持原始 URL（直连 403），管理端语音回放限制见 message_admin.py 登记。
+    """
     revoked = row.get("revoked_at") is not None
+    media_url = None if revoked else row.get("media_url")
+    if viewer is not None and media_url:
+        media_url = sign_media_url(
+            str(media_url), category=MEDIA_CATEGORY_AUDIO, viewer=viewer
+        )
     return ChatMessageResponse(
         id=int(row["id"]),
         session_id=int(row["session_id"]),
@@ -226,7 +294,8 @@ def _message(row: dict[str, Any]) -> ChatMessageResponse:
         to_user_id=int(row["to_user_id"]),
         type=int(row["type"]),
         content="消息已撤回" if revoked else row.get("content"),
-        media_url=None if revoked else row.get("media_url"),
+        media_url=media_url,
+        client_message_id=row.get("client_message_id"),
         is_read=bool(row["is_read"]),
         revoked=revoked,
         is_recalled=revoked,
@@ -235,18 +304,61 @@ def _message(row: dict[str, Any]) -> ChatMessageResponse:
     )
 
 
-async def list_messages(db: AsyncSession, user_id: int, session_id: int, page: int, page_size: int) -> list[ChatMessageResponse]:
+async def list_messages(
+    db: AsyncSession, user_id: int, session_id: int, page: int, page_size: int
+) -> list[ChatMessageResponse]:
     await _session(db, user_id, session_id)
-    result = await db.execute(text("SELECT id, session_id, from_user_id, to_user_id, type, content, media_url, is_read, revoked_at, created_at FROM chat_message WHERE session_id = :session_id ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"), {"session_id": session_id, "limit": page_size, "offset": (page - 1) * page_size})
-    return [_message(dict(row)) for row in reversed(result.mappings().all())]
+    result = await db.execute(
+        text("""SELECT id, session_id, from_user_id, to_user_id, type, content, media_url,
+            client_message_id, is_read, revoked_at, created_at FROM chat_message
+            WHERE session_id = :session_id ORDER BY created_at DESC, id DESC
+            LIMIT :limit OFFSET :offset"""),
+        {"session_id": session_id, "limit": page_size, "offset": (page - 1) * page_size},
+    )
+    return [_message(dict(row), viewer=user_id) for row in reversed(result.mappings().all())]
 
 
-async def send_message(db: AsyncSession, user_id: int, session_id: int, request: ChatMessageCreate) -> ChatMessageResponse:
+async def send_message(
+    db: AsyncSession, user_id: int, session_id: int, request: ChatMessageCreate
+) -> ChatMessageResponse:
     await ensure_user_allowed(db, user_id, "MESSAGE_RESTRICTED")
     session, target_id = await _session(db, user_id, session_id)
     await _ensure_message_privacy(db, user_id, target_id)
-    result = await db.execute(text("""INSERT INTO chat_message (session_id, from_user_id, to_user_id, type, content, media_url)
-        VALUES (:session_id, :from_id, :to_id, :type, :content, :media_url)"""), {"session_id": session_id, "from_id": user_id, "to_id": target_id, **request.model_dump()})
+
+    client_message_id = request.client_message_id
+    if client_message_id is not None:
+        existing = await _find_client_message(db, user_id, session_id, client_message_id)
+        if existing is not None:
+            return _idempotent_message_response(existing, request, viewer=user_id)
+
+    try:
+        inserted = await db.execute(
+            text("""INSERT INTO chat_message
+                (session_id, from_user_id, to_user_id, type, content, media_url, client_message_id)
+                VALUES (:session_id, :from_id, :to_id, :type, :content, :media_url,
+                        :client_message_id)"""),
+            {
+                "session_id": session_id,
+                "from_id": user_id,
+                "to_id": target_id,
+                "type": request.type,
+                "content": request.content,
+                # 提交边界剥离签名参数：DB 永远存原始 URL，读取端按当前查看者重签。
+                "media_url": strip_media_signature(request.media_url)
+                if request.media_url
+                else request.media_url,
+                "client_message_id": client_message_id,
+            },
+        )
+    except IntegrityError as exc:
+        if client_message_id is None or not _is_chat_message_idempotency_conflict(exc):
+            raise
+        await db.rollback()
+        existing = await _find_client_message(db, user_id, session_id, client_message_id)
+        if existing is None:
+            raise
+        return _idempotent_message_response(existing, request, viewer=user_id)
+
     preview = request.content if request.type == 1 else "[媒体消息]"
     unread_field = "unread_count_user1" if session["user1_id"] == target_id else "unread_count_user2"
     await db.execute(text(f"""UPDATE chat_session SET last_message = :last_message,
@@ -258,12 +370,14 @@ async def send_message(db: AsyncSession, user_id: int, session_id: int, request:
         })
     await emit_notification(
         db, recipient_user_id=target_id, actor_user_id=user_id, event_type="message",
-        title="?????", content=preview, target_type="chat_session",
+        title="收到一条新消息", content=preview, target_type="chat_session",
         target_id=session_id, payload={"message_type": request.type},
     )
     await db.commit()
-    created = await db.execute(text("SELECT id, session_id, from_user_id, to_user_id, type, content, media_url, is_read, revoked_at, created_at FROM chat_message WHERE id = :id"), {"id": result.lastrowid})
-    return _message(dict(created.mappings().one()))
+    created = await db.execute(text("""SELECT id, session_id, from_user_id, to_user_id, type,
+        content, media_url, client_message_id, is_read, revoked_at, created_at
+        FROM chat_message WHERE id = :id"""), {"id": inserted.lastrowid})
+    return _message(dict(created.mappings().one()), viewer=user_id)
 
 
 async def mark_messages_read(db: AsyncSession, user_id: int, session_id: int) -> None:
@@ -276,7 +390,7 @@ async def mark_messages_read(db: AsyncSession, user_id: int, session_id: int) ->
 
 async def recall_message(db: AsyncSession, user_id: int, message_id: int) -> ChatMessageResponse:
     result = await db.execute(text("""SELECT id, session_id, from_user_id, to_user_id, type,
-        content, media_url, is_read, revoked_at, created_at
+        content, media_url, client_message_id, is_read, revoked_at, created_at
         FROM chat_message WHERE id = :id AND from_user_id = :user_id"""), {"id": message_id, "user_id": user_id})
     row = result.mappings().first()
     if not row:
@@ -289,12 +403,12 @@ async def recall_message(db: AsyncSession, user_id: int, message_id: int) -> Cha
         row["revoked_at"] = refreshed.scalar()
     await emit_notification(
         db, recipient_user_id=int(row["to_user_id"]), actor_user_id=user_id,
-        event_type="message_recalled", title="?????", content="?????????",
+        event_type="message_recalled", title="消息已撤回", content="对方撤回了一条消息",
         target_type="chat_session", target_id=int(row["session_id"]),
         payload={"message_id": message_id},
     )
     await db.commit()
-    return _message(dict(row))
+    return _message(dict(row), viewer=user_id)
 
 
 async def revoke_message(db: AsyncSession, user_id: int, message_id: int) -> None:
@@ -1239,11 +1353,11 @@ async def list_messages_cursor(db: AsyncSession, user_id: int, session_id: int, 
     condition = "AND id < :cursor" if cursor is not None else ""
     params = {"session_id": session_id, "cursor": cursor, "limit": page_size + 1}
     rows = (await db.execute(text(f"""SELECT id, session_id, from_user_id, to_user_id, type, content, media_url,
-        is_read, revoked_at, created_at FROM chat_message WHERE session_id = :session_id {condition}
+        client_message_id, is_read, revoked_at, created_at FROM chat_message WHERE session_id = :session_id {condition}
         ORDER BY id DESC LIMIT :limit"""), params)).mappings().all()
     has_more = len(rows) > page_size
     selected = rows[:page_size]
-    items = [_message(dict(row)) for row in reversed(selected)]
+    items = [_message(dict(row), viewer=user_id) for row in reversed(selected)]
     return ChatMessagePage(items=items, next_cursor=int(selected[-1]["id"]) if has_more and selected else None, has_more=has_more)
 
 
@@ -1274,8 +1388,8 @@ async def create_chat_session_request(db: AsyncSession, user_id: int, session_id
          "expire_at": expire_at})
     await emit_notification(
         db, recipient_user_id=target_id, actor_user_id=user_id,
-        event_type="chat_session_request", title="??????",
-        content="????????????", target_type="chat_session_request",
+        event_type="chat_session_request", title="新的会话请求",
+        content="对方向你发起了会话请求，请及时处理", target_type="chat_session_request",
         target_id=int(result.lastrowid), payload={"request_type": request.request_type},
     )
     await db.commit()
@@ -1311,8 +1425,8 @@ async def respond_chat_session_request(db: AsyncSession, user_id: int, request_i
     recipient_id = int(row["requester_id"]) if user_id == int(row["responder_id"]) else int(row["responder_id"])
     await emit_notification(
         db, recipient_user_id=recipient_id, actor_user_id=user_id,
-        event_type="chat_session_request_result", title="????????",
-        content=f"????????{status}", target_type="chat_session_request",
+        event_type="chat_session_request_result", title="会话请求处理结果",
+        content=f"会话请求状态更新：{status}", target_type="chat_session_request",
         target_id=request_id, payload={"status": status, "request_type": row["request_type"]},
     )
     await db.commit()

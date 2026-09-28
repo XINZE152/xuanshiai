@@ -58,7 +58,8 @@ outputs
 .worktrees/
 .scripts/
 
-scripts/
+scripts/*
+!scripts/reproduce_upload_exposure.py
 artifacts/
 
 # Local runtime logs

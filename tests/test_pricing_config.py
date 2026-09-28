@@ -18,10 +18,10 @@ def test_point_cost_override_is_per_product() -> None:
 
 def test_mock_wechat_payment_is_rejected_outside_test_environments() -> None:
     with pytest.raises(ValueError, match="微信支付 Mock"):
-        Settings(_env_file=None, environment="production", auto_init_db=False, wechat_payment_mode="mock")
+        Settings(_env_file=None, environment="production", auto_init_db=False, live_provider="tencent", wechat_payment_mode="mock")
 
 
 def test_real_wechat_payment_mode_is_available_for_production() -> None:
-    configured = Settings(_env_file=None, environment="production", auto_init_db=False, wechat_payment_mode="real")
+    configured = Settings(_env_file=None, environment="production", auto_init_db=False, live_provider="tencent", wechat_payment_mode="real")
 
     assert configured.wechat_payment_mode == "real"

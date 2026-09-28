@@ -175,6 +175,11 @@ async def schedule_meeting(db: AsyncSession, admin: CurrentUser, request_id: int
         raise HTTPException(404, detail="约见申请不存在")
     if row["status"] != "ACCEPTED":
         raise HTTPException(409, detail="只有双方接受的约见申请才能安排约会")
+    active = await db.execute(text("""SELECT id FROM meeting_record
+        WHERE request_id = :request_id AND status IN ('SCHEDULED', 'REMINDED', 'CHECKED_IN')
+        LIMIT 1 FOR UPDATE"""), {"request_id": request_id})
+    if active.scalar():
+        raise HTTPException(409, detail="该约见申请已有进行中的安排")
     result = await db.execute(text("""INSERT INTO meeting_record
         (request_id, organizer_id, organization_id, scheduled_at, location, member_visible, sms_remind)
         VALUES (:request_id, :organizer_id, :organization_id, :scheduled_at, :location, :member_visible, :sms_remind)"""), {
@@ -185,6 +190,11 @@ async def schedule_meeting(db: AsyncSession, admin: CurrentUser, request_id: int
     })
     meeting_id = int(result.lastrowid)
     await db.execute(text("UPDATE meeting_request SET status = 'ACCEPTED', updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"id": request_id})
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id, reason)
+        VALUES (:actor, 'meeting.schedule', 'meeting_record', :meeting_id, '安排约见')"""), {
+        "actor": admin.id, "meeting_id": meeting_id,
+    })
     await db.commit()
     result = await db.execute(text("""SELECT id, request_id, organizer_id, organization_id,
         scheduled_at, location, status, cancel_reason, member_visible, sms_remind, created_at, updated_at

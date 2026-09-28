@@ -196,7 +196,7 @@ Authorization: Bearer <access_token>
 | `status` | string | 是 | 不适用 | `queued` / `running` / `ready` / `partial` / `applied` / `failed`。读取不返回 `discarded` | `"ready"` |
 | `expected_revision` | integer | 是 | 不适用 | 写入时必须原样提交；新建为 1，每次成功 apply 后 +1 | `1` |
 | `source_revision_id` | integer/null | 是 | 尚未绑定成稿版本 | 生成该草稿所用的个人画像 revision id | `88` |
-| `prompt_version` | string/null | 是 | 尚未生成 | 提示词版本 | `"profile-card-summarize-v1"` |
+| `prompt_version` | string/null | 是 | 尚未生成 | 提示词版本 | `"profile-card-summarize-v2"` |
 | `schema_version` | string/null | 是 | 尚未生成 | 草稿 schema 版本 | `"profile-card-summarize-v1"` |
 | `fields` | object | 是 | 不适用 | 五个开放文本槽，见下表 |  |
 | `fields.self_intro` | object | 是 | 不适用 | 自我介绍候选 |  |
@@ -223,7 +223,7 @@ Authorization: Bearer <access_token>
   "status": "ready",
   "expected_revision": 1,
   "source_revision_id": 88,
-  "prompt_version": "profile-card-summarize-v1",
+  "prompt_version": "profile-card-summarize-v2",
   "schema_version": "profile-card-summarize-v1",
   "fields": {
     "self_intro": {

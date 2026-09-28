@@ -35,15 +35,19 @@ def list_provinces() -> RegionListResponse:
 
 
 def list_cities(province_code: str) -> RegionListResponse:
-    province = next((item for item in _REGIONS if str(item.get("code")) == province_code), None)
+    # Accept padded route codes (e.g. "110000") by truncating to the tree code ("11").
+    wanted = str(province_code)[:2]
+    province = next((item for item in _REGIONS if str(item.get("code")) == wanted), None)
     if province is None:
         raise HTTPException(404, detail="省份编码不存在")
     return _response(province.get("children", []))
 
 
 def list_districts(city_code: str) -> RegionListResponse:
+    # Accept padded route codes (e.g. "110100") by truncating to the tree code ("1101").
+    wanted = str(city_code)[:4]
     for province in _REGIONS:
-        city = next((item for item in province.get("children", []) if str(item.get("code")) == city_code), None)
+        city = next((item for item in province.get("children", []) if str(item.get("code")) == wanted), None)
         if city is not None:
             return _response(city.get("children", []))
     raise HTTPException(404, detail="城市编码不存在")

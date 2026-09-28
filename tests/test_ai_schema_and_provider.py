@@ -7,6 +7,9 @@ schema validation through the Gateway, stable error shapes).
 
 from __future__ import annotations
 
+import hashlib
+import logging
+
 import pytest
 from pydantic import ValidationError
 
@@ -110,6 +113,9 @@ def test_production_legacy_ai_enabled_requires_approvals() -> None:
         Settings(
             _env_file=None,
             environment="production",
+            debug=False,
+            docs_enabled=False,
+            secret_key="unit-test-secret-key-0123456789abcdef",
             auto_init_db=False,
             live_provider="tencent",
             sms_provider="disabled",
@@ -254,6 +260,39 @@ async def test_schema_invalid_result_is_non_retryable_input_error() -> None:
     assert outcome.retryable is False
     assert outcome.error_code == "AI_INPUT_INVALID"
     assert outcome.result is None
+
+
+def test_invalid_extract_log_redacts_content_and_keeps_safe_metadata(caplog) -> None:
+    from app.services.ai import providers
+    from app.services.ai.audit import metric_snapshot
+
+    sensitive_content = "用户原文：请记录这段绝不能进入日志的内容"
+    category = "interests"
+
+    with caplog.at_level(logging.WARNING, logger=providers.logger.name):
+        providers._drop_invalid_extract_item(
+            "profile_entry",
+            {"category": category, "content": sensitive_content},
+        )
+
+    log_text = caplog.text
+    assert sensitive_content not in log_text
+    assert "profile_entry" in log_text
+    assert "category='interests'" in log_text
+    assert f"content_len={len(sensitive_content)}" in log_text
+    assert hashlib.sha256(sensitive_content.encode("utf-8")).hexdigest()[:12] in log_text
+    assert metric_snapshot()["schema_invalid"][-1] == (
+        1.0,
+        {"scene": "profile_entry"},
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=providers.logger.name):
+        providers._drop_invalid_extract_item(
+            "profile_entry",
+            {"category": sensitive_content, "content": sensitive_content},
+        )
+    assert sensitive_content not in caplog.text
+    assert "category='invalid'" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -128,6 +128,10 @@ python database_setup_marriage.py
 
 该脚本使用 `CREATE TABLE IF NOT EXISTS`，但生产环境仍应先备份并在发布窗口执行；真实支付、提现和第三方回调配置不能使用开发环境 Mock。
 
+### 聊天消息幂等键迁移
+
+生产/预发布环境保持 `AUTO_INIT_DB=false`，发布前对已选定并备份的目标库执行 `migrations/chat/20260923_01_chat_message_idempotency_up.sql`，再执行对应 `verify.sql` 并按 `migrations/chat/README.md` 核验；不得在未确认目标环境前执行。开发/测试初始化会通过 `database_setup_marriage.py` 幂等补齐该列与唯一键。回滚步骤见同目录 `README.md`，down 会删除新列中已写入的幂等键。
+
 生产或预发布环境必须配置：
 
 ```env
@@ -217,6 +221,17 @@ docker compose -f compose.ai-test.yml down -v --remove-orphans
 ```
 
 如果服务停在 `Created` 或健康检查异常，先执行 `docker compose -f compose.ai-test.yml ps --all` 和 `docker compose -f compose.ai-test.yml logs mysql redis worker-a worker-b`；确认只涉及 `xuanshiai-ai-test-*` 后，再执行上面的 `down -v` 重新建立干净的测试卷。
+
+### 4.1 测试分层与无数据库 CI
+
+测试按依赖和风险分层：
+
+- `tests/test_*.py` 为默认单元/契约集，优先使用 fake session、mock 和静态契约检查，不连接真实 MySQL/Redis。少数数据库场景（例如 `tests/test_community_features.py`）只有在显式设置 `ENVIRONMENT=testing` 和专用 `COMMUNITY_TEST_DATABASE_URL` 时才启用，并且只允许使用隔离测试库。
+- `tests/integration/` 为集成测试，包含专用 MySQL/Redis、schema、迁移和 Worker 验收；不得在普通单测或 CI 无数据库作业中运行。
+- `tests/live/` 为已部署服务/真实 HTTP 冒烟测试，需要人工提供目标环境，不属于默认 CI。
+- `scripts/reproduce_upload_exposure.py` 是手动安全风险证据脚本，使用 `TemporaryDirectory` + `TestClient`/ASGI 隔离文件，不属于 pytest 自动发现；它预期证明当前静态上传目录的匿名可读行为，不应被改写为“通过”断言。
+
+后端无数据库定向 CI 见 `.github/workflows/backend-ci.yml`：配置 `ENVIRONMENT=testing`、`AUTO_INIT_DB=false` 和不可达数据库地址，不启动数据库服务、不提供真实数据库凭据；仅针对消息/媒体改动域运行 Ruff 与四个对应的 FakeSession/契约测试文件。它不是全仓单测或全仓 Ruff 通过的证明。全量无集成检查另用 `ruff check .` 和 `pytest tests --ignore=tests/integration --ignore=tests/live --ignore=tests/manual -q`；本轮本机执行结果分别为 56 项存量 Ruff 错误及 6 个失败（2129 通过、6 跳过），需后续独立收敛。对应的逐项责任、失败信号和回归命令见 [`docs/TEST_GATE_HISTORY.md`](./TEST_GATE_HISTORY.md)。需要真实数据库的验证必须另建隔离作业和专用连接串，禁止写入开发/生产库。
 
 ## 五、测试与代码检查
 
