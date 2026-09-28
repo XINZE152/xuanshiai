@@ -130,13 +130,14 @@ async def admin_orders(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     status: int | None = Query(None, ge=0, le=3), user_id: int | None = Query(None, ge=1),
     order_no: str | None = Query(None, min_length=1, max_length=64),
+    product_name: str | None = Query(None, max_length=128),
     start_time: str | None = Query(None, max_length=10, description="开始日期 YYYY-MM-DD（兼容前端空字符串）"),
     end_time: str | None = Query(None, max_length=10, description="结束日期 YYYY-MM-DD（兼容前端空字符串）"),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> PaymentOrderAdminPage:
     admin.require("finance.read")
-    return await admin_list_orders(db, page, page_size, status, user_id, order_no, start_time, end_time)
+    return await admin_list_orders(db, page, page_size, status, user_id, order_no, product_name, start_time, end_time)
 
 
 @admin_router.get("/withdrawals", response_model=WithdrawalAdminPage, summary="后台分页查询提现")

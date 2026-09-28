@@ -376,7 +376,7 @@ async def review_withdrawal(db: AsyncSession, admin: CurrentUser, withdrawal_id:
     return _withdrawal(result.mappings().one())
 
 
-async def admin_list_orders(db: AsyncSession, page: int, page_size: int, status: int | None = None, user_id: int | None = None, order_no: str | None = None, start_time: str | None = None, end_time: str | None = None) -> PaymentOrderAdminPage:
+async def admin_list_orders(db: AsyncSession, page: int, page_size: int, status: int | None = None, user_id: int | None = None, order_no: str | None = None, product_name: str | None = None, start_time: str | None = None, end_time: str | None = None) -> PaymentOrderAdminPage:
     where = ["1 = 1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
     if status is not None:
@@ -388,6 +388,9 @@ async def admin_list_orders(db: AsyncSession, page: int, page_size: int, status:
     if order_no:
         where.append("po.order_no = :order_no")
         params["order_no"] = order_no
+    if product_name:
+        where.append("po.product_name LIKE :product_name")
+        params["product_name"] = f"%{product_name}%"
     if start_time:
         where.append("po.created_at >= CONCAT(:start_time, ' 00:00:00')")
         params["start_time"] = start_time

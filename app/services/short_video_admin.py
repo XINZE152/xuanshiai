@@ -583,6 +583,7 @@ async def list_homepages(db: AsyncSession, page: int, page_size: int, keyword: s
     items = [
         VideoHomepageItem(
             id=int(r["id"]),
+            user_id=int(r["user_id"]),
             nickname=r["nickname"],
             wechat=r["wechat"],
             bio=r["bio"],
@@ -632,6 +633,7 @@ async def _get_homepage(db: AsyncSession, homepage_id: int) -> VideoHomepageItem
     r = row
     return VideoHomepageItem(
         id=int(r["id"]),
+        user_id=int(r["user_id"]),
         nickname=r["nickname"],
         wechat=r["wechat"],
         bio=r["bio"],

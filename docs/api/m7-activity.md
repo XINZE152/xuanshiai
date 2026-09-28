@@ -126,7 +126,9 @@
 
 ### 3.1 列表 `GET /admin/activity-signups`
 
-参数：`activity_id`、`keyword`（昵称/手机/真名）、`status`（0 待付 / 1 已审核 / 2 取消 / 3 退款）、`pay_status`、`checked_in`、`in_crm`、`page` / `page_size`。
+参数：`activity_id`、`keyword`（昵称/手机/真名）、`search_by`（`nickname` / `phone`）、`status`（0 待审 / 1 已审核 / 2 取消 / 3 未通过）、`first_signup`、`gender`、`pay_status`（`free` / `paid` / `unpaid`）、`checked_in`、`signup_from` / `signup_to`（`YYYY-MM-DD`）、`page` / `page_size`。
+
+**变更记录（2026-09-28）**：新增跨活动查询和服务端筛选参数，旧的 `activity_id` 查询方式保持兼容；前端不再只拉取前 100 条后本地筛选。
 
 响应：`ActivitySignupAdminPage`：
 
