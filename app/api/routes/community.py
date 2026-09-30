@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import (
     CurrentUser,
     get_current_user,
+    get_face_verified_user,
     get_realname_verified_user,
     get_verified_user,
 )
@@ -206,7 +207,7 @@ async def post(
         min_length=8,
         max_length=128,
     ),
-    current: CurrentUser = Depends(get_realname_verified_user),
+    current: CurrentUser = Depends(get_face_verified_user),
     db: AsyncSession = Depends(get_db),
 ) -> CommunityPostResponse:
     return await _create_idempotently(
@@ -257,7 +258,7 @@ async def feed(
 @router.put("/community/posts/{post_id}", response_model=CommunityPostResponse, summary="修改动态并重新提交审核")
 async def update_post_route(
     post_id: int = Path(..., ge=1), body: CommunityPostUpdate = Body(...),
-    current: CurrentUser = Depends(get_realname_verified_user), db: AsyncSession = Depends(get_db),
+    current: CurrentUser = Depends(get_face_verified_user), db: AsyncSession = Depends(get_db),
 ) -> CommunityPostResponse:
     return await update_post(db, current.id, post_id, body)
 

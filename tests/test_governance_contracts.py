@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.api.dependencies import CurrentUser, get_realname_verified_user
+from app.api.dependencies import CurrentUser, get_face_verified_user, get_realname_verified_user
 from app.main import app
 from app.schemas.admin import ReportReviewRequest
 from app.schemas.restrictions import RestrictionCreate
@@ -48,15 +48,22 @@ def test_chat_response_keeps_legacy_revoke_field_and_new_fields() -> None:
     assert response.is_recalled is True
 
 
-def test_double_verification_requires_realname_and_face() -> None:
+def test_publish_requires_realname_and_face() -> None:
+    """发布门槛：实名 + 人脸；常规互动只要求实名。"""
     import asyncio
 
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException):
-        asyncio.run(get_realname_verified_user(CurrentUser(1, 1, "13800000000", 1, 2, 0)))
-    assert asyncio.run(get_realname_verified_user(CurrentUser(1, 1, "13800000000", 1, 2, 1))).id == 1
+        asyncio.run(get_face_verified_user(CurrentUser(1, 1, "13800000000", 1, 2, 0)))
+    assert asyncio.run(get_face_verified_user(CurrentUser(1, 1, "13800000000", 1, 2, 1))).id == 1
 
+
+def test_regular_interactions_only_require_realname() -> None:
+    import asyncio
+
+    current = CurrentUser(1, 1, "13800000000", 1, 2, 0)
+    assert asyncio.run(get_realname_verified_user(current)).id == 1
 
 def test_report_restriction_action_requires_explicit_penalty_fields() -> None:
     with pytest.raises(ValidationError):

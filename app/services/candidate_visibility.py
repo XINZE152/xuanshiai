@@ -43,11 +43,14 @@ class CandidateContext:
     profile_complete: bool = True
     media_approved: bool = True
     blocked: bool = False
+    # profile_visibility 档位：all / friends / only_me。
+    # friends 语义是「双方已匹配」（user_match.status IN (1,2)），不是关注关系。
+    profile_visibility: str = "all"
+    paired_with_viewer: bool = False
 
     @classmethod
     def visible(cls, user_id: int, who_can_see_me: int, **overrides: bool) -> CandidateContext:
         return cls(user_id=user_id, who_can_see_me=who_can_see_me, **overrides)
-
 
 @dataclass(frozen=True, slots=True)
 class VisibilityDecision:
@@ -84,6 +87,12 @@ def evaluate_visibility(
         return VisibilityDecision(False, "PROFILE_INCOMPLETE")
     if not candidate.media_approved:
         return VisibilityDecision(False, "MEDIA_REVIEW_PENDING")
+    if candidate.profile_visibility == "only_me":
+        return VisibilityDecision(False, "PROFILE_VISIBILITY_ONLY_ME")
+    if candidate.profile_visibility == "friends" and not candidate.paired_with_viewer:
+        return VisibilityDecision(False, "PROFILE_VISIBILITY_FRIENDS_ONLY")
+    if candidate.profile_visibility not in ("all", "friends", "only_me"):
+        return VisibilityDecision(False, "UNKNOWN_PROFILE_VISIBILITY")
     if candidate.who_can_see_me == 4:
         return VisibilityDecision(False, "PRIVATE_PROFILE")
     if candidate.who_can_see_me == 2 and viewer.realname_status != 2:
@@ -110,6 +119,13 @@ class CandidateVisibilityService:
             text(
                 """SELECT candidate.id AS candidate_id,
                     COALESCE(viewer_auth.realname_status, 0) AS viewer_realname_status,
+                    COALESCE(candidate_privacy.profile_visibility, 'all') AS profile_visibility,
+                    EXISTS (
+                        SELECT 1 FROM user_match vm
+                        WHERE vm.status IN (1, 2)
+                          AND ((vm.user_id = :visibility_viewer_id AND vm.target_user_id = candidate.id)
+                               OR (vm.user_id = candidate.id AND vm.target_user_id = :visibility_viewer_id))
+                    ) AS paired_with_viewer,
                     """
                 + active_membership_exists_sql(
                     membership_alias="viewer_membership",
@@ -177,6 +193,8 @@ class CandidateVisibilityService:
             profile_complete=bool(row["profile_complete"]),
             media_approved=bool(row["media_approved"]),
             blocked=bool(row["blocked"]),
+            profile_visibility=str(row.get("profile_visibility") or "all"),
+            paired_with_viewer=bool(row.get("paired_with_viewer")),
         )
         decision = evaluate_visibility(viewer, candidate)
         return VisibilityDecision(
@@ -209,6 +227,16 @@ class CandidateVisibilityService:
                 "AND (ban.ends_at IS NULL OR ban.ends_at > UTC_TIMESTAMP()))",
                 f"COALESCE({privacy_alias}.show_profile, 1) = 1",
                 f"COALESCE({privacy_alias}.match_status, 1) = 1",
+                # profile_visibility：只有白名单档位放行；friends 要求双方已匹配。
+                f"COALESCE({privacy_alias}.profile_visibility, 'all') IN ('all', 'friends', 'only_me')",
+                f"COALESCE({privacy_alias}.profile_visibility, 'all') <> 'only_me'",
+                "("
+                f"COALESCE({privacy_alias}.profile_visibility, 'all') <> 'friends' "
+                "OR EXISTS (SELECT 1 FROM user_match vm "
+                "WHERE vm.status IN (1, 2) "
+                f"AND ((vm.user_id = :visibility_viewer_id AND vm.target_user_id = {candidate_alias}.id) "
+                f"OR (vm.user_id = {candidate_alias}.id AND vm.target_user_id = :visibility_viewer_id)))"
+                ")",
                 f"COALESCE({privacy_alias}.who_can_see_me, 1) IN (1, 2, 3)",
                 "(:visibility_realname_status = 2 "
                 f"OR COALESCE({privacy_alias}.who_can_see_me, 1) <> 2)",

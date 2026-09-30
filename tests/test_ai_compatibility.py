@@ -795,6 +795,8 @@ class CompatibilityFakeSession:
                     "profile_complete": 1,
                     "media_approved": 1,
                     "blocked": 0,
+                    "profile_visibility": "all",
+                    "paired_with_viewer": 0,
                 }
             return _MappingResult([row])
         if "FROM user_revision_state" in sql:
@@ -948,6 +950,8 @@ async def test_read_compatibility_denies_hidden_candidate_with_404_code(
         "profile_complete": 1,
         "media_approved": 1,
         "blocked": 0,
+        "profile_visibility": "all",
+        "paired_with_viewer": 0,
     }
     with pytest.raises(CandidateNotVisible) as error:
         await read_compatibility_snapshot(compat_db, 10, 42)
@@ -1116,6 +1120,8 @@ async def test_recompute_denies_hidden_candidate(
         "profile_complete": 1,
         "media_approved": 1,
         "blocked": 1,
+        "profile_visibility": "all",
+        "paired_with_viewer": 0,
     }
     with pytest.raises(CandidateNotVisible):
         await request_compatibility_recompute(

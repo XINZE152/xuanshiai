@@ -74,9 +74,26 @@ async def get_verified_user(current: CurrentUser = Depends(get_current_user)) ->
 async def get_realname_verified_user(
     current: CurrentUser = Depends(get_verified_user),
 ) -> CurrentUser:
+    """Require realname verification for regular interactions and applications.
+
+    Face verification is intentionally not required here: publishing community
+    posts uses :func:`get_face_verified_user` instead. See PRODUCT.md §互动门槛.
+    """
     if current.realname_status != 2:
         raise HTTPException(status_code=403, detail="请先完成实名认证")
-    if current.face_verified is not None and current.face_verified != 1:
+    return current
+
+
+async def get_face_verified_user(
+    current: CurrentUser = Depends(get_verified_user),
+) -> CurrentUser:
+    """Require realname plus face verification for publishing community posts.
+
+    Fail-closed: a missing face record is treated as not verified.
+    """
+    if current.realname_status != 2:
+        raise HTTPException(status_code=403, detail="请先完成实名认证")
+    if current.face_verified != 1:
         raise HTTPException(status_code=403, detail="请先完成人脸认证")
     return current
 
