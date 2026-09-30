@@ -15,7 +15,6 @@ jobs:
       DATABASE_URL: mysql+aiomysql://ci:ci@127.0.0.1:1/ci_unreachable
       COMMUNITY_TEST_DATABASE_URL: ""
       AI_TEST_DATABASE_URL: ""
-      UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-uploads
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -27,6 +26,8 @@ jobs:
       - name: Ruff (message and media scope)
         run: uv run --no-sync ruff check app/api/routes/social.py app/api/routes/discovery.py app/services/social.py app/services/media.py app/services/member_follow_up_admin.py scripts/reproduce_upload_exposure.py tests/test_social_features.py tests/test_social_message_idempotency.py tests/test_discovery_features.py tests/test_member_follow_up_media.py
       - name: Message and media unit contracts (no integration/live/manual)
+        env:
+          UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-uploads
         run: uv run --no-sync pytest tests/test_social_features.py tests/test_social_message_idempotency.py tests/test_discovery_features.py tests/test_member_follow_up_media.py -q
 
   ai-unit:
@@ -37,7 +38,6 @@ jobs:
       AUTO_INIT_DB: "false"
       DATABASE_URL: mysql+aiomysql://ci:ci@127.0.0.1:1/ci_unreachable
       REDIS_URL: redis://127.0.0.1:1/5
-      UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-ai-uploads
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -60,6 +60,8 @@ jobs:
           tests/test_voice_auth.py tests/test_voice_cleanup.py
           tests/test_voice_providers_aliyun.py tests/test_voice_ws.py
       - name: AI and voice unit contracts
+        env:
+          UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-ai-uploads
         run: >-
           uv run --no-sync pytest
           tests/test_ai_schema_and_provider.py
