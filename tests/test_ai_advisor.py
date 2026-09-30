@@ -125,6 +125,15 @@ def test_advisor_serializes_idempotent_requests_and_replays_insert_conflicts() -
     assert "status='success'" in source
 
 
+def test_feedback_duplicate_detection_requires_integrity_conflict() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    duplicate = IntegrityError("insert", {}, RuntimeError("Duplicate entry for ai_advisor_feedback"))
+    unrelated = IntegrityError("insert", {}, RuntimeError("Duplicate entry for another_table"))
+    assert advisor_service._is_feedback_duplicate(duplicate) is True
+    assert advisor_service._is_feedback_duplicate(unrelated) is False
+
+
 # ---------------- 越权回归（cbfbee5 修复以来的覆盖补齐） ----------------
 
 

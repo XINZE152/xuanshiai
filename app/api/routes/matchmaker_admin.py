@@ -77,12 +77,16 @@ async def admin_logout(current: CurrentMatchmakerAdmin = Depends(get_current_mat
 
 @router.get("/matchmakers", response_model=MatchmakerPage, summary="查询红娘列表")
 async def matchmakers(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=50), keyword: str | None = Query(None, max_length=64), available: bool | None = Query(None), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MatchmakerPage:
-    return await list_matchmakers(db, page, page_size, keyword=keyword, available=available)
+    return await list_matchmakers(
+        db, page, page_size, keyword=keyword, available=available, admin=current
+    )
 
 
 @router.patch("/matchmakers/{matchmaker_id}/status", response_model=MatchmakerStatusResponse, summary="停用或恢复红娘接单")
 async def update_matchmaker_status(matchmaker_id: int = Path(..., ge=1), body: MatchmakerStatusUpdate = ..., current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MatchmakerStatusResponse:
-    result = await db.execute(text("SELECT id, status FROM user_matchmaker_apply WHERE user_id = :id AND application_type = 'service_matchmaker' FOR UPDATE"), {"id": matchmaker_id})
+    params: dict[str, object] = {"id": matchmaker_id}
+    scope = _matchmaker_scope_filter(current, params, "a.user_id", "status")
+    result = await db.execute(text("SELECT a.id, a.status FROM user_matchmaker_apply a WHERE a.user_id = :id AND a.application_type = 'service_matchmaker' AND " + scope + " FOR UPDATE"), params)
     row = result.mappings().first()
     if not row or int(row["status"]) != 1:
         raise HTTPException(404, detail="有效服务红娘不存在")
@@ -94,7 +98,7 @@ async def update_matchmaker_status(matchmaker_id: int = Path(..., ge=1), body: M
 
 @router.get("/matchmakers/{matchmaker_id}", response_model=MatchmakerCard, summary="查询红娘详情")
 async def matchmaker_detail(matchmaker_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MatchmakerCard:
-    return await get_matchmaker(db, matchmaker_id)
+    return await get_matchmaker(db, matchmaker_id, admin=current)
 
 
 @router.get("/service-products", response_model=list[MatchmakerServiceProductResponse], summary="查询红娘服务商品")
