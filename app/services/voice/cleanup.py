@@ -102,6 +102,7 @@ def _cleanup_expired_voice_audio_sync(
     )
     current = time.time() if now is None else now
     stats = VoiceCleanupStats()
+    expired_entries: list[Path] = []
 
     for subdir in SCAN_SUBDIRS:
         scan_dir = upload / subdir
@@ -131,18 +132,26 @@ def _cleanup_expired_voice_audio_sync(
                 )
                 stats.skipped += 1
                 continue
-            try:
-                _unlink(entry)
-                stats.deleted += 1
-            except FileNotFoundError:
-                # 并发清理把文件删掉了：目标已消失，按 skipped 处理。
-                stats.skipped += 1
-            except OSError:
-                # 单文件失败隔离：记错误继续处理其他文件，下轮重试。
-                stats.failed += 1
-                logger.exception(
-                    "voice_audio_cleanup_delete_failed path=%s", entry
-                )
+            expired_entries.append(entry)
+
+    for entry in expired_entries:
+        if not _is_within(upload, entry):
+            logger.warning(
+                "voice_audio_cleanup_out_of_bounds_refused path=%s",
+                entry,
+            )
+            stats.skipped += 1
+            continue
+        try:
+            _unlink(entry)
+            stats.deleted += 1
+        except FileNotFoundError:
+            # 并发清理把文件删掉了：目标已消失，按 skipped 处理。
+            stats.skipped += 1
+        except OSError:
+            # 单文件失败隔离：记错误继续处理其他文件，下轮重试。
+            stats.failed += 1
+            logger.exception("voice_audio_cleanup_delete_failed path=%s", entry)
 
     logger.info(
         "voice_audio_cleanup scanned=%d deleted=%d failed=%d skipped=%d "
