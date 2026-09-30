@@ -561,9 +561,22 @@ async def record_feedback(db: AsyncSession, user_id: int, message_id: int, reque
             "message_id": message_id, "user_id": user_id, "feedback_type": request.feedback_type,
         })
         await db.commit()
-    except Exception as exc:
+    except IntegrityError as exc:
         await db.rollback()
-        if "Duplicate" in str(exc) or "duplicate" in str(exc):
+        if _is_feedback_duplicate(exc):
             return AdvisorFeedbackResponse(message_id=message_id, feedback_type=request.feedback_type, recorded=False)
         raise HTTPException(503, detail="AI军师反馈暂时无法保存") from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(503, detail="AI军师反馈暂时无法保存") from exc
     return AdvisorFeedbackResponse(message_id=message_id, feedback_type=request.feedback_type, recorded=True)
+
+
+def _is_feedback_duplicate(exc: IntegrityError) -> bool:
+    """Identify only the feedback uniqueness conflict as an idempotent replay."""
+    original = getattr(exc, "orig", None)
+    args = getattr(original, "args", ())
+    if args and str(args[0]) == "1062":
+        return True
+    detail = str(original or "").lower()
+    return "duplicate" in detail and "feedback" in detail

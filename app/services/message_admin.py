@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser
+from app.api.dependencies import CurrentMatchmakerAdmin
 from app.schemas.message_admin import (
     AdminAnnouncementCreate,
     AdminAnnouncementItem,
@@ -51,7 +51,7 @@ def _message_item(row: dict) -> AdminMessageItem:
 
 async def list_admin_messages(
     db: AsyncSession,
-    admin: CurrentUser,
+    admin: CurrentMatchmakerAdmin,
     page: int,
     page_size: int,
     user_id: int | None = None,
@@ -110,7 +110,7 @@ async def moderate_admin_message(
     await db.execute(text("""INSERT INTO business_audit_log
         (actor_user_id, action, resource_type, resource_id, before_json, after_json, reason)
         VALUES (:actor, :action, 'chat_message', :id, :before_json, :after_json, :reason)"""), {
-        "actor": admin.id,
+        "actor": admin.account.id,
         "action": f"message.{action}",
         "id": message_id,
         "before_json": json.dumps({**before, "content": _redact_content(before.get("content"))}, ensure_ascii=False, default=str),

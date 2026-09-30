@@ -34,6 +34,18 @@ def test_matchmaker_statistics_scope_uses_existing_scope_condition() -> None:
     assert _matchmaker_scope_filter(current, params, "a.user_id", "stats") == "a.user_id = :scope_user_id"
 
 
+def test_legacy_matchmaker_admin_routes_pass_scope_to_service() -> None:
+    import inspect
+    from app.api.routes import matchmaker_admin
+
+    list_source = inspect.getsource(matchmaker_admin.matchmakers)
+    detail_source = inspect.getsource(matchmaker_admin.matchmaker_detail)
+    status_source = inspect.getsource(matchmaker_admin.update_matchmaker_status)
+    assert "admin=current" in list_source
+    assert "admin=current" in detail_source
+    assert "_matchmaker_scope_filter(current" in status_source
+
+
 def test_matchmaker_staff_admin_routes_are_registered() -> None:
     paths = client.get("/openapi.json").json()["paths"]
     expected = {

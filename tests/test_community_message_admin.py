@@ -81,6 +81,15 @@ def test_message_moderation_uses_data_scope_filter() -> None:
     assert "AND \"\"\" + scope" in source
 
 
+def test_message_moderation_uses_matchmaker_scope_authentication() -> None:
+    from app.api.routes import message_admin
+
+    source = inspect.getsource(message_admin.moderate)
+    assert "CurrentMatchmakerAdmin" in source
+    assert "get_current_matchmaker_admin" in source
+    assert "get_current_admin" not in source
+
+
 @pytest.mark.asyncio
 async def test_message_moderation_hides_out_of_scope_message() -> None:
     from app.services.message_admin import moderate_admin_message
@@ -102,6 +111,14 @@ async def test_message_moderation_hides_out_of_scope_message() -> None:
     with pytest.raises(HTTPException) as exc:
         await moderate_admin_message(DB(), _admin("SELF"), 99, "recall", "越权测试")
     assert exc.value.status_code == 404
+
+
+def test_message_admin_service_uses_matchmaker_account_for_audit_actor() -> None:
+    from app.services import message_admin
+
+    source = inspect.getsource(message_admin.moderate_admin_message)
+    assert '"actor": admin.account.id' in source
+    assert '"actor": admin.id' not in source
 
 
 def test_banner_admin_checks_overlapping_active_window() -> None:
