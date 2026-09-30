@@ -391,6 +391,88 @@ async def activity_detail(
 
 # ─────────────────────────── 报名管理（独立前缀） ───────────────────────────
 
+@signup_router.get("", response_model=ActivitySignupAdminPage, summary="分页查询活动报名")
+async def signup_list(
+    activity_id: int | None = Query(None, ge=1),
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    status: int | None = Query(None, ge=0, le=3),
+    first_signup: bool | None = Query(None),
+    gender: str | None = Query(None, max_length=8),
+    pay_status: str | None = Query(None, pattern="^(free|paid|unpaid)$"),
+    checked_in: bool | None = Query(None),
+    keyword: str | None = Query(None, max_length=128),
+    search_by: str | None = Query(None, pattern="^(nickname|phone)$"),
+    signup_from: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    signup_to: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> ActivitySignupAdminPage:
+    """Return the same signup shape as the activity-scoped endpoint, including all activities."""
+    current.require("community.activity.read")
+    where = ["1=1"]
+    params: dict[str, Any] = {
+        "limit": page_size,
+        "offset": (page - 1) * page_size,
+    }
+    if activity_id is not None:
+        where.append("s.activity_id = :activity_id")
+        params["activity_id"] = activity_id
+    if status is not None:
+        where.append("s.status = :status")
+        params["status"] = status
+    if first_signup is not None:
+        where.append("COALESCE(s.signup_times, 1) <= 1" if first_signup else "COALESCE(s.signup_times, 1) > 1")
+    if gender:
+        where.append("s.gender = :gender")
+        params["gender"] = gender
+    if pay_status:
+        where.append("s.pay_status = :pay_status")
+        params["pay_status"] = pay_status
+    if checked_in is not None:
+        where.append("COALESCE(s.checked_in, 0) = :checked_in")
+        params["checked_in"] = 1 if checked_in else 0
+    if keyword:
+        field = "u.phone" if search_by == "phone" else "COALESCE(u.nickname, s.real_name)"
+        where.append(f"{field} LIKE CONCAT('%', :keyword, '%')")
+        params["keyword"] = keyword
+    if signup_from:
+        where.append("s.created_at >= STR_TO_DATE(:signup_from, '%Y-%m-%d')")
+        params["signup_from"] = signup_from
+    if signup_to:
+        where.append(
+            "s.created_at < DATE_ADD(STR_TO_DATE(:signup_to, '%Y-%m-%d'), INTERVAL 1 DAY)"
+        )
+        params["signup_to"] = signup_to
+
+    clause = " AND ".join(where)
+    select_sql = (
+        "SELECT s.*, u.nickname, u.avatar AS user_avatar, "
+        "a.title AS activity_title, p.nickname AS promoter_name "
+        "FROM activity_signup s "
+        "LEFT JOIN users u ON u.id = s.user_id "
+        "LEFT JOIN offline_activity a ON a.id = s.activity_id "
+        "LEFT JOIN users p ON p.id = s.promoter_id "
+        f"WHERE {clause} ORDER BY s.id DESC LIMIT :limit OFFSET :offset"
+    )
+    rows = await db.execute(text(select_sql), params)
+    count = await db.execute(
+        text(
+            "SELECT COUNT(*) FROM activity_signup s "
+            "LEFT JOIN users u ON u.id = s.user_id "
+            f"WHERE {clause}"
+        ),
+        {key: value for key, value in params.items() if key not in ("limit", "offset")},
+    )
+    total = int(count.scalar() or 0)
+    return ActivitySignupAdminPage(
+        items=[_signup_item(row) for row in rows.mappings().all()],
+        page=page,
+        page_size=page_size,
+        total=total,
+        has_more=page * page_size < total,
+    )
+
 
 @signup_router.get("/statistics", response_model=ActivitySignupStatistics, summary="活动报名统计卡")
 async def signup_statistics(

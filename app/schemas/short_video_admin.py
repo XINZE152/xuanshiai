@@ -259,6 +259,7 @@ class RedPacketClaimItem(BaseModel):
 
 class VideoHomepageItem(BaseModel):
     id: int
+    user_id: int
     nickname: str | None = None
     wechat: str | None = None
     bio: str | None = None

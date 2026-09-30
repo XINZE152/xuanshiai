@@ -21,7 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 import database_setup_marriage
-from app.api.dependencies import CurrentUser, get_current_user, get_realname_verified_user
+from app.api.dependencies import (
+    CurrentUser,
+    get_current_user,
+    get_face_verified_user,
+    get_realname_verified_user,
+)
 from app.api.routes import community as community_routes
 from app.core import redis as redis_module
 from app.db.session import get_db
@@ -791,9 +796,40 @@ async def test_realname_guard_rejects_nonpassed_user() -> None:
     assert exc.value.status_code == 403
 
 
+@pytest.mark.asyncio
+async def test_realname_guard_allows_passed_user_without_face() -> None:
+    """常规互动与申请认识只要求实名通过，人脸认证是发布门槛而非通用门槛。"""
+    current = CurrentUser(id=7, session_id=9, phone="13800000000", status=1, realname_status=2, face_verified=0)
+    assert (await get_realname_verified_user(current)).id == 7
+
+
+@pytest.mark.asyncio
+async def test_face_guard_requires_realname_and_face() -> None:
+    """发布动态要求实名通过 + 人脸通过，缺少人脸记录时按未通过处理（fail-closed）。"""
+    realname_only = CurrentUser(id=7, session_id=9, phone="13800000000", status=1, realname_status=2, face_verified=0)
+    with pytest.raises(HTTPException) as exc:
+        await get_face_verified_user(realname_only)
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "请先完成人脸认证"
+
+    missing_face_record = CurrentUser(id=7, session_id=9, phone="13800000000", status=1, realname_status=2, face_verified=None)
+    with pytest.raises(HTTPException) as exc:
+        await get_face_verified_user(missing_face_record)
+    assert exc.value.status_code == 403
+
+    non_realname = CurrentUser(id=7, session_id=9, phone="13800000000", status=1, realname_status=1, face_verified=1)
+    with pytest.raises(HTTPException) as exc:
+        await get_face_verified_user(non_realname)
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "请先完成实名认证"
+
+    both = CurrentUser(id=7, session_id=9, phone="13800000000", status=1, realname_status=2, face_verified=1)
+    assert (await get_face_verified_user(both)).id == 7
+
+
 def test_community_interactions_require_realname() -> None:
-    guarded_routes = (
-        ("/api/v1/community/posts", "POST"),
+    """点赞/收藏/评论/话题/活动/纸飞机只需实名；发布动态需实名 + 人脸。"""
+    realname_routes = (
         ("/api/v1/community/posts/{post_id}", "DELETE"),
         ("/api/v1/community/posts/{post_id}/like", "PUT"),
         ("/api/v1/community/posts/{post_id}/like", "DELETE"),
@@ -806,8 +842,17 @@ def test_community_interactions_require_realname() -> None:
         ("/api/v1/paper-planes", "POST"),
         ("/api/v1/paper-planes/{plane_id}/replies", "POST"),
     )
-    for path, method in guarded_routes:
-        assert get_realname_verified_user in route_dependencies(path, method), (method, path)
+    for path, method in realname_routes:
+        dependencies = route_dependencies(path, method)
+        assert get_realname_verified_user in dependencies, (method, path)
+        assert get_face_verified_user not in dependencies, (method, path)
+
+    face_routes = (
+        ("/api/v1/community/posts", "POST"),
+        ("/api/v1/community/posts/{post_id}", "PUT"),
+    )
+    for path, method in face_routes:
+        assert get_face_verified_user in route_dependencies(path, method), (method, path)
 
 
 def test_community_browsing_does_not_require_realname() -> None:
@@ -821,8 +866,9 @@ def test_community_browsing_does_not_require_realname() -> None:
         ("/api/v1/paper-planes", "GET"),
     )
     for path, method in browsable_routes:
-        assert get_realname_verified_user not in route_dependencies(path, method), (method, path)
-
+        dependencies = route_dependencies(path, method)
+        assert get_realname_verified_user not in dependencies, (method, path)
+        assert get_face_verified_user not in dependencies, (method, path)
 
 @pytest.mark.asyncio
 async def test_list_comments_checks_post_visibility(monkeypatch: pytest.MonkeyPatch) -> None:

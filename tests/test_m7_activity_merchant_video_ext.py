@@ -66,6 +66,7 @@ def test_activity_routes_registered() -> None:
     assert "post" in paths[f"{ACTIVITY_BASE}/{{activity_id}}/copy"]
     assert "get" in paths[f"{ACTIVITY_BASE}/{{activity_id}}/signups"]
     assert "get" in paths[f"{ACTIVITY_BASE}/{{activity_id}}/link"]
+    assert "get" in paths[SIGNUP_BASE]
     assert "get" in paths[f"{SIGNUP_BASE}/statistics"]
     assert "get" in paths[f"{SIGNUP_BASE}/options"]
     assert "get" in paths[f"{SIGNUP_BASE}/export"]
@@ -141,6 +142,25 @@ def test_video_routes_registered() -> None:
 )
 def test_m7_endpoints_require_login(url: str) -> None:
     assert client.get(url).status_code == 401
+
+
+def test_all_activity_signup_list_requires_login() -> None:
+    assert client.get(SIGNUP_BASE).status_code == 401
+
+
+def test_all_activity_signup_list_validates_filters() -> None:
+    # 后台统一鉴权中间件先于 FastAPI query 校验执行，未登录请求应稳定返回 401。
+    assert client.get(f"{SIGNUP_BASE}?page=0").status_code == 401
+    assert client.get(f"{SIGNUP_BASE}?pay_status=invalid").status_code == 401
+    assert client.get(f"{SIGNUP_BASE}?search_by=invalid").status_code == 401
+    assert client.get(f"{SIGNUP_BASE}?signup_from=09-01-2026").status_code == 401
+    schema = client.get("/openapi.json").json()["paths"][SIGNUP_BASE]["get"]["parameters"]
+    params = {item["name"]: item for item in schema}
+    assert params["page"]["schema"]["minimum"] == 1
+    def schema_text(name: str) -> str:
+        return str(params[name]["schema"])
+    assert "free|paid|unpaid" in schema_text("pay_status")
+    assert "nickname|phone" in schema_text("search_by")
 
 
 # ─── schema 校验 ─────────────────────────────────────────────────────
