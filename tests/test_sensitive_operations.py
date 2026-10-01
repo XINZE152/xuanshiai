@@ -12,6 +12,7 @@ from app.api.routes import finance as finance_routes
 from app.api.routes import matchmaker_admin_account as account_routes
 from app.api.routes import organization_admin as organization_routes
 from app.main import app
+from app.services.idempotency import IdempotencyReservation, abort
 
 SENSITIVE_OPERATIONS = (
     ("/api/v1/admin/matchmaker/accounts/{account_id}/reset-password", "post"),
@@ -74,3 +75,70 @@ def test_failures_abort_the_reservation_so_retry_is_possible() -> None:
             "        await abort_sensitive_operation(db, reservation)\n"
             "        raise\n"
         ) in source, handler.__name__
+
+
+class RecordingDB:
+    """记录 session 上的操作顺序：审计第 1c 项判据全在顺序里。"""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.committed = False
+        self.rolled_back = False
+
+    async def execute(self, statement, params=None):
+        self.events.append(f"execute:{str(statement).split()[:3][0].upper()}")
+        return None
+
+    async def commit(self) -> None:
+        self.events.append("commit")
+        self.committed = True
+
+    async def rollback(self) -> None:
+        self.events.append("rollback")
+        self.rolled_back = True
+        self.committed = False
+
+
+@pytest.mark.asyncio
+async def test_abort_rolls_back_before_deleting_and_committing() -> None:
+    """审计第 1c 项：abort 必须 rollback → DELETE → commit。
+
+    业务写入与预占行共用同一 session，若直接 DELETE + commit，这次 commit 会把异常前
+    已完成的部分业务写入一起落库，形成「操作失败但数据改了一半」。
+    """
+    db = RecordingDB()
+    # 模拟调用方在异常前已经写入的业务语句
+    await db.execute("UPDATE users SET password_hash = :h WHERE id = :id")
+    assert db.committed is False
+    await abort(db, IdempotencyReservation(7, "owner-token"))
+    assert db.events == ["execute:UPDATE", "rollback", "execute:DELETE", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_abort_does_not_commit_partial_business_writes() -> None:
+    """rollback 必须先于任何 commit，否则半途写入会被 abort 一起提交。"""
+    db = RecordingDB()
+    await db.execute("INSERT INTO account_ledger (a) VALUES (1)")
+    await db.execute("UPDATE withdrawal_request SET status = :s WHERE id = :id")
+    await abort(db, IdempotencyReservation(9, "tok"))
+    first_commit = db.events.index("commit")
+    assert "rollback" in db.events
+    assert db.events.index("rollback") < first_commit
+    # 半途写入之后再无任何提前 commit
+    assert db.events.count("commit") == 1
+
+
+def test_abort_source_keeps_rollback_first() -> None:
+    """静态兜底：顺序被改回去时立刻失败（不依赖 mock 的调用时序）。"""
+    source = inspect.getsource(abort)
+    assert source.index("await db.rollback()") < source.index("DELETE FROM api_idempotency_record")
+    assert source.index("DELETE FROM api_idempotency_record") < source.index("await db.commit()")
+
+
+def test_begin_keeps_reservation_committed_separately() -> None:
+    """预占行必须由 begin 单独提交，rollback 才不会顺手丢掉预占语义。"""
+    from app.services import idempotency
+
+    source = inspect.getsource(idempotency.reserve_or_replay)
+    assert "INSERT INTO api_idempotency_record" in source
+    assert "await db.commit()" in source

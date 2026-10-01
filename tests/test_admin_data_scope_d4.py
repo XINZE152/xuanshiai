@@ -131,9 +131,10 @@ async def test_member_detail_service_is_scoped() -> None:
     from app.services.matchmaker_member_admin import _member
 
     db = StubDB([StubResult(first=None)])
-    scope = _admin("SELF").scope_exists_clause({}, correlation="scope_assignment.user_id = u.id")
+    params: dict[str, object] = {}
+    scope = _admin("SELF").scope_exists_clause(params, correlation="scope_assignment.user_id = u.id")
     with pytest.raises(HTTPException) as exc:
-        await _member(db, 99, scope)
+        await _member(db, 99, scope, params)
     assert exc.value.status_code == 404
     assert "scope_assignment.matchmaker_id = :scope_matchmaker_user_id" in db.statements[0][0]
 
@@ -297,7 +298,10 @@ async def test_finance_report_is_scoped() -> None:
     db = StubDB([StubResult(rows=[])])
     await admin_finance_report(db, admin=_admin("SELF"))
     sql = db.statements[0][0]
-    assert "ce.beneficiary_type = 'user'" in sql
+    # 分成的 beneficiary_type 类型域是 service_matchmaker/promoter/partner/store，
+    # 按 'user' 过滤会让普通权限账号永远列不出应得分成（审计第 2c 项）。
+    assert "ce.beneficiary_type IN ('service_matchmaker', 'promoter', 'partner')" in sql
+    assert "ce.beneficiary_type = 'user'" not in sql
     assert "scope_assignment.matchmaker_id = :scope_matchmaker_user_id" in sql
     assert "scope_assignment.user_id = ce.beneficiary_id" in sql
     assert db.statements[0][1]["scope_matchmaker_user_id"] == MATCHMAKER_USER_ID

@@ -99,6 +99,8 @@ class SearchCondition(BaseModel):
 
 
 class SearchConditionRead(BaseModel):
+    # 稳定对应 ai_search_condition.condition_no，供 PATCH/confirm 原样回传。
+    condition_no: int
     field_key: str
     operator: SearchConditionOperator
     value: Any = None

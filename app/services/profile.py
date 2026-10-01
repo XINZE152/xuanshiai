@@ -26,6 +26,7 @@ from app.core.profile_tags import (
     ALL_TAG_OPTIONS,
     CUSTOM_TAG_CATEGORY_KEY,
     CUSTOM_TAG_CATEGORY_MAP_KEY,
+    display_personal_tags,
     TAG_CATEGORIES,
     TAG_CATALOG_REVISION,
     normalize_custom_tag_categories,
@@ -315,13 +316,14 @@ async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> d
     raw_tags = _profile_tag_values(data)
     data["custom_tag_categories"] = _profile_custom_tag_categories(data)
     data["custom_tags"] = list(data["custom_tag_categories"])
-    data["personal_tags"] = personal_tags(raw_tags, data["custom_tags"])
+    stored_tags = personal_tags(raw_tags, data["custom_tags"])
+    data["personal_tags"] = display_personal_tags(raw_tags, data["custom_tags"])
     data["legacy_tags"] = []
     data["interest_tags"], data["personality_tags"] = split_personal_tags(raw_tags, data["custom_tags"])
     data["tag_selections"] = {
-        key: [tag for tag in data["personal_tags"] if tag in options]
+        key: [tag for tag in stored_tags if tag in options]
         for key, _, options in TAG_CATEGORIES
-        if any(tag in options for tag in data["personal_tags"])
+        if any(tag in options for tag in stored_tags)
     }
     if data["custom_tags"]:
         data["tag_selections"][CUSTOM_TAG_CATEGORY_KEY] = data["custom_tags"]

@@ -1284,18 +1284,21 @@ async def create_master_session(
                 # 过期或版本漂移的活动槽已在 _reuse_active_session 内关槽；
                 # 落到下方新建分支，保证 session_start 返回可直接提交的会话，
                 # 而不是把 stale 会话透传给首个 turn 再失败。
+                # 注意：此处绝不能再进入下方 build/update 关槽分支——existing
+                # 已不可用（曾因置空后在关槽分支下标读取而 TypeError）。
                 existing = None
-        # 旧 build/update 会话不能静默复用为 master：抽取 handler 会按
-        # session_kind 分流，误复用会把墨相师轮次送进题库/更新路径。保留旧数据，
-        # 仅关闭活动槽并标记 stale，再创建新的 master 会话。
-        await db.execute(
-            text(
-                "UPDATE ai_profile_session SET status = 'stale', active_status = 0, "
-                "ended_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() "
-                "WHERE session_id = :session_id AND active_status = 1"
-            ),
-            {"session_id": str(existing["session_id"])},
-        )
+        else:
+            # 旧 build/update 会话不能静默复用为 master：抽取 handler 会按
+            # session_kind 分流，误复用会把墨相师轮次送进题库/更新路径。保留旧数据，
+            # 仅关闭活动槽并标记 stale，再创建新的 master 会话。
+            await db.execute(
+                text(
+                    "UPDATE ai_profile_session SET status = 'stale', active_status = 0, "
+                    "ended_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() "
+                    "WHERE session_id = :session_id AND active_status = 1"
+                ),
+                {"session_id": str(existing["session_id"])},
+            )
     session_id = uuid.uuid4().hex
     expires_at = _now_utc() + timedelta(days=settings.ai_profile_session_expire_days)
     policy_revision = consent_snapshot.get("policy_revision") or PROFILE_POLICY_REVISION

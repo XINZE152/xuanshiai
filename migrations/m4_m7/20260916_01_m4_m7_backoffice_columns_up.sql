@@ -131,6 +131,24 @@ SET @m6_partner_team_ddl = IF(
 PREPARE m6_partner_team_cols_stmt FROM @m6_partner_team_ddl;
 EXECUTE m6_partner_team_cols_stmt;
 DEALLOCATE PREPARE m6_partner_team_cols_stmt;
+-- 幂等创建 idx_partner_team_level（支持按级别统计正常团队）。
+SET @m6_partner_level_index_ddl = IF(
+    EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'partner_team'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'partner_team'
+          AND INDEX_NAME = 'idx_partner_team_level'
+    ),
+    'ALTER TABLE `partner_team` ADD KEY `idx_partner_team_level` (`level_id`, `status`)',
+    'SELECT 1'
+);
+PREPARE m6_partner_level_idx_stmt FROM @m6_partner_level_index_ddl;
+EXECUTE m6_partner_level_idx_stmt;
+DEALLOCATE PREPARE m6_partner_level_idx_stmt;
+
 
 SET @m6_commission_entry_missing = (
     SELECT GROUP_CONCAT(CONCAT('ADD COLUMN ', w.column_ddl) ORDER BY w.ord SEPARATOR ', ')
@@ -165,7 +183,7 @@ SET @m6_commission_entry_order_id_nullable = (
 );
 SET @m6_commission_entry_order_id_ddl = IF(
     @m6_commission_entry_order_id_nullable = 'NO',
-    'ALTER TABLE `commission_entry` MODIFY COLUMN `order_id` bigint unsigned DEFAULT NULL',
+    'ALTER TABLE `commission_entry` MODIFY COLUMN `order_id` bigint unsigned DEFAULT NULL COMMENT ''关联订单；后台手工录入时为空''',
     'SELECT 1'
 );
 PREPARE m6_commission_entry_order_id_stmt FROM @m6_commission_entry_order_id_ddl;

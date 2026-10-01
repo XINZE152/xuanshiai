@@ -325,25 +325,88 @@ def _dict_value(value: Any, key: str) -> Any:
     return value[key]
 
 
+def _strip_wrapping_quotes(text: str) -> str:
+    cleaned = text.strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
+        return cleaned[1:-1].strip()
+    return cleaned
+
+
+def _normalize_condition_value(field_key: str, operator: str, value: Any) -> Any:
+    """把真实 LLM 输出归一为冻结契约的类型（解析落库前统一调用）。
+
+    真实供应商对同一字段会输出 330100、"310100"、'"310100"'、28、"28" 等多种
+    形态；不落库前归一，编译期 eq/IN 等值会静默失配（2026-10-01 真实链路验证）。
+    """
+    if value is None:
+        return None
+
+    def _clean_scalar(item: Any) -> Any:
+        if isinstance(item, bool) or item is None:
+            return None
+        if isinstance(item, (int, float)):
+            return item
+        text = _strip_wrapping_quotes(str(item))
+        return text or None
+
+    if field_key == "city_code":
+        if isinstance(value, list):
+            normalized = [cleaned for item in value if (cleaned := _clean_scalar(item)) is not None]
+            return normalized or None
+        return _clean_scalar(value)
+    if field_key in ("age", "height_cm", "income_band", "education_level", "marriage_status"):
+        def _as_number(item: Any) -> Any:
+            if isinstance(item, bool) or item is None:
+                return None
+            if isinstance(item, (int, float)):
+                return item
+            text = _strip_wrapping_quotes(str(item))
+            try:
+                return int(text)
+            except ValueError:
+                try:
+                    return float(text)
+                except ValueError:
+                    return item
+        if isinstance(value, dict):
+            return {key: _as_number(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_as_number(item) for item in value]
+        return _as_number(value)
+    if field_key in ("interest_tags", "lifestyle_tags", "occupation_group", "relationship_goal"):
+        if isinstance(value, list):
+            cleaned = [_strip_wrapping_quotes(str(item)) for item in value]
+            cleaned = [item for item in cleaned if item]
+            return cleaned or value
+        if isinstance(value, str):
+            return _strip_wrapping_quotes(value) or value
+    return value
+
+
 def _single_city(value: Any) -> str:
     if isinstance(value, str) and value.strip():
-        return value.strip()
+        return _strip_wrapping_quotes(value)
+    # 真实解析链路中 LLM 会把 6 位城市码输出为整数；归一为字符串再入库。
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
     if (
         isinstance(value, list)
         and len(value) == 1
-        and isinstance(value[0], str)
-        and value[0].strip()
+        and isinstance(value[0], (str, int))
+        and not isinstance(value[0], bool)
+        and str(value[0]).strip()
     ):
-        return value[0].strip()
+        return _strip_wrapping_quotes(str(value[0]))
     raise SearchInputInvalid("city_code 筛选一次仅支持一座城市")
 
 
 def _city_values(value: Any) -> tuple[str, ...]:
     values = value if isinstance(value, list) else [value]
     normalized = tuple(
-        item.strip()
+        _strip_wrapping_quotes(str(item))
         for item in values
-        if isinstance(item, str) and item.strip()
+        if (isinstance(item, str) and item.strip())
+        or (isinstance(item, int) and not isinstance(item, bool))
     )
     if not normalized or len(normalized) != len(values):
         raise SearchInputInvalid("city_code in 必须是非空城市编码数组")
@@ -786,6 +849,7 @@ def _condition_from_row(row: dict[str, Any]) -> SearchCondition:
 
 def _condition_read_from_row(row: dict[str, Any]) -> SearchConditionRead:
     return SearchConditionRead(
+        condition_no=int(row["condition_no"]),
         field_key=str(row["field_key"]),
         operator=str(row["operator"]),
         value=_maybe_json(row.get("value_json")),
@@ -1165,7 +1229,9 @@ async def parse_search_draft(
                 condition_no,
                 str(condition.field_key),
                 str(condition.operator),
-                condition.value,
+                _normalize_condition_value(
+                    str(condition.field_key), str(condition.operator), condition.value
+                ),
                 str(condition.kind),
                 float(condition.confidence),
                 condition.source_span,

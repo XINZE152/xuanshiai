@@ -73,6 +73,7 @@ def _require_recommend_feature() -> None:
 async def get_recommendations_route(
     view: RecommendationView = Query(...),
     limit: int = Query(20, ge=1, le=50),
+    include_card: bool = Query(False, description="返回经过可见性裁剪的公开名片"),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> RecommendationPage:
@@ -85,7 +86,13 @@ async def get_recommendations_route(
     同日幂等任务（``recommend-view-{user}-{日期}``），重复 GET 不重复入队。
     """
     _require_recommend_feature()
-    items = await read_recommendations(db, current.id, view, limit)
+    # 默认保持旧响应；只有新客户端显式请求时才装配公开名片。
+    if include_card:
+        items = await read_recommendations(
+            db, current.id, view, limit, include_card=True
+        )
+    else:
+        items = await read_recommendations(db, current.id, view, limit)
     if items:
         return RecommendationPage(view=view, items=items, regenerating=False)
     try:

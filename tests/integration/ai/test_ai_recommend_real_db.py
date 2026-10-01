@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -691,4 +692,131 @@ async def test_real_i_like_likes_me_consume_fresh_llm_directions(
     rows = {int(r["target_user_id"]): r for r in await _rows(real_db_session, "i_like")}
     assert rows[TARGET_ID]["engine"] == "rule-v1"
     assert float(rows[TARGET_ID]["score"]) > 0
+    await real_db_session.rollback()
+
+
+# ===== W2 推荐公开名片（include_card）：无浏览副作用与可见性过滤 =====
+
+
+async def _browse_side_effect_counts(db: AsyncSession) -> tuple[int, int]:
+    """返回 (浏览扣次记录数, 浏览访问记录数)，仅统计当前查看者的测试用户段。"""
+    quota_rows = (
+        await db.execute(
+            text(
+                "SELECT COUNT(*) FROM user_quota_usage "
+                "WHERE user_id = :uid AND quota_code = 'browse'"
+            ),
+            {"uid": VIEWER_ID},
+        )
+    ).scalar_one()
+    history_rows = (
+        await db.execute(
+            text("SELECT COUNT(*) FROM user_browse_history WHERE user_id = :uid"),
+            {"uid": VIEWER_ID},
+        )
+    ).scalar_one()
+    return int(quota_rows), int(history_rows)
+
+
+@pytest.mark.asyncio
+async def test_real_include_card_attaches_card_without_browse_side_effects(
+    real_db_session: AsyncSession,
+) -> None:
+    """include_card=true 装配公开名片，但三视图读取不得扣浏览额度或写访问记录。"""
+    from app.core.redis import daily_quota_key, get_daily_used
+    from app.schemas.discovery import DiscoveryCard
+    from app.services.ai.recommend import read_recommendations
+
+    await _seed_world(real_db_session)
+    await materialize_recommendations(real_db_session, VIEWER_ID, trigger="read")
+    await real_db_session.commit()
+
+    quota_before, history_before = await _browse_side_effect_counts(real_db_session)
+    browse_used_before = await get_daily_used(
+        daily_quota_key("discovery:browse", VIEWER_ID)
+    )
+
+    card_views: dict[str, list[dict[str, Any]]] = {}
+    for view_kind in ("i_like", "likes_me", "similar"):
+        card_views[view_kind] = await read_recommendations(
+            real_db_session, VIEWER_ID, view_kind, 20, include_card=True
+        )
+    assert any(items for items in card_views.values()), (
+        "双向投影齐全的种子世界至少应产出一个带名片的推荐"
+    )
+    for items in card_views.values():
+        for item in items:
+            card = item["card"]
+            assert card is not None
+            assert int(card["user_id"]) == int(item["target_user_id"])
+            # 只允许公开名片字段，不夹带画像原文或完整 ProfileResponse。
+            assert set(card.keys()) == set(DiscoveryCard.model_fields.keys())
+
+    await real_db_session.commit()
+    quota_after, history_after = await _browse_side_effect_counts(real_db_session)
+    browse_used_after = await get_daily_used(
+        daily_quota_key("discovery:browse", VIEWER_ID)
+    )
+    assert (quota_after, history_after) == (quota_before, history_before), (
+        "include_card 读取不得产生浏览扣次或访问记录"
+    )
+    assert browse_used_after == browse_used_before
+    await real_db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_real_view_profile_still_consumes_quota_and_records_visit(
+    real_db_session: AsyncSession,
+) -> None:
+    """对照：主动打开完整主页仍按原业务扣次并写访问记录（修复不得关闭正常计费）。"""
+    from app.core.redis import daily_quota_key, get_daily_used
+    from app.services.discovery import view_profile
+
+    await _seed_world(real_db_session)
+    await real_db_session.commit()
+
+    quota_before, history_before = await _browse_side_effect_counts(real_db_session)
+    browse_used_before = await get_daily_used(
+        daily_quota_key("discovery:browse", VIEWER_ID)
+    )
+
+    response = await view_profile(real_db_session, VIEWER_ID, TARGET_ID)
+    assert response.card.user_id == TARGET_ID
+    assert response.profile is not None
+    await real_db_session.commit()
+
+    quota_after, history_after = await _browse_side_effect_counts(real_db_session)
+    browse_used_after = await get_daily_used(
+        daily_quota_key("discovery:browse", VIEWER_ID)
+    )
+    assert quota_after == quota_before + 1
+    assert history_after == history_before + 1
+    assert browse_used_after == browse_used_before + 1
+    await real_db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_real_include_card_filters_blocked_target(
+    real_db_session: AsyncSession,
+) -> None:
+    """拉黑后 include_card 读取直接过滤候选，不连带返回其推荐解释。"""
+    from app.services.ai.recommend import read_recommendations
+
+    await _seed_world(real_db_session)
+    await materialize_recommendations(real_db_session, VIEWER_ID, trigger="read")
+    await real_db_session.commit()
+    items = await read_recommendations(
+        real_db_session, VIEWER_ID, "i_like", 20, include_card=True
+    )
+    assert any(int(i["target_user_id"]) == TARGET_ID for i in items)
+
+    await real_db_session.execute(
+        text("INSERT INTO user_block (user_id, target_user_id) VALUES (:uid, :tid)"),
+        {"uid": VIEWER_ID, "tid": TARGET_ID},
+    )
+    await real_db_session.commit()
+    blocked_items = await read_recommendations(
+        real_db_session, VIEWER_ID, "i_like", 20, include_card=True
+    )
+    assert all(int(i["target_user_id"]) != TARGET_ID for i in blocked_items)
     await real_db_session.rollback()

@@ -8,6 +8,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin
+from app.core.sensitive_fields import (
+    REDACTION_LEVEL_ELEVATED,
+    REDACTION_LEVEL_STANDARD,
+    mask_middle,
+    redaction_level_from_permissions,
+)
 from app.schemas.message_admin import (
     AdminAnnouncementCreate,
     AdminAnnouncementItem,
@@ -19,31 +25,46 @@ _PHONE_PATTERN = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 _ID_CARD_PATTERN = re.compile(r"(?<!\d)(\d{17}[\dXx]|\d{15})(?!\d)")
 _BANK_CARD_PATTERN = re.compile(r"(?<!\d)(\d{16,19})(?!\d)")
 _WECHAT_PATTERN = re.compile(r"(?i)(wxid_[A-Za-z0-9_-]{3,})")
-_WECHAT_LABEL_PATTERN = re.compile(r"(微信号|微信|wechat|vx|V信)\s*[:：]?\s*([A-Za-z][A-Za-z0-9_-]{4,})")
+# 值组下界取 2（合计 3 字符）：微信号最短允许 6 位，但用户手写的短 ID 与带前后缀的
+# 写法同样会泄露，原 {4,} 让短微信号整串可见。标签与值之间还允许「是/为」连接词，
+# 否则「我的vx是 li_hua2024」这类最自然的写法整串漏出。
+_WECHAT_LABEL_PATTERN = re.compile(r"(微信号|微信|weixin|wechat|vx|V信)[\s:：是为]*([A-Za-z][A-Za-z0-9_-]{2,})")
+# 裸微信号：既无 wxid_ 前缀也无“微信”标签，只能靠接触意图线索词定位。线索词加上
+# :func:`_looks_like_wechat_id`（须含数字或分隔符）两道门槛，避免把普通英文词、
+# 域名和 URL 片段误判成微信号；宁漏不误伤正文，但带线索的裸号一定被掩掉。
+_WECHAT_BARE_PATTERN = re.compile(
+    r"(?i)((?:加|加上|添加|求|留|搜|搜索)\s*(?:我|一下|个)?\s*(?:微信|weixin|wechat|vx|V信)?\s*[:：]?\s*)"
+    r"([A-Za-z][A-Za-z0-9_-]{5,19})(?![A-Za-z0-9_-])"
+)
 _ADDRESS_LABEL_PATTERN = re.compile(
     r"(地址|住址|现居|家住|收件地址)\s*[:：]?\s*([^\s，,。;；]{4,60})"
 )
 
-# 脱敏等级：standard 为普通只读账号；elevated 为具备处置/审计权限的账号。
-# 两级都只展示部分字符，任何等级都不返回完整敏感值。
-REDACTION_LEVEL_STANDARD = "standard"
-REDACTION_LEVEL_ELEVATED = "elevated"
-
-_ELEVATED_PERMISSIONS = frozenset({"message.moderate", "message.manage", "admin.moderate"})
-
+# 脱敏等级常量来自 app.core.sensitive_fields：结构化字段与自由文本共用同一套分档，
+# 避免两处各自演化出“某档能看到完整值”的口径差异。
 
 def redaction_level(admin: CurrentMatchmakerAdmin) -> str:
     """按账号权限决定脱敏粒度：具备处置/审计权限者可见更多位数（仍为掩码）。"""
-    if "*" in admin.permissions or (admin.permissions & _ELEVATED_PERMISSIONS):
-        return REDACTION_LEVEL_ELEVATED
-    return REDACTION_LEVEL_STANDARD
+    return redaction_level_from_permissions(admin.permissions)
 
 
-def _mask_middle(value: str, keep_head: int, keep_tail: int) -> str:
-    hidden = len(value) - keep_head - keep_tail
-    if hidden <= 0:
-        return "*" * len(value)
-    return f"{value[:keep_head]}{'*' * hidden}{value[-keep_tail:]}"
+def _looks_like_wechat_id(value: str) -> bool:
+    """裸号候选是否像微信号：至少含一位数字或分隔符。
+
+    微信号允许 6-20 位字母开头，普通英文词也满足该形状，唯一稳定区分点是真实微信号
+    几乎总带数字或 ``_``/``-``。据此把 ``加我 goodmorning`` 这类正常句子放过。
+    """
+    return any(char.isdigit() or char in "_-" for char in value)
+
+
+def _bare_wechat_replacer(elevated: bool):
+    def _replace(match: re.Match[str]) -> str:
+        candidate = match.group(2)
+        if not _looks_like_wechat_id(candidate):
+            return match.group(0)
+        return f"{match.group(1)}{mask_middle(candidate, 3, 4 if elevated else 0)}"
+
+    return _replace
 
 
 def redact_sensitive(value: str | None, level: str = REDACTION_LEVEL_STANDARD) -> str | None:
@@ -55,25 +76,28 @@ def redact_sensitive(value: str | None, level: str = REDACTION_LEVEL_STANDARD) -
         return None
     elevated = level == REDACTION_LEVEL_ELEVATED
     text_value = _PHONE_PATTERN.sub(
-        (lambda m: _mask_middle(m.group(0), 3, 4)) if elevated else (lambda m: "1**********"),
+        (lambda m: mask_middle(m.group(0), 3, 4)) if elevated else (lambda m: "1**********"),
         value,
     )
     text_value = _ID_CARD_PATTERN.sub(
-        (lambda m: _mask_middle(m.group(0), 4, 4)) if elevated else (lambda m: "*" * len(m.group(0))),
+        (lambda m: mask_middle(m.group(0), 4, 4)) if elevated else (lambda m: "*" * len(m.group(0))),
         text_value,
     )
     text_value = _BANK_CARD_PATTERN.sub(
-        (lambda m: _mask_middle(m.group(0), 4, 4)) if elevated else (lambda m: "************" + m.group(0)[-4:]),
+        (lambda m: mask_middle(m.group(0), 4, 4)) if elevated else (lambda m: "************" + m.group(0)[-4:]),
         text_value,
     )
+    # wxid 与标签号一律走 mask_middle：其 keep_tail=0 分支已在 core 修正，
+    # 早先直连切片会拼回完整 wxid。
     text_value = _WECHAT_PATTERN.sub(
-        (lambda m: _mask_middle(m.group(0), 5, 0)) if elevated else (lambda m: m.group(0)[:5] + "***"),
+        (lambda m: mask_middle(m.group(0), 5, 0)) if elevated else (lambda m: m.group(0)[:5] + "***"),
         text_value,
     )
     text_value = _WECHAT_LABEL_PATTERN.sub(
-        lambda m: f"{m.group(1)}:{m.group(2)[:3]}***",
+        lambda m: f"{m.group(1)}:{mask_middle(m.group(2), 3, 4 if elevated else 0)}",
         text_value,
     )
+    text_value = _WECHAT_BARE_PATTERN.sub(_bare_wechat_replacer(elevated), text_value)
     # 地址无法可靠识别边界，仅处理带显式标签的写法：保留前 6 个字符（通常为省市区）。
     text_value = _ADDRESS_LABEL_PATTERN.sub(
         lambda m: f"{m.group(1)}:{m.group(2)[:6]}{'*' * max(0, len(m.group(2)) - 6)}",

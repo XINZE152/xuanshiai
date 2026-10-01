@@ -267,6 +267,26 @@ class MoxiangWSClient:
                 f"consent grant failed: {resp.status_code} {resp.text[:200]}"
             )
 
+    async def _issue_ws_ticket(self) -> str:
+        """领取一次性 AI WebSocket 凭证，避免把长期 JWT 放进 URL。"""
+        headers = {"Authorization": f"Bearer {self._token}"}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{self.base_url}/api/v1/voice/ws-ticket",
+                headers=headers,
+            )
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"voice ws ticket failed: {resp.status_code} {resp.text[:200]}"
+            )
+        try:
+            ticket = str(resp.json().get("ticket") or "")
+        except (TypeError, ValueError):
+            ticket = ""
+        if not ticket:
+            raise RuntimeError("voice ws ticket response missing ticket")
+        return ticket
+
     async def replay(
         self,
         transcript: Any,
@@ -283,9 +303,10 @@ class MoxiangWSClient:
         if reset_session:
             await self._archive_active_session()
 
+        ticket = await self._issue_ws_ticket()
         ws_url = (
             f"{self.base_url.replace('http://', 'ws://').replace('https://', 'wss://')}"
-            f"/api/v1/voice/moxiang-master?{urlencode({'token': self._token})}"
+            f"/api/v1/voice/moxiang-master?{urlencode({'ticket': ticket})}"
         )
 
         result = ReplayResult(

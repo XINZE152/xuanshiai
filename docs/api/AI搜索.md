@@ -156,6 +156,7 @@ Content-Type: application/json
 
 | 字段 | 类型 | 必返 | 枚举 | 业务含义 | 示例值 |
 | --- | --- | --- | --- | --- | --- |
+| `condition_no` | integer | 是 | >=0 | 稳定条件序号，PATCH/confirm 原样回传；即使其他条件被移除也不重排 | `0` |
 | `field_key` | string | 是 | 10 字段 allowlist 或未知原文 | 条件字段 | `age` |
 | `operator` | string | 是 | `between/gte/lte/eq/in/contains` | 条件操作符 | `between` |
 | `value` | any | 是 | 与字段/operator 相关 | 条件取值（如 `{"min":26,"max":32}`） | `{"min":26,"max":32}` |
@@ -173,7 +174,7 @@ Content-Type: application/json
   "condition_revision": 0,
   "condition_schema_version": "search-condition-v1",
   "conditions": [
-    {"field_key":"age","operator":"between","value":{"min":26,"max":32},"kind":"hard","confidence":0.99,"source_span":"26到32岁","user_action":"pending"},
+    {"condition_no":0,"field_key":"age","operator":"between","value":{"min":26,"max":32},"kind":"hard","confidence":0.99,"source_span":"26到32岁","user_action":"pending"},
     {"field_key":"interest_tags","operator":"contains","value":"户外","kind":"soft","confidence":0.78,"source_span":"周末愿意户外","user_action":"pending"}
   ],
   "unknown": [],

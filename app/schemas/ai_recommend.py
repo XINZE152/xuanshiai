@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from app.schemas.discovery import DiscoveryCard
+
 RecommendationView = Literal["i_like", "likes_me", "similar"]
 
 
@@ -24,6 +26,8 @@ class RecommendationCard(BaseModel):
     engine: str = "rule-v1"
     reason_codes: list[str] = []
     reason_texts: list[str] = []
+    # 仅在 include_card=true 时返回；旧客户端保持原响应形态。
+    card: DiscoveryCard | None = None
 
 
 class RecommendationPage(BaseModel):

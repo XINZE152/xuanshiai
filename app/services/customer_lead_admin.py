@@ -11,6 +11,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.sensitive_fields import REDACTION_LEVEL_STANDARD, is_masked_value, mask_contact
+
 from app.schemas.customer_lead_admin import (
     CustomerLead, CustomerLeadAbandonment, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadFollowUp,
     CustomerLeadBatchImportResult, CustomerLeadFollowUpCreate, CustomerLeadImportRow, CustomerLeadImportSummary,
@@ -34,10 +36,16 @@ _TEMPLATE_SAMPLE: list[str] = ["示例：张女士", "13800000000", "zhang_wx", 
 _INTENTION_ALIASES: dict[str, int] = {"低": 1, "中": 2, "高": 3, "1": 1, "2": 2, "3": 3}
 
 
-def _lead(row: Any) -> CustomerLead:
+def _lead(row: Any, redaction_level: str = REDACTION_LEVEL_STANDARD) -> CustomerLead:
+    """客源线索序列化。
+
+    `wechat` 按敏感等级掩码后返回（审计第 1 项：完整微信号不得返回）；默认标准级，
+    调用方忘记传等级时落到最严格一档，不会泄露完整值。
+    """
     payload = dict(row)
     raw = payload.pop("tags_raw", None)
     payload["tags"] = [item for item in (raw or "").split(",") if item]
+    payload["wechat"] = mask_contact(payload.get("wechat"), redaction_level)
     return CustomerLead(**payload)
 
 
@@ -67,7 +75,7 @@ async def _sync_tags(db: AsyncSession, lead_id: int, tags: list[str]) -> None:
             await db.execute(text("""INSERT IGNORE INTO customer_lead_tag_relation (lead_id, tag_id) VALUES (:lead_id, :tag_id)"""), {"lead_id": lead_id, "tag_id": int(tag_id)})
 
 
-async def create_lead(db: AsyncSession, account_id: int, request: CustomerLeadCreate) -> CustomerLead:
+async def create_lead(db: AsyncSession, account_id: int, request: CustomerLeadCreate, redaction_level: str = REDACTION_LEVEL_STANDARD) -> CustomerLead:
     phone = normalize_contact(request.phone)
     wechat = normalize_contact(request.wechat)
     await ensure_contact_available(db, phone, wechat)
@@ -85,17 +93,25 @@ async def create_lead(db: AsyncSession, account_id: int, request: CustomerLeadCr
     except IntegrityError:
         await db.rollback()
         raise_duplicate_contact()
-    return await get_lead(db, lead_id)
+    return await get_lead(db, lead_id, redaction_level)
 
 
-async def get_lead(db: AsyncSession, lead_id: int) -> CustomerLead:
+async def get_lead(db: AsyncSession, lead_id: int, redaction_level: str = REDACTION_LEVEL_STANDARD) -> CustomerLead:
     row = (await db.execute(text(f"{LEAD_SELECT} WHERE id = :id"), {"id": lead_id})).mappings().first()
     if not row:
         raise HTTPException(404, detail="客源线索不存在")
-    return _lead(row)
+    return _lead(row, redaction_level)
 
 
-async def list_leads(db: AsyncSession, page: int, page_size: int, status: str | None, source: str | None, matchmaker_id: int | None, search: str | None) -> CustomerLeadPage:
+async def _raw_contact(db: AsyncSession, lead_id: int, column: str) -> str | None:
+    """重复性校验必须比对库里的真实联系方式，不能用脱敏后的展示值。"""
+    if column not in ("phone", "wechat"):
+        raise ValueError(f"不支持的联系方式字段: {column}")
+    row = (await db.execute(text(f"SELECT {column} FROM customer_lead WHERE id = :id"), {"id": lead_id})).first()
+    return row[0] if row else None
+
+
+async def list_leads(db: AsyncSession, page: int, page_size: int, status: str | None, source: str | None, matchmaker_id: int | None, search: str | None, redaction_level: str = REDACTION_LEVEL_STANDARD) -> CustomerLeadPage:
     where = ["1=1"]
     params: dict[str, Any] = {"limit": page_size, "offset": (page - 1) * page_size}
     if status:
@@ -114,36 +130,41 @@ async def list_leads(db: AsyncSession, page: int, page_size: int, status: str | 
     rows = await db.execute(text(f"{LEAD_SELECT} WHERE {clause} ORDER BY id DESC LIMIT :limit OFFSET :offset"), params)
     count = await db.execute(text(f"SELECT COUNT(*) FROM customer_lead WHERE {clause}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})
     total = int(count.scalar() or 0)
-    return CustomerLeadPage(items=[_lead(row) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
+    return CustomerLeadPage(items=[_lead(row, redaction_level) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
-async def update_lead(db: AsyncSession, account_id: int, lead_id: int, request: CustomerLeadUpdate) -> CustomerLead:
-    current = await get_lead(db, lead_id)
+async def update_lead(db: AsyncSession, account_id: int, lead_id: int, request: CustomerLeadUpdate, redaction_level: str = REDACTION_LEVEL_STANDARD) -> CustomerLead:
+    current = await get_lead(db, lead_id, redaction_level)
     values = request.model_dump(exclude_unset=True)
+    # 掩码值不写回：表单预填的是脱敏后的展示值，原样落库会把真实微信号毁成 ***
+    if is_masked_value(values.get("wechat")):
+        values.pop("wechat")
     target_status = values.get("status") or current.status
     # 目标状态仍为有效线索时，联系方式不得与其它有效线索重复；改为 LOST/CLOSED 后生成列会置空。
     if target_status not in ("LOST", "CLOSED"):
-        target_phone = normalize_contact(values["phone"]) if "phone" in values else normalize_contact(current.phone)
-        target_wechat = normalize_contact(values["wechat"]) if "wechat" in values else normalize_contact(current.wechat)
+        target_phone = normalize_contact(values["phone"]) if "phone" in values else normalize_contact(await _raw_contact(db, lead_id, "phone"))
+        target_wechat = normalize_contact(values["wechat"]) if "wechat" in values else normalize_contact(await _raw_contact(db, lead_id, "wechat"))
         await ensure_contact_available(db, target_phone, target_wechat, exclude_lead_id=lead_id)
     assignments = ", ".join(f"{key} = :{key}" for key in values)
+    # 掩码回显字段被全部丢弃时 assignments 为空，直接拼会产出 ``SET , updated_at`` 病态 SQL；此时只刷时间戳。
+    set_clause = f"{assignments}, " if assignments else ""
     try:
-        await db.execute(text(f"UPDATE customer_lead SET {assignments}, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {**values, "id": lead_id})
+        await db.execute(text(f"UPDATE customer_lead SET {set_clause}updated_at = UTC_TIMESTAMP() WHERE id = :id"), {**values, "id": lead_id})
         await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) VALUES (:actor, 'customer_lead.update', 'customer_lead', :id)"), {"actor": account_id, "id": lead_id})
         await db.commit()
     except IntegrityError:
         await db.rollback()
         raise_duplicate_contact()
-    return await get_lead(db, lead_id)
+    return await get_lead(db, lead_id, redaction_level)
 
 
-async def assign_lead(db: AsyncSession, account_id: int, lead_id: int, request: CustomerLeadAssignment) -> CustomerLead:
+async def assign_lead(db: AsyncSession, account_id: int, lead_id: int, request: CustomerLeadAssignment, redaction_level: str = REDACTION_LEVEL_STANDARD) -> CustomerLead:
     await get_lead(db, lead_id)
     await _validate_owner(db, request)
     await db.execute(text("UPDATE customer_lead SET matchmaker_id = :matchmaker_id, organization_id = :organization_id, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {**request.model_dump(), "id": lead_id})
     await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) VALUES (:actor, 'customer_lead.assign', 'customer_lead', :id)"), {"actor": account_id, "id": lead_id})
     await db.commit()
-    return await get_lead(db, lead_id)
+    return await get_lead(db, lead_id, redaction_level)
 
 
 async def add_follow_up(db: AsyncSession, account_id: int, lead_id: int, request: CustomerLeadFollowUpCreate) -> CustomerLeadFollowUp:
@@ -188,7 +209,7 @@ async def abandon_lead(db: AsyncSession, account_id: int, lead_id: int, reason: 
     return CustomerLeadAbandonment(**dict(row))
 
 
-async def restore_lead(db: AsyncSession, account_id: int, lead_id: int, reason: str) -> CustomerLead:
+async def restore_lead(db: AsyncSession, account_id: int, lead_id: int, reason: str, redaction_level: str = REDACTION_LEVEL_STANDARD) -> CustomerLead:
     current = await get_lead(db, lead_id)
     active = (await db.execute(text("SELECT id FROM customer_lead_abandonment WHERE lead_id = :id AND restored_at IS NULL ORDER BY id DESC LIMIT 1"), {"id": lead_id})).scalar()
     if not active:
@@ -205,7 +226,7 @@ async def restore_lead(db: AsyncSession, account_id: int, lead_id: int, reason: 
     await db.execute(text("UPDATE customer_lead SET status = 'NEW', updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"id": lead_id})
     await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) VALUES (:actor, 'customer_lead.restore', 'customer_lead', :id)"), {"actor": account_id, "id": lead_id})
     await db.commit()
-    return await get_lead(db, lead_id)
+    return await get_lead(db, lead_id, redaction_level)
 
 
 async def list_abandonments(db: AsyncSession, active_only: bool) -> list[CustomerLeadAbandonment]:

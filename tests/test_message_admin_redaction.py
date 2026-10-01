@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from app.api.dependencies import CurrentMatchmakerAdmin
 from app.schemas.matchmaker_admin import MatchmakerAdminAccount
 from app.services.message_admin import (
@@ -87,3 +89,55 @@ def test_ordered_patterns_do_not_double_mask_into_plaintext() -> None:
     masked = redact_sensitive(ID_CARD, REDACTION_LEVEL_STANDARD)
     assert masked is not None
     assert not any(char.isdigit() for char in masked)
+
+
+def test_short_wechat_id_is_masked() -> None:
+    """短微信号（原值组下界 {4,} 漏网的那一档）同样不得整串可见。"""
+    for level in (REDACTION_LEVEL_STANDARD, REDACTION_LEVEL_ELEVATED):
+        masked = redact_sensitive("微信号:ab1", level)
+        assert masked == "微信号:***"
+        assert "ab1" not in masked
+
+
+def test_bare_wechat_id_with_intent_cue_is_masked() -> None:
+    """无 ``wxid_`` 前缀也无「微信」标签的裸号，带接触意图线索词时必须掩掉。"""
+    raw = "zhangsan88"
+    standard = redact_sensitive(f"加我 {raw} 通过一下", REDACTION_LEVEL_STANDARD)
+    elevated = redact_sensitive(f"加我 {raw} 通过一下", REDACTION_LEVEL_ELEVATED)
+    assert standard is not None and elevated is not None
+    assert raw not in standard and raw not in elevated
+    assert "zha*******" in standard
+    # elevated 只多保留尾 4 位，仍不是完整值
+    assert "zha***an88" in elevated
+
+
+def test_bare_pattern_does_not_mangle_plain_english() -> None:
+    """裸号模式靠「须含数字或分隔符」抬高门槛，普通英文词正文不受影响。"""
+    sentence = "加我 goodmorning 谢谢"
+    assert redact_sensitive(sentence, REDACTION_LEVEL_STANDARD) == sentence
+
+
+def test_wxid_prefix_never_full_at_elevated() -> None:
+    """elevated 走 mask_middle(keep_tail=0)；早先的直连切片会拼回完整 wxid。"""
+    raw = "wxid_ab12cd34ef"
+    masked = redact_sensitive(f"联系我 {raw}", REDACTION_LEVEL_ELEVATED)
+    assert masked is not None
+    assert raw not in masked
+    assert masked.startswith("联系我 wxid_")
+
+
+@pytest.mark.parametrize("text", [
+    "微信号:zhang_san88",
+    "我的vx是 li_hua2024",
+    "加我 zhaoshang99",
+    "联系 wxid_qw12345678",
+])
+def test_no_writing_of_wechat_id_survives_either_level(text: str) -> None:
+    """审计第 1 项判据：任一写法在任一等级下都不返回完整微信号。"""
+    tokens = [t for t in ("zhang_san88", "li_hua2024", "zhaoshang99", "wxid_qw12345678") if t in text]
+    assert len(tokens) == 1
+    for level in (REDACTION_LEVEL_STANDARD, REDACTION_LEVEL_ELEVATED):
+        masked = redact_sensitive(text, level)
+        assert masked is not None
+        assert tokens[0] not in masked
+        assert "*" in masked

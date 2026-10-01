@@ -188,6 +188,8 @@ async def sweep_test_users(
                 "DELETE FROM derivation_consumer_receipt WHERE event_id LIKE 'g2b-%'",
                 "DELETE FROM derivation_outbox WHERE event_id LIKE 'g2b-%'",
                 "DELETE FROM user_block WHERE user_id BETWEEN 9876543000 AND 9876549999 OR target_user_id BETWEEN 9876543000 AND 9876549999",
+                "DELETE FROM user_browse_history WHERE user_id BETWEEN 9876543000 AND 9876549999 OR target_user_id BETWEEN 9876543000 AND 9876549999",
+                "DELETE FROM user_quota_usage WHERE user_id BETWEEN 9876543000 AND 9876549999 OR target_user_id BETWEEN 9876543000 AND 9876549999",
                 "DELETE FROM user_revision_state WHERE user_id BETWEEN 9876543000 AND 9876549999",
                 "DELETE FROM user_profile_completion WHERE user_id BETWEEN 9876543000 AND 9876549999",
                 "DELETE FROM user_privacy WHERE user_id BETWEEN 9876543000 AND 9876549999",

@@ -266,6 +266,14 @@ def personal_tags(values: list[str], stored_custom_tags: list[str] | None = None
     allowed_custom = set(custom_tags(stored_custom_tags or []))
     return list(dict.fromkeys(tag for tag in values if tag in ALL_TAG_OPTIONS or tag in allowed_custom))
 
+def display_personal_tags(values: list[str], stored_custom_tags: list[str] | None = None) -> list[str]:
+    """本人页与他人页共用的展示口径：校验、去重后统一截断到展示上限。
+
+    采用 AI 建议标签后两端必须读到同一份列表，因此截断只能发生在这里；
+    调用点各自决定条数会造成本人页能看到、他人页被裁掉的假性"采用失败"。
+    """
+    return personal_tags(values, stored_custom_tags)[:MAX_PERSONAL_TAGS]
+
 
 def split_personal_tags(values: list[str], stored_custom_tags: list[str] | None = None) -> tuple[list[str], list[str]]:
     tags = personal_tags(values, stored_custom_tags)

@@ -51,12 +51,14 @@ from app.services.ai.profile import (
     ProfileSessionStale,
     ProfileTurn,
     _insert_turn,
+    _load_revision_fields,
     find_turn_by_client_id,
     hash_request,
     load_owned_active_session,
     moderate_text,
     normalize_profile_answer,
 )
+from app.services.profile import get_profile
 from app.services.ai.tasks import AiTaskRecord, enqueue_task, fail_task
 from app.services.revisions import RevisionVector
 
@@ -406,6 +408,85 @@ _HARD_PROFILE_FIELDS = (
 )
 
 
+async def _session_user_id(db: AsyncSession, session_id: str) -> int | None:
+    """按会话 ID 取属主 user_id；会话不存在/已失效时返回 None。"""
+    result = await db.execute(
+        text("SELECT user_id FROM ai_profile_session WHERE session_id = :session_id"),
+        {"session_id": session_id},
+    )
+    row = result.mappings().first()
+    if row is None or row.get("user_id") is None:
+        return None
+    return int(row["user_id"])
+
+
+async def _latest_revision_id(
+    db: AsyncSession, user_id: int, subject: str
+) -> int | None:
+    """当前主体最新一次已发布画像 revision；从未发布过返回 None。"""
+    result = await db.execute(
+        text(
+            "SELECT id FROM ai_profile_revision "
+            "WHERE user_id = :user_id AND subject = :subject "
+            "ORDER BY revision_no DESC, id DESC LIMIT 1"
+        ),
+        {"user_id": user_id, "subject": subject},
+    )
+    row = result.mappings().first()
+    return int(row["id"]) if row is not None and row.get("id") is not None else None
+
+
+def _revision_fields_digest(rows: list[dict[str, Any]]) -> str:
+    """把已发布画像字段行渲染成与候选摘要同构的紧凑清单。
+
+    结构化字段显示 ``field_key = 显示值``；条目显示 ``category：content``。
+    只做展示渲染，不做任何状态判断。
+    """
+    lines: list[str] = []
+    for row in rows[:40]:
+        field_key = str(row.get("field_key") or "")
+        if not field_key:
+            continue
+        if str(row.get("field_kind") or "structured") == "structured":
+            detail = f"{field_key} = {str(row.get('display_value') or row.get('value_json') or '')}"
+        else:
+            content = str(row.get("content") or "").strip().replace("\n", " ")
+            if len(content) > 40:
+                content = content[:40] + "…"
+            detail = f"{str(row.get('category') or '')}：{content}"
+        lines.append(f"- {detail}")
+    return "\n".join(lines)
+
+
+def _profile_hard_field_presence(profile: dict[str, Any]) -> set[str]:
+    """把正式资料映射到硬字段的"已填写"集合；只判存在，不做值转换。
+
+    ``is_married`` 0 表示未知（存储域注释），不算已填写。
+    """
+    present: set[str] = set()
+
+    def filled(key: str) -> bool:
+        value = profile.get(key)
+        return value is not None and str(value).strip() != ""
+
+    if filled("age"):
+        present.add("age")
+    if filled("residence_city_code"):
+        present.add("city_code")
+    marriage = profile.get("is_married")
+    if marriage is not None and int(marriage) >= 1:
+        present.add("marriage_status")
+    if filled("education_level"):
+        present.add("education_level")
+    if filled("height"):
+        present.add("height_cm")
+    if filled("income"):
+        present.add("income_band")
+    if filled("occupation"):
+        present.add("occupation_group")
+    return present
+
+
 async def compose_journey_build_context(
     db: AsyncSession, *, session_id: str, subject: str
 ) -> str:
@@ -414,6 +495,11 @@ async def compose_journey_build_context(
     Reads the session's active/promoted candidates and projects them into the
     independent system segment the master prompt injects, so the conversation
     steers toward what is still unknown instead of re-asking settled facts.
+
+    R4：缺失判断与"已确认"描述不再只看本会话候选。三个真实来源按各自含义
+    使用——本人正式资料与当前主体已发布画像字段用于抑制重复采集；本会话
+    候选保持"待核对"语义，不冒充已确认事实。读不到资料时保留可用状态
+    （只按候选判断），不能把所有字段当成空并重新采集。
     """
     candidates = await list_session_candidates(
         db, session_id=session_id, active_only=False
@@ -437,6 +523,30 @@ async def compose_journey_build_context(
         if progress.dimensions[dim].evidence_count < 2
     ]
     steering_hooks = steering_hook_lines(blank_dimensions, subject=subject)
+    confirmed_present: set[str] = set()
+    confirmed_summary = ""
+    profile_present: set[str] = set()
+    user_id = await _session_user_id(db, session_id)
+    if user_id is not None:
+        revision_id = await _latest_revision_id(db, user_id, subject)
+        if revision_id is not None:
+            revision_rows = await _load_revision_fields(db, revision_id)
+            confirmed_summary = _revision_fields_digest(revision_rows)
+            confirmed_present = {
+                str(row.get("field_key") or "")
+                for row in revision_rows
+                if str(row.get("field_kind") or "structured") == "structured"
+            }
+            confirmed_present.discard("")
+        if subject == "personal":
+            try:
+                profile = await get_profile(db, user_id)
+                profile_present = _profile_hard_field_presence(profile)
+            except Exception:  # noqa: BLE001 — 资料读取失败不等于资料为空
+                logger.warning(
+                    "journey build context: profile load failed for user %s",
+                    user_id,
+                )
     missing_hard: list[str] = []
     if subject == "personal":
         present = {
@@ -444,8 +554,14 @@ async def compose_journey_build_context(
             for candidate in usable
             if candidate.field_kind == "structured"
         }
-        missing_hard = [key for key in _HARD_PROFILE_FIELDS if key not in present]
-    confirmed_summary = _existing_candidates_digest(usable)
+        missing_hard = [
+            key
+            for key in _HARD_PROFILE_FIELDS
+            if key not in present
+            and key not in confirmed_present
+            and key not in profile_present
+        ]
+    pending_summary = _existing_candidates_digest(usable)
     return build_build_context(
         missing_hard,
         confirmed_summary,
@@ -453,6 +569,7 @@ async def compose_journey_build_context(
         subject=subject,
         dimension_lines=dimension_lines,
         steering_hooks=steering_hooks,
+        pending_summary=pending_summary,
     )
 
 

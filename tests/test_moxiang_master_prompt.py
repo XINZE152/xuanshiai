@@ -186,6 +186,22 @@ def test_master_prompt_forbids_repetitive_follow_up_phrases() -> None:
         assert cue in _SYSTEM_HEADER
 
 
+def test_v15_master_prompt_prioritizes_corrections_stops_and_reference_boundaries() -> None:
+    context = build_build_context([], "旧摘要", 0.0)
+    for cue in (
+        "当前用户消息优先",
+        "明确纠正会使旧说法失效",
+        "先停、到此、晚点或等切换后再聊",
+        "未收到主体更新前",
+        "短答或含糊答复不提供脑补许可",
+        "仅作背景，不能当作本轮新事实",
+    ):
+        assert cue in _SYSTEM_HEADER or cue in context
+
+
+def test_v15_master_prompt_keeps_replies_short_and_single_question() -> None:
+    assert "通常 2-3 句，最多保留一个问题" in _SYSTEM_HEADER
+
 def test_opening_messages_do_not_leak_into_the_other_subject() -> None:
     """The two opening strings must not reference the other subject's vocabulary."""
     assert "理想" not in OPENING_MESSAGE

@@ -18,6 +18,7 @@ from app.core.profile_tags import (
     CUSTOM_TAG_CATEGORY_KEY,
     CUSTOM_TAG_CATEGORY_MAP_KEY,
     DISCOVERY_CITY_OPTIONS,
+    display_personal_tags,
     normalize_custom_tag_categories,
     personal_tags,
 )
@@ -304,7 +305,7 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         is_married=row.get("is_married") if not detail_locked else None,
         online_status=0 if row.get("hide_online_status") else int(row.get("online_status") or 0),
         mbti=row.get("mbti") if not detail_locked else None,
-        personal_tags=personal_tags(_json_list(row.get("interest_tags")) + _json_list(row.get("personality_tags")), _stored_custom_tags(row))[:10] if not detail_locked else [],
+        personal_tags=display_personal_tags(_json_list(row.get("interest_tags")) + _json_list(row.get("personality_tags")), _stored_custom_tags(row)) if not detail_locked else [],
         interest_tags=personal_tags(_json_list(row.get("interest_tags")), _stored_custom_tags(row))[:5] if not detail_locked else [],
         certification_tags=certification_tags,
         match_score=score,

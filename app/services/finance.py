@@ -182,6 +182,34 @@ def _account_anchor_scope(
     return f"(({type_column} = 'user' AND {member}) OR ({type_column} = 'store' AND ({org})))"
 
 
+# ``commission_entry.beneficiary_type`` 的实际类型域：除门店外都记在个人账户上
+# （见同文件退款冲正处 ``'store'`` -> 门店账户，其余 -> 个人账户的映射）。
+_COMMISSION_MEMBER_TYPES: tuple[str, ...] = ("service_matchmaker", "promoter", "partner")
+
+
+def _commission_anchor_scope(
+    admin: CurrentMatchmakerAdmin,
+    params: dict[str, object],
+    *,
+    type_column: str,
+    account_column: str,
+    alias: str = "scope_assignment",
+) -> str:
+    """分成表（``commission_entry``）的可见范围锚点。
+
+    分成的 ``beneficiary_type`` 取值是 ``service_matchmaker`` / ``promoter`` /
+    ``partner`` / ``store``，与资金账户表的 ``user`` / ``store`` 不是一套枚举。
+    沿用 `_account_anchor_scope` 会让所有会员锚定的分成匹配不到范围，
+    表现为「应得分成列不出来也处理不了」（审计第 2 项）。
+    """
+    member = _member_anchor_scope(admin, params, member_column=account_column, alias=alias)
+    if member == "1 = 1":
+        return "1 = 1"
+    org = admin.scope_organization_clause(params, column=account_column)
+    kinds = ", ".join(f"'{kind}'" for kind in _COMMISSION_MEMBER_TYPES)
+    return f"(({type_column} IN ({kinds}) AND {member}) OR ({type_column} = 'store' AND ({org})))"
+
+
 async def mark_order_paid_and_settle(db: AsyncSession, admin: CurrentUser, order_id: int, *, scope_admin: CurrentMatchmakerAdmin | None = None) -> list[CommissionEntryResponse]:
     if not settings.is_test_mode:
         raise HTTPException(503, detail="支付成功状态必须由真实支付回调确认")
@@ -278,7 +306,7 @@ async def list_user_commissions(db: AsyncSession, current: CurrentUser) -> list[
 
 async def admin_finance_report(db: AsyncSession, *, admin: CurrentMatchmakerAdmin) -> list[FinanceReportRow]:
     params: dict[str, object] = {}
-    scope = _account_anchor_scope(
+    scope = _commission_anchor_scope(
         admin, params, type_column="ce.beneficiary_type", account_column="ce.beneficiary_id"
     )
     result = await db.execute(text(f"""SELECT ce.beneficiary_type, ce.beneficiary_id,
@@ -293,7 +321,7 @@ async def admin_finance_report(db: AsyncSession, *, admin: CurrentMatchmakerAdmi
 
 async def release_commission(db: AsyncSession, admin: CurrentUser, entry_id: int, *, scope_admin: CurrentMatchmakerAdmin | None = None) -> CommissionEntryResponse:
     params: dict[str, object] = {"id": entry_id}
-    scope = "1 = 1" if scope_admin is None else _account_anchor_scope(
+    scope = "1 = 1" if scope_admin is None else _commission_anchor_scope(
         scope_admin, params, type_column="commission_entry.beneficiary_type", account_column="commission_entry.beneficiary_id"
     )
     result = await db.execute(text(f"""SELECT id, order_id, beneficiary_type, beneficiary_id,
@@ -903,7 +931,7 @@ async def admin_store_commission_options(db: AsyncSession, *, admin: CurrentMatc
     matchmaker_rows = (
         await db.execute(
             text(
-                """SELECT DISTINCT m.id, COALESCE(m.nickname, CONCAT('红娘#', m.id)) AS name, m.avatar
+                f"""SELECT DISTINCT m.id, COALESCE(m.nickname, CONCAT('红娘#', m.id)) AS name, m.avatar
                    FROM commission_entry ce
                    JOIN payment_order po ON po.id = ce.order_id
                    JOIN resource_assignment ra ON ra.user_id = po.user_id AND ra.status = 1

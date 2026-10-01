@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, File, Form, Path, Query, Response, Uploa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, declare_permission, get_current_matchmaker_admin
+from app.core.sensitive_fields import redaction_level_from_permissions
 from app.db.session import get_db
 from app.schemas.customer_lead_admin import CustomerLead, CustomerLeadAbandonment, CustomerLeadAbandonRequest, CustomerLeadBatchImportRequest, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadBatchImportResult, CustomerLeadFollowUp, CustomerLeadFollowUpCreate, CustomerLeadImportSummary, CustomerLeadOptions, CustomerLeadPage, CustomerLeadRestoreRequest, CustomerLeadStatistics, CustomerLeadUpdate
 from app.services.customer_lead_admin import abandon_lead, add_follow_up, assign_lead, batch_import_leads, build_import_template, create_lead, get_lead, import_leads_file, lead_options, lead_statistics, list_abandonments, list_follow_ups, list_leads, restore_lead, update_lead
@@ -17,14 +18,14 @@ _XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.
 @router.get("", response_model=CustomerLeadPage, summary="查询客源线索")
 async def lead_list(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=100), status: str | None = Query(None, pattern="^(NEW|CONTACTED|INTENDED|CONVERTED|LOST|CLOSED)$"), source: str | None = Query(None, max_length=64), matchmaker_id: int | None = Query(None, ge=1), search: str | None = Query(None, max_length=64), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> CustomerLeadPage:
     current.require("customer_lead.manage")
-    return await list_leads(db, page, page_size, status, source, matchmaker_id, search)
+    return await list_leads(db, page, page_size, status, source, matchmaker_id, search, redaction_level_from_permissions(current.permissions))
 
 
 @declare_permission("customer_lead.manage")
 @router.post("", response_model=CustomerLead, status_code=201, summary="录入客源线索")
 async def lead_create(body: CustomerLeadCreate, current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> CustomerLead:
     current.require("customer_lead.manage")
-    return await create_lead(db, current.account.id, body)
+    return await create_lead(db, current.account.id, body, redaction_level_from_permissions(current.permissions))
 
 
 @declare_permission("customer_lead.manage")
@@ -99,14 +100,14 @@ async def lead_import(
 @router.get("/{lead_id}", response_model=CustomerLead, summary="查询客源线索详情")
 async def lead_detail(lead_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> CustomerLead:
     current.require("customer_lead.manage")
-    return await get_lead(db, lead_id)
+    return await get_lead(db, lead_id, redaction_level_from_permissions(current.permissions))
 
 
 @declare_permission("customer_lead.manage")
 @router.patch("/{lead_id}", response_model=CustomerLead, summary="修改客源线索")
 async def lead_update(lead_id: int = Path(..., ge=1), body: CustomerLeadUpdate = ..., current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> CustomerLead:
     current.require("customer_lead.manage")
-    return await update_lead(db, current.account.id, lead_id, body)
+    return await update_lead(db, current.account.id, lead_id, body, redaction_level_from_permissions(current.permissions))
 
 
 @declare_permission("customer_lead.manage")
@@ -138,7 +139,7 @@ async def follow_up_create(lead_id: int = Path(..., ge=1), body: CustomerLeadFol
 @router.patch("/{lead_id}/assignment", response_model=CustomerLead, summary="分配客源线索")
 async def lead_assignment(lead_id: int = Path(..., ge=1), body: CustomerLeadAssignment = ..., current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> CustomerLead:
     current.require("customer_lead.manage")
-    return await assign_lead(db, current.account.id, lead_id, body)
+    return await assign_lead(db, current.account.id, lead_id, body, redaction_level_from_permissions(current.permissions))
 
 
 @declare_permission("customer_lead.manage")
@@ -152,4 +153,4 @@ async def lead_abandon(lead_id: int = Path(..., ge=1), body: CustomerLeadAbandon
 @router.post("/{lead_id}/restore", response_model=CustomerLead, summary="从弃海池恢复")
 async def lead_restore(lead_id: int = Path(..., ge=1), body: CustomerLeadRestoreRequest = ..., current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> CustomerLead:
     current.require("customer_lead.manage")
-    return await restore_lead(db, current.account.id, lead_id, body.reason)
+    return await restore_lead(db, current.account.id, lead_id, body.reason, redaction_level_from_permissions(current.permissions))

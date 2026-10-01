@@ -3418,13 +3418,19 @@ class DatabaseManager:
         self._ensure_table_columns(cursor, "`partner_team`", self._named_columns({
             "level_id": "tinyint unsigned NOT NULL DEFAULT 1 COMMENT '合伙级别：1 初级 / 2 中级 / 3 战略合伙人（固定 3 种）'",
         }))
+        self._ensure_optional_index(
+            cursor, "partner_team", "idx_partner_team_level", "(`level_id`, `status`)"
+        )
         # commission_entry 支持后台手工录入：order_id 放开为可空 + 补 source/remark
         self._ensure_table_columns(cursor, "`commission_entry`", self._named_columns({
             "source": "varchar(16) NOT NULL DEFAULT 'order' COMMENT 'order 订单产生 / manual 后台手工录入'",
             "remark": "varchar(255) DEFAULT NULL COMMENT '后台手工录入备注'",
         }))
         try:
-            cursor.execute("ALTER TABLE `commission_entry` MODIFY COLUMN `order_id` bigint unsigned DEFAULT NULL")
+            cursor.execute(
+                "ALTER TABLE `commission_entry` MODIFY COLUMN `order_id` "
+                "bigint unsigned DEFAULT NULL COMMENT '关联订单；后台手工录入时为空'"
+            )
             logger.info("✅ commission_entry.order_id 已放开为可空（支持手工录入分成）")
         except Exception as e:  # 已是可空或权限不足时静默跳过
             logger.debug(f"commission_entry.order_id 调整跳过: {e}")

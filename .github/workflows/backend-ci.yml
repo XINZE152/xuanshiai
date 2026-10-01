@@ -72,3 +72,49 @@ jobs:
           tests/test_voice_ws.py
           tests/test_voice_providers_aliyun.py
           tests/test_voice_cleanup.py -q
+
+  # 审计整改（脱敏 / 数据范围 / 事务 / 报名软删除）：全部为不依赖 DB 的单元契约。
+  admin-scope-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ENVIRONMENT: testing
+      AUTO_INIT_DB: "false"
+      DATABASE_URL: mysql+aiomysql://ci:ci@127.0.0.1:1/ci_unreachable
+      REDIS_URL: redis://127.0.0.1:1/5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install backend and dev dependencies
+        run: uv sync --locked --extra dev
+      - name: Ruff (admin scope, redaction and signup soft delete scope)
+        run: >-
+          uv run --no-sync ruff check
+          app/api/routes/activity_admin.py app/api/routes/customer_leads_admin.py
+          app/api/routes/matchmaker_crm_admin.py app/api/routes/matchmaker_member_admin.py
+          app/core/sensitive_fields.py app/services/community.py
+          app/services/customer_lead_admin.py app/services/finance.py
+          app/services/idempotency.py app/services/matchmaker_member_admin.py
+          app/services/message_admin.py
+          tests/test_activity_signup_soft_delete.py tests/test_admin_data_scope_d4.py
+          tests/test_certification_material_scope.py tests/test_crm_reassign_org_ownership.py
+          tests/test_finance_commission_anchor.py tests/test_matchmaker_crm_data_scope.py
+          tests/test_member_admin_scope_params.py tests/test_message_admin_redaction.py
+          tests/test_sensitive_operations.py tests/test_wechat_field_redaction.py
+      - name: Admin scope, redaction and soft delete contracts
+        env:
+          UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-admin-uploads
+        run: >-
+          uv run --no-sync pytest
+          tests/test_message_admin_redaction.py
+          tests/test_wechat_field_redaction.py
+          tests/test_sensitive_operations.py
+          tests/test_member_admin_scope_params.py
+          tests/test_admin_data_scope_d4.py
+          tests/test_certification_material_scope.py
+          tests/test_crm_reassign_org_ownership.py
+          tests/test_finance_commission_anchor.py
+          tests/test_activity_signup_soft_delete.py
+          tests/test_matchmaker_crm_data_scope.py -q

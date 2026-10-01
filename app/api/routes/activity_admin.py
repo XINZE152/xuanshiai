@@ -694,6 +694,16 @@ async def delete_signup(
              "updated_at = UTC_TIMESTAMP() WHERE id = :id AND deleted_at IS NULL"),
         {"actor": current.account.id, "id": signup_id},
     )
+    # 名额回收：被删报名若处于「待审核 / 已通过」，此前已计入 current_people，必须同事务减回去，
+    # 否则用户端剩余名额与「名额已满」状态会长期偏小。SET 按从左到右求值，故 status 判断用的是已减后的值。
+    if int(snapshot.get("status") or 0) in (0, 1):
+        await db.execute(
+            text("UPDATE offline_activity SET "
+                 "current_people = CASE WHEN current_people > 0 THEN current_people - 1 ELSE 0 END, "
+                 "status = CASE WHEN status = 2 AND (max_people <= 0 OR current_people < max_people) "
+                 "THEN 1 ELSE status END, updated_at = UTC_TIMESTAMP() WHERE id = :activity_id"),
+            {"activity_id": snapshot["activity_id"]},
+        )
     await db.execute(
         text("INSERT INTO business_audit_log "
              "(actor_user_id, action, resource_type, resource_id, before_json, reason) "

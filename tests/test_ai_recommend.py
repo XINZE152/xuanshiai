@@ -231,6 +231,64 @@ def test_api_recommendations_returns_ranked_items(
     assert called["enqueue"] is False
 
 
+def test_api_recommendations_include_public_card_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.routes.ai_recommend as route_mod
+
+    async def fake_read(db, viewer_id, view_kind, limit, *, include_card=False):
+        assert include_card is True
+        return [{
+            "target_user_id": 2,
+            "score": 85.0,
+            "coverage": 0.5,
+            "rank_no": 1,
+            "engine": "rule-v1",
+            "reason_codes": ["INTEREST_OVERLAP"],
+            "reason_texts": [],
+            "card": {
+                "user_id": 2,
+                "nickname": "小周",
+                "avatar": None,
+                "age": 30,
+                "height": 170,
+                "education_level": 4,
+                "occupation": "设计",
+                "city_code": "310100",
+                "income": None,
+                "distance_km": None,
+                "is_married": 1,
+                "online_status": 1,
+                "mbti": None,
+                "personal_tags": ["徒步"],
+                "interest_tags": ["徒步"],
+                "certification_tags": ["实名认证"],
+                "match_score": 72.0,
+                "match_reason": "兴趣匹配",
+                "algorithm_version": "legacy-rule-v1",
+                "match_score_source": "legacy-rule-v1",
+                "is_favorite": False,
+                "is_vip": False,
+                "is_pure_free": True,
+                "is_boosted": False,
+                "detail_locked": False,
+            },
+        }]
+
+    monkeypatch.setattr(route_mod, "read_recommendations", fake_read)
+    _enable_recommend(monkeypatch)
+    _override_auth()
+    try:
+        response = client.get(
+            "/api/v1/ai/recommendations",
+            params={"view": "i_like", "include_card": "true"},
+        )
+    finally:
+        _clear_overrides()
+    assert response.status_code == 200
+    assert response.json()["items"][0]["card"]["user_id"] == 2
+
+
 def test_api_recommendations_miss_triggers_regenerating(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

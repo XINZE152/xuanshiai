@@ -138,6 +138,14 @@ async def complete(
 
 
 async def abort(db: AsyncSession, reservation: IdempotencyReservation) -> None:
+    """放弃一次幂等预占：先回滚调用方的半途业务写入，再删除预占行。
+
+    顺序不可颠倒。业务动作与预占行共用同一个 session，若直接 ``DELETE + commit``，
+    这次 commit 会把调用方在异常前已完成的部分业务写入一并落库，形成“操作失败但
+    数据改了一半”。预占行本身由 :func:`begin` 单独 commit 过，回滚不会丢掉它，
+    因此回滚后再删仍然可靠。
+    """
+    await db.rollback()
     await db.execute(
         text(
             """DELETE FROM api_idempotency_record

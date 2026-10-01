@@ -24,8 +24,9 @@ Authorization: Bearer <access_token>   # 必需
 | --- | --- | --- | --- | --- | --- | --- |
 | `view` | query | string | 是 | — | 枚举 `i_like` / `likes_me` / `similar` | 视图：我会喜欢 / 会喜欢我 / 相似的人 |
 | `limit` | query | integer | 否 | 20 | 1–50 | 返回的最大卡片数 |
+| `include_card` | query | boolean | 否 | `false` | `true`/`false` | 仅返回当前可见的公开名片；不触发完整主页浏览、扣次或访问记录 |
 
-请求示例：`GET /api/v1/ai/recommendations?view=i_like&limit=20`，Header `Authorization: Bearer <token>`。无请求体（非法示例：`view=hot` → 422 校验错误）。
+请求示例：`GET /api/v1/ai/recommendations?view=i_like&limit=20&include_card=true`，Header `Authorization: Bearer <token>`。无请求体（非法示例：`view=hot` → 422 校验错误）。 `include_card` 是向后兼容的可选扩展；旧客户端不传时 `card` 为 `null`，客户端可忽略该新增字段。
 
 #### 返回参数
 
@@ -40,6 +41,7 @@ Authorization: Bearer <access_token>   # 必需
 | `items[].engine` | string | 是 | — | 分数来源：`rule-v1` 规则 / `llm-v1` LLM 精算（快照混用为设计语义） | `rule-v1` |
 | `items[].reason_codes` | array[string] | 是 | `[]` | 稳定原因码（如 `INTEREST_OVERLAP`、`DIMENSION_UNKNOWN`） | `["INTEREST_OVERLAP"]` |
 | `items[].reason_texts` | array[string] | 是 | `[]` | 中文理由（仅 `llm-v1` 行有） | `["兴趣重合"]` |
+| `items[].card` | object/null | 否 | `null`：未请求或旧后端 | `include_card=true` 时的公开 DiscoveryCard，不含画像原文或联系方式 | 见 DiscoveryCard |
 | `regenerating` | boolean | 是 | — | `true` 表示快照 miss 且确有在途重建任务；客户端可稍后重试 | `false` |
 
 成功响应示例（正常）：
@@ -67,7 +69,7 @@ Authorization: Bearer <access_token>   # 必需
 #### 使用方法与业务规则
 
 - 前置条件：已登录；本人已发布画像投影且持有 `profile_text_extract` 授权（否则 miss 且不入队，恒返回空页）。功能开关关闭统一 503。
-- 读取期门禁：每个候选在返回前重新过可见性（双向拉黑、隐藏、封禁、账号/审核/资料完整）与授权/投影资格；**校验先于任何卡片与解释返回**。
+- 读取期门禁：每个候选在返回前重新过可见性（双向拉黑、隐藏、封禁、账号/审核/资料完整）与授权/投影资格；**校验先于任何卡片与解释返回**。 `include_card=true` 复用同一可见性裁剪和公开名片组装，不进入完整主页 `view_profile`，因此不扣完整浏览额度、不写主动访问记录。
 - 短页：候选在物化后被过滤时，后续可见候选顶上（按 `rank_no` 取前 `limit` 个可见项）；无可展示项返回空 `items`。
 - 幂等与频率：GET 为纯读取（miss 时的入队是唯一写入，同日幂等键 `recommend-view-{user}-{YYYYMMDD}` 收敛，重复 GET 不重复入队）。
 - 快照 TTL：默认 24 小时（`ai_recommendation_ttl_minutes`）；过期视为 miss 触发重建。

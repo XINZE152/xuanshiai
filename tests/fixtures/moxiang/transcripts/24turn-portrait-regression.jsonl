@@ -1,0 +1,31 @@
+{
+  "name": "24turn-portrait-regression",
+  "subject": "personal",
+  "description": "画像对话回归：24 轮覆盖自然展开、短回答、拒答、纠正、连续换题、具体对象与择偶偏好边界，以及用户请求从我的墨相切换到愿遇之相。无真实用户数据。",
+  "turns": [
+    {"role": "user", "text": "先介绍一下自己：我29岁，在南京做产品经理，本科毕业，目前单身，周末喜欢逛书店。", "category": "basics_lifestyle", "expect_dimensions": ["personality_social", "lifestyle"]},
+    {"role": "user", "text": "嗯，差不多就是这样。", "category": "short", "expect_dimensions": []},
+    {"role": "user", "text": "上周六临时没加班，去了家新开的书店，后来在附近咖啡馆坐了一下午，挺舒服的。", "category": "natural_expand", "expect_dimensions": ["lifestyle"]},
+    {"role": "user", "text": "朋友说我刚认识时比较慢热，熟了以后其实很话多，也愿意听别人说。", "category": "personality", "expect_dimensions": ["personality_social"]},
+    {"role": "user", "text": "感情经历这个我暂时不想聊，先换个轻松一点的吧。", "category": "refusal", "expect_dimensions": []},
+    {"role": "user", "text": "我下班后一般自己做饭，饭后散步或者看纪录片，不太喜欢临时应酬。", "category": "lifestyle", "expect_dimensions": ["lifestyle"]},
+    {"role": "user", "text": "我不太会说甜言蜜语，但会记得对方随口提过的小事，能做的就默默做了。", "category": "emotional_expression", "expect_dimensions": ["emotional_expression"]},
+    {"role": "user", "text": "遇到分歧我会先冷静一会儿，不想在气头上争输赢，过后还是会把事情讲清楚。", "category": "intimacy", "expect_dimensions": ["intimacy_pattern"]},
+    {"role": "user", "text": "我不接受翻手机和查行踪，感情再好也要有各自的空间。", "category": "boundary", "expect_dimensions": ["relationship_boundaries"]},
+    {"role": "user", "text": "更正一下，我不是喜欢爬山，之前只是偶尔陪朋友去过；我更喜欢城市散步和安静的咖啡馆。", "category": "correction", "expect_dimensions": ["lifestyle"]},
+    {"role": "user", "text": "说起来，昨晚那场球赛最后几分钟还挺刺激的。", "category": "off_topic", "expect_dimensions": []},
+    {"role": "user", "text": "还是聊回我吧。未来几年我想留在南京，生活稳定一点，家里有自己的小空间。", "category": "future", "expect_dimensions": ["future_expectations"]},
+    {"role": "user", "text": "我前任以前很会照顾人，生病时会把药和水都放在床头。", "category": "concrete_person", "expect_dimensions": []},
+    {"role": "user", "text": "不过我希望未来的伴侣愿意沟通，有情绪时能说出来，不要让人一直猜。", "category": "partner_preference_boundary", "expect_dimensions": []},
+    {"role": "user", "text": "如果现在还在我的墨相阶段，那择偶偏好先别记；我只是想问问什么时候可以切到愿遇之相。", "category": "subject_switch_request", "expect_dimensions": []},
+    {"role": "user", "text": "这个我还真没想好。", "category": "short_ambiguous", "expect_dimensions": []},
+    {"role": "user", "text": "我压力大的时候会先一个人待着，等情绪平一点再找信任的人聊，不太会当场发泄。", "category": "emotional", "expect_dimensions": ["emotional_expression"]},
+    {"role": "user", "text": "我爸妈都比较尊重我的选择，所以我习惯自己做决定，也不喜欢替别人安排。", "category": "personality", "expect_dimensions": ["personality_social"]},
+    {"role": "user", "text": "周末有时会去菜市场买菜，回家慢慢做；如果累了就点外卖，不会勉强自己。", "category": "lifestyle", "expect_dimensions": ["lifestyle"]},
+    {"role": "user", "text": "我希望以后是两个人各自忙自己的事，晚上还能坐下来吃饭聊几句，日子有烟火气。", "category": "future_relationship", "expect_dimensions": ["future_expectations"]},
+    {"role": "user", "text": "收入和家庭细节我暂时不想展开，之后有需要再说。", "category": "refusal", "expect_dimensions": []},
+    {"role": "user", "text": "补充刚才的生活习惯：我偶尔也会去郊外走走，但不喜欢把每个周末都排满活动。", "category": "correction", "expect_dimensions": ["lifestyle"]},
+    {"role": "user", "text": "现在认识的一个人很会制造惊喜，但这只是对方的做法，不代表我已经想把这种特质写进择偶标准。", "category": "concrete_person_boundary", "expect_dimensions": []},
+    {"role": "user", "text": "我单身这件事前面已经说过了。我们先停在这里，等切到愿遇之相再聊我期待什么样的伴侣。", "category": "dedup_and_subject_switch", "expect_dimensions": []}
+  ]
+}

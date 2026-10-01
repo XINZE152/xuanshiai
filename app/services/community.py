@@ -1327,7 +1327,7 @@ _ACTIVITY_SELECT = """SELECT a.id, a.title, a.cover, a.type, a.city, a.address, 
     a.signup_deadline, a.max_people, a.current_people, a.price, a.status, a.description, a.created_at,
     s.status AS my_status
     FROM offline_activity a
-    LEFT JOIN activity_signup s ON s.activity_id = a.id AND s.user_id = :user_id"""
+    LEFT JOIN activity_signup s ON s.activity_id = a.id AND s.user_id = :user_id AND s.deleted_at IS NULL"""
 
 
 async def list_activities(
@@ -1351,7 +1351,7 @@ async def list_activities(
     )
     count_sql = text(
         f"""SELECT COUNT(*) FROM offline_activity a
-        LEFT JOIN activity_signup s ON s.activity_id = a.id AND s.user_id = :user_id
+        LEFT JOIN activity_signup s ON s.activity_id = a.id AND s.user_id = :user_id AND s.deleted_at IS NULL
         {where_sql}"""
     )
     total = int((await db.execute(count_sql, {"user_id": user_id})).scalar() or 0)
@@ -1388,7 +1388,7 @@ async def signup_activity(
                 """SELECT a.status, a.signup_deadline, a.max_people,
                 s.status AS my_status
                 FROM offline_activity a
-                LEFT JOIN activity_signup s ON s.activity_id = a.id AND s.user_id = :user_id
+                LEFT JOIN activity_signup s ON s.activity_id = a.id AND s.user_id = :user_id AND s.deleted_at IS NULL
                 WHERE a.id = :activity_id
                 FOR UPDATE"""
             ),
@@ -1420,7 +1420,7 @@ async def signup_activity(
                 await db.execute(
                     text(
                         """SELECT COUNT(*) FROM activity_signup
-                        WHERE activity_id = :activity_id AND status IN (0, 1)"""
+                        WHERE activity_id = :activity_id AND status IN (0, 1) AND deleted_at IS NULL"""
                     ),
                     {"activity_id": activity_id},
                 )
@@ -1449,7 +1449,8 @@ async def signup_activity(
                 """INSERT INTO activity_signup (activity_id, user_id, real_name, phone, remark, status)
                 VALUES (:activity_id, :user_id, :real_name, :phone, :remark, 0)
                 ON DUPLICATE KEY UPDATE real_name = VALUES(real_name), phone = VALUES(phone),
-                  remark = VALUES(remark), status = 0, cancel_reason = NULL, updated_at = UTC_TIMESTAMP()"""
+                  remark = VALUES(remark), status = 0, cancel_reason = NULL,
+                  deleted_at = NULL, deleted_by = NULL, updated_at = UTC_TIMESTAMP()"""
             ),
             {
                 "activity_id": activity_id,
@@ -1506,7 +1507,7 @@ async def list_my_activities(
     )
     count_sql = text(
         f"""SELECT COUNT(*) FROM offline_activity a
-        JOIN activity_signup s ON s.activity_id = a.id AND s.user_id = :user_id
+        JOIN activity_signup s ON s.activity_id = a.id AND s.user_id = :user_id AND s.deleted_at IS NULL
         {where_sql}"""
     )
     total = int((await db.execute(count_sql, {"user_id": user_id})).scalar() or 0)

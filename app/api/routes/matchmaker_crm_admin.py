@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
+from app.core.sensitive_fields import mask_contact, redaction_level_from_permissions
 from app.db.session import get_db
 from app.schemas.matchmaker_crm_admin import MatchRecordCreate, MatchRecordItem, MatchRecordPage, MatchRecordResponse, MemberAssignmentResponse, MemberAssignmentUpdate, MemberDetail, MemberListItem, MemberPage, MemberStatistics, MemberStatusResponse, MemberStatusUpdate
 from app.schemas.admin import CertificationReviewRequest, RealnameReviewRequest
@@ -349,6 +350,9 @@ async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchm
             data["tags"] = json.loads(raw_tags)
         except (TypeError, ValueError):
             data["tags"] = None
+    # 微信号整列本身就是敏感值，必须按权限分级掩码后再返回；SQL 侧原样取出只是为了把
+    # 脱敏口径集中在一处，elevated 档也仅保留首尾若干位。
+    data["wechat"] = mask_contact(data.get("wechat"), redaction_level_from_permissions(current.permissions))
     return MemberDetail(**data)
 
 
@@ -371,9 +375,10 @@ async def member_assignment(
         WHERE user_id = :user_id AND status = 1"""), {"user_id": member_id})
     if body.matchmaker_id is not None:
         await db.execute(text("""INSERT INTO resource_assignment
-            (user_id, matchmaker_id, source, assigned_by)
-            VALUES (:user_id, :matchmaker_id, 'manual', :assigned_by)"""), {
-            "user_id": member_id, "matchmaker_id": body.matchmaker_id, "assigned_by": current.account.id,
+            (user_id, organization_id, matchmaker_id, source, assigned_by)
+            VALUES (:user_id, :organization_id, :matchmaker_id, 'manual', :assigned_by)"""), {
+            "user_id": member_id, "organization_id": current.account.organization_id,
+            "matchmaker_id": body.matchmaker_id, "assigned_by": current.account.id,
         })
     await db.execute(text("""INSERT INTO business_audit_log
         (actor_user_id, action, resource_type, resource_id, reason)

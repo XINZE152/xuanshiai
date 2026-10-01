@@ -47,6 +47,15 @@ class _AllColumnsMissingCursor:
         return 0
 
 
+class _ExistingPartnerTeamCursor(_AllColumnsMissingCursor):
+    """让 partner_team 存在且目标索引缺失，验证 helper 会补建复合索引。"""
+
+    def fetchone(self):
+        if self.statements and self.statements[-1].startswith("SHOW TABLES LIKE"):
+            return ("partner_team",)
+        return None
+
+
 def _added_columns(statements: list[str]) -> list[str]:
     columns: list[str] = []
     for statement in statements:
@@ -82,6 +91,23 @@ def test_m4_helper_covers_audit_status_and_promoter_id() -> None:
     columns = _added_columns(cursor.statements)
     assert any(item.startswith("`audit_status`") for item in columns)
     assert any(item.startswith("`promoter_id`") for item in columns)
+
+
+def test_m6_helper_adds_partner_level_index_and_preserves_order_comment() -> None:
+    manager = DatabaseManager.__new__(DatabaseManager)
+    cursor = _ExistingPartnerTeamCursor()
+
+    manager._ensure_m6_columns(cursor)
+
+    assert any(
+        "idx_partner_team_level" in statement
+        and "(`level_id`, `status`)" in statement
+        for statement in cursor.statements
+    )
+    assert any(
+        "COMMENT '关联订单；后台手工录入时为空'" in statement
+        for statement in cursor.statements
+    )
 
 
 def test_ensure_table_columns_rejects_definition_without_name_prefix() -> None:
@@ -138,3 +164,31 @@ def test_m4_m7_migration_scripts_are_paired() -> None:
     assert "`audit_status`" in up_sql
     assert "`promoter_id`" in up_sql
     assert "group_concat_max_len" in up_sql, "长 ALTER 拼接必须放开 GROUP_CONCAT 上限"
+    assert "idx_partner_team_level" in up_sql
+    assert "(`level_id`, `status`)" in up_sql
+    assert "COMMENT ''关联订单；后台手工录入时为空''" in up_sql
+
+    down_sql = down.read_text(encoding="utf-8")
+    assert "SIGNAL SQLSTATE '45000'" in down_sql
+    assert "pre-migration object manifest" in down_sql
+    assert "DROP COLUMN" not in down_sql
+
+    verify_sql = (migration_dir / "20260916_01_m4_m7_backoffice_columns_verify.sql").read_text(
+        encoding="utf-8"
+    )
+    for field in (
+        "COLUMN_TYPE",
+        "IS_NULLABLE",
+        "COLUMN_DEFAULT",
+        "CHARACTER_SET_NAME",
+        "COLLATION_NAME",
+        "register_reward_male",
+        "consume_commission_rate",
+        "share_bonus",
+        "uk_partner_level",
+        "uk_merchant_category_name",
+        "uk_short_video_category_name",
+        "idx_partner_team_level",
+        "SUB_PART",
+    ):
+        assert field in verify_sql
