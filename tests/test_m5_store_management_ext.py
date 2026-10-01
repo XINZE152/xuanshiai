@@ -174,6 +174,12 @@ def test_store_user_scope_is_parameterized() -> None:
     assert ":store_id" in sql and "u.id" in sql and "resource_assignment" in sql
 
 
+def test_store_report_summary_uses_matching_payment_order_aliases() -> None:
+    source = inspect.getsource(store_service.store_report_summary)
+    assert "order_scope_po3 = _STORE_USER_SCOPE.format(col=\"po3.user_id\")" in source
+    assert "WHERE po3.status = 1 AND po3.product_type = 'offline_vip' AND {order_scope_po3}" in source
+
+
 def test_recent_months_order_and_length() -> None:
     months = store_service._recent_months(6)
     assert len(months) == 6

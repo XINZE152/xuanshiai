@@ -151,12 +151,18 @@ class DatabaseManager:
 
     @staticmethod
     def _named_columns(columns: dict) -> dict:
-        """给 {字段名: 类型定义} 字典补上 `字段名` 前缀。
+        """标准化 {字段名: 类型定义} 字典中的完整列定义。
 
         _ensure_table_columns 的 SQL 模板是 `ALTER TABLE ... ADD COLUMN {column_def}`，
-        要求定义自带 `字段名` 前缀；新式字典（键=字段名，值=纯类型定义）需先经过本方法。
+        要求定义自带 `字段名` 前缀；兼容值已经带前缀的旧式定义，避免重复生成
+        `` `name` `name` type ... `` 导致 MySQL 1064。
         """
-        return {name: f"`{name}` {definition}" for name, definition in columns.items()}
+        result = {}
+        for name, definition in columns.items():
+            normalized = str(definition).lstrip()
+            prefix = f"`{name}`"
+            result[name] = normalized if normalized.startswith(prefix) else f"{prefix} {normalized}"
+        return result
 
     @staticmethod
     def _assert_column_definition(table_name: str, column_name: str, column_def: str) -> None:

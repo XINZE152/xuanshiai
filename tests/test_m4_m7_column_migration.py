@@ -101,6 +101,14 @@ def test_named_columns_adds_backtick_prefix() -> None:
     }
 
 
+def test_named_columns_does_not_duplicate_existing_backtick_prefix() -> None:
+    assert DatabaseManager._named_columns({
+        "promoter_id": "`promoter_id` bigint unsigned DEFAULT NULL COMMENT '推广红娘用户ID'",
+    }) == {
+        "promoter_id": "`promoter_id` bigint unsigned DEFAULT NULL COMMENT '推广红娘用户ID'",
+    }
+
+
 def test_customer_lead_select_columns_exist_in_create_table() -> None:
     """服务层 SELECT 的列必须都能在建表定义里找到（同一类漂移的通用检查）。"""
     ddl = BUSINESS_TABLES["customer_lead"]

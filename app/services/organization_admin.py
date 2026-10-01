@@ -242,6 +242,7 @@ async def store_report_summary(db: AsyncSession, store_id: int) -> StoreReportSu
     store = await get_store_admin(db, store_id)
     membership_scope = _STORE_USER_SCOPE.format(col="m.user_id")
     order_scope = _STORE_USER_SCOPE.format(col="po.user_id")
+    order_scope_po3 = _STORE_USER_SCOPE.format(col="po3.user_id")
     row = (await db.execute(text(f"""SELECT
         (SELECT COUNT(*) FROM customer_lead cl WHERE cl.organization_id = :store_id) lead_count,
         (SELECT COUNT(DISTINCT sa.user_id) FROM resource_assignment sa
@@ -273,7 +274,7 @@ async def store_report_summary(db: AsyncSession, store_id: int) -> StoreReportSu
                 WHERE po2.status = 1 AND po2.product_type = 'offline_vip' AND EXISTS (SELECT 1 FROM resource_assignment sa2
                     WHERE sa2.user_id = po2.user_id AND sa2.status = 1 AND sa2.organization_id = o2.id)) >
                 (SELECT COALESCE(SUM(po3.amount), 0) FROM payment_order po3
-                    WHERE po3.status = 1 AND po3.product_type = 'offline_vip' AND {order_scope})) offline_performance_rank,
+                    WHERE po3.status = 1 AND po3.product_type = 'offline_vip' AND {order_scope_po3})) offline_performance_rank,
         (SELECT COUNT(*) FROM organization o2 WHERE o2.org_type = 'store' AND o2.status <> 3
             AND o2.id <> :store_id AND (SELECT COUNT(*) FROM meeting_record mr2
                 WHERE mr2.status <> 'CANCELLED' AND mr2.organization_id = o2.id) >
