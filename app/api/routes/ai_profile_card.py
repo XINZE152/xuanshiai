@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user
@@ -123,6 +123,7 @@ async def summarize_profile_card_route(
     await db.commit()
     return ProfileCardSummarizeAccepted(
         task_id=submission.task.task_id,
+        draft_id=submission.draft_id,
         status=submission.task.status,
         poll_url=f"/api/v1/ai/tasks/{submission.task.task_id}",
         replayed=submission.replayed,
@@ -133,15 +134,16 @@ async def summarize_profile_card_route(
     "/profile-card/draft",
     response_model=ProfileCardDraftRead,
     status_code=status.HTTP_200_OK,
-    summary="读取本人最新未丢弃的资料卡草稿",
+    summary="按 draft_id 或兼容读取本人未丢弃的资料卡草稿",
 )
 async def get_profile_card_draft_route(
+    draft_id: str | None = Query(default=None, min_length=1, max_length=64, description="精确读取本人草稿；省略时兼容读取最新草稿"),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ProfileCardDraftRead:
     _require_profile_feature()
     try:
-        return await load_profile_card_draft(db, current.id)
+        return await load_profile_card_draft(db, current.id, draft_id=draft_id)
     except AIConsentRequired as exc:
         raise _error_response(exc.code, exc.message, exc.status_code) from exc
     except ProfileCardDraftNotFound as exc:
@@ -184,6 +186,8 @@ async def apply_profile_card_draft_route(
         raise _error_response(exc.code, exc.message, exc.status_code) from exc
     except ProfileCardVersionConflict as exc:
         raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except TaskError as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - 统一包装未知错误
@@ -193,5 +197,14 @@ async def apply_profile_card_draft_route(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             retryable=True,
         ) from exc
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as exc:  # pragma: no cover - 提交失败也必须回滚整笔 apply
+        await db.rollback()
+        raise _error_response(
+            "AI_TEMPORARILY_UNAVAILABLE",
+            "资料卡草稿写入暂时不可用",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            retryable=True,
+        ) from exc
     return ProfileCardApplyResponse.model_validate(result)

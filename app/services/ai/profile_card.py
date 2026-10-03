@@ -23,6 +23,7 @@ from app.core.profile_tags import ALL_TAG_OPTIONS, MAX_PERSONAL_TAGS
 from app.schemas.ai_profile import ProfileSubject
 from app.schemas.ai_profile_card import (
     ProfileCardApplyRequest,
+    ProfileCardApplyResponse,
     ProfileCardDraftFields,
     ProfileCardDraftRead,
 )
@@ -49,7 +50,7 @@ from app.services.ai.prompts.profile_card_summarize import (
 from app.services.ai.prompts.profile_narrative import serialize_fields_for_prompt
 from app.services.ai.tasks import AiTaskRecord, TaskError, enqueue_task, fail_task
 from app.services.content_filter import moderate_text
-from app.services.profile import get_profile, update_profile
+from app.services.profile import _lock_profile_update, get_profile, update_profile
 from app.services.revisions import RevisionVector
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,7 @@ class ProfileCardVersionConflict(Exception):
 class ProfileCardTaskSubmission:
     task: AiTaskRecord
     replayed: bool = False
+    draft_id: str | None = None
 
 
 def _now_utc() -> datetime:
@@ -161,7 +163,7 @@ def _empty_fields() -> dict[str, Any]:
     return ProfileCardDraftFields().model_dump()
 
 
-def _draft_read(row: dict[str, Any]) -> ProfileCardDraftRead:
+def _draft_read(row: dict[str, Any], base_profile_revision: int) -> ProfileCardDraftRead:
     raw_fields = _maybe_json(row.get("fields_json")) or {}
     if not isinstance(raw_fields, dict):
         raw_fields = {}
@@ -172,6 +174,7 @@ def _draft_read(row: dict[str, Any]) -> ProfileCardDraftRead:
         source_revision_id=(
             int(row["source_revision_id"]) if row.get("source_revision_id") else None
         ),
+        base_profile_revision=base_profile_revision,
         prompt_version=str(row["prompt_version"]) if row.get("prompt_version") else None,
         schema_version=str(row["schema_version"]) if row.get("schema_version") else None,
         fields=ProfileCardDraftFields.model_validate(raw_fields),
@@ -238,13 +241,22 @@ async def _count_daily_tasks(db: AsyncSession, user_id: int) -> int:
     return int((row or {}).get("n") or 0)
 
 
-async def _latest_card_draft(
-    db: AsyncSession, user_id: int, statuses: tuple[str, ...]
+async def _card_draft(
+    db: AsyncSession,
+    user_id: int,
+    statuses: tuple[str, ...],
+    *,
+    draft_id: str | None = None,
+    for_update: bool = False,
 ) -> dict[str, Any] | None:
     placeholders = ", ".join(f":st{i}" for i in range(len(statuses)))
     params: dict[str, Any] = {"user_id": user_id}
     for index, status in enumerate(statuses):
         params[f"st{index}"] = status
+    draft_clause = " AND draft_id = :draft_id" if draft_id is not None else ""
+    if draft_id is not None:
+        params["draft_id"] = draft_id
+    lock_clause = " FOR UPDATE" if for_update else ""
     result = await db.execute(
         text(
             "SELECT draft_id, user_id, task_id, source_revision_id, status, "
@@ -253,8 +265,8 @@ async def _latest_card_draft(
             "last_operation_request_digest, last_operation_response_json, "
             "generated_at, applied_at, created_at, updated_at "
             "FROM ai_profile_card_draft "
-            f"WHERE user_id = :user_id AND status IN ({placeholders}) "
-            "ORDER BY updated_at DESC LIMIT 1"
+            f"WHERE user_id = :user_id AND status IN ({placeholders})"
+            f"{draft_clause} ORDER BY updated_at DESC LIMIT 1{lock_clause}"
         ),
         params,
     )
@@ -262,7 +274,7 @@ async def _latest_card_draft(
 
 
 async def _latest_open_draft(db: AsyncSession, user_id: int) -> dict[str, Any] | None:
-    return await _latest_card_draft(
+    return await _card_draft(
         db, user_id, ("queued", "running", "ready", "partial")
     )
 
@@ -270,7 +282,7 @@ async def _latest_open_draft(db: AsyncSession, user_id: int) -> dict[str, Any] |
 async def _latest_readable_draft(
     db: AsyncSession, user_id: int
 ) -> dict[str, Any] | None:
-    return await _latest_card_draft(
+    return await _card_draft(
         db, user_id, ("queued", "running", "ready", "partial", "applied")
     )
 
@@ -313,7 +325,9 @@ async def request_profile_card_summarize(
                 message="Idempotency-Key 已用于不同请求内容",
                 status_code=409,
             )
-        return ProfileCardTaskSubmission(task=record, replayed=True)
+        payload_summary = record.payload_summary if isinstance(record.payload_summary, dict) else {}
+        draft_id = str(payload_summary.get("draft_id") or "") or None
+        return ProfileCardTaskSubmission(task=record, replayed=True, draft_id=draft_id)
 
     ready = await _latest_open_draft(db, user_id)
     if (
@@ -337,8 +351,10 @@ async def request_profile_card_summarize(
         replay_row = await _first_row(task_row)
         if replay_row is not None:
             emit_ai_metric("success", 1, {"scene": PROFILE_CARD_SUMMARIZE_TASK_TYPE, "reason": "replay_ready"})
+            replay_record = AiTaskRecord.from_row(replay_row)
+            draft_id = str(ready["draft_id"])
             return ProfileCardTaskSubmission(
-                task=AiTaskRecord.from_row(replay_row), replayed=True
+                task=replay_record, replayed=True, draft_id=draft_id
             )
 
     if await _count_daily_tasks(db, user_id) >= PROFILE_CARD_DAILY_LIMIT:
@@ -401,17 +417,21 @@ async def request_profile_card_summarize(
     )
     await db.flush()
     emit_ai_metric("success", 1, {"scene": PROFILE_CARD_SUMMARIZE_TASK_TYPE, "reason": "enqueued"})
-    return ProfileCardTaskSubmission(task=task, replayed=False)
+    return ProfileCardTaskSubmission(task=task, replayed=False, draft_id=draft_id)
 
 
 async def load_profile_card_draft(
-    db: AsyncSession, user_id: int
+    db: AsyncSession, user_id: int, draft_id: str | None = None
 ) -> ProfileCardDraftRead:
     await _require_consent(db, user_id)
-    row = await _latest_open_draft(db, user_id)
+    row = await _card_draft(
+        db, user_id, ("queued", "running", "ready", "partial", "applied"),
+        draft_id=draft_id,
+    )
     if row is None:
         raise ProfileCardDraftNotFound()
-    return _draft_read(row)
+    vector = await _load_revision_vector(db, user_id)
+    return _draft_read(row, vector.profile)
 
 
 def _clip(value: str, limit: int) -> str:
@@ -644,17 +664,45 @@ async def generate_profile_card_summarize_handler(
     return f"profile-card:{user_id_int}:{revision_id_int}", revisions
 
 
-async def apply_profile_card_draft(
+async def _load_profile_revision(db: AsyncSession, user_id: int) -> int:
+    result = await db.execute(
+        text(
+            "SELECT profile_revision FROM user_revision_state "
+            "WHERE user_id = :user_id FOR UPDATE"
+        ),
+        {"user_id": user_id},
+    )
+    row = await _first_row(result)
+    return int((row or {}).get("profile_revision") or 0)
+
+
+async def _apply_profile_card_draft(
     db: AsyncSession,
     user_id: int,
     body: ProfileCardApplyRequest,
     idempotency_key: str,
 ) -> dict[str, Any]:
+    await _lock_profile_update(db, user_id)
     await _require_consent(db, user_id)
-    row = await _latest_readable_draft(db, user_id)
+    row = await _card_draft(
+        db,
+        user_id,
+        ("queued", "running", "ready", "partial", "applied"),
+        draft_id=body.draft_id,
+        for_update=True,
+    )
     if row is None:
         raise ProfileCardDraftNotFound()
     request_hash = _hash_apply_request(user_id, body)
+    if (
+        str(row.get("last_operation_idempotency_key") or "") == idempotency_key
+        and str(row.get("last_operation_request_digest") or "") != request_hash
+    ):
+        raise TaskError(
+            code="TASK_IDEMPOTENCY_CONFLICT",
+            message="Idempotency-Key 已用于不同请求内容",
+            status_code=409,
+        )
     if (
         str(row.get("last_operation_idempotency_key") or "") == idempotency_key
         and str(row.get("last_operation_request_digest") or "") == request_hash
@@ -662,13 +710,44 @@ async def apply_profile_card_draft(
     ):
         replay = _maybe_json(row.get("last_operation_response_json")) or {}
         replay["replayed"] = True
+        replay.setdefault("draft_id", str(row["draft_id"]))
+        replay.setdefault("expected_revision", int(row.get("expected_revision") or 0))
         return replay
     if str(row.get("status")) not in _APPLYABLE_STATUSES:
         raise AIInputError("当前草稿不可写入资料卡")
     if int(row.get("expected_revision") or 0) != int(body.expected_revision):
         raise ProfileCardVersionConflict()
+    if body.source_revision_id is not None:
+        stored_source_revision = row.get("source_revision_id")
+        if stored_source_revision is None or int(stored_source_revision) != int(body.source_revision_id):
+            raise ProfileCardVersionConflict()
+    # current read 在 revision 锁之前取得来源锁，与画像发布的 revision→向量顺序一致。
+    latest_source = await _first_row(await db.execute(
+        text(
+            "SELECT id FROM ai_profile_revision "
+            "WHERE user_id = :user_id AND subject = :subject "
+            "ORDER BY revision_no DESC, id DESC LIMIT 1 FOR UPDATE"
+        ),
+        {"user_id": user_id, "subject": ProfileSubject.PERSONAL.value},
+    ))
+    if latest_source is None or int(latest_source["id"]) != int(row.get("source_revision_id") or 0):
+        raise TaskError(code="RESULT_STALE", message="画像来源已变化，请重新整理", status_code=409)
+    if body.base_profile_revision is not None:
+        current_profile_revision = await _load_profile_revision(db, user_id)
+        if current_profile_revision != int(body.base_profile_revision):
+            raise ProfileCardVersionConflict()
 
     accepted = body.accepted
+    if accepted.personal_tags is not None:
+        if len(accepted.personal_tags) > MAX_PERSONAL_TAGS:
+            raise AIInputError(f"个人标签最多选择 {MAX_PERSONAL_TAGS} 个")
+        if len(set(accepted.personal_tags)) != len(accepted.personal_tags):
+            raise AIInputError("个人标签不能重复")
+        if any(tag not in ALL_TAG_OPTIONS for tag in accepted.personal_tags):
+            raise AIInputError("个人标签必须来自可选标签目录")
+    elif body.tag_apply_mode == "replace_selection":
+        raise AIInputError("replace_selection 必须同时提交 accepted.personal_tags")
+
     written: list[str] = []
     skipped: list[str] = []
     patch: dict[str, Any] = {}
@@ -728,13 +807,13 @@ async def apply_profile_card_draft(
     if accepted.personal_tags is not None:
         incoming = [tag for tag in accepted.personal_tags if tag in ALL_TAG_OPTIONS]
         existing_tags = list(current.get("personal_tags") or [])
-        merged_tags: list[str] = []
-        for tag in existing_tags + incoming:
-            if tag not in merged_tags:
-                merged_tags.append(tag)
-            if len(merged_tags) >= MAX_PERSONAL_TAGS:
-                break
-        patch["personal_tags"] = merged_tags
+        if body.tag_apply_mode == "replace_selection":
+            selected_tags = incoming
+        else:
+            selected_tags = list(dict.fromkeys(existing_tags + incoming))
+        if len(selected_tags) > MAX_PERSONAL_TAGS:
+            raise AIInputError(f"合并后的个人标签不能超过 {MAX_PERSONAL_TAGS} 个")
+        patch["personal_tags"] = selected_tags
         written.append("personal_tags")
 
     discarded = [key for key in body.rejected if key in _FACT_KEYS]
@@ -746,19 +825,24 @@ async def apply_profile_card_draft(
         "user_edited": True,
         "label": "AI 生成后经用户修改",
     }
+    final_expected_revision = int(row.get("expected_revision") or 0) + 1
     response = {
         "status": "applied",
         "replayed": False,
+        "draft_id": str(row["draft_id"]),
+        "expected_revision": final_expected_revision,
         "written_fields": written,
         "skipped_fields": skipped,
         "profile": None,
     }
     if patch:
-        updated = await update_profile(db, user_id, ProfileUpdateRequest(**patch))
-        response["profile"] = updated
+        response["profile"] = await update_profile(
+            db, user_id, ProfileUpdateRequest(**patch), commit=False
+        )
     else:
         response["profile"] = current
-        response["profile"] = current
+    # 先转换为接口 JSON 类型，首次响应与数据库回放保持完全一致（日期/Decimal 等）。
+    response = ProfileCardApplyResponse.model_validate(response).model_dump(mode="json")
 
     await db.execute(
         text(
@@ -782,3 +866,18 @@ async def apply_profile_card_draft(
     )
     await db.flush()
     return response
+
+
+async def apply_profile_card_draft(
+    db: AsyncSession,
+    user_id: int,
+    body: ProfileCardApplyRequest,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    try:
+        return await _apply_profile_card_draft(db, user_id, body, idempotency_key)
+    except Exception:
+        # 资料、revision/outbox、草稿状态和幂等回执必须同回滚；路由在成功
+        # 返回前才 commit，直接调用服务的测试/任务也保持同样的事务语义。
+        await db.rollback()
+        raise

@@ -33,6 +33,7 @@ class ProfileCardSummarizeRequest(BaseModel):
 
 class ProfileCardSummarizeAccepted(BaseModel):
     task_id: str
+    draft_id: str | None = Field(default=None, description="本次任务对应的稳定草稿 ID；旧任务可能为空，客户端不得猜最新草稿")
     status: AiTaskStatus
     poll_url: str
     replayed: bool = False
@@ -63,6 +64,7 @@ class ProfileCardDraftRead(BaseModel):
     status: ProfileCardDraftStatus
     expected_revision: int
     source_revision_id: int | None = None
+    base_profile_revision: int = Field(..., ge=0, description="读取草稿时的资料版本，采用时原样提交")
     prompt_version: str | None = None
     schema_version: str | None = None
     fields: ProfileCardDraftFields
@@ -83,7 +85,8 @@ class ProfileCardAcceptedPayload(BaseModel):
 
     self_intro: str | None = Field(default=None, max_length=500)
     qa_answers: list[ProfileQaAnswer] | None = None
-    personal_tags: list[str] | None = Field(default=None, max_length=10)
+    # 超限由资料卡服务层返回稳定的 AI_INPUT_INVALID，而不是入口静默截断。
+    personal_tags: list[str] | None = None
 
     @field_validator("self_intro")
     @classmethod
@@ -96,7 +99,11 @@ class ProfileCardAcceptedPayload(BaseModel):
 class ProfileCardApplyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    expected_revision: int = Field(..., ge=0)
+    draft_id: str | None = Field(default=None, min_length=1, max_length=64, description="精确采用本人指定草稿；省略仅为旧客户端兼容")
+    expected_revision: int = Field(..., ge=0, description="GET 返回的草稿版本，采用时原样提交")
+    source_revision_id: int | None = Field(default=None, ge=0, description="GET 返回的画像来源 ID；提供时校验相等，且草稿必须仍来自最新画像")
+    base_profile_revision: int | None = Field(default=None, ge=0, description="GET 返回的个人资料版本；提供时必须等于采用时的当前版本")
+    tag_apply_mode: Literal["merge", "replace_selection"] = Field(default="merge", description="默认合并标签；replace_selection 必须提交 personal_tags 完整选择")
     accepted: ProfileCardAcceptedPayload = Field(default_factory=ProfileCardAcceptedPayload)
     rejected: list[str] = Field(default_factory=list)
     replace_existing: ProfileCardReplaceExisting = Field(
@@ -124,6 +131,8 @@ class ProfileCardApplyRequest(BaseModel):
 class ProfileCardApplyResponse(BaseModel):
     status: Literal["applied"]
     replayed: bool = False
+    draft_id: str
+    expected_revision: int
     written_fields: list[str] = Field(default_factory=list)
     skipped_fields: list[str] = Field(default_factory=list)
     profile: dict[str, Any] | None = None

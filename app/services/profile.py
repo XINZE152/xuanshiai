@@ -361,7 +361,21 @@ async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> d
     return data
 
 
-async def update_profile(db: AsyncSession, user_id: int, request: ProfileUpdateRequest) -> dict[str, Any]:
+async def _lock_profile_update(db: AsyncSession, user_id: int) -> None:
+    # 普通资料编辑和草稿采用统一先锁用户，再读资料/锁 revision，避免丢失更新与锁反序。
+    await db.execute(
+        text("SELECT id FROM users WHERE id = :user_id FOR UPDATE"),
+        {"user_id": user_id},
+    )
+
+
+async def update_profile(
+    db: AsyncSession,
+    user_id: int,
+    request: ProfileUpdateRequest,
+    *,
+    commit: bool = True,
+) -> dict[str, Any]:
     values = request.model_dump(exclude_unset=True)
     if "personal_tags" in values:
         selected = values.pop("personal_tags")
@@ -381,6 +395,7 @@ async def update_profile(db: AsyncSession, user_id: int, request: ProfileUpdateR
         values["tag_selections"][CUSTOM_TAG_CATEGORY_MAP_KEY] = selected_custom_categories
     if "birthday" in values and values["birthday"] and _calculate_age(values["birthday"]) < 18:
         raise HTTPException(422, detail="用户必须年满18周岁")
+    await _lock_profile_update(db, user_id)
     if "gender" in values:
         result = await db.execute(text("SELECT gender FROM users WHERE id = :id FOR UPDATE"), {"id": user_id})
         old_gender = result.scalar()
@@ -437,7 +452,8 @@ async def update_profile(db: AsyncSession, user_id: int, request: ProfileUpdateR
             "profile_updated",
             50,
         )
-    await db.commit()
+    if commit:
+        await db.commit()
     return await get_profile(db, user_id)
 
 

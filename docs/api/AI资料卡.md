@@ -7,6 +7,8 @@
 | 日期 | 版本 | 说明 |
 | --- | --- | --- |
 | 2026-09-22 | v1.0 | 首次公开 `POST /ai/profile-card/summarize`、`GET /ai/profile-card/draft`、`POST /ai/profile-card/draft/apply`。 |
+| 2026-10-02 | v1.1（本地实施，未发布） | 变更前：客户端按最新草稿采用，缺少资料版本保护，资料写入可能提前提交。变更后：summarize 返回稳定 `draft_id`；GET 精确取稿并返回 `base_profile_revision`；apply 增加来源/资料版本校验、明确幂等冲突、标签 merge/replace_selection 与原子事务。旧客户端省略新增入参仍兼容；新版页面缺少版本信息时停止写入，禁止降级重发。 |
+| 2026-10-03 | v1.1 联调说明（未发布） | 补充客户端同键同内容重试、终态任务重试与隐私可见范围说明；真实 MySQL 和静态检查不替代真实登录、UTS 编译或真机验收。 |
 
 通用请求头：
 
@@ -21,6 +23,7 @@ Idempotency-Key: <8-128 位 [A-Za-z0-9._:-]>  # 仅两个写接口必需
 - 三个接口都要求 `ai_profile_enabled` 通过画像功能门禁。未开启时一律 `503`，`code=AI_FEATURE_DISABLED`，不创建任务、不读草稿、不写资料。
 - 三个接口都要求当前用户仍持有 `profile_text_extract` 授权。未授权或已撤回返回 `403 AI_CONSENT_REQUIRED`。
 - 写接口幂等键与画像会话相同字符集，但长度是 **8–128**，不是记忆接口的 1–128。
+- 响应 Content-Type 均为 `application/json`。422 参数校验错误使用 FastAPI 标准 `detail` 数组，不是上述业务错误对象；前端应区分两种结构。
 - 错误响应与画像一致，包在 `detail` 里：
 
 ```json
@@ -60,7 +63,7 @@ Idempotency-Key: <8-128 位 [A-Za-z0-9._:-]>  # 仅两个写接口必需
 | `Idempotency-Key` | header | string | 是 | 无 | 8–128 位，字符集 `[A-Za-z0-9._:-]` | 同一用户、同一任务类型下的回放键 |
 | `force` | body | boolean | 否 | `false` | 额外字段一律拒绝 | `false`：同一成稿版本已有 `ready`/`partial` 草稿时直接回放该草稿任务，不占新额度。`true`：忽略这份可复用草稿，重新入队 |
 
-合法示例：`force=false`。非法示例：`{"force":"yes"}`（类型不符，422）；`{"extra":1}`（多余字段，422）；缺 `Idempotency-Key` 或 key 为 `short`（400）。
+合法示例：`force=false`。非法示例：`{"force":"maybe"}`（不可解析为布尔，422）；`{"extra":1}`（多余字段，422）；缺 `Idempotency-Key` 或 key 为 `short`（400）。客户端始终发送 JSON 布尔，不依赖服务端兼容性类型转换。
 
 **请求体示例**
 
@@ -84,6 +87,7 @@ Idempotency-Key: card-key-202ok
 | 字段 | 类型 | 必返 | 空值含义 | 业务含义 | 示例 |
 | --- | --- | --- | --- | --- | --- |
 | `task_id` | string | 是 | 不适用 | 异步任务 ID，用 `GET /api/v1/ai/tasks/{task_id}` 轮询 | `"task_01J..."` |
+| `draft_id` | string/null | 是 | 旧任务没有稳定草稿指针 | 本次任务对应的草稿 ID；新版客户端必须指定该 ID 取稿，不能猜最新草稿 | `"draft-ready"` |
 | `status` | string | 是 | 不适用 | 任务状态，取值与 AI 任务状态枚举一致 | `"queued"` |
 | `poll_url` | string | 是 | 不适用 | 轮询路径，固定为 `/api/v1/ai/tasks/{task_id}` | `"/api/v1/ai/tasks/task_01J..."` |
 | `replayed` | boolean | 是 | 不适用 | 本次没有新建任务，回放了已有任务 | `false` |
@@ -94,6 +98,7 @@ Idempotency-Key: card-key-202ok
 ```json
 {
   "task_id": "task_01Jabc",
+  "draft_id": "draft-ready",
   "status": "queued",
   "poll_url": "/api/v1/ai/tasks/task_01Jabc",
   "replayed": false,
@@ -106,6 +111,7 @@ Idempotency-Key: card-key-202ok
 ```json
 {
   "task_id": "task_01Jabc",
+  "draft_id": "draft-ready",
   "status": "queued",
   "poll_url": "/api/v1/ai/tasks/task_01Jabc",
   "replayed": true,
@@ -118,11 +124,12 @@ Idempotency-Key: card-key-202ok
 **使用方法与业务规则**
 
 - 前置条件：已登录；画像功能开启；`profile_text_extract` 仍有效；个人画像已有确认成稿（最新 `ai_profile_revision` 的叙事状态为 `confirmed`，且该版本有字段）。缺成稿返回 `400`，文案为「请先确认画像成稿」。
-- 调用顺序：先完成画像确认，再调用本接口；拿到 `task_id` 后轮询任务；任务成功后再 `GET /ai/profile-card/draft`。不要把 202 当成草稿已可写。
+- 调用顺序：先完成画像确认，再生成；保存 `task_id` 和 `draft_id`，轮询成功后 `GET /ai/profile-card/draft?draft_id=<返回ID>` 并核对回执 ID。缺少草稿指针时停止，不把 202 当成可写，也不回退“最新草稿”。
 - 幂等：`user + profile_card_summarize + Idempotency-Key + 请求摘要` 回放第一次任务。请求摘要包含用户、成稿版本和 `force`。同一 key 换了成稿版本或 `force`，返回 `409 TASK_IDEMPOTENCY_CONFLICT`，不会覆盖旧任务。
 - `force=false` 且当前已有同一成稿版本的 `ready`/`partial` 草稿时，回放该草稿对应任务，`replayed=true`，不新建草稿、不计入额度。
 - 额度：滚动 24 小时内该用户 `profile_card_summarize` 任务达到 5 次后，新的非回放请求返回 `429 AI_QUOTA_EXCEEDED`，`retryable=true`。回放不占新额度。
 - 状态：新建草稿初始 `queued`、`expected_revision=1`。Worker 完成后草稿变为 `ready`；没有任何可用文本或候选时变为 `failed`。输入或输出被内容审核拒绝时任务失败，错误码 `AI_POLICY_DENIED`，草稿 `failed`。本接口本身不把草稿写成 `applied`。
+- 任务状态 `failed` / `cancelled` / `superseded` 已终止时，用户明确重试需使用新操作键；轮询超时或网络结果不明则保留原键以恢复原任务。不要永久回放失败任务，也不要在未确认任务终态时重复创建。
 - 边界：只使用本人成稿。理想型摘要仅在对方叙事为 `confirmed` 或 `published` 时附带，缺失不报错。功能关闭、撤权、额度用尽都不写个人资料。
 
 **错误**
@@ -164,7 +171,7 @@ Idempotency-Key: short
 
 | 项 | 值 |
 | --- | --- |
-| 用途 | 读取本人最新一份未丢弃的资料卡草稿，供用户确认后再写入资料 |
+| 用途 | 按 `draft_id` 精确读取本人草稿；省略时兼容读取最新可读草稿 |
 | URL | `GET /api/v1/ai/profile-card/draft` |
 | 登录 | 是 |
 | 权限 | 画像功能开启，且已授权 `profile_text_extract` |
@@ -176,15 +183,16 @@ Idempotency-Key: short
 | 参数名 | 位置 | 类型 | 必填 | 默认值 | 校验 | 业务含义 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Authorization` | header | string | 是 | 无 | `Bearer` access token | 只读本人草稿 |
+| `draft_id` | query | string/null | 否 | 无 | 1–64 字符；提供时精确读取该草稿，不回退到最新草稿 | 多草稿并存时的稳定选择 |
 
-无 query、无 body。非法示例：未带 token。
+未提供 `draft_id` 时保留旧客户端行为，读取本人最新可读草稿；非法示例：`draft_id=` 为空或超过 64 字符。
 
 **请求体示例**
 
 无请求体。
 
 ```http
-GET /api/v1/ai/profile-card/draft HTTP/1.1
+GET /api/v1/ai/profile-card/draft?draft_id=draft-ready HTTP/1.1
 Authorization: Bearer <access_token>
 ```
 
@@ -193,9 +201,10 @@ Authorization: Bearer <access_token>
 | 字段 | 类型 | 必返 | 空值含义 | 业务含义 | 示例 |
 | --- | --- | --- | --- | --- | --- |
 | `draft_id` | string | 是 | 不适用 | 草稿 ID | `"a1b2..."` |
-| `status` | string | 是 | 不适用 | `queued` / `running` / `ready` / `partial` / `applied` / `failed`。读取不返回 `discarded` | `"ready"` |
+| `status` | string | 是 | 不适用 | `queued` / `running` / `ready` / `partial` / `applied`；不返回 `failed`/`discarded` | `"ready"` |
 | `expected_revision` | integer | 是 | 不适用 | 写入时必须原样提交；新建为 1，每次成功 apply 后 +1 | `1` |
 | `source_revision_id` | integer/null | 是 | 尚未绑定成稿版本 | 生成该草稿所用的个人画像 revision id | `88` |
+| `base_profile_revision` | integer | 是 | 不适用 | GET 时的个人资料版本（>=0）；新版客户端采用时必须原样传回；不是草稿版本或来源 ID | `3` |
 | `prompt_version` | string/null | 是 | 尚未生成 | 提示词版本 | `"profile-card-summarize-v2"` |
 | `schema_version` | string/null | 是 | 尚未生成 | 草稿 schema 版本 | `"profile-card-summarize-v1"` |
 | `fields` | object | 是 | 不适用 | 五个开放文本槽，见下表 |  |
@@ -205,7 +214,7 @@ Authorization: Bearer <access_token>
 | `fields.qa_2_sports_candidates` | object | 是 | 不适用 | 问答 2「喜欢的运动」候选，文本在 `candidates` |  |
 | `fields.interest_tag_candidates` | object | 是 | 不适用 | 兴趣标签候选，文本在 `candidates` |  |
 | `fields.*.value` | string | 是 | 空串表示这一槽没有单值文案 | 模型给出的单段文本，最长按生成侧裁剪 | `"周末喜欢徒步。"` |
-| `fields.*.candidates` | string[] | 是 | 空数组表示没有候选 | 只保留目录内标签；运动与兴趣槽使用它 | `["徒步"]` |
+| `fields.*.candidates` | string[] | 是 | 空数组表示没有候选 | 只保留目录内标签；运动与兴趣槽使用它 | `["周末徒步"]` |
 | `fields.*.confidence` | number | 是 | 不适用 | 0–1 | `0.8` |
 | `fields.*.source_ref` | string/null | 是 | 无来源指针 | 最小来源引用，不是原文 | `null` |
 | `task_id` | string/null | 是 | 草稿没有关联任务 | 生成该草稿的任务 | `"task_01Jabc"` |
@@ -223,6 +232,7 @@ Authorization: Bearer <access_token>
   "status": "ready",
   "expected_revision": 1,
   "source_revision_id": 88,
+  "base_profile_revision": 3,
   "prompt_version": "profile-card-summarize-v2",
   "schema_version": "profile-card-summarize-v1",
   "fields": {
@@ -236,13 +246,13 @@ Authorization: Bearer <access_token>
     "qa_3_love": {"value": "", "candidates": [], "confidence": 0, "source_ref": null},
     "qa_2_sports_candidates": {
       "value": "",
-      "candidates": ["徒步"],
+      "candidates": ["周末徒步"],
       "confidence": 0.7,
       "source_ref": null
     },
     "interest_tag_candidates": {
       "value": "",
-      "candidates": ["徒步"],
+      "candidates": ["周末徒步"],
       "confidence": 0.7,
       "source_ref": null
     }
@@ -260,7 +270,7 @@ Authorization: Bearer <access_token>
 
 - 前置条件与生成接口相同：登录、画像功能、`profile_text_extract`。
 - 调用顺序：summarize 返回 202 后轮询任务，再读本接口。`queued`/`running` 可继续轮询任务，不要拿空字段去 apply。
-- 读取范围是本人最新一条状态属于 `queued`、`running`、`ready`、`partial`、`applied` 的草稿。`discarded` 不返回；没有任何可读行时 `404 PROFILE_CARD_DRAFT_NOT_FOUND`。
+- 读取状态为 `queued`、`running`、`ready`、`partial`、`applied`；指定 ID 时只返回本人该草稿，找不到返回 404，不回退最新草稿；省略 ID 才按更新时间取最新可读草稿。`failed`/`discarded` 均不返回。
 - 幂等：只读，无 Idempotency-Key，不改状态、不占额度。
 - 边界：不返回他人草稿。功能关闭时不回退成「返回旧草稿」。
 
@@ -270,7 +280,8 @@ Authorization: Bearer <access_token>
 | --- | --- | --- | --- |
 | 401 | （鉴权失败，非业务码） | 未登录或 token 无效 | 重新登录 |
 | 403 | `AI_CONSENT_REQUIRED` | 未授权或已撤回 | 重新授权后再读 |
-| 404 | `PROFILE_CARD_DRAFT_NOT_FOUND` | 本人没有未丢弃草稿 | 先调用 summarize |
+| 404 | `PROFILE_CARD_DRAFT_NOT_FOUND` | 指定草稿缺失、属于他人、已失败/丢弃，或未提供 ID 且本人没有可读草稿 | 重新整理；不能将带 ID 请求降级成最新草稿查询 |
+| 422 | （query 校验失败） | `draft_id` 为空或超过 64 字符 | 修正参数，不改成无 ID 查询 |
 | 503 | `AI_FEATURE_DISABLED` | 画像功能关闭 | 停止读取 |
 
 ---
@@ -294,17 +305,27 @@ Authorization: Bearer <access_token>
 | --- | --- | --- | --- | --- | --- | --- |
 | `Authorization` | header | string | 是 | 无 | Bearer token | 只写本人资料 |
 | `Idempotency-Key` | header | string | 是 | 无 | 8–128 位 `[A-Za-z0-9._:-]` | 同一草稿、同一请求摘要的回放键 |
-| `expected_revision` | body | integer | 是 | 无 | `>= 0`，必须等于草稿当前 `expected_revision` | 乐观锁 |
+| `draft_id` | body | string/null | 否 | `null` | 1–64 字符；提供时精确采用该草稿并加行锁 | 避免多草稿串稿；省略时兼容读取最新草稿 |
+| `expected_revision` | body | integer | 是 | 无 | `>= 0`，必须等于草稿当前 `expected_revision` | 草稿乐观锁 |
+| `source_revision_id` | body | integer/null | 否 | `null` | `>=0`；提供且草稿已有来源时必须相等，服务端另校验草稿仍来自本人最新画像 | 新版页面必须保留 GET 的来源 ID；旧客户端可省略 |
+| `base_profile_revision` | body | integer/null | 否 | `null` | `>=0`；提供时必须等于当前 `user_revision_state.profile_revision` | 资料版本乐观锁；新版页面必须原样透传 GET 快照，旧客户端可省略 |
+| `tag_apply_mode` | body | string | 否 | `merge` | `merge` / `replace_selection`；后者必须同时提交 `accepted.personal_tags` | 标签合并或替换语义 |
 | `accepted` | body | object | 否 | 空对象 | 禁止额外字段 | 用户确认要写入的内容 |
 | `accepted.self_intro` | body | string/null | 否 | `null` | 最长 500；服务端再 strip | 要写入的自我介绍 |
 | `accepted.qa_answers` | body | array/null | 否 | `null` | 每项见下表 | 要写入的「关于我」问答 |
-| `accepted.qa_answers[].question_id` | body | integer | 项内必填 | 无 | 只能是 `1`、`2`、`3` | 1 理想的另一半；2 喜欢的运动；3 期待的爱情 |
-| `accepted.qa_answers[].question` | body | string/null | 否 | 按 question_id 填充 | 最长 64 | 题干；空则服务端填固定题干 |
-| `accepted.qa_answers[].answer` | body | string | 否 | `""` | 最长 300；写入前 strip，空答案跳过 | 用户确认后的答案 |
-| `accepted.personal_tags` | body | string[]/null | 否 | `null` | 数组最长 10 | 要并入的兴趣标签；不在标签目录中的项被丢弃 |
-| `rejected` | body | string[] | 否 | `[]` | 无格式枚举 | 用户明确不写的槽。只有事实列键会计入 `skipped_fields`：`height`、`education`、`income`、`occupation`、`city`、`education_level`、`city_code`、`weight`、`birthday`、`age` |
+| `accepted.personal_tags` | body | string[]/null | 否 | `null` | 必须在标签目录；超过 10 个、重复、未知标签或 merge 结果超限返回 `400 AI_INPUT_INVALID`，不截断 | 资料接口保持既有 10 个容量；S1 页面每次最多显式采用 3 个候选 |
+| `rejected` | body | string[] | 否 | `[]` | 无格式枚举 | 用户明确不写的槽。只有事实列键会计入 `skipped_fields` |
 | `replace_existing` | body | object | 否 | `{"self_intro": false}` | 禁止额外字段 | 是否覆盖资料里已有内容 |
 | `replace_existing.self_intro` | body | boolean | 否 | `false` | 布尔 | `false` 且资料已有非空自我介绍时跳过，不覆盖 |
+
+`accepted.qa_answers` 每项（S1 页面不提交，兼容既有客户端）：
+
+| 字段 | 位置 | 类型 | 必填 | 默认 | 校验与含义 | 合法示例 / 非法示例 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `question_id` | body | integer | 是 | 无 | 仅 1/2/3；对应既有关于我问题 | `1` / `4` |
+| `question` | body | string/null | 否 | `null` | 最长 64；空值使用目录问题文本 | `"理想的另一半"` / 超过 64 字符 |
+| `answer` | body | string | 否 | `""` | 最长 300，strip 后再内容审核；空回答不写入 | `"希望认真沟通"` / 超过 300 字符 |
+
 
 非法示例：`{"expected_revision": -1}`（422）；`accepted` 里带 `height`（422，该对象禁止额外字段）；缺 Idempotency-Key（400）。`rejected` 里出现 `height` **不是**非法请求，它只表示不写该事实列。
 
@@ -320,12 +341,16 @@ Idempotency-Key: apply-key-0001
 ```json
 {
   "expected_revision": 1,
+  "draft_id": "draft-ready",
+  "source_revision_id": 88,
+  "base_profile_revision": 3,
+  "tag_apply_mode": "merge",
   "accepted": {
     "self_intro": "周末喜欢徒步和看展，希望找一个能一起出门的人。",
     "qa_answers": [
       {"question_id": 1, "answer": "希望对方也喜欢出门。"}
     ],
-    "personal_tags": ["徒步"]
+    "personal_tags": ["周末徒步"]
   },
   "rejected": ["height", "education", "income"],
   "replace_existing": {"self_intro": false}
@@ -338,9 +363,11 @@ Idempotency-Key: apply-key-0001
 | --- | --- | --- | --- | --- | --- |
 | `status` | string | 是 | 不适用 | 恒为 `applied` | `"applied"` |
 | `replayed` | boolean | 是 | 不适用 | 同一 key 与同一请求摘要命中已应用草稿时为 `true` | `false` |
-| `written_fields` | string[] | 是 | 空数组表示这次没有新写入 | 实际写入的槽：`self_intro`、`qa_1`/`qa_2`/`qa_3`、`personal_tags` | `["self_intro","qa_1"]` |
+| `draft_id` | string | 是 | 不适用 | 实际采用的草稿 ID | `"draft-ready"` |
+| `expected_revision` | integer | 是 | 不适用 | 本次成功采用后的最终草稿 revision | `2` |
+| `written_fields` | string[] | 是 | 空数组表示这次没有新写入 | 实际写入的槽 | `["self_intro","personal_tags"]` |
 | `skipped_fields` | string[] | 是 | 空数组表示没有跳过 | 因已有内容、空文本或被拒绝的事实列而没写的槽 | `["height"]` |
-| `profile` | object/null | 是 | 无 | 写入后的个人资料；无资料变更时为写入前的当前资料。结构同 `GET /users/me/profile` | 见个人资料文档 |
+| `profile` | object/null | 是 | 无 | 写入后的个人资料；结构同 `GET /users/me/profile` | 见个人资料文档 |
 
 **返回示例**
 
@@ -348,6 +375,8 @@ Idempotency-Key: apply-key-0001
 {
   "status": "applied",
   "replayed": false,
+  "draft_id": "draft-ready",
+  "expected_revision": 2,
   "written_fields": ["self_intro", "qa_1", "personal_tags"],
   "skipped_fields": ["height", "education", "income"],
   "profile": {
@@ -362,16 +391,18 @@ Idempotency-Key: apply-key-0001
 
 **使用方法与业务规则**
 
-- 前置条件：登录、画像功能开启、`profile_text_extract` 有效，且本人最新可读草稿状态是 `ready`、`partial` 或 `applied`。`queued`/`running`/`failed` 返回 `400`，文案「当前草稿不可写入资料卡」。没有可读草稿返回 `404`。
-- 调用顺序：先 GET draft，把返回的 `expected_revision` 原样带回。用户必须在客户端改过或确认过文本后再提交；服务端仍会做内容审核。
-- 幂等：草稿已是 `applied`，且 Idempotency-Key 与请求摘要都和上次相同，回放第一次响应，不再写资料、不再把 `expected_revision` +1。同一 key 但请求摘要不同不会回放；此时状态仍是 `applied`，只要 `expected_revision` 与当前值一致，会再次写入并把 revision 再 +1。状态不是 `ready`、`partial`、`applied` 时返回 400。
-- 乐观锁：`expected_revision` 不一致返回 `409 DRAFT_VERSION_CONFLICT`。成功写入后该值 +1。
-- 自我介绍：空串跳过。资料里已有非空介绍且 `replace_existing.self_intro=false` 时跳过，不覆盖。`true` 才替换。
-- 问答：`question_id` 1 和 3 在资料里已有非空答案时跳过。`question_id` 2 允许覆盖已有答案。空答案不写。答案写入前截断到 300 字。
-- 标签：只保留标签目录内的值，与现有标签去重合并，总数不超过 10。本次即使没有新增目录内标签，只要请求带了 `personal_tags`（含空数组），仍会计入 `written_fields`。
-- 事实列（身高、学历、收入、职业、城市等）永远不会从本接口写入。把它们放进 `rejected` 只会出现在 `skipped_fields`。
-- 内容审核拒绝自我介绍或问答时，整个请求失败为 `400 AI_INPUT_INVALID`，不把草稿标成 `applied`。审核替换时使用替换后的展示文本。
-- 事务：有资料变更时，个人资料由 `update_profile` 先提交，路由再提交草稿的 `applied` 标记，这两步不是同一个数据库事务。若后一步失败，资料可能已经写入，而草稿仍不是 `applied`，同一 key 不会回放。没有资料变更时，路由只提交草稿标记。任一步在返回前失败都不返回 200。
+
+- 调用顺序：先 GET draft；多草稿并存时把返回的 `draft_id` 和 `expected_revision` 原样带回。用户必须在客户端改过或确认过文本后再提交。
+- 幂等：草稿已是 `applied`，且 Idempotency-Key 与请求摘要都和上次相同，回放第一次响应，不再写资料、不再把 `expected_revision` +1。回执始终包含实际 `draft_id` 与最终 `expected_revision`。
+- 相同草稿的同一幂等键携带不同 body 摘要，返回 `409 TASK_IDEMPOTENCY_CONFLICT`，不会覆盖已落库回执。回放的资料是第一次成功时的快照，不代表此后资料的当前值。
+- 乐观锁：`expected_revision`、已提供的 `source_revision_id`、已提供的 `base_profile_revision` 任一不一致返回 `409 DRAFT_VERSION_CONFLICT`。
+- 来源失效：采用前以当前读检查本人最新画像 revision；草稿来源不再是最新版本时返回 `409 RESULT_STALE`，必须重新整理。不能仅把旧草稿来源 ID 原样提交来绕过校验。
+- 标签：默认 `merge`；`replace_selection` 用本次 `personal_tags` 完整替换已有选择。输入超过 10 个、合并结果超过 10 个或替换模式缺少选择返回 `400 AI_INPUT_INVALID`，服务端不静默截断。
+- 事务：资料写入（包括 profile revision/outbox）、草稿 `applied` 状态、幂等回执在同一事务中；提交前任一步失败全部回滚，不留下部分资料变更、revision 增量或 applied 标记。数据库提交确认或 HTTP 响应丢失不能推断“未写入”，必须保留原键和 body 核对回执。
+- 锁顺序：资料编辑与采用复用用户行锁；采用再锁草稿、当前来源和资料 revision。GET 仅返回快照，不持有写锁。
+- S1 页面仅展示可编辑自我介绍与逐项选择的最多 3 个标签；问答槽保留既有服务端兼容能力，但不纳入 S1 采用入口。
+- 重试：首次提交时冻结已确认文本、标签、替换选项、草稿/来源/资料版本及操作键。网络或 5xx 结果不明时锁定编辑并原样重试；不能同键改 body，也不能删除约束重发。首次明确 400/422 且此前从未出现结果不明时，允许修改内容后重新确认并使用新键。
+- 可见范围：采用不会变更本人既有隐私设置；对方仍按现有可见性策略读取。回放回执是首次成功快照，若要判断当前资料或移除是否生效，必须重新读取当前资料，不以旧回执覆盖当前状态。
 - 额度：本接口不占 summarize 的每日 5 次额度。
 - 边界：不能写他人草稿。功能关闭时不能借此接口清理或补写。重复提交同一已应用请求应看 `replayed`，不要据此再改 UI 草稿。
 
@@ -379,14 +410,16 @@ Idempotency-Key: apply-key-0001
 
 | HTTP | 错误码 | 触发条件 | 前端处理建议 |
 | --- | --- | --- | --- |
-| 400 | `AI_INPUT_INVALID` | key 非法；草稿还不能写；自我介绍或问答被审核拒绝 | 刷新草稿或改文案；不要原样重试被拒内容 |
+| 400 | `AI_INPUT_INVALID` | key 非法；草稿还不能写；标签超限/重复/目录外；replace_selection 缺少 personal_tags；自我介绍或问答被审核拒绝 | 首次明确拒绝时修改后重新确认；若此前结果不明，先核对原请求结果 |
 | 401 | （鉴权失败，非业务码） | 未登录或 token 无效 | 重新登录 |
 | 403 | `AI_CONSENT_REQUIRED` | 授权已撤回 | 重新授权 |
-| 404 | `PROFILE_CARD_DRAFT_NOT_FOUND` | 没有可读草稿 | 重新 summarize |
-| 409 | `DRAFT_VERSION_CONFLICT` | `expected_revision` 与服务端不一致 | 重新 GET draft 后再提交 |
-| 422 | （请求体或资料校验失败） | revision 缺失/为负、问答 question_id 非法、`accepted` 含未声明字段；或个人资料更新本身拒绝该内容 | 按字段表修正 |
+| 404 | `PROFILE_CARD_DRAFT_NOT_FOUND` | 没有指定或可读草稿 | 重新 GET 或 summarize |
+| 409 | `DRAFT_VERSION_CONFLICT` | 草稿、来源成稿或资料版本不一致 | 重新 GET 指定 draft_id 后再提交 |
+| 409 | `RESULT_STALE` | 草稿来源不再是本人最新画像 | 重新整理，不复用旧稿 |
+| 409 | `TASK_IDEMPOTENCY_CONFLICT` | 同一草稿的同一幂等键对应不同 body | 保留已成功回执；核对后以新操作键提交 |
+| 422 | （请求体校验失败） | revision 缺失/为负、枚举非法、`accepted` 含未声明字段 | 按字段表修正 |
 | 503 | `AI_FEATURE_DISABLED` | 画像功能关闭 | 停止写入 |
-| 503 | `AI_TEMPORARILY_UNAVAILABLE` | 写入过程出现未分类异常，`retryable=true` | 先 GET draft 看是否已是 `applied`，再决定是否用同一 key 重试 |
+| 503 | `AI_TEMPORARILY_UNAVAILABLE` | 事务提交或写入过程出现未分类异常 | 不猜测未写入；保留原 key、精确草稿 ID、全部版本与相同 body 重试核对回执 |
 
 非法 body 示例：
 
