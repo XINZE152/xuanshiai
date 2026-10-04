@@ -2060,7 +2060,7 @@ class DatabaseManager:
                     `reason` varchar(1000) DEFAULT NULL,
                     `risk_level` varchar(16) NOT NULL DEFAULT 'low',
                     `source` varchar(255) DEFAULT NULL,
-                    `version` varchar(64) NOT NULL DEFAULT 'seed-v1',
+                    `version` varchar(64) NOT NULL DEFAULT 'seed-v2',
                     `enabled` tinyint NOT NULL DEFAULT '1',
                     `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
                     `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -3492,8 +3492,11 @@ class DatabaseManager:
             "checked_in": "tinyint NOT NULL DEFAULT 0 COMMENT '是否已签到'",
             "in_crm": "tinyint NOT NULL DEFAULT 0 COMMENT '是否已入库会员CRM'",
             "promoter_id": "bigint unsigned DEFAULT NULL COMMENT '推广红娘 users.id'",
+            "deleted_at": "datetime DEFAULT NULL COMMENT '软删除时间，非空表示已删除'",
+            "deleted_by": "bigint unsigned DEFAULT NULL COMMENT '删除操作人 matchmaker_admin_account.id'",
         }))
         self._ensure_optional_index(cursor, "activity_signup", "idx_activity_signup_promoter", "(`promoter_id`)")
+        self._ensure_optional_index(cursor, "activity_signup", "idx_activity_signup_deleted", "(`deleted_at`)")
         self._ensure_optional_index(cursor, "offline_activity", "idx_offline_activity_online", "(`online`, `sort_order`)")
         # 商家分类种子
         cursor.execute("""

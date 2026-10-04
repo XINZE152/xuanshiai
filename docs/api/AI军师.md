@@ -311,7 +311,7 @@ AI_PROVIDER=mock
 AI_DAILY_ADVISOR_LIMIT=20
 AI_ADVISOR_MAX_CONTEXT_MESSAGES=80
 AI_ADVISOR_PROMPT_VERSION=relationship-v1
-AI_ADVISOR_KNOWLEDGE_VERSION=seed-v1
+AI_ADVISOR_KNOWLEDGE_VERSION=seed-v2
 ```
 
 `AI_PROVIDER=mock` 仅用于开发/测试。生产启用必须同时满足统一 AI 审批、retention、真实 provider 和凭据门禁；真实 API key 只能放在环境变量或配置中心，不能提交到 Git。

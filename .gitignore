@@ -67,6 +67,5 @@ artifacts/
 uvicorn.err.log
 uvicorn.out.log
 
-.workbudddy/
-.workbuddy/memory/2026-09-08.md
-.workbuddy/memory/MEMORY.md
+# 工作区数据与记忆（本地数据，不纳入版本控制）
+.workbuddy/

@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentUser
+from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser
 from app.core.config import settings
 from app.schemas.finance import (
     AccountBalanceResponse,
@@ -141,12 +141,55 @@ async def list_rules(db: AsyncSession) -> list[CommissionRuleResponse]:
     return [_rule(row) for row in result.mappings().all()]
 
 
-async def mark_order_paid_and_settle(db: AsyncSession, admin: CurrentUser, order_id: int) -> list[CommissionEntryResponse]:
+def _member_anchor_scope(
+    admin: CurrentMatchmakerAdmin,
+    params: dict[str, object],
+    *,
+    member_column: str,
+    alias: str = "scope_assignment",
+) -> str:
+    """D-4 财务可见范围锚点：业务会员的生效归属。
+
+    订单 / 分成 / 日报 / 导出等资金流水表本身不带组织或红娘列，统一以「业务会员是否
+    落在账号数据范围内」收口（与既有 `admin_list_store_commission_entries` 的
+    ``ra.matchmaker_id`` 口径一致）：SELF → 本红娘名下会员；STORE / ORGANIZATION →
+    本门店 / 本组织（含下属门店）名下会员；未绑定组织 → ``1 = 0``；ALL / ``*`` → ``1 = 1``。
+    """
+    return admin.scope_exists_clause(
+        params,
+        correlation=f"{alias}.user_id = {member_column}",
+        assignment_alias=alias,
+    )
+
+
+def _account_anchor_scope(
+    admin: CurrentMatchmakerAdmin,
+    params: dict[str, object],
+    *,
+    type_column: str,
+    account_column: str,
+    alias: str = "scope_assignment",
+) -> str:
+    """D-4 账户型资金表（提现 / 账本 / 分成）的可见范围锚点。
+
+    这类记录按 ``account_type``（user / store）+ ``account_id`` 记账：个人账户按
+    「会员归属」判定，门店账户按「组织维度」判定（`scope_organization_clause`）。
+    """
+    member = _member_anchor_scope(admin, params, member_column=account_column, alias=alias)
+    if member == "1 = 1":
+        return "1 = 1"
+    org = admin.scope_organization_clause(params, column=account_column)
+    return f"(({type_column} = 'user' AND {member}) OR ({type_column} = 'store' AND ({org})))"
+
+
+async def mark_order_paid_and_settle(db: AsyncSession, admin: CurrentUser, order_id: int, *, scope_admin: CurrentMatchmakerAdmin | None = None) -> list[CommissionEntryResponse]:
     if not settings.is_test_mode:
         raise HTTPException(503, detail="支付成功状态必须由真实支付回调确认")
-    result = await db.execute(text("""SELECT id, user_id, amount, status, service_product_id,
+    params: dict[str, object] = {"id": order_id}
+    scope = "1 = 1" if scope_admin is None else _member_anchor_scope(scope_admin, params, member_column="payment_order.user_id")
+    result = await db.execute(text(f"""SELECT id, user_id, amount, status, service_product_id,
         matchmaker_id FROM payment_order
-        WHERE id = :id FOR UPDATE"""), {"id": order_id})
+        WHERE id = :id AND ({scope}) FOR UPDATE"""), params)
     order = result.mappings().first()
     if not order:
         raise HTTPException(404, detail="支付订单不存在")
@@ -233,19 +276,28 @@ async def list_user_commissions(db: AsyncSession, current: CurrentUser) -> list[
     return [CommissionEntryResponse(**{**dict(row), "created_at": _dt(row["created_at"])}) for row in result.mappings().all()]
 
 
-async def admin_finance_report(db: AsyncSession) -> list[FinanceReportRow]:
-    result = await db.execute(text("""SELECT ce.beneficiary_type, ce.beneficiary_id,
+async def admin_finance_report(db: AsyncSession, *, admin: CurrentMatchmakerAdmin) -> list[FinanceReportRow]:
+    params: dict[str, object] = {}
+    scope = _account_anchor_scope(
+        admin, params, type_column="ce.beneficiary_type", account_column="ce.beneficiary_id"
+    )
+    result = await db.execute(text(f"""SELECT ce.beneficiary_type, ce.beneficiary_id,
         COUNT(DISTINCT ce.order_id) AS order_count, COALESCE(SUM(ce.amount), 0) AS total_amount,
         COALESCE(SUM(CASE WHEN ce.status = 'PENDING' THEN ce.amount ELSE 0 END), 0) AS pending_amount,
         COALESCE(SUM(CASE WHEN ce.status = 'AVAILABLE' THEN ce.amount ELSE 0 END), 0) AS available_amount
-        FROM commission_entry ce GROUP BY ce.beneficiary_type, ce.beneficiary_id
-        ORDER BY total_amount DESC"""))
+        FROM commission_entry ce WHERE ({scope})
+        GROUP BY ce.beneficiary_type, ce.beneficiary_id
+        ORDER BY total_amount DESC"""), params)
     return [FinanceReportRow(**dict(row)) for row in result.mappings().all()]
 
 
-async def release_commission(db: AsyncSession, admin: CurrentUser, entry_id: int) -> CommissionEntryResponse:
-    result = await db.execute(text("""SELECT id, order_id, beneficiary_type, beneficiary_id,
-        base_amount, amount, status, created_at FROM commission_entry WHERE id = :id FOR UPDATE"""), {"id": entry_id})
+async def release_commission(db: AsyncSession, admin: CurrentUser, entry_id: int, *, scope_admin: CurrentMatchmakerAdmin | None = None) -> CommissionEntryResponse:
+    params: dict[str, object] = {"id": entry_id}
+    scope = "1 = 1" if scope_admin is None else _account_anchor_scope(
+        scope_admin, params, type_column="commission_entry.beneficiary_type", account_column="commission_entry.beneficiary_id"
+    )
+    result = await db.execute(text(f"""SELECT id, order_id, beneficiary_type, beneficiary_id,
+        base_amount, amount, status, created_at FROM commission_entry WHERE id = :id AND ({scope}) FOR UPDATE"""), params)
     row = result.mappings().first()
     if not row:
         raise HTTPException(404, detail="分成明细不存在")
@@ -261,9 +313,11 @@ async def release_commission(db: AsyncSession, admin: CurrentUser, entry_id: int
     return CommissionEntryResponse(**{**dict(row), "created_at": _dt(row["created_at"])})
 
 
-async def refund_order(db: AsyncSession, admin: CurrentUser, order_id: int, request: FinanceRefundRequest) -> None:
-    result = await db.execute(text("""SELECT id, status, service_request_id
-        FROM payment_order WHERE id = :id FOR UPDATE"""), {"id": order_id})
+async def refund_order(db: AsyncSession, admin: CurrentUser, order_id: int, request: FinanceRefundRequest, *, scope_admin: CurrentMatchmakerAdmin | None = None) -> None:
+    params: dict[str, object] = {"id": order_id}
+    scope = "1 = 1" if scope_admin is None else _member_anchor_scope(scope_admin, params, member_column="payment_order.user_id")
+    result = await db.execute(text(f"""SELECT id, status, service_request_id
+        FROM payment_order WHERE id = :id AND ({scope}) FOR UPDATE"""), params)
     order = result.mappings().first()
     if not order:
         raise HTTPException(404, detail="支付订单不存在")
@@ -346,9 +400,13 @@ async def request_withdrawal(db: AsyncSession, current: CurrentUser, request: Wi
     return _withdrawal(result.mappings().one())
 
 
-async def review_withdrawal(db: AsyncSession, admin: CurrentUser, withdrawal_id: int, request: WithdrawalReview) -> WithdrawalResponse:
-    result = await db.execute(text("""SELECT id, account_type, account_id, amount, status,
-        payee_masked, failure_reason, created_at, updated_at FROM withdrawal_request WHERE id = :id FOR UPDATE"""), {"id": withdrawal_id})
+async def review_withdrawal(db: AsyncSession, admin: CurrentUser, withdrawal_id: int, request: WithdrawalReview, *, scope_admin: CurrentMatchmakerAdmin | None = None) -> WithdrawalResponse:
+    params: dict[str, object] = {"id": withdrawal_id}
+    scope = "1 = 1" if scope_admin is None else _account_anchor_scope(
+        scope_admin, params, type_column="withdrawal_request.account_type", account_column="withdrawal_request.account_id"
+    )
+    result = await db.execute(text(f"""SELECT id, account_type, account_id, amount, status,
+        payee_masked, failure_reason, created_at, updated_at FROM withdrawal_request WHERE id = :id AND ({scope}) FOR UPDATE"""), params)
     row = result.mappings().first()
     if not row:
         raise HTTPException(404, detail="提现申请不存在")
@@ -376,9 +434,10 @@ async def review_withdrawal(db: AsyncSession, admin: CurrentUser, withdrawal_id:
     return _withdrawal(result.mappings().one())
 
 
-async def admin_list_orders(db: AsyncSession, page: int, page_size: int, status: int | None = None, user_id: int | None = None, order_no: str | None = None, product_name: str | None = None, start_time: str | None = None, end_time: str | None = None) -> PaymentOrderAdminPage:
-    where = ["1 = 1"]
+async def admin_list_orders(db: AsyncSession, page: int, page_size: int, status: int | None = None, user_id: int | None = None, order_no: str | None = None, product_name: str | None = None, start_time: str | None = None, end_time: str | None = None, *, admin: CurrentMatchmakerAdmin) -> PaymentOrderAdminPage:
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    # D-4：订单以「下单会员的生效归属」为锚点收口。
+    where = [_member_anchor_scope(admin, params, member_column="po.user_id")]
     if status is not None:
         where.append("po.status = :status")
         params["status"] = status
@@ -408,9 +467,10 @@ async def admin_list_orders(db: AsyncSession, page: int, page_size: int, status:
     return PaymentOrderAdminPage(items=[_order(row) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
-async def admin_list_withdrawals(db: AsyncSession, page: int, page_size: int, status: str | None = None, account_id: int | None = None, start_time: str | None = None, end_time: str | None = None) -> WithdrawalAdminPage:
-    where = ["1 = 1"]
+async def admin_list_withdrawals(db: AsyncSession, page: int, page_size: int, status: str | None = None, account_id: int | None = None, start_time: str | None = None, end_time: str | None = None, *, admin: CurrentMatchmakerAdmin) -> WithdrawalAdminPage:
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    # D-4：提现按账户类型分别锚定（会员归属 / 门店组织）。
+    where = [_account_anchor_scope(admin, params, type_column="wr.account_type", account_column="wr.account_id")]
     if status:
         where.append("status = :status")
         params["status"] = status
@@ -424,21 +484,22 @@ async def admin_list_withdrawals(db: AsyncSession, page: int, page_size: int, st
         where.append("created_at < DATE_ADD(CONCAT(:end_time, ' 00:00:00'), INTERVAL 1 DAY)")
         params["end_time"] = end_time
     clause = " AND ".join(where)
-    rows = await db.execute(text(f"""SELECT id, account_type, account_id, amount, status,
-        payee_masked, failure_reason, created_at, updated_at FROM withdrawal_request
-        WHERE {clause} ORDER BY id DESC LIMIT :limit OFFSET :offset"""), params)
-    count = await db.execute(text(f"SELECT COUNT(*) FROM withdrawal_request WHERE {clause}"),
+    rows = await db.execute(text(f"""SELECT wr.id, wr.account_type, wr.account_id, wr.amount, wr.status,
+        wr.payee_masked, wr.failure_reason, wr.created_at, wr.updated_at FROM withdrawal_request wr
+        WHERE {clause} ORDER BY wr.id DESC LIMIT :limit OFFSET :offset"""), params)
+    count = await db.execute(text(f"SELECT COUNT(*) FROM withdrawal_request wr WHERE {clause}"),
         {key: value for key, value in params.items() if key not in ("limit", "offset")})
     total = int(count.scalar() or 0)
     return WithdrawalAdminPage(items=[_withdrawal(row) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
 async def admin_revenue_daily_report(
-    db: AsyncSession, start_date: str | None = None, end_date: str | None = None
+    db: AsyncSession, start_date: str | None = None, end_date: str | None = None, *, admin: CurrentMatchmakerAdmin
 ) -> list[FinanceDailyRow]:
     """后台统计报表：按支付日期聚合订单收入与退款（status=1 已支付 / status=3 已退款）。"""
-    where = ["po.pay_time IS NOT NULL"]
     params: dict[str, object] = {}
+    # D-4：日报同口径按「下单会员的生效归属」收口。
+    where = ["po.pay_time IS NOT NULL", _member_anchor_scope(admin, params, member_column="po.user_id")]
     if start_date:
         where.append("DATE(po.pay_time) >= :start_date")
         params["start_date"] = start_date
@@ -462,11 +523,11 @@ async def admin_revenue_daily_report(
     ) for row in rows]
 
 
-async def admin_list_ledger(db: AsyncSession, page: int, page_size: int, account_type: str | None = None, account_id: int | None = None, start_time: str | None = None, end_time: str | None = None) -> LedgerEntryPage:
-    where = ["1 = 1"]
+async def admin_list_ledger(db: AsyncSession, page: int, page_size: int, account_type: str | None = None, account_id: int | None = None, start_time: str | None = None, end_time: str | None = None, *, admin: CurrentMatchmakerAdmin) -> LedgerEntryPage:
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    where = [_account_anchor_scope(admin, params, type_column="al.account_type", account_column="al.account_id")]
     if account_type:
-        where.append("account_type = :account_type")
+        where.append("al.account_type = :account_type")
         params["account_type"] = account_type
     if account_id is not None:
         where.append("account_id = :account_id")
@@ -478,10 +539,10 @@ async def admin_list_ledger(db: AsyncSession, page: int, page_size: int, account
         where.append("created_at < DATE_ADD(CONCAT(:end_time, ' 00:00:00'), INTERVAL 1 DAY)")
         params["end_time"] = end_time
     clause = " AND ".join(where)
-    rows = await db.execute(text(f"""SELECT id, account_type, account_id, direction, amount,
-        state, source_type, source_id, idempotency_key, created_at
-        FROM account_ledger WHERE {clause} ORDER BY id DESC LIMIT :limit OFFSET :offset"""), params)
-    count = await db.execute(text(f"SELECT COUNT(*) FROM account_ledger WHERE {clause}"),
+    rows = await db.execute(text(f"""SELECT al.id, al.account_type, al.account_id, al.direction, al.amount,
+        al.state, al.source_type, al.source_id, al.idempotency_key, al.created_at
+        FROM account_ledger al WHERE {clause} ORDER BY al.id DESC LIMIT :limit OFFSET :offset"""), params)
+    count = await db.execute(text(f"SELECT COUNT(*) FROM account_ledger al WHERE {clause}"),
         {key: value for key, value in params.items() if key not in ("limit", "offset")})
     total = int(count.scalar() or 0)
     return LedgerEntryPage(items=[LedgerEntryResponse(**dict(row)) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
@@ -631,9 +692,15 @@ async def admin_list_commission_entries(
     rule_id: int | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    *,
+    admin: CurrentMatchmakerAdmin,
 ) -> CommissionEntryDetailPage:
-    where = [f"ce.beneficiary_type = '{_DETAIL_BENEFICIARY_TYPE}'"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    # D-4：以「消费会员的生效归属」为锚点收口（与分店分成明细口径一致）。
+    where = [
+        f"ce.beneficiary_type = '{_DETAIL_BENEFICIARY_TYPE}'",
+        _member_anchor_scope(admin, params, member_column="po.user_id"),
+    ]
     if matchmaker_id is not None:
         where.append("ce.beneficiary_id = :matchmaker_id")
         params["matchmaker_id"] = matchmaker_id
@@ -668,7 +735,8 @@ async def admin_list_commission_entries(
     total = int(
         (
             await db.execute(
-                text(f"SELECT COUNT(*) FROM commission_entry ce WHERE {clause}"),
+                text(f"""SELECT COUNT(*) FROM commission_entry ce
+                    LEFT JOIN payment_order po ON po.id = ce.order_id WHERE {clause}"""),
                 count_params,
             )
         ).scalar()
@@ -684,18 +752,21 @@ async def admin_list_commission_entries(
     )
 
 
-async def admin_list_commission_options(db: AsyncSession) -> CommissionEntryDetailOptions:
+async def admin_list_commission_options(db: AsyncSession, *, admin: CurrentMatchmakerAdmin) -> CommissionEntryDetailOptions:
     """一次性返回筛选下拉：当前产生过分成的总店红娘列表 + 启用的分成规则列表"""
+    params: dict[str, object] = {"kind": _DETAIL_BENEFICIARY_TYPE}
+    scope = _member_anchor_scope(admin, params, member_column="po.user_id")
     matchmaker_rows = (
         await db.execute(
             text(
-                """SELECT DISTINCT u.id, COALESCE(u.nickname, CONCAT('红娘#', u.id)) AS name, u.avatar
+                f"""SELECT DISTINCT u.id, COALESCE(u.nickname, CONCAT('红娘#', u.id)) AS name, u.avatar
                    FROM commission_entry ce
+                   LEFT JOIN payment_order po ON po.id = ce.order_id
                    JOIN users u ON u.id = ce.beneficiary_id
-                   WHERE ce.beneficiary_type = :kind
+                   WHERE ce.beneficiary_type = :kind AND ({scope})
                    ORDER BY u.id DESC"""
             ),
-            {"kind": _DETAIL_BENEFICIARY_TYPE},
+            params,
         )
     ).mappings().all()
     event_rows = (
@@ -744,10 +815,15 @@ async def admin_list_store_commission_entries(
     rule_id: int | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    *,
+    admin: CurrentMatchmakerAdmin,
 ) -> StoreCommissionEntryPage:
     """分店线上分成明细：beneficiary_type='store'，beneficiary_id=organization.id。"""
-    where = [f"ce.beneficiary_type = '{_STORE_BENEFICIARY_TYPE}'"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    where = [
+        f"ce.beneficiary_type = '{_STORE_BENEFICIARY_TYPE}'",
+        _member_anchor_scope(admin, params, member_column="po.user_id"),
+    ]
     if store_id is not None:
         where.append("ce.beneficiary_id = :store_id")
         params["store_id"] = store_id
@@ -811,14 +887,19 @@ async def admin_list_store_commission_entries(
     )
 
 
-async def admin_store_commission_options(db: AsyncSession) -> StoreCommissionOptions:
+async def admin_store_commission_options(db: AsyncSession, *, admin: CurrentMatchmakerAdmin) -> StoreCommissionOptions:
     """分店分成明细筛选下拉：门店列表 + 产生过分成的红娘 + 启用分成规则。"""
+    params: dict[str, object] = {"kind": _STORE_BENEFICIARY_TYPE}
+    store_scope = admin.scope_organization_clause(params, column="organization.id")
     store_rows = (
         await db.execute(
-            text("""SELECT id, COALESCE(display_name, name) name, status
-                FROM organization WHERE org_type = 'store' ORDER BY sort_order DESC, id DESC""")
+            text(f"""SELECT organization.id, COALESCE(display_name, name) name, status
+                FROM organization WHERE org_type = 'store' AND ({store_scope})
+                ORDER BY sort_order DESC, id DESC"""),
+            params,
         )
     ).mappings().all()
+    matchmaker_scope = _member_anchor_scope(admin, params, member_column="po.user_id")
     matchmaker_rows = (
         await db.execute(
             text(
@@ -827,10 +908,10 @@ async def admin_store_commission_options(db: AsyncSession) -> StoreCommissionOpt
                    JOIN payment_order po ON po.id = ce.order_id
                    JOIN resource_assignment ra ON ra.user_id = po.user_id AND ra.status = 1
                    JOIN users m ON m.id = ra.matchmaker_id
-                   WHERE ce.beneficiary_type = :kind
+                   WHERE ce.beneficiary_type = :kind AND ({matchmaker_scope})
                    ORDER BY m.id DESC"""
             ),
-            {"kind": _STORE_BENEFICIARY_TYPE},
+            params,
         )
     ).mappings().all()
     event_rows = (
@@ -846,10 +927,14 @@ async def admin_store_commission_options(db: AsyncSession) -> StoreCommissionOpt
     )
 
 
-async def admin_store_commission_summary(db: AsyncSession, store_id: int | None = None) -> StoreCommissionSummary:
+async def admin_store_commission_summary(db: AsyncSession, store_id: int | None = None, *, admin: CurrentMatchmakerAdmin) -> StoreCommissionSummary:
     """分店分成 4 张统计卡：累计分得 / 本月分成 / 上月分成 / 待结算余额。"""
-    where = ["ce.beneficiary_type = :kind", "ce.status <> 'REVERSED'"]
     params: dict[str, object] = {"kind": _STORE_BENEFICIARY_TYPE}
+    where = [
+        "ce.beneficiary_type = :kind",
+        "ce.status <> 'REVERSED'",
+        _member_anchor_scope(admin, params, member_column="po.user_id"),
+    ]
     if store_id is not None:
         where.append("ce.beneficiary_id = :store_id")
         params["store_id"] = store_id
@@ -864,7 +949,9 @@ async def admin_store_commission_summary(db: AsyncSession, store_id: int | None 
                     AND ce.created_at < DATE_FORMAT(UTC_TIMESTAMP(), '%%Y-%%m-01')
                     THEN ce.amount ELSE 0 END), 0) previous_month_amount,
                 COALESCE(SUM(CASE WHEN ce.status = 'PENDING' THEN ce.amount ELSE 0 END), 0) pending_amount
-                FROM commission_entry ce WHERE {clause}"""),
+                FROM commission_entry ce
+                LEFT JOIN payment_order po ON po.id = ce.order_id
+                WHERE {clause}"""),
             params,
         )
     ).mappings().one()
@@ -888,6 +975,8 @@ async def build_store_commission_export(
     rule_id: int | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    *,
+    admin: CurrentMatchmakerAdmin,
 ) -> bytes:
     """导出分店线上分成明细为 .xlsx（当前筛选条件的全量数据）。"""
     from io import BytesIO
@@ -895,8 +984,12 @@ async def build_store_commission_export(
     from openpyxl import Workbook
     from openpyxl.utils import get_column_letter
 
-    where = [f"ce.beneficiary_type = '{_STORE_BENEFICIARY_TYPE}'"]
     params: dict[str, object] = {}
+    # D-4：导出与列表同口径，避免用导出接口绕过数据范围。
+    where = [
+        f"ce.beneficiary_type = '{_STORE_BENEFICIARY_TYPE}'",
+        _member_anchor_scope(admin, params, member_column="po.user_id"),
+    ]
     if store_id is not None:
         where.append("ce.beneficiary_id = :store_id")
         params["store_id"] = store_id

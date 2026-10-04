@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import CurrentMatchmakerAdmin
 from app.schemas.organization_admin import (
     AssignmentAdminItem,
     StoreAdminCreate,
@@ -41,10 +42,12 @@ def _store_item(row) -> StoreAdminItem:
 
 
 async def list_stores_admin(
-    db: AsyncSession, page: int, page_size: int, search: str | None = None, status: int | None = None
+    db: AsyncSession, page: int, page_size: int, search: str | None = None, status: int | None = None,
+    *, admin: CurrentMatchmakerAdmin,
 ) -> tuple[list[StoreAdminItem], int]:
-    where = ["o.org_type = 'store'"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    # D-4：门店属组织自有资源，用统一组织维度谓词收口（SELF / 未绑定组织 → 0 条）。
+    where = ["o.org_type = 'store'", admin.scope_organization_clause(params, column="o.id")]
     if search:
         where.append("(o.name LIKE CONCAT('%', :search, '%') OR o.display_name LIKE CONCAT('%', :search, '%')"
                      " OR o.code LIKE CONCAT('%', :search, '%') OR o.region_code LIKE CONCAT('%', :search, '%'))")
@@ -65,7 +68,7 @@ async def list_stores_admin(
 
 
 async def create_store_admin(
-    db: AsyncSession, body: StoreAdminCreate, actor_id: int
+    db: AsyncSession, body: StoreAdminCreate, actor_id: int, *, admin: CurrentMatchmakerAdmin
 ) -> StoreAdminItem:
     try:
         result = await db.execute(text("""INSERT INTO organization
@@ -79,15 +82,24 @@ async def create_store_admin(
     except IntegrityError:
         await db.rollback()
         raise HTTPException(409, detail="分站编码已存在")
+    # D-4：新建门店必须落在账号数据范围内。当前建档接口不解析「上级组织」，
+    # 因此新建门店只会落在平台根层：仅 ALL/`*` 账号可通过本校验，其余账号
+    # 回滚并 403（fail-closed，避免组织账号建出门店后自己都看不到）。
+    params: dict[str, object] = {"id": store_id}
+    if not (await db.execute(text(
+        f"SELECT 1 FROM organization o WHERE o.id = :id AND ({admin.scope_organization_clause(params, column='o.id')})"
+    ), params)).scalar():
+        await db.rollback()
+        raise HTTPException(403, detail="新建门店归属超出当前账号数据范围")
     await db.execute(text("""INSERT INTO business_audit_log
         (actor_user_id, action, resource_type, resource_id)
         VALUES (:actor, 'organization.create', 'organization', :id)"""), {"actor": actor_id, "id": store_id})
     await db.commit()
-    return await get_store_admin(db, store_id)
+    return await get_store_admin(db, store_id, admin=admin)
 
 
-async def delete_store_admin(db: AsyncSession, store_id: int, actor_id: int) -> StoreAdminItem:
-    item = await get_store_admin(db, store_id)
+async def delete_store_admin(db: AsyncSession, store_id: int, actor_id: int, *, admin: CurrentMatchmakerAdmin) -> StoreAdminItem:
+    item = await get_store_admin(db, store_id, admin=admin)
     if item.member_count:
         raise HTTPException(409, detail="该分站下仍有成员，请先移除成员后再删除")
     if (await db.execute(text(
@@ -102,8 +114,8 @@ async def delete_store_admin(db: AsyncSession, store_id: int, actor_id: int) -> 
     return item
 
 
-async def update_store(db: AsyncSession, store_id: int, body: StoreAdminUpdate, actor_id: int):
-    await get_store_admin(db, store_id)
+async def update_store(db: AsyncSession, store_id: int, body: StoreAdminUpdate, actor_id: int, *, admin: CurrentMatchmakerAdmin):
+    await get_store_admin(db, store_id, admin=admin)
     values = body.model_dump(exclude_unset=True)
     if "auto_redirect" in values and values["auto_redirect"] is not None:
         values["auto_redirect"] = int(values["auto_redirect"])
@@ -117,19 +129,22 @@ async def update_store(db: AsyncSession, store_id: int, body: StoreAdminUpdate, 
         VALUES (:actor, 'organization.update', 'organization', :id)"""),
         {"actor": actor_id, "id": store_id})
     await db.commit()
-    return await get_store_admin(db, store_id)
+    return await get_store_admin(db, store_id, admin=admin)
 
 
-async def get_store_admin(db: AsyncSession, store_id: int) -> StoreAdminItem:
-    row = (await db.execute(text(f"{STORE_SELECT} WHERE o.id = :id AND o.org_type = 'store'"),
-        {"id": store_id})).mappings().first()
+async def get_store_admin(db: AsyncSession, store_id: int, *, admin: CurrentMatchmakerAdmin) -> StoreAdminItem:
+    """读取单个门店。越权访问统一按 404「门店不存在」返回（D-4）。"""
+    params: dict[str, object] = {"id": store_id}
+    scope = admin.scope_organization_clause(params, column="o.id")
+    row = (await db.execute(text(f"{STORE_SELECT} WHERE o.id = :id AND o.org_type = 'store' AND ({scope})"),
+        params)).mappings().first()
     if not row:
         raise HTTPException(404, detail="门店不存在")
     return _store_item(row)
 
 
-async def update_store_status(db: AsyncSession, store_id: int, status: int, reason: str | None, actor_id: int):
-    await get_store_admin(db, store_id)
+async def update_store_status(db: AsyncSession, store_id: int, status: int, reason: str | None, actor_id: int, *, admin: CurrentMatchmakerAdmin):
+    await get_store_admin(db, store_id, admin=admin)
     await db.execute(text(
         "UPDATE organization SET status = :status, updated_at = UTC_TIMESTAMP() WHERE id = :id"
     ), {"status": status, "id": store_id})
@@ -138,11 +153,11 @@ async def update_store_status(db: AsyncSession, store_id: int, status: int, reas
         VALUES (:actor, 'organization.status', 'organization', :id, :reason)"""),
         {"actor": actor_id, "id": store_id, "reason": reason})
     await db.commit()
-    return await get_store_admin(db, store_id)
+    return await get_store_admin(db, store_id, admin=admin)
 
 
-async def list_store_members(db: AsyncSession, store_id: int, page: int, page_size: int) -> tuple[list[StoreMemberAdminItem], int]:
-    await get_store_admin(db, store_id)
+async def list_store_members(db: AsyncSession, store_id: int, page: int, page_size: int, *, admin: CurrentMatchmakerAdmin) -> tuple[list[StoreMemberAdminItem], int]:
+    await get_store_admin(db, store_id, admin=admin)
     params = {"store_id": store_id, "limit": page_size, "offset": (page - 1) * page_size}
     rows = await db.execute(text("""SELECT om.id, om.organization_id, om.user_id,
         u.nickname, u.phone, om.role_code, om.status, om.started_at, om.ended_at
@@ -156,11 +171,13 @@ async def list_store_members(db: AsyncSession, store_id: int, page: int, page_si
     return items, total
 
 
-async def remove_store_member(db: AsyncSession, member_id: int, reason: str, actor_id: int) -> StoreMemberAdminItem:
-    row = (await db.execute(text("""SELECT om.id, om.organization_id, om.user_id,
+async def remove_store_member(db: AsyncSession, member_id: int, reason: str, actor_id: int, *, admin: CurrentMatchmakerAdmin) -> StoreMemberAdminItem:
+    params: dict[str, object] = {"id": member_id}
+    scope = admin.scope_organization_clause(params, column="om.organization_id")
+    row = (await db.execute(text(f"""SELECT om.id, om.organization_id, om.user_id,
         u.nickname, u.phone, om.role_code, om.status, om.started_at, om.ended_at
         FROM organization_member om LEFT JOIN users u ON u.id = om.user_id
-        WHERE om.id = :id FOR UPDATE"""), {"id": member_id})).mappings().first()
+        WHERE om.id = :id AND ({scope}) FOR UPDATE"""), params)).mappings().first()
     if not row:
         raise HTTPException(404, detail="门店成员不存在")
     if int(row["status"]) != 1:
@@ -178,8 +195,8 @@ async def remove_store_member(db: AsyncSession, member_id: int, reason: str, act
     return StoreMemberAdminItem(**row)
 
 
-async def store_report(db: AsyncSession, store_id: int) -> StoreReport:
-    await get_store_admin(db, store_id)
+async def store_report(db: AsyncSession, store_id: int, *, admin: CurrentMatchmakerAdmin) -> StoreReport:
+    await get_store_admin(db, store_id, admin=admin)
     row = (await db.execute(text("""SELECT
         (SELECT COUNT(*) FROM organization_member WHERE organization_id = :id AND status = 1) active_member_count,
         (SELECT COUNT(*) FROM resource_assignment WHERE organization_id = :id AND status = 1) active_assignment_count,
@@ -209,10 +226,13 @@ async def list_assignments(db: AsyncSession, page: int, page_size: int, search: 
     return [AssignmentAdminItem(**dict(row)) for row in rows.mappings().all()], int(count.scalar() or 0)
 
 
-async def end_assignment(db: AsyncSession, assignment_id: int, reason: str, actor_id: int) -> AssignmentAdminItem:
+async def end_assignment(db: AsyncSession, assignment_id: int, reason: str, actor_id: int, *, admin: CurrentMatchmakerAdmin) -> AssignmentAdminItem:
+    params: dict[str, object] = {"id": assignment_id}
+    # D-4：资源分配自带 matchmaker_id / organization_id，可直接套用统一四档谓词。
+    scope = admin.scope_clause(params, user_column="ra.matchmaker_id", organization_column="ra.organization_id")
     row = (await db.execute(text(
-        "SELECT id FROM resource_assignment WHERE id = :id FOR UPDATE"
-    ), {"id": assignment_id})).scalar()
+        f"SELECT ra.id FROM resource_assignment ra WHERE ra.id = :id AND ({scope}) FOR UPDATE"
+    ), params)).scalar()
     if not row:
         raise HTTPException(404, detail="资源分配不存在")
     await db.execute(text("""UPDATE resource_assignment SET status = 2,
@@ -223,11 +243,17 @@ async def end_assignment(db: AsyncSession, assignment_id: int, reason: str, acto
         VALUES (:actor, 'resource_assignment.end', 'resource_assignment', :id, :reason)"""),
         {"actor": actor_id, "id": assignment_id, "reason": reason})
     await db.commit()
-    items, _ = await list_assignments(db, 1, 1)
-    for item in items:
-        if item.id == assignment_id:
-            return item
-    raise HTTPException(404, detail="资源分配不存在")
+    # 修复原实现「取分页首条再比对 id」导致结束后可能误报 404 的问题：直接按 id 回读。
+    updated = (await db.execute(text("""SELECT ra.id, ra.user_id, u.nickname,
+        ra.organization_id, o.name organization_name, ra.matchmaker_id, mu.nickname matchmaker_name,
+        ra.source, ra.status, ra.effective_at, ra.ended_at, ra.end_reason
+        FROM resource_assignment ra JOIN users u ON u.id = ra.user_id
+        LEFT JOIN organization o ON o.id = ra.organization_id
+        LEFT JOIN users mu ON mu.id = ra.matchmaker_id
+        WHERE ra.id = :id"""), {"id": assignment_id})).mappings().first()
+    if not updated:
+        raise HTTPException(404, detail="资源分配不存在")
+    return AssignmentAdminItem(**dict(updated))
 
 
 # ------------------------- M5 分店报表 -------------------------
@@ -237,9 +263,9 @@ _STORE_USER_SCOPE = (
 )
 
 
-async def store_report_summary(db: AsyncSession, store_id: int) -> StoreReportSummary:
+async def store_report_summary(db: AsyncSession, store_id: int, *, admin: CurrentMatchmakerAdmin) -> StoreReportSummary:
     """分店报表 9 张统计卡（口径与平台首页 dashboard 保持一致）。"""
-    store = await get_store_admin(db, store_id)
+    store = await get_store_admin(db, store_id, admin=admin)
     membership_scope = _STORE_USER_SCOPE.format(col="m.user_id")
     order_scope = _STORE_USER_SCOPE.format(col="po.user_id")
     order_scope_po3 = _STORE_USER_SCOPE.format(col="po3.user_id")
@@ -314,9 +340,9 @@ def _recent_months(months: int) -> list[str]:
     return list(reversed(collected))
 
 
-async def store_report_monthly(db: AsyncSession, store_id: int, months: int = 6) -> StoreReportMonthly:
+async def store_report_monthly(db: AsyncSession, store_id: int, months: int = 6, *, admin: CurrentMatchmakerAdmin) -> StoreReportMonthly:
     """分店月度报表：按月聚合新增会员/客源/牵线/约会/VIP/分成。"""
-    await get_store_admin(db, store_id)
+    await get_store_admin(db, store_id, admin=admin)
     months = max(1, min(months, 24))
     month_list = _recent_months(months)
     start = datetime.strptime(f"{month_list[0]}-01", "%Y-%m-%d")

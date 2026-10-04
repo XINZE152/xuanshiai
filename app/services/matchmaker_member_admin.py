@@ -22,8 +22,13 @@ def _mask_phone(phone: str | None) -> str | None:
     return f"{phone[:3]}****{phone[-4:]}" if len(phone) >= 7 else "***"
 
 
-async def _member(db: AsyncSession, member_id: int) -> MatchmakerMemberAdminItem:
-    row = (await db.execute(text("""SELECT u.id, u.nickname, u.phone, u.gender, u.status,
+async def _member(db: AsyncSession, member_id: int, scope: str) -> MatchmakerMemberAdminItem:
+    """读取单个会员。
+
+    ``scope`` 由调用方通过 `CurrentMatchmakerAdmin.scope_exists_clause` 生成（D-4）。
+    越权访问统一按 404 「会员不存在」返回，避免通过状态码差异枚举他组织会员 ID。
+    """
+    row = (await db.execute(text(f"""SELECT u.id, u.nickname, u.phone, u.gender, u.status,
         u.created_at, u.updated_at, a.matchmaker_id,
         v.vip_end_at,
         CASE WHEN v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP())
@@ -31,9 +36,9 @@ async def _member(db: AsyncSession, member_id: int) -> MatchmakerMemberAdminItem
         FROM users u
         LEFT JOIN (SELECT user_id, MAX(end_at) vip_end_at FROM user_membership
             WHERE status = 1 GROUP BY user_id) v ON v.user_id = u.id
-        LEFT JOIN (SELECT user_id, matchmaker_id FROM resource_assignment
-            WHERE status = 1) a ON a.user_id = u.id
-        WHERE u.id = :id"""), {"id": member_id})).mappings().first()
+        LEFT JOIN (SELECT user_id, MAX(matchmaker_id) AS matchmaker_id FROM resource_assignment
+            WHERE status = 1 GROUP BY user_id) a ON a.user_id = u.id
+        WHERE u.id = :id AND ({scope})"""), {"id": member_id})).mappings().first()
     if not row:
         raise HTTPException(404, detail="会员不存在")
     return MatchmakerMemberAdminItem(
@@ -50,7 +55,14 @@ async def _member(db: AsyncSession, member_id: int) -> MatchmakerMemberAdminItem
     )
 
 
-async def create_member(db: AsyncSession, body: MatchmakerMemberCreate, actor_id: int) -> MatchmakerMemberAdminItem:
+async def create_member(
+    db: AsyncSession,
+    body: MatchmakerMemberCreate,
+    actor_id: int,
+    *,
+    organization_id: int | None = None,
+    matchmaker_user_id: int | None = None,
+) -> MatchmakerMemberAdminItem:
     duplicate = await db.execute(text("SELECT id FROM users WHERE phone = :phone"), {"phone": body.phone})
     if duplicate.scalar():
         raise HTTPException(409, detail="手机号已注册")
@@ -60,6 +72,17 @@ async def create_member(db: AsyncSession, body: MatchmakerMemberCreate, actor_id
         **body.model_dump(exclude={"remark"}), "phone": body.phone,
     })
     member_id = int(result.lastrowid)
+    # D-4：建档必须同时落归属。否则 SELF / STORE / ORGANIZATION 账号建出的会员
+    # 不属于任何组织或红娘，在 fail-closed 的列表里永远查不到，也无法改派。
+    if organization_id is not None or matchmaker_user_id is not None:
+        await db.execute(text("""INSERT INTO resource_assignment
+            (user_id, organization_id, matchmaker_id, source, assigned_by)
+            VALUES (:user_id, :organization_id, :matchmaker_id, 'manual', :assigned_by)"""), {
+            "user_id": member_id,
+            "organization_id": organization_id,
+            "matchmaker_id": matchmaker_user_id,
+            "assigned_by": actor_id,
+        })
     await db.execute(text("""INSERT INTO matchmaker_admin_member_note
         (user_id, note, updated_by) VALUES (:user_id, :note, :updated_by)"""), {
         "user_id": member_id, "note": body.remark, "updated_by": actor_id,
@@ -70,11 +93,12 @@ async def create_member(db: AsyncSession, body: MatchmakerMemberCreate, actor_id
         "actor": actor_id, "resource_id": member_id, "reason": body.remark,
     })
     await db.commit()
-    return await _member(db, member_id)
+    # 该记录由调用方本人刚创建，回读不叠加作用域，避免归属未即时生效时误判 404。
+    return await _member(db, member_id, "1 = 1")
 
 
-async def update_member(db: AsyncSession, member_id: int, body: MatchmakerMemberUpdate, actor_id: int) -> MatchmakerMemberAdminItem:
-    await _member(db, member_id)
+async def update_member(db: AsyncSession, member_id: int, body: MatchmakerMemberUpdate, actor_id: int, *, scope: str) -> MatchmakerMemberAdminItem:
+    await _member(db, member_id, scope)
     values = body.model_dump(exclude_unset=True)
     remark = values.pop("remark", None)
     user_values = {key: values.pop(key) for key in ("nickname", "gender", "birthday", "is_married", "avatar") if key in values}
@@ -152,16 +176,16 @@ async def update_member(db: AsyncSession, member_id: int, body: MatchmakerMember
         "actor": actor_id, "resource_id": member_id, "reason": remark,
     })
     await db.commit()
-    return await _member(db, member_id)
+    return await _member(db, member_id, scope)
 
 
-async def certification_detail(db: AsyncSession, member_id: int, kind: str) -> CertificationDetail:
+async def certification_detail(db: AsyncSession, member_id: int, kind: str, *, scope: str) -> CertificationDetail:
     if kind == "marriage":
         row = (await db.execute(text(
             "SELECT id, is_married, updated_at FROM users WHERE id = :id"
         ), {"id": member_id})).mappings().first()
         if not row:
-            await _member(db, member_id)
+            await _member(db, member_id, scope)
         return CertificationDetail(
             user_id=member_id,
             kind=kind,
@@ -188,7 +212,7 @@ async def certification_detail(db: AsyncSession, member_id: int, kind: str) -> C
         ua.{reviewed_field} AS reviewed_at
         FROM user_auth ua WHERE ua.user_id = :id"""), {"id": member_id})).mappings().first()
     if not row:
-        await _member(db, member_id)
+        await _member(db, member_id, scope)
         return CertificationDetail(
             user_id=member_id, kind=kind, status=0, submitted_at=None, reviewed_at=None,
             fail_reason=None, value=None, material_urls=[], reviewer_id=None, audit_history=[],
@@ -204,8 +228,8 @@ async def certification_detail(db: AsyncSession, member_id: int, kind: str) -> C
     )
 
 
-async def member_audit_logs(db: AsyncSession, member_id: int) -> list[MemberAuditLogItem]:
-    await _member(db, member_id)
+async def member_audit_logs(db: AsyncSession, member_id: int, *, scope: str) -> list[MemberAuditLogItem]:
+    await _member(db, member_id, scope)
     result = await db.execute(text("""SELECT id, action, resource_type, resource_id, reason, created_at
         FROM business_audit_log WHERE resource_type = 'user' AND resource_id = :id
         ORDER BY id DESC LIMIT 200"""), {"id": member_id})

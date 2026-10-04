@@ -4,7 +4,13 @@ from fastapi import APIRouter, Body, Depends, Path, Query
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser, get_current_user, get_current_matchmaker_admin
+from app.api.dependencies import (
+    CurrentMatchmakerAdmin,
+    CurrentUser,
+    get_current_user,
+    get_current_matchmaker_admin,
+    require_sensitive_operation,
+)
 from app.db.session import get_db
 from app.schemas.finance import (
     AccountBalanceResponse,
@@ -56,6 +62,11 @@ from app.services.finance import (
     admin_list_orders,
     admin_list_withdrawals,
     admin_revenue_daily_report,
+)
+from app.services.sensitive_operations import (
+    abort_sensitive_operation,
+    begin_sensitive_operation,
+    finish_sensitive_operation,
 )
 
 router = APIRouter(prefix="/finance")
@@ -112,7 +123,7 @@ async def product_commission_rule(
 @admin_router.get("/report", response_model=list[FinanceReportRow], summary="查询分成汇总报表")
 async def report(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[FinanceReportRow]:
     admin.require("finance.read")
-    return await admin_finance_report(db)
+    return await admin_finance_report(db, admin=admin)
 
 
 @admin_router.get("/daily-report", response_model=list[FinanceDailyRow], summary="查询按日收入/退款统计报表")
@@ -123,7 +134,7 @@ async def daily_report(
     db: AsyncSession = Depends(get_db),
 ) -> list[FinanceDailyRow]:
     admin.require("finance.read")
-    return await admin_revenue_daily_report(db, start_date, end_date)
+    return await admin_revenue_daily_report(db, start_date, end_date, admin=admin)
 
 
 @admin_router.get("/orders", response_model=PaymentOrderAdminPage, summary="后台分页查询订单")
@@ -138,7 +149,7 @@ async def admin_orders(
     db: AsyncSession = Depends(get_db),
 ) -> PaymentOrderAdminPage:
     admin.require("finance.read")
-    return await admin_list_orders(db, page, page_size, status, user_id, order_no, product_name, start_time, end_time)
+    return await admin_list_orders(db, page, page_size, status, user_id, order_no, product_name, start_time, end_time, admin=admin)
 
 
 @admin_router.get("/withdrawals", response_model=WithdrawalAdminPage, summary="后台分页查询提现")
@@ -152,7 +163,7 @@ async def admin_withdrawals(
     db: AsyncSession = Depends(get_db),
 ) -> WithdrawalAdminPage:
     admin.require("finance.read")
-    return await admin_list_withdrawals(db, page, page_size, status, account_id, start_time, end_time)
+    return await admin_list_withdrawals(db, page, page_size, status, account_id, start_time, end_time, admin=admin)
 
 
 @admin_router.get("/ledger", response_model=LedgerEntryPage, summary="后台分页查询资金流水")
@@ -166,25 +177,45 @@ async def admin_ledger(
     db: AsyncSession = Depends(get_db),
 ) -> LedgerEntryPage:
     admin.require("finance.read")
-    return await admin_list_ledger(db, page, page_size, account_type, account_id, start_time, end_time)
+    return await admin_list_ledger(db, page, page_size, account_type, account_id, start_time, end_time, admin=admin)
 
 
 @admin_router.post("/orders/{order_id}/settle", response_model=list[CommissionEntryResponse], summary="结算已支付订单分成")
 async def settle(order_id: int = Path(..., ge=1), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[CommissionEntryResponse]:
     admin.require("finance.write")
-    return await mark_order_paid_and_settle(db, _finance_actor(admin), order_id)
+    return await mark_order_paid_and_settle(db, _finance_actor(admin), order_id, scope_admin=admin)
 
 
-@admin_router.post("/orders/{order_id}/refund", status_code=204, summary="退款并冲正分成")
-async def refund(order_id: int = Path(..., ge=1), body: FinanceRefundRequest = Body(...), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> None:
+@admin_router.post("/orders/{order_id}/refund", status_code=204, summary="退款并冲正分成（幂等 + 二次确认）")
+async def refund(
+    order_id: int = Path(..., ge=1),
+    body: FinanceRefundRequest = Body(...),
+    idempotency_key: str = Depends(require_sensitive_operation),
+    admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> None:
     admin.require("finance.write")
-    await refund_order(db, _finance_actor(admin), order_id, body)
+    reservation, replayed = await begin_sensitive_operation(
+        db,
+        actor_id=admin.account.id,
+        operation="finance.order.refund",
+        idempotency_key=idempotency_key,
+        payload={"order_id": order_id, "body": body.model_dump(mode="json")},
+    )
+    if replayed is not None:
+        return
+    try:
+        await refund_order(db, _finance_actor(admin), order_id, body, scope_admin=admin)
+    except Exception:
+        await abort_sensitive_operation(db, reservation)
+        raise
+    await finish_sensitive_operation(db, reservation, {"order_id": order_id, "refunded": True})
 
 
 @admin_router.post("/commission-entries/{entry_id}/release", response_model=CommissionEntryResponse, summary="释放待结算分成")
 async def release(entry_id: int = Path(..., ge=1), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> CommissionEntryResponse:
     admin.require("finance.write")
-    return await release_commission(db, _finance_actor(admin), entry_id)
+    return await release_commission(db, _finance_actor(admin), entry_id, scope_admin=admin)
 
 
 @admin_router.get("/commission-entries", response_model=CommissionEntryDetailPage, summary="分页查询红娘线上分成明细")
@@ -200,7 +231,7 @@ async def admin_commission_entries(
 ) -> CommissionEntryDetailPage:
     admin.require("finance.read")
     return await admin_list_commission_entries(
-        db, page, page_size, matchmaker_id, rule_id, start_date, end_date
+        db, page, page_size, matchmaker_id, rule_id, start_date, end_date, admin=admin
     )
 
 
@@ -210,7 +241,7 @@ async def admin_commission_entry_options(
     db: AsyncSession = Depends(get_db),
 ) -> CommissionEntryDetailOptions:
     admin.require("finance.read")
-    return await admin_list_commission_options(db)
+    return await admin_list_commission_options(db, admin=admin)
 
 
 @admin_router.get("/store-commission-entries", response_model=StoreCommissionEntryPage, summary="分页查询分店线上分成明细")
@@ -226,7 +257,7 @@ async def admin_store_commission_entries(
     db: AsyncSession = Depends(get_db),
 ) -> StoreCommissionEntryPage:
     admin.require("finance.read")
-    return await admin_list_store_commission_entries(db, page, page_size, store_id, matchmaker_id, rule_id, start_date, end_date)
+    return await admin_list_store_commission_entries(db, page, page_size, store_id, matchmaker_id, rule_id, start_date, end_date, admin=admin)
 
 
 @admin_router.get("/store-commission-entries/options", response_model=StoreCommissionOptions, summary="获取分店线上分成明细筛选下拉选项")
@@ -235,7 +266,7 @@ async def admin_store_commission_entry_options(
     db: AsyncSession = Depends(get_db),
 ) -> StoreCommissionOptions:
     admin.require("finance.read")
-    return await admin_store_commission_options(db)
+    return await admin_store_commission_options(db, admin=admin)
 
 
 @admin_router.get("/store-commission-summary", response_model=StoreCommissionSummary, summary="分店分成统计卡")
@@ -245,7 +276,7 @@ async def admin_store_commission_summary_route(
     db: AsyncSession = Depends(get_db),
 ) -> StoreCommissionSummary:
     admin.require("finance.read")
-    return await admin_store_commission_summary(db, store_id)
+    return await admin_store_commission_summary(db, store_id, admin=admin)
 
 
 @admin_router.get("/store-commission-entries/export", summary="导出分店线上分成明细 Excel")
@@ -259,7 +290,7 @@ async def admin_store_commission_export(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     admin.require("finance.read")
-    content = await build_store_commission_export(db, store_id, matchmaker_id, rule_id, start_date, end_date)
+    content = await build_store_commission_export(db, store_id, matchmaker_id, rule_id, start_date, end_date, admin=admin)
     return Response(
         content=content,
         media_type=_XLSX_MEDIA_TYPE,
@@ -267,10 +298,31 @@ async def admin_store_commission_export(
     )
 
 
-@admin_router.patch("/withdrawals/{withdrawal_id}", response_model=WithdrawalResponse, summary="审核提现")
-async def review(withdrawal_id: int = Path(..., ge=1), body: WithdrawalReview = Body(...), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> WithdrawalResponse:
+@admin_router.patch("/withdrawals/{withdrawal_id}", response_model=WithdrawalResponse, summary="审核提现（幂等 + 二次确认）")
+async def review(
+    withdrawal_id: int = Path(..., ge=1),
+    body: WithdrawalReview = Body(...),
+    idempotency_key: str = Depends(require_sensitive_operation),
+    admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> WithdrawalResponse:
     admin.require("finance.write")
-    return await review_withdrawal(db, _finance_actor(admin), withdrawal_id, body)
+    reservation, replayed = await begin_sensitive_operation(
+        db,
+        actor_id=admin.account.id,
+        operation="finance.withdrawal.review",
+        idempotency_key=idempotency_key,
+        payload={"withdrawal_id": withdrawal_id, "body": body.model_dump(mode="json")},
+    )
+    if replayed is not None:
+        return WithdrawalResponse(**replayed)
+    try:
+        result = await review_withdrawal(db, _finance_actor(admin), withdrawal_id, body, scope_admin=admin)
+    except Exception:
+        await abort_sensitive_operation(db, reservation)
+        raise
+    await finish_sensitive_operation(db, reservation, result.model_dump(mode="json"))
+    return result
 
 
 @admin_router.post("/credit-grants", response_model=CreditGrantResult, status_code=201, summary="后台手动发放积分（积分明细-发放积分）")

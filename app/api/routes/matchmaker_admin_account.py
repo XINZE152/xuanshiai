@@ -5,7 +5,12 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Path, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
+from app.api.dependencies import (
+    CurrentMatchmakerAdmin,
+    declare_permission,
+    get_current_matchmaker_admin,
+    require_sensitive_operation,
+)
 from app.db.session import get_db
 from app.schemas.admin_account_cancellation import (
     AdminAccountCancellationItem,
@@ -35,6 +40,11 @@ from app.services.matchmaker_admin_account import (
     revoke_all_sessions,
     update_account,
     update_account_status,
+)
+from app.services.sensitive_operations import (
+    abort_sensitive_operation,
+    begin_sensitive_operation,
+    finish_sensitive_operation,
 )
 
 router = APIRouter(prefix="/admin/matchmaker")
@@ -80,6 +90,7 @@ async def login_logs(
     return await list_login_logs(db, page, page_size, account_id, username, from_time, to_time)
 
 
+@declare_permission("matchmaker.account.manage")
 @router.get("/audit-logs", response_model=MatchmakerAdminAuditLogPage, summary="后台通用审计日志（系统日志页）")
 async def audit_logs(
     page: int = Query(1, ge=1),
@@ -128,15 +139,35 @@ async def change_account_status(
     return await update_account_status(db, account_id, body, current.account.id)
 
 
-@router.post("/accounts/{account_id}/reset-password", response_model=MatchmakerAdminAccountItem)
+@router.post(
+    "/accounts/{account_id}/reset-password",
+    response_model=MatchmakerAdminAccountItem,
+    summary="重置后台账号密码（幂等 + 二次确认）",
+)
 async def reset_account_password(
     account_id: int,
     body: MatchmakerAdminPasswordReset,
+    idempotency_key: str = Depends(require_sensitive_operation),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> MatchmakerAdminAccountItem:
     current.require("matchmaker.account.manage")
-    return await reset_password(db, account_id, body, current.account.id)
+    reservation, replayed = await begin_sensitive_operation(
+        db,
+        actor_id=current.account.id,
+        operation="matchmaker.admin_account.reset_password",
+        idempotency_key=idempotency_key,
+        payload={"account_id": account_id, "body": body.model_dump(mode="json")},
+    )
+    if replayed is not None:
+        return MatchmakerAdminAccountItem(**replayed)
+    try:
+        result = await reset_password(db, account_id, body, current.account.id)
+    except Exception:
+        await abort_sensitive_operation(db, reservation)
+        raise
+    await finish_sensitive_operation(db, reservation, result.model_dump(mode="json"))
+    return result
 
 
 @router.get("/accounts/{account_id}/sessions", response_model=MatchmakerAdminSessionPage)
@@ -176,6 +207,7 @@ async def delete_account(
     )
 
 
+@declare_permission("matchmaker.account.manage")
 @router.get("/account-cancellations", response_model=AdminAccountCancellationPage, summary="注销申请列表")
 async def list_account_cancellations(
     page: int = Query(1, ge=1),
@@ -191,6 +223,7 @@ async def list_account_cancellations(
     )
 
 
+@declare_permission("matchmaker.account.manage")
 @router.post(
     "/account-cancellations/{cancellation_id}/review",
     response_model=AdminAccountCancellationItem,

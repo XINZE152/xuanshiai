@@ -65,7 +65,51 @@ def test_message_scope_is_parameterized() -> None:
     clause = _message_scope(_admin("ORGANIZATION"), params)
     assert ":scope_organization_id" in clause
     assert params == {"scope_organization_id": 10}
+    params = {}
+    clause = _message_scope(_admin("STORE"), params)
+    assert ":scope_store_id" in clause
+    assert "org_type = 'store'" in clause
+    assert params == {"scope_store_id": 10}
     assert _message_scope(_admin("ALL"), {}) == "1=1"
+
+
+def test_message_scope_store_tier_is_narrower_than_organization() -> None:
+    """STORE 档必须只命中本门店，不得退化为整个组织。"""
+    store_clause = _message_scope(_admin("STORE"), {})
+    org_clause = _message_scope(_admin("ORGANIZATION"), {})
+    assert "parent_id" not in store_clause
+    assert "parent_id" in org_clause
+
+
+def test_message_scope_unbound_accounts_are_fail_closed() -> None:
+    from app.api.dependencies import CurrentMatchmakerAdmin
+    from app.schemas.matchmaker_admin import MatchmakerAdminAccount
+
+    def unbound(scope: str) -> CurrentMatchmakerAdmin:
+        return CurrentMatchmakerAdmin(
+            account=MatchmakerAdminAccount(
+                id=1,
+                username="admin",
+                display_name="Admin",
+                matchmaker_user_id=None,
+                data_scope=scope,
+                organization_id=None,
+                status=1,
+                last_login_at=None,
+            ),
+            session_id=1,
+            permissions=frozenset(),
+        )
+
+    self_params: dict[str, object] = {}
+    assert "1 = 0" in _message_scope(unbound("SELF"), self_params)
+    assert self_params == {}
+    store_params: dict[str, object] = {}
+    assert "1 = 0" in _message_scope(unbound("STORE"), store_params)
+    assert store_params == {}
+    org_params: dict[str, object] = {}
+    assert "1 = 0" in _message_scope(unbound("ORGANIZATION"), org_params)
+    assert org_params == {}
 
 
 def test_message_content_redacts_phone_numbers() -> None:
@@ -104,7 +148,7 @@ async def test_message_moderation_hides_out_of_scope_message() -> None:
     class DB:
         async def execute(self, statement, params=None):
             sql = str(statement)
-            assert "scope_assignment.matchmaker_id=:scope_matchmaker_id" in sql
+            assert "scope_assignment.matchmaker_id = :scope_matchmaker_id" in sql
             assert params == {"id": 99, "scope_matchmaker_id": 7}
             return Result()
 

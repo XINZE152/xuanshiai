@@ -121,5 +121,5 @@ async def ws_ticket(
     await service.ensure_live_event_access(db, session_id, current.id)
     expires_in = 60
     ticket_id = random_token()
-    ticket = create_live_ws_ticket(current.id, session_id, ticket_id, expires_in)
+    ticket = create_live_ws_ticket(current.id, session_id, ticket_id, expires_in, current.session_id)
     return LiveWsTicketResponse(ticket=ticket, expires_in=expires_in)

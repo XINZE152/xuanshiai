@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
+from app.api.dependencies import CurrentMatchmakerAdmin, declare_permission, get_current_matchmaker_admin
 from app.db.session import get_db
 from app.schemas.admin_content import ContentItem, ContentItemCreate, ContentItemPage, ContentItemUpdate
 from app.services.admin_content import create_item, delete_item, list_items, update_item
@@ -11,6 +11,7 @@ from app.services.admin_content import create_item, delete_item, list_items, upd
 router = APIRouter(prefix="/admin/content")
 
 
+@declare_permission("platform.config.read")
 @router.get("/{domain}", response_model=ContentItemPage, summary="查询内容项列表")
 async def content_list(
     domain: str = Path(..., min_length=2, max_length=64),
@@ -25,6 +26,7 @@ async def content_list(
     return await list_items(db, domain, page, page_size, keyword, status)
 
 
+@declare_permission("platform.config.write")
 @router.post("/{domain}", response_model=ContentItem, status_code=201, summary="新增内容项")
 async def content_create(
     body: ContentItemCreate = ...,
@@ -36,6 +38,7 @@ async def content_create(
     return await create_item(db, current.account.id, domain, body)
 
 
+@declare_permission("platform.config.write")
 @router.patch("/{domain}/{item_id}", response_model=ContentItem, summary="更新内容项")
 async def content_update(
     body: ContentItemUpdate = ...,
@@ -48,6 +51,7 @@ async def content_update(
     return await update_item(db, domain, item_id, body)
 
 
+@declare_permission("platform.config.write")
 @router.delete("/{domain}/{item_id}", status_code=204, summary="删除内容项")
 async def content_delete(
     domain: str = Path(..., min_length=2, max_length=64),

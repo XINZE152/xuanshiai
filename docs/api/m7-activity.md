@@ -114,6 +114,8 @@
 ### 2.8 删除活动 `DELETE /admin/activities/{activity_id}` → 204
 级联软删相关报名与互选记录（不动线下记录主键）。
 
+**变更记录（2026-10-04）**：新增前置拦截——存在「已支付」或「已签到」的报名时返回 **409**，需先处理这些报名（退款/取消）再删除活动，避免已收款凭证随活动一起消失。
+
 ### 2.9 字典下拉 `GET /admin/activities/options`
 
 ```json
@@ -180,7 +182,15 @@
 ```
 
 ### 3.8 删除报名 `DELETE /admin/activity-signups/{signup_id}` → 204
-软删（保留审计）。
+
+**变更记录（2026-10-04）**：原实现为**物理删除且不写审计**，与本节契约不符；现已按契约落地为软删除。
+
+- 查询参数：`reason`（可选，≤255 字），写入审计。
+- 行为：`UPDATE activity_signup SET deleted_at = UTC_TIMESTAMP(), deleted_by = <后台账号 id>`，并向 `business_audit_log` 写入 `before_json` 快照（含被删前完整行）。
+- **拦截（409）**：报名已支付（`pay_status = 'paid'`）或已签到（`checked_in = 1`）时不允许删除，必须先走退款/取消流程，防止「删掉即抹除已收款凭证」。
+- 报名已删除（`deleted_at` 非空）或不存在 → 404。
+- 所有报名读取路径（活动详情/列表的男女计数、报名列表、统计卡、导出、报名详情、`PATCH` 修改）均只返回 `deleted_at IS NULL` 的记录，因此删除后不会出现在任何报表口径中。
+- 字段：`deleted_at`（datetime，非空表示已删除）、`deleted_by`（bigint，后台账号 id）。迁移脚本：`migrations/m4_m7/20261004_01_activity_signup_soft_delete_{up,down,verify}.sql`。
 
 ---
 

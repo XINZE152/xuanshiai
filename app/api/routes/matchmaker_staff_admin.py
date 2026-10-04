@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from fastapi import APIRouter, Depends, File, Path, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
+from app.api.dependencies import CurrentMatchmakerAdmin, declare_permission, get_current_matchmaker_admin
 from app.db.session import get_db
 from app.schemas.matchmaker_staff_admin import (
     AdminMenuNode,
@@ -143,11 +143,13 @@ async def visibility_matchmaker(
     return await service.set_visibility(db, matchmaker_id, body)
 
 
+@declare_permission("matchmaker.read")
 @router.get("/menus/tree", response_model=list[AdminMenuNode])
 async def menus_tree(
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[AdminMenuNode]:
+    current.require("matchmaker.read")
     _guard(current)
     return await service.menu_tree(db)
 
@@ -245,6 +247,7 @@ async def dict_stores(
     return await service.stores(db)
 
 
+@declare_permission("matchmaker.manage")
 @router.post("/common/upload", response_model=CommonUploadResponse, status_code=201)
 async def common_upload(
     file: UploadFile = File(...),

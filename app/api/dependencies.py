@@ -1,8 +1,10 @@
 """Common request dependencies and authenticated-user guards."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +15,31 @@ from app.schemas.matchmaker_admin import MatchmakerAdminAccount
 from app.db.session import get_db
 
 bearer = HTTPBearer(auto_error=False)
+
+
+async def require_sensitive_operation(
+    idempotency_key: str = Header(
+        ...,
+        alias="Idempotency-Key",
+        min_length=8,
+        max_length=128,
+        description="客户端生成的幂等键，同键同载荷只会执行一次",
+    ),
+    confirm: bool = Query(
+        False,
+        description="敏感操作二次确认；必须显式传 true，否则返回 428",
+    ),
+) -> str:
+    """敏感后台操作的前置校验：强制幂等键 + 二次确认。
+
+    用于退款、提现审核、重置密码、资源调整等不可逆或涉及金额的操作。
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=428,
+            detail="敏感操作需要二次确认：请携带 confirm=true",
+        )
+    return idempotency_key
 
 
 @dataclass(frozen=True)
@@ -159,6 +186,70 @@ class CurrentMatchmakerAdmin:
             raise HTTPException(status_code=403, detail=f"缺少权限：{permission}")
 
 
+    def require_any(self, *permissions: str) -> None:
+        """任一权限命中即通过；全部未命中时抛出 403。"""
+        if "*" in self.permissions:
+            return
+        for permission in permissions:
+            try:
+                self.require(permission)
+            except HTTPException:
+                continue
+            return
+        raise HTTPException(status_code=403, detail=f"缺少权限：{' 或 '.join(permissions)}")
+
+    def scope_clause(
+        self,
+        params: dict[str, object],
+        *,
+        user_column: str | None = None,
+        organization_column: str = "organization_id",
+        store_organization_column: str | None = None,
+        user_param: str = "scope_matchmaker_user_id",
+    ) -> str:
+        """Return a SQL predicate for the account's declared data scope.
+
+        四档语义（唯一实现，供各后台服务共用，禁止各自另写一份）：
+
+        - ``ALL`` / 持 ``*`` ：``1 = 1``
+        - ``SELF``           ：``user_column = :<user_param>``；账号未绑定红娘用户时
+                               ``1 = 0``（fail-closed，避免退化为按账号 ID 任意匹配）
+        - ``STORE``          ：``store_organization_column`` 命中本门店（账号所属组织必须是
+                               门店），否则 ``1 = 0``
+        - ``ORGANIZATION``   ：``organization_column IN (本组织, 其下属组织)``
+        - 未绑定组织         ：``1 = 0``（fail-closed，绝不退化为 ``1 = 1``）
+
+        所有值均通过 ``params`` 绑定，不接受调用方拼接字面量。``user_param`` 仅用于
+        兼容既有调用方已固定的绑定变量名。
+        """
+        account = self.account
+        if account.data_scope == "ALL" or "*" in self.permissions:
+            return "1 = 1"
+        if account.data_scope == "SELF":
+            if user_column is None:
+                raise HTTPException(status_code=403, detail="当前账号为 SELF 数据范围，该接口缺少用户维度")
+            if account.matchmaker_user_id is None:
+                return "1 = 0"
+            params[user_param] = account.matchmaker_user_id
+            return f"{user_column} = :{user_param}"
+        if account.data_scope == "STORE":
+            column = store_organization_column or organization_column
+            if account.organization_id is None:
+                return "1 = 0"
+            params["scope_store_id"] = account.organization_id
+            # 组织必须是门店；平台级账号配置为 STORE 属配置错误，按无数据返回。
+            return (
+                f"{column} IN (SELECT id FROM organization "
+                "WHERE id = :scope_store_id AND org_type = 'store')"
+            )
+        if account.organization_id is None:
+            return "1 = 0"
+        params["scope_organization_id"] = account.organization_id
+        return (
+            f"{organization_column} IN (SELECT id FROM organization "
+            "WHERE id = :scope_organization_id OR parent_id = :scope_organization_id)"
+        )
+
     def scope_condition(
         self,
         *,
@@ -166,25 +257,150 @@ class CurrentMatchmakerAdmin:
         params: dict[str, object],
         user_column: str | None = None,
     ) -> str:
-        """Return a SQL predicate for the account's declared data scope."""
-        scope = self.account.data_scope
-        if scope == "ALL" or "*" in self.permissions:
+        """Return a SQL predicate for the account's declared data scope.
+
+        保留原有签名（既有调用方众多），实现统一委托给 :meth:`scope_clause`。
+        """
+        return self.scope_clause(
+            params,
+            user_column=user_column,
+            organization_column=organization_column,
+            store_organization_column=organization_column,
+        )
+
+    def scope_organization_clause(self, params: dict[str, object], *, column: str) -> str:
+        """只按「组织维度」给出作用域谓词（资源归组织所有，不存在个人归属）。
+
+        适用于门店、组织、门店提现账户、门店分成行等「没有个人所有者」的资源：
+
+        - ``ALL`` / ``*``          → ``1 = 1``
+        - ``STORE``                → ``column IN (本门店)``（组织必须是门店）
+        - ``ORGANIZATION``         → ``column IN (本组织及其下属门店)``
+        - ``SELF``                 → ``1 = 0``（该资源不存在个人归属，fail-closed，
+                                      绝不退化为「按账号个人 ID 匹配组织 ID」）
+        - 未绑定组织                → ``1 = 0``
+
+        四档判定仍与 :meth:`scope_clause` 同源，本方法只是裁剪掉用户维度。
+        """
+        account = self.account
+        if account.data_scope == "ALL" or "*" in self.permissions:
             return "1 = 1"
-        if scope == "SELF":
-            if user_column is None:
-                raise HTTPException(status_code=403, detail="当前账号为 SELF 数据范围，该接口缺少用户维度")
-            params["scope_user_id"] = self.account.matchmaker_user_id or self.account.id
-            return f"{user_column} = :scope_user_id"
-        if not self.account.organization_id:
-            raise HTTPException(status_code=403, detail="当前账号未绑定组织，无法访问该数据")
-        params["scope_organization_id"] = self.account.organization_id
-        return f"{organization_column} = :scope_organization_id"
+        if account.organization_id is None:
+            return "1 = 0"
+        if account.data_scope == "STORE":
+            params["scope_store_id"] = account.organization_id
+            return (
+                f"{column} IN (SELECT id FROM organization "
+                "WHERE id = :scope_store_id AND org_type = 'store')"
+            )
+        if account.data_scope == "SELF":
+            return "1 = 0"
+        params["scope_organization_id"] = account.organization_id
+        return (
+            f"{column} IN (SELECT id FROM organization "
+            "WHERE id = :scope_organization_id OR parent_id = :scope_organization_id)"
+        )
+
+    def scope_exists_clause(
+        self,
+        params: dict[str, object],
+        *,
+        correlation: str,
+        assignment_alias: str = "scope_assignment",
+        user_column: str | None = "matchmaker_id",
+        organization_column: str = "organization_id",
+        user_param: str = "scope_matchmaker_user_id",
+    ) -> str:
+        """把四档作用域包成基于 ``resource_assignment`` 的 EXISTS 谓词。
+
+        适用于「被保护对象本身不带归属列，归属信息只存在于 ``resource_assignment``」
+        的场景（消息、会员写操作等）。四档判定仍由 :meth:`scope_clause` 唯一实现，
+        本方法只负责改写 SQL 形态，避免每个服务各写一份 EXISTS 包装。
+
+        :param correlation: assignment 行与被保护对象的相关条件，例如
+            ``"scope_assignment.user_id = users.id"`` 或
+            ``"scope_assignment.user_id IN (chat_message.from_user_id, chat_message.to_user_id)"``。
+        :param user_param: 透传给 :meth:`scope_clause`，仅用于兼容既有绑定变量名。
+        :returns: ``1 = 1``（ALL / ``*``，不做归属约束）或 EXISTS 谓词。
+        """
+        scope = self.scope_clause(
+            params,
+            user_column=(
+                f"{assignment_alias}.{user_column}" if user_column else None
+            ),
+            organization_column=f"{assignment_alias}.{organization_column}",
+            user_param=user_param,
+        )
+        if scope == "1 = 1":
+            return "1 = 1"
+        return (
+            f"EXISTS (SELECT 1 FROM resource_assignment {assignment_alias} "
+            f"WHERE {assignment_alias}.status = 1 AND ({scope}) AND {correlation})"
+        )
+
+
+PERMISSION_ATTR = "__matchmaker_permission__"
+
+# 显式豁免白名单：仅认证类端点可跳过权限校验。
+# 这些端点本身就是要「用当前登录态回答我是谁」，因此不能要求业务权限。
+# 采用「精确后缀」而非子串匹配：早期实现使用 `"/auth/" in path`，
+# 会把 `/admin/members/auth/realname-reviews` 等实名审核业务路由一并误判为豁免。
+PERMISSION_EXEMPT_SUFFIXES: tuple[str, ...] = (
+    "/admin/matchmaker/auth/me",
+    "/admin/matchmaker/auth/logout",
+)
+
+
+def _is_permission_exempt(path: str) -> bool:
+    return any(path.endswith(suffix) for suffix in PERMISSION_EXEMPT_SUFFIXES)
+
+
+def declare_permission(*permissions: str) -> Callable[[Any], Any]:
+    """Declare the permission(s) required by a back-office endpoint.
+
+    用法::
+
+        @router.patch("/configs/{namespace}")
+        @declare_permission("platform.config.write")
+        async def write_config(...): ...
+
+    传入多个权限码时表示「任一命中即可」，例如同时服务首页大盘与会员报表的接口::
+
+        @declare_permission("dashboard.read", "matchmaker.member.read")
+
+    该标记由 :func:`get_current_matchmaker_admin` 统一读取并执行，用于覆盖
+    ``_matchmaker_admin_permission`` 的 URL 关键词映射未命中的路径。未命中映射
+    且未声明权限的后台路由会被直接拒绝（fail-closed），而不是静默放行。
+    """
+    if not permissions:
+        raise ValueError("declare_permission 至少需要一个权限码")
+    declared: str | tuple[str, ...] = permissions[0] if len(permissions) == 1 else tuple(permissions)
+
+    def decorator(func: Any) -> Any:
+        setattr(func, PERMISSION_ATTR, declared)
+        return func
+
+    return decorator
+
+
+def _declared_permission(request: Request) -> str | tuple[str, ...] | None:
+    """Read the permission(s) declared on the matched endpoint, if any."""
+    route = request.scope.get("route")
+    endpoint = getattr(route, "endpoint", None)
+    if endpoint is None:
+        return None
+    declared = getattr(endpoint, PERMISSION_ATTR, None)
+    if not declared:
+        return None
+    if isinstance(declared, str):
+        return declared
+    return tuple(str(item) for item in declared)
 
 
 def _matchmaker_admin_permission(request: Request) -> str | None:
     path = request.url.path
     method = request.method.upper()
-    if path.endswith("/auth/me") or path.endswith("/auth/logout") or "/auth/" in path:
+    if _is_permission_exempt(path):
         return None
     if path == "/api/v1/admin/dashboard/stats":
         return "matchmaker.read"
@@ -277,6 +493,17 @@ async def get_current_matchmaker_admin(
         permissions=permissions,
     )
     permission = _matchmaker_admin_permission(request)
-    if permission:
+    if permission is None:
+        permission = _declared_permission(request)
+    if isinstance(permission, tuple):
+        current.require_any(*permission)
+    elif permission is not None:
         current.require(permission)
+    elif not _is_permission_exempt(request.url.path):
+        # fail-closed：未命中 URL 权限映射、端点也未声明权限时直接拒绝。
+        # 早期实现在此处静默放行（fail-open），导致大量后台路由实际无权限校验。
+        raise HTTPException(
+            status_code=403,
+            detail=f"后台接口缺少权限声明：{request.method.upper()} {request.url.path}",
+        )
     return current
