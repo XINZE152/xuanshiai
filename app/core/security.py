@@ -40,12 +40,26 @@ def decode_access_token(token: str) -> dict[str, str]:
     return payload
 
 
-def create_live_ws_ticket(user_id: int, session_id: int, ticket_id: str, expires_seconds: int) -> str:
-    """Create a short-lived, single-purpose JWT for a live WebSocket handshake."""
+def create_live_ws_ticket(
+    user_id: int,
+    session_id: int,
+    ticket_id: str,
+    expires_seconds: int,
+    user_session_id: int,
+) -> str:
+    """Create a short-lived, single-purpose JWT for a live WebSocket handshake.
+
+    ``session_id`` is the *live session* (场次) identifier and is used to
+    guarantee the ticket is only redeemable against the session it was issued
+    for. ``user_session_id`` is the caller's *login session* (``user_session.id``)
+    and is the only correct basis for the periodic keep-alive revocation check —
+    conflating the two silently closes every connection. Keep them separate.
+    """
     now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
         "sid": str(session_id),
+        "uss": str(user_session_id),
         "jti": ticket_id,
         "typ": "live_ws_ticket",
         "iat": now,
@@ -63,6 +77,7 @@ def decode_live_ws_ticket(token: str) -> dict[str, str]:
         payload.get("typ") != "live_ws_ticket"
         or not payload.get("sub")
         or not payload.get("sid")
+        or not payload.get("uss")
         or not payload.get("jti")
     ):
         raise ValueError("无效的直播 WebSocket 凭证")

@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser, get_current_user, get_current_matchmaker_admin
+from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser, declare_permission, get_current_matchmaker_admin, get_current_user
 from app.db.session import get_db
 from app.schemas.auth import (
     MatchmakerApplicationCreate,
@@ -76,6 +76,7 @@ async def my_matchmaker_applications(
     return await list_my_applications(db, current.id)
 
 
+@declare_permission("matchmaker.application.read")
 @router.get("/admin/matchmaker/applications", response_model=MatchmakerApplicationAdminPage, summary="分页查询红娘申请")
 async def admin_matchmaker_applications(
     page: int = Query(1, ge=1),
@@ -92,6 +93,7 @@ async def admin_matchmaker_applications(
     )
 
 
+@declare_permission("matchmaker.application.read")
 @router.get("/admin/matchmaker/applications/{application_id}", response_model=MatchmakerApplicationResponse, summary="查询红娘申请详情")
 async def admin_matchmaker_application_detail(
     application_id: int,
@@ -102,6 +104,7 @@ async def admin_matchmaker_application_detail(
     return await admin_get_matchmaker_application(db, application_id)
 
 
+@declare_permission("matchmaker.application.review")
 @router.patch("/admin/matchmaker/applications/{application_id}", response_model=MatchmakerApplicationResponse, summary="审核红娘申请")
 async def review_matchmaker_application_endpoint(
     application_id: int,

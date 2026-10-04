@@ -114,6 +114,39 @@ async def _load_knowledge(db: AsyncSession, scenario: str, tone: str) -> list[di
     return [{"content": item, "reason": "Seed relationship-advice guidance"} for item in _FALLBACK_KNOWLEDGE.get(scenario, _FALLBACK_KNOWLEDGE["reply"])]
 
 
+async def verify_knowledge_version(db: AsyncSession) -> str | None:
+    """校验库中启用知识的版本与配置一致，返回不一致时的说明（一致返回 None）。
+
+    `ai_advisor_call_log.knowledge_version` 记录的是配置值；若库中实际生效的知识
+    版本与之不符，审计链路就无法回答「这次回答用了哪版知识」。非开发/测试环境
+    必须 fail-fast，避免带着失真的审计数据上线。
+    """
+    configured = settings.ai_advisor_knowledge_version
+    try:
+        rows = await db.execute(
+            text("SELECT DISTINCT version FROM ai_advisor_knowledge WHERE enabled = 1")
+        )
+        versions = {str(row[0]) for row in rows.all() if row[0] is not None}
+    except Exception as exc:
+        logger.warning("AI 军师知识版本校验跳过（知识表不可用）：%s", exc)
+        return None
+    if not versions:
+        logger.warning("AI 军师知识库为空，跳过版本一致性校验（configured=%s）", configured)
+        return None
+    if versions == {configured}:
+        logger.info("AI 军师知识版本一致性校验通过：%s", configured)
+        return None
+    detail = (
+        f"AI 军师知识版本不一致：配置为 {configured}，库中启用知识版本为 {sorted(versions)}。"
+        "请执行 scripts/seed_ai_advisor_knowledge.py 或修正 AI_ADVISOR_KNOWLEDGE_VERSION，"
+        "否则 ai_advisor_call_log.knowledge_version 记录将与实际生效知识不符。"
+    )
+    if settings.is_test_mode:
+        logger.warning("%s（当前为 %s 环境，仅告警不阻断）", detail, settings.environment)
+        return detail
+    raise RuntimeError(detail)
+
+
 def _risk_level(content: str) -> str:
     value = content.casefold()
     if any(term.casefold() in value for term in _HIGH_RISK_TERMS):

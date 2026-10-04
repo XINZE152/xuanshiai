@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from io import BytesIO
 from typing import Any
 
@@ -47,6 +48,18 @@ def _num(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _snapshot_json(row: dict[str, Any]) -> str:
+    """把审计前快照序列化为 JSON 文本（datetime/Decimal 统一转字符串）。"""
+    return json.dumps(
+        {
+            key: (value.isoformat() if hasattr(value, "isoformat") else value)
+            for key, value in row.items()
+        },
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 def _activity_item(row: Any) -> ActivityAdminItem:
@@ -142,10 +155,10 @@ async def _get_activity(db: AsyncSession, activity_id: int) -> ActivityAdminItem
             text(
                 "SELECT a.*, "
                 "(SELECT COUNT(*) FROM activity_signup s JOIN users u ON u.id = s.user_id "
-                " WHERE s.activity_id = a.id AND s.status = 1 "
+                " WHERE s.activity_id = a.id AND s.status = 1 AND s.deleted_at IS NULL "
                 " AND COALESCE(s.gender, CASE u.gender WHEN 1 THEN '男' WHEN 2 THEN '女' END) = '男') AS male_count, "
                 "(SELECT COUNT(*) FROM activity_signup s JOIN users u ON u.id = s.user_id "
-                " WHERE s.activity_id = a.id AND s.status = 1 "
+                " WHERE s.activity_id = a.id AND s.status = 1 AND s.deleted_at IS NULL "
                 " AND COALESCE(s.gender, CASE u.gender WHEN 1 THEN '男' WHEN 2 THEN '女' END) = '女') AS female_count "
                 "FROM offline_activity a WHERE a.id = :id"
             ),
@@ -192,10 +205,10 @@ async def activities(
         text(
             "SELECT a.*, "
             "(SELECT COUNT(*) FROM activity_signup s JOIN users u ON u.id = s.user_id "
-            " WHERE s.activity_id = a.id AND s.status = 1 "
+            " WHERE s.activity_id = a.id AND s.status = 1 AND s.deleted_at IS NULL "
             " AND COALESCE(s.gender, CASE u.gender WHEN 1 THEN '男' WHEN 2 THEN '女' END) = '男') AS male_count, "
             "(SELECT COUNT(*) FROM activity_signup s JOIN users u ON u.id = s.user_id "
-            " WHERE s.activity_id = a.id AND s.status = 1 "
+            " WHERE s.activity_id = a.id AND s.status = 1 AND s.deleted_at IS NULL "
             " AND COALESCE(s.gender, CASE u.gender WHEN 1 THEN '男' WHEN 2 THEN '女' END) = '女') AS female_count "
             f"FROM offline_activity a WHERE {clause} ORDER BY a.id DESC LIMIT :limit OFFSET :offset"
         ),
@@ -256,7 +269,7 @@ async def signups(
 ) -> ActivitySignupAdminPage:
     current.require("community.activity.read")
     await _get_activity(db, activity_id)
-    where = ["s.activity_id = :activity_id"]
+    where = ["s.activity_id = :activity_id", "s.deleted_at IS NULL"]
     params: dict = {"activity_id": activity_id, "limit": page_size, "offset": (page - 1) * page_size}
     if status is not None:
         where.append("s.status = :status")
@@ -369,6 +382,20 @@ async def delete_activity(
 ) -> None:
     current.require("community.activity.manage")
     await _get_activity(db, activity_id)
+    # 活动级联删除会把报名一起物理删除；已支付/已签到的报名涉及金额与履约记录，
+    # 必须先走退款/撤销流程，避免直接丢失对账依据。
+    blocking = (
+        await db.execute(
+            text("SELECT COUNT(*) FROM activity_signup WHERE activity_id = :id "
+                 "AND deleted_at IS NULL AND (pay_status = 'paid' OR COALESCE(checked_in, 0) = 1)"),
+            {"id": activity_id},
+        )
+    ).scalar()
+    if int(blocking or 0) > 0:
+        raise HTTPException(
+            409,
+            detail=f"该活动存在 {int(blocking)} 条已支付或已签到的报名，不能删除，请先处理退款或撤销签到",
+        )
     await db.execute(text("DELETE FROM activity_signup WHERE activity_id = :id"), {"id": activity_id})
     await db.execute(text("DELETE FROM offline_activity WHERE id = :id"), {"id": activity_id})
     await db.execute(
@@ -410,7 +437,7 @@ async def signup_list(
 ) -> ActivitySignupAdminPage:
     """Return the same signup shape as the activity-scoped endpoint, including all activities."""
     current.require("community.activity.read")
-    where = ["1=1"]
+    where = ["1=1", "s.deleted_at IS NULL"]
     params: dict[str, Any] = {
         "limit": page_size,
         "offset": (page - 1) * page_size,
@@ -481,7 +508,7 @@ async def signup_statistics(
     db: AsyncSession = Depends(get_db),
 ) -> ActivitySignupStatistics:
     current.require("community.activity.read")
-    where = "WHERE 1=1"
+    where = "WHERE 1=1 AND deleted_at IS NULL"
     params: dict = {}
     if activity_id:
         where += " AND activity_id = :activity_id"
@@ -535,7 +562,7 @@ async def signup_export(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     current.require("community.activity.read")
-    where = ["1=1"]
+    where = ["1=1", "s.deleted_at IS NULL"]
     params: dict = {}
     if activity_id:
         where.append("s.activity_id = :activity_id")
@@ -589,7 +616,7 @@ async def signup_detail(
             text("SELECT s.*, u.nickname, u.avatar AS user_avatar, a.title AS activity_title, p.nickname AS promoter_name "
                  "FROM activity_signup s LEFT JOIN users u ON u.id = s.user_id "
                  "LEFT JOIN offline_activity a ON a.id = s.activity_id "
-                 "LEFT JOIN users p ON p.id = s.promoter_id WHERE s.id = :id"),
+                 "LEFT JOIN users p ON p.id = s.promoter_id WHERE s.id = :id AND s.deleted_at IS NULL"),
             {"id": signup_id},
         )
     ).mappings().first()
@@ -611,7 +638,8 @@ async def update_signup(
         raise HTTPException(422, detail="至少提供一个需要修改的字段")
     updates = ", ".join(f"{key} = :{key}" for key in values)
     result = await db.execute(
-        text(f"UPDATE activity_signup SET {updates}, updated_at = UTC_TIMESTAMP() WHERE id = :id"),
+        text(f"UPDATE activity_signup SET {updates}, updated_at = UTC_TIMESTAMP() "
+             "WHERE id = :id AND deleted_at IS NULL"),
         {**values, "id": signup_id},
     )
     if result.rowcount == 0:
@@ -634,14 +662,47 @@ async def update_signup(
     return _signup_item(row)
 
 
-@signup_router.delete("/{signup_id}", status_code=204, summary="删除活动报名")
+@signup_router.delete("/{signup_id}", status_code=204, summary="删除活动报名（软删除并留审计）")
 async def delete_signup(
     signup_id: int = Path(..., ge=1),
+    reason: str | None = Query(None, max_length=255),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    """软删除报名记录。
+
+    报名记录含支付金额与签到状态，物理删除后无法追溯、也无法支撑退款对账，
+    因此改为软删除并写入 `business_audit_log`（含删除前快照）。已支付或已签到的
+    报名禁止删除，需走退款/撤销流程。
+    """
     current.require("community.activity.manage")
-    result = await db.execute(text("DELETE FROM activity_signup WHERE id = :id"), {"id": signup_id})
-    if result.rowcount == 0:
+    row = (
+        await db.execute(
+            text("SELECT * FROM activity_signup WHERE id = :id AND deleted_at IS NULL FOR UPDATE"),
+            {"id": signup_id},
+        )
+    ).mappings().first()
+    if not row:
         raise HTTPException(404, detail="活动报名不存在")
+    snapshot = dict(row)
+    if str(snapshot.get("pay_status") or "") == "paid":
+        raise HTTPException(409, detail="该报名已支付，不能删除，请走退款流程")
+    if int(snapshot.get("checked_in") or 0) == 1:
+        raise HTTPException(409, detail="该报名已签到，不能删除，请先撤销签到")
+    await db.execute(
+        text("UPDATE activity_signup SET deleted_at = UTC_TIMESTAMP(), deleted_by = :actor, "
+             "updated_at = UTC_TIMESTAMP() WHERE id = :id AND deleted_at IS NULL"),
+        {"actor": current.account.id, "id": signup_id},
+    )
+    await db.execute(
+        text("INSERT INTO business_audit_log "
+             "(actor_user_id, action, resource_type, resource_id, before_json, reason) "
+             "VALUES (:actor, 'activity_signup.delete', 'activity_signup', :id, :before_json, :reason)"),
+        {
+            "actor": current.account.id,
+            "id": signup_id,
+            "before_json": _snapshot_json(snapshot),
+            "reason": reason or "后台删除报名",
+        },
+    )
     await db.commit()

@@ -16,32 +16,105 @@ from app.schemas.message_admin import (
 )
 
 _PHONE_PATTERN = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+_ID_CARD_PATTERN = re.compile(r"(?<!\d)(\d{17}[\dXx]|\d{15})(?!\d)")
+_BANK_CARD_PATTERN = re.compile(r"(?<!\d)(\d{16,19})(?!\d)")
+_WECHAT_PATTERN = re.compile(r"(?i)(wxid_[A-Za-z0-9_-]{3,})")
+_WECHAT_LABEL_PATTERN = re.compile(r"(微信号|微信|wechat|vx|V信)\s*[:：]?\s*([A-Za-z][A-Za-z0-9_-]{4,})")
+_ADDRESS_LABEL_PATTERN = re.compile(
+    r"(地址|住址|现居|家住|收件地址)\s*[:：]?\s*([^\s，,。;；]{4,60})"
+)
+
+# 脱敏等级：standard 为普通只读账号；elevated 为具备处置/审计权限的账号。
+# 两级都只展示部分字符，任何等级都不返回完整敏感值。
+REDACTION_LEVEL_STANDARD = "standard"
+REDACTION_LEVEL_ELEVATED = "elevated"
+
+_ELEVATED_PERMISSIONS = frozenset({"message.moderate", "message.manage", "admin.moderate"})
 
 
-def _redact_content(value: str | None) -> str | None:
+def redaction_level(admin: CurrentMatchmakerAdmin) -> str:
+    """按账号权限决定脱敏粒度：具备处置/审计权限者可见更多位数（仍为掩码）。"""
+    if "*" in admin.permissions or (admin.permissions & _ELEVATED_PERMISSIONS):
+        return REDACTION_LEVEL_ELEVATED
+    return REDACTION_LEVEL_STANDARD
+
+
+def _mask_middle(value: str, keep_head: int, keep_tail: int) -> str:
+    hidden = len(value) - keep_head - keep_tail
+    if hidden <= 0:
+        return "*" * len(value)
+    return f"{value[:keep_head]}{'*' * hidden}{value[-keep_tail:]}"
+
+
+def redact_sensitive(value: str | None, level: str = REDACTION_LEVEL_STANDARD) -> str | None:
+    """对消息正文做分级脱敏：手机号 / 身份证 / 银行卡 / 微信号 / 带标签地址。
+
+    `elevated` 保留更多首尾字符便于核对，但同样不返回完整敏感值。
+    """
     if value is None:
         return None
-    return _PHONE_PATTERN.sub("1**********", value)
+    elevated = level == REDACTION_LEVEL_ELEVATED
+    text_value = _PHONE_PATTERN.sub(
+        (lambda m: _mask_middle(m.group(0), 3, 4)) if elevated else (lambda m: "1**********"),
+        value,
+    )
+    text_value = _ID_CARD_PATTERN.sub(
+        (lambda m: _mask_middle(m.group(0), 4, 4)) if elevated else (lambda m: "*" * len(m.group(0))),
+        text_value,
+    )
+    text_value = _BANK_CARD_PATTERN.sub(
+        (lambda m: _mask_middle(m.group(0), 4, 4)) if elevated else (lambda m: "************" + m.group(0)[-4:]),
+        text_value,
+    )
+    text_value = _WECHAT_PATTERN.sub(
+        (lambda m: _mask_middle(m.group(0), 5, 0)) if elevated else (lambda m: m.group(0)[:5] + "***"),
+        text_value,
+    )
+    text_value = _WECHAT_LABEL_PATTERN.sub(
+        lambda m: f"{m.group(1)}:{m.group(2)[:3]}***",
+        text_value,
+    )
+    # 地址无法可靠识别边界，仅处理带显式标签的写法：保留前 6 个字符（通常为省市区）。
+    text_value = _ADDRESS_LABEL_PATTERN.sub(
+        lambda m: f"{m.group(1)}:{m.group(2)[:6]}{'*' * max(0, len(m.group(2)) - 6)}",
+        text_value,
+    )
+    return text_value
+
+
+def _redact_content(value: str | None, level: str = REDACTION_LEVEL_STANDARD) -> str | None:
+    """向后兼容入口：等价于 :func:`redact_sensitive`。"""
+    return redact_sensitive(value, level)
 
 
 def _message_scope(admin: CurrentMatchmakerAdmin, params: dict[str, object]) -> str:
-    account = admin.account
-    if account.data_scope == "ALL" or "*" in admin.permissions:
-        return "1=1"
-    if account.data_scope == "SELF":
-        if account.matchmaker_user_id is None:
-            return "1=0"
-        params["scope_matchmaker_id"] = account.matchmaker_user_id
-        return "EXISTS (SELECT 1 FROM resource_assignment scope_assignment WHERE scope_assignment.status=1 AND scope_assignment.matchmaker_id=:scope_matchmaker_id AND scope_assignment.user_id IN (chat_message.from_user_id, chat_message.to_user_id))"
-    if account.organization_id is None:
-        return "1=0"
-    params["scope_organization_id"] = account.organization_id
-    return "EXISTS (SELECT 1 FROM resource_assignment scope_assignment WHERE scope_assignment.status=1 AND scope_assignment.organization_id IN (SELECT id FROM organization WHERE id=:scope_organization_id OR parent_id=:scope_organization_id) AND scope_assignment.user_id IN (chat_message.from_user_id, chat_message.to_user_id))"
+    """消息可见范围：委托 `CurrentMatchmakerAdmin.scope_exists_clause` 的四档语义。
+
+    消息的归属由 `resource_assignment` 决定，且一条消息涉及收发双方，
+    因此在外层包一层 EXISTS 后套用统一作用域谓词：
+
+    - ALL / `*`      → ``1=1``
+    - SELF           → 本红娘名下会员收发的消息
+    - STORE          → 本门店（组织）名下会员收发的消息（历史实现缺失该档，
+                       门店级管理员会看到整个组织）
+    - ORGANIZATION   → 本组织及其下属门店
+
+    EXISTS 包装与四档判定已收敛到 `dependencies.py`，本函数只做
+    ``1 = 1`` 的历史写法兼容（既有测试与 SQL 断言依赖无空格的 ``1=1``）。
+    """
+    clause = admin.scope_exists_clause(
+        params,
+        correlation="scope_assignment.user_id IN (chat_message.from_user_id, chat_message.to_user_id)",
+        user_column="matchmaker_id",
+        organization_column="organization_id",
+        user_param="scope_matchmaker_id",
+    )
+    return "1=1" if clause == "1 = 1" else clause
 
 
-def _message_item(row: dict) -> AdminMessageItem:
+def _message_item(row: dict, level: str = REDACTION_LEVEL_STANDARD) -> AdminMessageItem:
     data = dict(row)
-    data["content"] = _redact_content(data.get("content"))
+    data["content"] = redact_sensitive(data.get("content"), level)
     # 语音 media_url 保持 DB 原始 URL，不按管理员重签：audio 类验签钩子
     # （media_access._user_active）查 users 表语义，与管理员后台账号不匹配，
     # 强行重签会产生永久 403 的假签名。已登记限制：管理端语音回放不可用，
@@ -59,6 +132,7 @@ async def list_admin_messages(
     message_type: int | None = None,
 ) -> AdminMessagePage:
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    level = redaction_level(admin)
     where = [_message_scope(admin, params)]
     if user_id is not None:
         where.append("(chat_message.from_user_id=:user_id OR chat_message.to_user_id=:user_id)")
@@ -76,7 +150,7 @@ async def list_admin_messages(
     count_params = {key: value for key, value in params.items() if key not in {"limit", "offset"}}
     total = int((await db.execute(text(f"SELECT COUNT(*) FROM chat_message WHERE {clause}"), count_params)).scalar() or 0)
     return AdminMessagePage(
-        items=[_message_item(dict(row)) for row in rows],
+        items=[_message_item(dict(row), level) for row in rows],
         page=page,
         page_size=page_size,
         total=total,
@@ -92,6 +166,7 @@ async def moderate_admin_message(
     reason: str,
 ) -> AdminMessageItem:
     params: dict[str, object] = {"id": message_id}
+    level = redaction_level(admin)
     scope = _message_scope(admin, params)
     row = (await db.execute(text("""SELECT id, session_id, from_user_id, to_user_id, type,
         content, media_url, is_read, revoked_at, created_at FROM chat_message
@@ -113,12 +188,12 @@ async def moderate_admin_message(
         "actor": admin.account.id,
         "action": f"message.{action}",
         "id": message_id,
-        "before_json": json.dumps({**before, "content": _redact_content(before.get("content"))}, ensure_ascii=False, default=str),
-        "after_json": json.dumps({**dict(updated), "content": _redact_content(updated.get("content"))}, ensure_ascii=False, default=str),
+        "before_json": json.dumps({**before, "content": redact_sensitive(before.get("content"), level)}, ensure_ascii=False, default=str),
+        "after_json": json.dumps({**dict(updated), "content": redact_sensitive(updated.get("content"), level)}, ensure_ascii=False, default=str),
         "reason": reason,
     })
     await db.commit()
-    return _message_item(dict(updated))
+    return _message_item(dict(updated), level)
 
 
 async def create_admin_announcement(

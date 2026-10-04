@@ -14,6 +14,9 @@ from app.schemas.matchmaker import (
     MatchmakerContactExchangeUpdate,
     MatchmakerContactUpdate,
     MatchmakerPage,
+    MatchmakerRatingCreate,
+    MatchmakerRatingPage,
+    MatchmakerRatingResponse,
     MatchmakerServiceOrderCreate,
     MatchmakerServiceOrderPage,
     MatchmakerServiceOrderResponse,
@@ -27,6 +30,7 @@ from app.schemas.matchmaker import (
 )
 from app.services.matchmaker import (
     admin_create_service_product,
+    create_matchmaker_rating,
     create_service_request,
     create_service_order,
     get_matchmaker_contact,
@@ -35,6 +39,7 @@ from app.services.matchmaker import (
     get_service_product,
     get_service_request,
     get_matchmaker,
+    list_matchmaker_ratings,
     list_service_products,
     list_service_orders,
     list_matchmakers,
@@ -49,6 +54,7 @@ from app.services.matchmaker import (
 
 router = APIRouter(prefix="/matchmakers")
 product_router = APIRouter(prefix="/matchmaker/service-products")
+service_router = APIRouter(prefix="/matchmaker/services")
 
 
 @router.get("", response_model=MatchmakerPage, summary="查询服务红娘列表")
@@ -74,6 +80,27 @@ async def matchmaker_detail(
     matchmaker_id: int = Path(..., ge=1), db: AsyncSession = Depends(get_db)
 ) -> MatchmakerCard:
     return await get_matchmaker(db, matchmaker_id)
+
+
+@router.get("/{matchmaker_id}/ratings", response_model=MatchmakerRatingPage, summary="查询红娘服务评价列表")
+async def matchmaker_ratings(
+    matchmaker_id: int = Path(..., ge=1),
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+) -> MatchmakerRatingPage:
+    # 公开只读：评价是对红娘的公开口碑，游客可见（待产品最终确认）。
+    return await list_matchmaker_ratings(db, matchmaker_id, page, page_size)
+
+
+@service_router.post("/{service_id}/rating", response_model=MatchmakerRatingResponse, status_code=201, summary="提交服务评价")
+async def create_rating(
+    service_id: int = Path(..., ge=1),
+    body: MatchmakerRatingCreate = ...,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MatchmakerRatingResponse:
+    return await create_matchmaker_rating(db, current, service_id, body)
 
 
 @product_router.get("", response_model=list[MatchmakerServiceProductResponse], summary="查询在售红娘服务商品")

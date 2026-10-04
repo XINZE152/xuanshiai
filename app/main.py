@@ -21,7 +21,7 @@ from app.api.router import OPENAPI_TAGS, api_router
 from app.api.routes.admin_home import legacy_router as admin_home_legacy_router
 from app.core.config import settings
 from app.core.logging import configure_logging, request_id_context
-from app.db.session import engine
+from app.db.session import engine, session_factory
 from app.services.media_access import MediaAccessUnavailable, verify_media_access
 
 configure_logging(settings)
@@ -61,6 +61,21 @@ async def initialize_database_on_startup() -> None:
     logger.info("数据库自动初始化完成")
 
 
+async def verify_ai_advisor_knowledge_on_startup() -> None:
+    """启动期校验 AI 军师知识版本与配置一致（非开发环境不一致即 fail-fast）。"""
+    if session_factory is None:
+        return
+    from app.services.ai_advisor import verify_knowledge_version
+
+    try:
+        async with session_factory() as db:
+            await verify_knowledge_version(db)
+    except RuntimeError:
+        raise
+    except Exception as exc:  # 知识表尚未建好等情况不应阻断启动，仅告警
+        logger.warning("AI 军师知识版本校验未能执行：%s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info(
@@ -69,6 +84,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         settings.app_version,
     )
     await initialize_database_on_startup()
+    await verify_ai_advisor_knowledge_on_startup()
     yield
     if engine is not None:
         await engine.dispose()

@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentUser
+from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser
 from app.schemas.meeting import (
     MeetingFeedbackCreate,
     MeetingDirectCreate,
@@ -145,10 +145,13 @@ async def update_meeting_request(db: AsyncSession, current: CurrentUser, request
     return _request_response(result.mappings().one())
 
 
-async def admin_update_request(db: AsyncSession, request_id: int, request: MeetingStatusUpdate, actor_id: int) -> MeetingRequestResponse:
-    result = await db.execute(text("""SELECT id, user_id, target_user_id, matchmaker_id,
+async def admin_update_request(db: AsyncSession, request_id: int, request: MeetingStatusUpdate, actor_id: int, *, admin: CurrentMatchmakerAdmin) -> MeetingRequestResponse:
+    # D-4：越权申请统一按「不存在」返回，避免用状态码差异探测他组织约见申请。
+    params: dict[str, object] = {"id": request_id}
+    scope = admin.scope_clause(params, user_column="r.matchmaker_id", organization_column="r.organization_id")
+    result = await db.execute(text(f"""SELECT id, user_id, target_user_id, matchmaker_id,
         service_id, organization_id, status, note, created_at, updated_at
-        FROM meeting_request WHERE id = :id FOR UPDATE"""), {"id": request_id})
+        FROM meeting_request r WHERE r.id = :id AND ({scope}) FOR UPDATE"""), params)
     row = result.mappings().first()
     if not row:
         raise HTTPException(404, detail="约见申请不存在")
@@ -167,9 +170,24 @@ async def admin_update_request(db: AsyncSession, request_id: int, request: Meeti
     return _request_response(result.mappings().one())
 
 
-async def schedule_meeting(db: AsyncSession, admin: CurrentUser, request_id: int, request: MeetingScheduleCreate) -> MeetingRecordResponse:
-    result = await db.execute(text("""SELECT id, user_id, target_user_id, status FROM meeting_request
-        WHERE id = :id FOR UPDATE"""), {"id": request_id})
+async def _assert_record_in_scope(db: AsyncSession, meeting_id: int, admin: CurrentMatchmakerAdmin) -> None:
+    """校验约会记录落在账号数据范围内，否则回滚并 403（D-4）。
+
+    直接复用 :meth:`CurrentMatchmakerAdmin.scope_clause`，不在业务层另判组织/红娘归属。
+    """
+    params: dict[str, object] = {"id": meeting_id}
+    scope = admin.scope_clause(params, user_column="mr.organizer_id", organization_column="mr.organization_id")
+    if not await db.scalar(text(f"SELECT 1 FROM meeting_record mr WHERE mr.id = :id AND ({scope})"), params):
+        await db.rollback()
+        raise HTTPException(403, detail="约会归属超出当前账号数据范围")
+
+
+async def schedule_meeting(db: AsyncSession, admin: CurrentUser, request_id: int, request: MeetingScheduleCreate, *, scope_admin: CurrentMatchmakerAdmin | None = None) -> MeetingRecordResponse:
+    # `scope_admin` 仅在后台路由下发（D-4）；C 端流程传 None 表示不叠加后台数据范围。
+    params: dict[str, object] = {"id": request_id}
+    scope = "1 = 1" if scope_admin is None else scope_admin.scope_clause(params, user_column="meeting_request.matchmaker_id", organization_column="meeting_request.organization_id")
+    result = await db.execute(text(f"""SELECT id, user_id, target_user_id, status FROM meeting_request
+        WHERE id = :id AND ({scope}) FOR UPDATE"""), params)
     row = result.mappings().first()
     if not row:
         raise HTTPException(404, detail="约见申请不存在")
@@ -189,6 +207,8 @@ async def schedule_meeting(db: AsyncSession, admin: CurrentUser, request_id: int
         "sms_remind": int(request.sms_remind),
     })
     meeting_id = int(result.lastrowid)
+    if scope_admin is not None:
+        await _assert_record_in_scope(db, meeting_id, scope_admin)
     await db.execute(text("UPDATE meeting_request SET status = 'ACCEPTED', updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"id": request_id})
     await db.execute(text("""INSERT INTO business_audit_log
         (actor_user_id, action, resource_type, resource_id, reason)
@@ -216,24 +236,30 @@ _ADMIN_RECORD_SELECT = """SELECT mr.id, mr.request_id, mr.organizer_id, mr.organ
     LEFT JOIN users uo ON uo.id = mr.organizer_id"""
 
 
-async def admin_meeting_statistics(db: AsyncSession) -> MeetingStatistics:
-    """约会管理顶部统计：总安排/总成功 + 本月已安排/待见面/已见面/未见面。"""
-    row = (await db.execute(text("""SELECT
+async def admin_meeting_statistics(db: AsyncSession, *, admin: CurrentMatchmakerAdmin) -> MeetingStatistics:
+    """约会管理顶部统计：总安排/总成功 + 本月已安排/待见面/已见面/未见面。
+
+    ``meeting_record`` 自带 ``organizer_id`` / ``organization_id``，可直接套用
+    :meth:`CurrentMatchmakerAdmin.scope_clause` 的四档谓词（D-4）。
+    """
+    params: dict[str, object] = {}
+    scope = admin.scope_clause(params, user_column="mr.organizer_id", organization_column="mr.organization_id")
+    row = (await db.execute(text(f"""SELECT
         COUNT(*) AS total_arranged,
-        SUM(status IN ('CHECKED_IN', 'COMPLETED')) AS total_met,
-        SUM(YEAR(scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(scheduled_at) = MONTH(UTC_TIMESTAMP())) AS month_arranged,
-        SUM(YEAR(scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(scheduled_at) = MONTH(UTC_TIMESTAMP())
-            AND status IN ('SCHEDULED', 'REMINDED')) AS month_waiting,
-        SUM(YEAR(scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(scheduled_at) = MONTH(UTC_TIMESTAMP())
-            AND status IN ('CHECKED_IN', 'COMPLETED')) AS month_met,
-        SUM(YEAR(scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(scheduled_at) = MONTH(UTC_TIMESTAMP())
-            AND status IN ('NO_SHOW', 'CANCELLED')) AS month_not_met
-        FROM meeting_record"""))).mappings().one()
+        SUM(mr.status IN ('CHECKED_IN', 'COMPLETED')) AS total_met,
+        SUM(YEAR(mr.scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(mr.scheduled_at) = MONTH(UTC_TIMESTAMP())) AS month_arranged,
+        SUM(YEAR(mr.scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(mr.scheduled_at) = MONTH(UTC_TIMESTAMP())
+            AND mr.status IN ('SCHEDULED', 'REMINDED')) AS month_waiting,
+        SUM(YEAR(mr.scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(mr.scheduled_at) = MONTH(UTC_TIMESTAMP())
+            AND mr.status IN ('CHECKED_IN', 'COMPLETED')) AS month_met,
+        SUM(YEAR(mr.scheduled_at) = YEAR(UTC_TIMESTAMP()) AND MONTH(mr.scheduled_at) = MONTH(UTC_TIMESTAMP())
+            AND mr.status IN ('NO_SHOW', 'CANCELLED')) AS month_not_met
+        FROM meeting_record mr WHERE ({scope})"""), params)).mappings().one()
     keys = ("total_arranged", "total_met", "month_arranged", "month_waiting", "month_met", "month_not_met")
     return MeetingStatistics(**{key: int(row[key] or 0) for key in keys})
 
 
-async def admin_create_meeting(db: AsyncSession, body: MeetingDirectCreate, actor_id: int) -> MeetingRecordResponse:
+async def admin_create_meeting(db: AsyncSession, body: MeetingDirectCreate, actor_id: int, *, admin: CurrentMatchmakerAdmin) -> MeetingRecordResponse:
     """约会管理-添加约会：自动建立约见申请（ACCEPTED）并写入约会记录。"""
     if body.from_user_id == body.to_user_id:
         raise HTTPException(422, detail="约会双方不能为同一会员")
@@ -265,11 +291,13 @@ async def admin_create_meeting(db: AsyncSession, body: MeetingDirectCreate, acto
         "member_visible": int(body.member_visible), "sms_remind": int(body.sms_remind),
     })
     meeting_id = int(result.lastrowid)
+    # D-4：新建约会的归属必须落在账号数据范围内，否则回滚并拒绝。
+    await _assert_record_in_scope(db, meeting_id, admin)
     await db.execute(text("""INSERT INTO business_audit_log
         (actor_user_id, action, resource_type, resource_id)
         VALUES (:actor, 'meeting.create', 'meeting_record', :id)"""), {"actor": actor_id, "id": meeting_id})
     await db.commit()
-    return await admin_get_meeting(db, meeting_id)
+    return await admin_get_meeting(db, meeting_id, admin=admin)
 
 
 async def create_feedback(db: AsyncSession, current: CurrentUser, meeting_id: int, request: MeetingFeedbackCreate) -> None:
@@ -291,9 +319,10 @@ async def create_feedback(db: AsyncSession, current: CurrentUser, meeting_id: in
     await db.commit()
 
 
-async def admin_list_requests(db: AsyncSession, page: int, page_size: int, status: str | None = None, search: str | None = None, matchmaker_id: int | None = None, from_date: str | None = None, to_date: str | None = None, status_group: str | None = None) -> MeetingRequestAdminPage:
-    where = ["1 = 1"]
+async def admin_list_requests(db: AsyncSession, page: int, page_size: int, status: str | None = None, search: str | None = None, matchmaker_id: int | None = None, from_date: str | None = None, to_date: str | None = None, status_group: str | None = None, *, admin: CurrentMatchmakerAdmin) -> MeetingRequestAdminPage:
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    # D-4：约见申请自带 matchmaker_id / organization_id，直接套用统一四档谓词。
+    where = [admin.scope_clause(params, user_column="r.matchmaker_id", organization_column="r.organization_id")]
     if status:
         where.append("r.status = :status")
         params["status"] = status
@@ -341,9 +370,12 @@ async def admin_list_meetings(
     to_date: str | None = None,
     met: str | None = None,
     member_id: int | None = None,
+    *,
+    admin: CurrentMatchmakerAdmin,
 ) -> MeetingRecordAdminPage:
-    where = ["1 = 1"]
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    # D-4：约会记录的服务红娘列为 organizer_id，组织列为 organization_id。
+    where = [admin.scope_clause(params, user_column="mr.organizer_id", organization_column="mr.organization_id")]
     if status:
         where.append("mr.status = :status")
         params["status"] = status
@@ -380,15 +412,17 @@ async def admin_list_meetings(
     return MeetingRecordAdminPage(items=[_record_response(row) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
-async def admin_get_meeting(db: AsyncSession, meeting_id: int) -> MeetingRecordResponse:
-    row = (await db.execute(text(f"{_ADMIN_RECORD_SELECT} WHERE mr.id = :id"), {"id": meeting_id})).mappings().first()
+async def admin_get_meeting(db: AsyncSession, meeting_id: int, *, admin: CurrentMatchmakerAdmin) -> MeetingRecordResponse:
+    params: dict[str, object] = {"id": meeting_id}
+    scope = admin.scope_clause(params, user_column="mr.organizer_id", organization_column="mr.organization_id")
+    row = (await db.execute(text(f"{_ADMIN_RECORD_SELECT} WHERE mr.id = :id AND ({scope})"), params)).mappings().first()
     if not row:
         raise HTTPException(404, detail="约见记录不存在")
     return _record_response(row)
 
 
-async def admin_update_meeting(db: AsyncSession, meeting_id: int, body: MeetingRecordAdminUpdate, actor_id: int) -> MeetingRecordResponse:
-    current = await admin_get_meeting(db, meeting_id)
+async def admin_update_meeting(db: AsyncSession, meeting_id: int, body: MeetingRecordAdminUpdate, actor_id: int, *, admin: CurrentMatchmakerAdmin) -> MeetingRecordResponse:
+    current = await admin_get_meeting(db, meeting_id, admin=admin)
     values = body.model_dump(exclude_unset=True)
     if current.status == "CANCELLED" and values.get("status") not in (None, "CANCELLED"):
         raise HTTPException(409, detail="已取消的约见不能恢复")
@@ -402,11 +436,11 @@ async def admin_update_meeting(db: AsyncSession, meeting_id: int, body: MeetingR
         (actor_user_id, action, resource_type, resource_id)
         VALUES (:actor, 'meeting.update', 'meeting_record', :id)"""), {"actor": actor_id, "id": meeting_id})
     await db.commit()
-    return await admin_get_meeting(db, meeting_id)
+    return await admin_get_meeting(db, meeting_id, admin=admin)
 
 
-async def admin_feedback(db: AsyncSession, meeting_id: int) -> list[MeetingFeedbackAdminItem]:
-    await admin_get_meeting(db, meeting_id)
+async def admin_feedback(db: AsyncSession, meeting_id: int, *, admin: CurrentMatchmakerAdmin) -> list[MeetingFeedbackAdminItem]:
+    await admin_get_meeting(db, meeting_id, admin=admin)
     rows = await db.execute(text("""SELECT id, meeting_id, user_id, target_rating,
         matchmaker_rating, continue_intent, private_feedback, created_at
         FROM meeting_feedback WHERE meeting_id = :id ORDER BY id ASC"""), {"id": meeting_id})
@@ -446,8 +480,10 @@ async def admin_options(db: AsyncSession) -> dict:
     }
 
 
-async def admin_delete_request(db: AsyncSession, request_id: int, actor_id: int) -> bool:
-    row = (await db.execute(text("SELECT id, status FROM meeting_request WHERE id = :id FOR UPDATE"), {"id": request_id})).mappings().first()
+async def admin_delete_request(db: AsyncSession, request_id: int, actor_id: int, *, admin: CurrentMatchmakerAdmin) -> bool:
+    params: dict[str, object] = {"id": request_id}
+    scope = admin.scope_clause(params, user_column="meeting_request.matchmaker_id", organization_column="meeting_request.organization_id")
+    row = (await db.execute(text(f"SELECT id, status FROM meeting_request WHERE id = :id AND ({scope}) FOR UPDATE"), params)).mappings().first()
     if not row:
         raise HTTPException(404, detail="约见申请不存在")
     if row["status"] in ("CLOSED",):
@@ -461,8 +497,10 @@ async def admin_delete_request(db: AsyncSession, request_id: int, actor_id: int)
     return True
 
 
-async def admin_delete_meeting(db: AsyncSession, meeting_id: int, actor_id: int) -> bool:
-    row = (await db.execute(text("SELECT id, status FROM meeting_record WHERE id = :id FOR UPDATE"), {"id": meeting_id})).mappings().first()
+async def admin_delete_meeting(db: AsyncSession, meeting_id: int, actor_id: int, *, admin: CurrentMatchmakerAdmin) -> bool:
+    params: dict[str, object] = {"id": meeting_id}
+    scope = admin.scope_clause(params, user_column="meeting_record.organizer_id", organization_column="meeting_record.organization_id")
+    row = (await db.execute(text(f"SELECT id, status FROM meeting_record WHERE id = :id AND ({scope}) FOR UPDATE"), params)).mappings().first()
     if not row:
         raise HTTPException(404, detail="约会记录不存在")
     if row["status"] == "COMPLETED":

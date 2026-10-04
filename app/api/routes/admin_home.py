@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
+from app.api.dependencies import CurrentMatchmakerAdmin, declare_permission, get_current_matchmaker_admin
 from app.db.session import get_db
 from app.schemas.admin_home import AdminBootstrap, AdminDashboard, AnnouncementPage, LegacyResponse, RechargeItem
 from app.services import admin_home
@@ -15,11 +15,14 @@ router = APIRouter(prefix="/admin")
 legacy_router = APIRouter()
 
 
+@declare_permission("dashboard.read")
 @router.get("/bootstrap", response_model=AdminBootstrap, summary="查询管理端首页初始化数据")
 async def get_bootstrap(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> AdminBootstrap:
+    admin.require("dashboard.read")
     return await admin_home.bootstrap(db, admin)
 
 
+@declare_permission("dashboard.read")
 @router.get("/dashboard", response_model=AdminDashboard, summary="查询管理端首页统计")
 async def get_dashboard(from_date: date | None = Query(None, alias="from"), to_date: date | None = Query(None, alias="to"), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> AdminDashboard:
     admin.require("dashboard.read")
@@ -27,6 +30,7 @@ async def get_dashboard(from_date: date | None = Query(None, alias="from"), to_d
     return await admin_home.dashboard(db, admin, from_date or end - timedelta(days=14), end)
 
 
+@declare_permission("dashboard.read", "matchmaker.member.read")
 @router.get("/member-statistics", summary="查询会员 CRM 数据报表")
 async def get_member_statistics(from_date: date | None = Query(None, alias="from"), to_date: date | None = Query(None, alias="to"), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
     # 该报表同时服务于首页大盘与「会员CRM → 数据报表」页，两类权限任一即可。
@@ -41,8 +45,10 @@ async def get_announcements(page: int = Query(1, ge=1), page_size: int = Query(2
     return await admin_home.announcements(db, admin, page, page_size, category, keyword)
 
 
+@declare_permission("dashboard.read")
 @router.get("/academy/categories", summary="查询婚创学苑栏目树")
 async def get_academy_categories(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("dashboard.read")
     return await admin_home.academy_categories(db)
 
 
@@ -89,35 +95,47 @@ def _order_records(report: AdminDashboard, granularity: str) -> list[dict]:
     return list(buckets.values())
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/common/api/image/getConfig", response_model=LegacyResponse[dict])
 async def legacy_image_config(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin)):
     # Upload credentials are intentionally absent; uploads use the existing authenticated endpoint.
+    admin.require("dashboard.read")
     return _legacy({"bucket": "", "fileDomain": "", "uploadDomain": "/api/v1/media", "imageWmType": "text", "videoPrivateQueue": "", "wmContent": "", "wmFont": "", "wmFontColor": "", "wmFontSize": 0, "wmGravity": "SouthEast", "wmOpen": False, "wmResize": 0, "wmRotate": 0, "wmTransparency": 0, "wmUnitH": 0, "wmUnitW": 0, "wmXdistance": 0, "wmYdistance": 0})
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/common/api/system/getTenantDetail", response_model=LegacyResponse[dict])
 async def legacy_tenant_detail(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin)):
+    admin.require("dashboard.read")
     return _legacy({"id": 0, "name": "", "alias": "", "customerName": "", "bindingDomain": "", "bindingDomainWithHttps": "", "certificationLocked": False, "concurrentNumLimit": 0, "faceProvider": None, "grantAuthDeadline": None, "grantPluginIds": "", "h5UsingFaceId": False, "maritalStatusLocked": False, "maritalStatusProvider": None, "phone": None, "regionDataMode": "", "signLocked": False, "smsChannel": "", "smsLocked": False, "smsSignature": "", "whetherLock": admin.account.status != 1})
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/common/api/config/getSystemBaseConfig", response_model=LegacyResponse[dict])
 async def legacy_system_config(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin)):
+    admin.require("dashboard.read")
     return _legacy({"id": 0, "name": "", "adminLogo": "", "customerLogo": "", "bindingDomain": "", "customerWords": "", "customerServicePhone": None, "customerServiceWechat": None, "customerServiceWechatQrCode": None, "whetherOpenLink": False})
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/commonadmin/api/system/getTenantAuth", response_model=LegacyResponse[dict])
 async def legacy_tenant_auth(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("dashboard.read")
     sms = await admin_home.sms_statistics(db)
     return _legacy({"id": 0, "name": "", "alias": "", "whetherLock": admin.account.status != 1, "grantAuthDeadline": None, "smsLocked": False, "smsSurplusNum": sms.remaining_count, "realNameSurplusNum": 0, "signSurplusNum": 0, "maritalStatusSurplusNum": 0, "whetherProtect": False, "whetherOpenLink": False})
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/commonadmin/api/adminUser/info", response_model=LegacyResponse[dict])
 async def legacy_admin_info(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin)):
+    admin.require("dashboard.read")
     return _legacy({"id": admin.account.id, "account": admin.account.username, "name": admin.account.display_name, "groupId": 0, "permissions": sorted(admin.permissions), "whetherLock": admin.account.status != 1, "whetherOrdinaryPage": False})
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/commonadmin/api/system/getTenantData", response_model=LegacyResponse[dict])
 async def legacy_tenant_data(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("dashboard.read")
     dashboard = await admin_home.dashboard(db, admin, date.today().replace(day=1), date.today())
     m = dashboard.metrics
     previous_month_end = date.today().replace(day=1) - timedelta(days=1)
@@ -127,20 +145,26 @@ async def legacy_tenant_data(admin: CurrentMatchmakerAdmin = Depends(get_current
     return _legacy({"tenantId": 1, "regUserNums": m.member_count, "loveUserNums": m.member_count, "totalIncome": float(m.online_income), "curMonthIncome": float(current_income), "lastMonthIncome": float(previous_income), "detailsViews": 0, "indexViews": 0, "lastLoginTime": None, "wechatFans": 0})
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/commonadmin/api/system/getIndexTopStatistics", response_model=LegacyResponse[dict])
 async def legacy_top_statistics(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("dashboard.read")
     dashboard = await admin_home.dashboard(db, admin, date.today(), date.today())
     return _legacy({"activeSignUpAuditingNum": 0, "finCashoutAuditingNum": dashboard.metrics.pending_withdrawal_count, "giftExchangeAuditingNum": 0, "onlineDays": 0, "onlineIncome": float(dashboard.metrics.online_income), "regUserNum": dashboard.metrics.member_count, "shortVideoAuditingNum": 0, "wechatFansNum": 0})
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/loveadmin/api/loveUser/getAdminIndexStatistic", response_model=LegacyResponse[dict])
 async def legacy_member_statistics(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("dashboard.read")
     m = (await admin_home.dashboard(db, admin, date.today(), date.today())).metrics
     return _legacy({"appointmentAuditingNum": 0, "commitmentAuditingNum": 0, "educationAuditingNum": 0, "femaleNums": 0, "houseAuditingNum": 0, "lineAuditingNum": 0, "loveCustomerNums": m.lead_count, "loveUserAuditingNum": 0, "maleNums": 0, "matchmakerNums": m.matchmaker_count, "noSingleNums": 0, "offlineIncome": float(m.offline_income), "offlineVipNums": 0, "otherAuditingNum": 0, "popMatchmakerNums": 0, "popularizeAuditingNum": 0, "reportAuditingNum": 0, "total": m.member_count, "vipNums": m.vip_count})
 
 
+@declare_permission("finance.read")
 @legacy_router.get("/commonadmin/api/system/getIncomeRank", response_model=LegacyResponse[list[dict]])
 async def legacy_income_rank(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("finance.read")
     rows = await db.execute(text("""SELECT product_type, COALESCE(SUM(amount), 0) income
         FROM payment_order WHERE status = 1 GROUP BY product_type ORDER BY income DESC, product_type LIMIT 5"""))
     result = rows.mappings().all()
@@ -148,8 +172,10 @@ async def legacy_income_rank(admin: CurrentMatchmakerAdmin = Depends(get_current
     return _legacy([{"serviceType": row["product_type"], "serviceTypeCode": 0, "income": float(row["income"] or 0), "proportion": round(float(row["income"] or 0) * 100 / total, 2) if total else 0} for row in result])
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/loveadmin/api/loveUser/getAdminIndexLoveUserStatisticByDay", response_model=LegacyResponse[list[dict]])
 async def legacy_member_trend(page: int = Query(1, ge=1), limit: int = Query(15, ge=1, le=366), createFromTime: datetime | None = None, createToTime: datetime | None = None, admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("dashboard.read")
     end = createToTime.date() if createToTime else date.today()
     start = createFromTime.date() if createFromTime else end - timedelta(days=limit - 1)
     report = await admin_home.dashboard(db, admin, start, end)
@@ -157,8 +183,10 @@ async def legacy_member_trend(page: int = Query(1, ge=1), limit: int = Query(15,
     return _legacy(records[(page - 1) * limit: page * limit])
 
 
+@declare_permission("finance.read")
 @legacy_router.get("/commonadmin/api/finOrder/getOrderStatics", response_model=LegacyResponse[dict])
 async def legacy_order_statistics(dateStatisticType: str = Query("Day", pattern="^(Day|Month)$"), whetherDesc: bool = False, page: int = Query(1, ge=1), limit: int = Query(15, ge=1, le=366), fromTime: datetime | None = None, endTime: datetime | None = None, admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("finance.read")
     end = endTime.date() if endTime else date.today()
     start = fromTime.date() if fromTime else end - timedelta(days=limit - 1)
     report = await admin_home.dashboard(db, admin, start, end)
@@ -168,26 +196,34 @@ async def legacy_order_statistics(dateStatisticType: str = Query("Day", pattern=
     return _legacy(_legacy_page(records, page, limit))
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/commonadmin/api/adv/getPlatformCategoryList", response_model=LegacyResponse[list[dict]])
 async def legacy_categories(type: str = Query("Guides", pattern="^Guides$"), whetherOpen: bool = True, admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("dashboard.read")
     categories = await admin_home.academy_categories(db, whetherOpen)
     def item(x): return {"id": x.id, "parentId": x.parent_id or 0, "name": x.name, "desc": x.description, "image": x.image, "categoryType": x.category_type, "sort": x.sort, "whetherOpen": x.enabled, "whetherMatchmakerClassOpen": x.matchmaker_class_enabled, "secondDicCategoryList": [item(c) for c in x.children]}
     return _legacy([item(x) for x in categories])
 
 
+@declare_permission("finance.read")
 @legacy_router.get("/commonadmin/api/recharge/getFinItems", response_model=LegacyResponse[list[dict]])
 async def legacy_recharge_items(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("finance.read")
     return _legacy([{"id": x.id, "name": x.name, "type": x.resource_type, "numTimes": x.quantity, "price": float(x.price)} for x in await admin_home.recharge_items(db)])
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/commonadmin/api/sms/getStastics", response_model=LegacyResponse[dict])
 async def legacy_sms_statistics(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("dashboard.read")
     sms = await admin_home.sms_statistics(db)
     return _legacy({"sendSucess": sms.success_count, "sendFail": sms.failed_count, "smsSurplusNum": sms.remaining_count})
 
 
+@declare_permission("dashboard.read")
 @legacy_router.get("/commonadmin/api/feedback/checkFeedbackWhetherView", response_model=LegacyResponse[bool])
 async def legacy_feedback(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("dashboard.read")
     return _legacy(await admin_home.has_unread_feedback(db, admin.account.id))
 
 
@@ -197,30 +233,40 @@ async def _unread_count(db: AsyncSession, account_id: int) -> int:
         WHERE a.published_at IS NOT NULL AND r.id IS NULL"""), {"id": account_id})).scalar() or 0)
 
 
+@declare_permission("message.read")
 @legacy_router.get("/commonadmin/api/mUpdRep/getUnreadNum", response_model=LegacyResponse[int])
 async def legacy_unread_count(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("message.read")
     return _legacy(await _unread_count(db, admin.account.id))
 
 
+@declare_permission("message.read")
 @legacy_router.get("/commonadmin/api/mUpdRep/getWhetherNewReport", response_model=LegacyResponse[bool])
 async def legacy_has_unread(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("message.read")
     return _legacy((await _unread_count(db, admin.account.id)) > 0)
 
 
+@declare_permission("message.read")
 @legacy_router.get("/commonadmin/api/mUpdRep/getFirstVersion", response_model=LegacyResponse[dict | None])
 async def legacy_first_version(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("message.read")
     row = (await db.execute(text("SELECT id, name FROM admin_announcement_version WHERE published_at IS NOT NULL ORDER BY is_first DESC, published_at, id LIMIT 1"))).mappings().first()
     return _legacy({"id": row["id"], "isFirst": True, "name": row["name"]} if row else None)
 
 
+@declare_permission("message.read")
 @legacy_router.get("/commonadmin/api/mUpdRep/getAllVersions", response_model=LegacyResponse[list[dict]])
 async def legacy_versions(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("message.read")
     rows = await db.execute(text("SELECT id, name, is_first FROM admin_announcement_version WHERE published_at IS NOT NULL ORDER BY published_at, id"))
     return _legacy([{"id": x["id"], "isFirst": bool(x["is_first"]), "name": x["name"]} for x in rows.mappings().all()])
 
 
+@declare_permission("message.read")
 @legacy_router.get("/commonadmin/api/mUpdRep/pageUpdReps", response_model=LegacyResponse[dict])
 async def legacy_announcements(page: int = Query(1, ge=1), limit: int = Query(100, ge=1, le=100), category: str | None = Query(None, max_length=64), updRepTitleOrId: str | None = Query(None, max_length=100), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)):
+    admin.require("message.read")
     result = await admin_home.announcements(db, admin, page, limit, category or None, updRepTitleOrId or None)
     records = [{"id": x.id, "versionId": x.version_id, "category": x.category, "title": x.title, "titleColor": x.title_color, "titleBold": x.title_bold, "top": x.top, "intOrder": x.sort_order, "linkTo": x.link_to, "createTime": x.created_at, "whetherRead": x.read} for x in result.items]
     return _legacy({"current": page, "size": limit, "total": result.total, "pages": (result.total + limit - 1) // limit, "records": records, "countId": None, "maxLimit": None, "optimizeCountSql": True, "orders": [], "searchCount": True})

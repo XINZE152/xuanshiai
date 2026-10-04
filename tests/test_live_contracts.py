@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
 
 from app.core.config import Settings, settings
+from app.core.security import create_live_ws_ticket, decode_live_ws_ticket
 from app.main import app
 from app.services.live import INTERACTION_STATUS, TRANSITIONS
 from app.services.live_tencent import LiveProviderUnavailable, generate_user_sig
@@ -173,6 +174,59 @@ def test_live_reliability_schema_and_migration_contracts() -> None:
     assert "live_outbox_event" in up
     assert "uk_live_active_user" in up
     assert "DROP TABLE IF EXISTS `live_outbox_event`" in down
+
+
+def test_live_websocket_ticket_separates_live_session_from_login_session() -> None:
+    """D-1 回归：票根必须同时携带直播场次 ID 与登录会话 ID，二者语义不同。
+
+    历史上两者被混用，导致保活校验用直播场次 ID 去匹配 ``user_session.id``，
+    连接建立后必然被 1008 关闭。
+    """
+    live_session_id = 4242
+    login_session_id = 77
+    ticket = create_live_ws_ticket(
+        user_id=9,
+        session_id=live_session_id,
+        ticket_id="ticket-abc",
+        expires_seconds=60,
+        user_session_id=login_session_id,
+    )
+
+    payload = decode_live_ws_ticket(ticket)
+    assert int(payload["sid"]) == live_session_id
+    assert int(payload["uss"]) == login_session_id
+    assert payload["uss"] != payload["sid"]
+
+
+def test_live_websocket_ticket_without_login_session_is_rejected() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from jose import jwt
+
+    now = datetime.now(UTC)
+    legacy_ticket = jwt.encode(
+        {
+            "sub": "9",
+            "sid": "4242",
+            "jti": "ticket-abc",
+            "typ": "live_ws_ticket",
+            "iat": now,
+            "exp": now + timedelta(seconds=60),
+        },
+        settings.secret_key,
+        algorithm=settings.jwt_algorithm,
+    )
+
+    with pytest.raises(ValueError):
+        decode_live_ws_ticket(legacy_ticket)
+
+
+def test_live_websocket_keepalive_binds_login_session() -> None:
+    """D-1 回归：保活 SQL 必须绑定登录会话 ID，而非直播场次 ID。"""
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "app/api/routes/live_ws.py").read_text(encoding="utf-8")
+    assert '"sid": login_session_id' in source
+    assert '"sid": ticket_session_id' not in source
 
 
 def test_live_worker_has_bounded_operator_entrypoint() -> None:

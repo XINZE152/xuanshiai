@@ -26,6 +26,9 @@ async def live_events(
         payload = decode_live_ws_ticket(ticket)
         user_id = int(payload["sub"])
         ticket_session_id = int(payload["sid"])
+        # 登录会话 ID（user_session.id）与直播场次 ID 是两个不同的概念：
+        # 前者用于保活撤销校验，后者仅用于确认票根与 URL 场次一致。
+        login_session_id = int(payload["uss"])
         ticket_id = payload["jti"]
     except (ValueError, KeyError):
         await websocket.close(code=1008, reason="invalid ticket")
@@ -104,7 +107,7 @@ async def live_events(
                         "SELECT 1 FROM user_session WHERE id=:sid AND user_id=:uid AND status=1 "
                         "AND revoked_at IS NULL AND access_expire_at>UTC_TIMESTAMP()"
                     ),
-                    {"uid": user_id, "sid": ticket_session_id},
+                    {"uid": user_id, "sid": login_session_id},
                 )
                 session_is_valid = bool(current.scalar())
             if not session_is_valid:

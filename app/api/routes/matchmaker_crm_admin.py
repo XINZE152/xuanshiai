@@ -16,6 +16,15 @@ from app.services.certifications import list_certification_reviews, review_certi
 
 router = APIRouter(prefix="/admin/matchmaker")
 
+# 会员归属展示列：每个会员只取一条生效归属，避免 `LEFT JOIN resource_assignment`
+# 因一人多单而放大结果行数（历史实现使用非聚合子查询，会在列表分页中产生重复行）。
+# 数据可见范围不使用该派生表，而统一走 `CurrentMatchmakerAdmin.scope_exists_clause`，
+# 以保证「任一生效归属落在作用域内即可见」的正确语义。
+_ASSIGNMENT_DISPLAY_DERIVED = (
+    "(SELECT user_id, MAX(matchmaker_id) AS matchmaker_id FROM resource_assignment "
+    "WHERE status = 1 GROUP BY user_id)"
+)
+
 
 class MemberBatchStatus(BaseModel):
     member_ids: list[int] = Field(min_length=1, max_length=200)
@@ -36,6 +45,8 @@ async def match_records(
     if search:
         where.append("(fu.nickname LIKE CONCAT('%', :search, '%') OR tu.nickname LIKE CONCAT('%', :search, '%') OR fu.phone LIKE CONCAT('%', :search, '%') OR tu.phone LIKE CONCAT('%', :search, '%'))")
         params["search"] = search
+    # 牵线记录会把双方昵称与手机号一并下发，按「发起方（from）会员归属」收口。
+    where.append(current.scope_exists_clause(params, correlation="scope_assignment.user_id = a.from_user_id"))
     clause = " AND ".join(where)
     base = "FROM match_apply a JOIN users fu ON fu.id = a.from_user_id JOIN users tu ON tu.id = a.to_user_id"
     rows = await db.execute(text(f"""SELECT a.id, a.from_user_id, a.to_user_id, a.status, a.created_at, a.responded_at,
@@ -77,7 +88,12 @@ async def create_match_record(
     return MatchRecordResponse(id=int(result.lastrowid), from_user_id=body.from_love_user_id, to_user_id=body.to_love_user_id, status=body.line_status, created_at=body.create_time, responded_at=body.complete_time)
 
 
-async def _member_query(db: AsyncSession, where: str, params: dict, page: int, page_size: int) -> MemberPage:
+async def _member_query(db: AsyncSession, where: str, params: dict, page: int, page_size: int, scope: str) -> MemberPage:
+    """会员 CRM 列表查询。
+
+    ``scope`` 必须由调用方通过 `CurrentMatchmakerAdmin.scope_exists_clause`
+    生成——本函数不接受手写作用域谓词，也不允许为空（fail-closed）。
+    """
     column_rows = await db.execute(text("""SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('user_profile', 'user_auth')"""))
     available = {(row[0], row[1]) for row in column_rows.all()}
@@ -88,12 +104,13 @@ async def _member_query(db: AsyncSession, where: str, params: dict, page: int, p
     def profile_expr(name: str) -> str:
         return f"p.{name}" if ("user_profile", name) in available else "NULL"
 
-    base = """FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
+    base = f"""FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
         LEFT JOIN user_auth ua ON ua.user_id = u.id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(end_at) AS vip_end_at FROM user_membership WHERE status = 1 GROUP BY user_id) v ON v.user_id = u.id
-        LEFT JOIN (SELECT user_id, matchmaker_id FROM resource_assignment WHERE status = 1) a ON a.user_id = u.id
+        LEFT JOIN {_ASSIGNMENT_DISPLAY_DERIVED} a ON a.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(created_at) last_follow_at, MAX(next_follow_at) next_follow_at FROM member_follow_up GROUP BY user_id) f ON f.user_id = u.id"""
+    where = f"({where}) AND ({scope})"
     params = {**params, "limit": page_size, "offset": (page - 1) * page_size}
     sort_by = str(params.pop("sort_by", "created_at"))
     # Keep sort fields server-side whitelisted; never interpolate user input.
@@ -159,20 +176,32 @@ async def members(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20
     if follow_state == "overdue":
         where += " AND f.next_follow_at < CURDATE()"
     params["sort_by"] = sort_by
-    return await _member_query(db, where, params, page, page_size)
+    scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = u.id")
+    return await _member_query(db, where, params, page, page_size, scope)
 
 
 @router.get("/members/statistics", response_model=MemberStatistics, summary="查询会员统计")
 async def member_statistics(current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberStatistics:
-    row = (await db.execute(text("""SELECT COUNT(*) total, SUM(u.gender = 1) male, SUM(u.gender = 2) female,
+    params: dict[str, object] = {}
+    scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = u.id")
+    # VIP 子查询必须同口径收口：历史实现统计全平台 VIP，会向门店/组织账号泄露全局规模。
+    vip_scope = current.scope_exists_clause(
+        params,
+        correlation="vip_scope_assignment.user_id = vm.user_id",
+        assignment_alias="vip_scope_assignment",
+    )
+    row = (await db.execute(text(f"""SELECT COUNT(*) total, SUM(u.gender = 1) male, SUM(u.gender = 2) female,
         SUM(u.status = 1) active,
         SUM(a.matchmaker_id IS NULL) unassigned,
         SUM(f.last_follow_at IS NULL) never_followed,
         SUM(f.next_follow_at >= CURDATE() AND f.next_follow_at < DATE_ADD(CURDATE(), INTERVAL 1 DAY)) follow_due_today,
-        (SELECT COUNT(DISTINCT user_id) FROM user_membership WHERE status = 1 AND (end_at IS NULL OR end_at > UTC_TIMESTAMP())) vip
+        (SELECT COUNT(DISTINCT vm.user_id) FROM user_membership vm
+            WHERE vm.status = 1 AND (vm.end_at IS NULL OR vm.end_at > UTC_TIMESTAMP())
+              AND ({vip_scope})) vip
         FROM users u
-        LEFT JOIN (SELECT user_id, matchmaker_id FROM resource_assignment WHERE status = 1) a ON a.user_id = u.id
-        LEFT JOIN (SELECT user_id, MAX(created_at) last_follow_at, MAX(next_follow_at) next_follow_at FROM member_follow_up GROUP BY user_id) f ON f.user_id = u.id"""))).mappings().one()
+        LEFT JOIN {_ASSIGNMENT_DISPLAY_DERIVED} a ON a.user_id = u.id
+        LEFT JOIN (SELECT user_id, MAX(created_at) last_follow_at, MAX(next_follow_at) next_follow_at FROM member_follow_up GROUP BY user_id) f ON f.user_id = u.id
+        WHERE ({scope})"""), params)).mappings().one()
     return MemberStatistics(**{key: int(row[key] or 0) for key in ("total", "male", "female", "vip", "active", "unassigned", "never_followed", "follow_due_today")})
 
 
@@ -186,7 +215,9 @@ async def batch_member_status(
     placeholders = ",".join(f":id_{index}" for index in range(len(ids)))
     params = {f"id_{index}": value for index, value in enumerate(ids)}
     params.update({"status": body.status, "actor": current.account.id, "reason": body.reason})
-    result = await db.execute(text(f"UPDATE users SET status=:status, updated_at=UTC_TIMESTAMP() WHERE id IN ({placeholders})"), params)
+    # 批量写操作必须同口径收口，否则可越过单条改状态的越权防线。
+    scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = users.id")
+    result = await db.execute(text(f"UPDATE users SET status=:status, updated_at=UTC_TIMESTAMP() WHERE id IN ({placeholders}) AND ({scope})"), params)
     await db.commit()
     return {"updated": int(result.rowcount or 0), "status": body.status}
 
@@ -208,6 +239,8 @@ async def member_auth_list(
     if search:
         where.append("(u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))")
         params["search"] = search
+    # 该接口会下发 real_name / id_card 等高敏字段，必须与会员列表同口径收口。
+    where.append(current.scope_exists_clause(params, correlation="scope_assignment.user_id = u.id"))
     clause = " AND ".join(where)
     base = "FROM users u LEFT JOIN user_auth ua ON ua.user_id=u.id"
     rows = await db.execute(text(f"SELECT u.id, u.nickname, u.phone, u.gender, u.birthday, ua.real_name, ua.id_card, COALESCE(ua.auth_status,0) auth_status, ua.updated_at submitted_at {base} WHERE {clause} ORDER BY submitted_at DESC, u.id DESC LIMIT :limit OFFSET :offset"), params)
@@ -273,6 +306,9 @@ async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchm
 
     def auth_expr(name: str) -> str:
         return f"ua.{name}" if ("user_auth", name) in available else "NULL"
+    params: dict[str, object] = {"id": member_id}
+    # 越权访问按「不存在」处理（404），避免通过状态码差异枚举他组织会员 ID。
+    scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = u.id")
     row = (await db.execute(text(f"""SELECT u.id, u.nickname, u.phone, u.gender, u.status, u.avatar, u.birthday, u.is_married, u.created_at,
         u.last_login_at, u.register_ip AS ip_location, {profile_expr('residence_city_code')} AS residence_city_code,
         {profile_expr('height')} AS height, {profile_expr('weight')} AS weight,
@@ -302,7 +338,7 @@ async def member_detail(member_id: int = Path(..., ge=1), current: CurrentMatchm
         LEFT JOIN user_auth ua ON ua.user_id = u.id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(end_at) vip_end_at FROM user_membership WHERE status = 1 GROUP BY user_id) v ON v.user_id = u.id
-        LEFT JOIN (SELECT user_id, matchmaker_id FROM resource_assignment WHERE status = 1) a ON a.user_id = u.id WHERE u.id = :id"""), {"id": member_id})).mappings().first()
+        LEFT JOIN {_ASSIGNMENT_DISPLAY_DERIVED} a ON a.user_id = u.id WHERE u.id = :id AND ({scope})"""), params)).mappings().first()
     if not row:
         from fastapi import HTTPException
         raise HTTPException(404, detail="会员不存在")
@@ -323,7 +359,9 @@ async def member_assignment(
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> MemberAssignmentResponse:
-    if not (await db.execute(text("SELECT id FROM users WHERE id = :id"), {"id": member_id})).scalar():
+    guard_params: dict[str, object] = {"id": member_id}
+    scope = current.scope_exists_clause(guard_params, correlation="scope_assignment.user_id = u.id")
+    if not (await db.execute(text(f"SELECT u.id FROM users u WHERE u.id = :id AND ({scope})"), guard_params)).scalar():
         raise HTTPException(404, detail="会员不存在")
     if body.matchmaker_id is not None and not (await db.execute(text("""SELECT 1 FROM user_role
         WHERE user_id = :id AND role_code = 'service_matchmaker' AND status = 1 LIMIT 1"""), {"id": body.matchmaker_id})).scalar():
@@ -349,10 +387,13 @@ async def member_assignment(
 
 @router.patch("/members/{member_id}/status", response_model=MemberStatusResponse, summary="修改会员状态")
 async def member_status(member_id: int = Path(..., ge=1), body: MemberStatusUpdate = ..., current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberStatusResponse:
-    result = await db.execute(text("SELECT id FROM users WHERE id = :id FOR UPDATE"), {"id": member_id})
-    if not result.scalar():
-        from fastapi import HTTPException
+    guard_params: dict[str, object] = {"id": member_id}
+    scope = current.scope_exists_clause(guard_params, correlation="scope_assignment.user_id = u.id")
+    # 作用域判定与行锁拆成两条语句：MySQL 不允许对派生表/含派生表的查询加锁，
+    # EXISTS 判定留在第一条，锁定语句只锁 users 行。
+    if not (await db.execute(text(f"SELECT u.id FROM users u WHERE u.id = :id AND ({scope})"), guard_params)).scalar():
         raise HTTPException(404, detail="会员不存在")
+    await db.execute(text("SELECT id FROM users WHERE id = :id FOR UPDATE"), {"id": member_id})
     await db.execute(text("UPDATE users SET status = :status, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"status": body.status, "id": member_id})
     await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id, reason) VALUES (:actor, 'member.status.update', 'user', :id, :reason)"), {"actor": current.account.id, "id": member_id, "reason": body.reason})
     await db.commit()
