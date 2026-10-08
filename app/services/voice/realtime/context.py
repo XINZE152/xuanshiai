@@ -15,7 +15,10 @@ from typing import Any
 from sqlalchemy import text as sql_text
 
 from app.db.session import session_factory as default_session_factory
-from app.services.ai.journey import compose_journey_build_context
+from app.services.ai.journey import (
+    compose_continuous_context,
+    compose_journey_build_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,60 @@ async def build_journey_context(
         return None
 
 
+async def build_continuous_context(
+    user_id: int,
+    *,
+    session_factory: Any = default_session_factory,
+) -> str | None:
+    """Project both subjects into safe continuous_v2 reply context.
+
+    Unlike :func:`build_journey_context` (single subject, current session only)
+    this aggregates both subjects' confirmed revisions plus cross-session
+    history.  Consent revocation must stay visible: ``PermissionError`` is
+    re-raised instead of being flattened into an empty context.
+    """
+    if not user_id or session_factory is None:
+        return None
+    try:
+        async with session_factory() as db:
+            return await compose_continuous_context(db, user_id=user_id)
+    except PermissionError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "moxiang_continuous_context_failed user_id=%s err=%s",
+            user_id,
+            type(exc).__name__,
+        )
+        return None
+
+
+async def load_continuous_history(
+    db: Any,
+    user_id: int,
+    *,
+    limit: int = 24,
+) -> list[dict[str, str]]:
+    """Load recent dialogue across the user's internal master sessions.
+
+    continuous_v2 restores one conversation even when the internal session row
+    was released and recreated, so history must be scoped by user rather than
+    by the current ``session_id``.
+    """
+    from app.services.ai.continuous import list_continuous_turns
+
+    rows, _ = await list_continuous_turns(db, user_id, limit)
+    return [
+        {
+            "role": str(row.get("role") or ""),
+            "content": str(row.get("answer_text") or ""),
+        }
+        for row in rows
+        if str(row.get("role") or "") in {"user", "assistant"}
+        and str(row.get("answer_text") or "").strip()
+    ]
+
+
 async def load_master_history(
     db: Any,
     session_id: str,
@@ -79,4 +136,10 @@ async def load_master_history(
     ]
 
 
-__all__ = ["build_journey_context", "load_master_history", "send_json"]
+__all__ = [
+    "build_continuous_context",
+    "build_journey_context",
+    "load_continuous_history",
+    "load_master_history",
+    "send_json",
+]

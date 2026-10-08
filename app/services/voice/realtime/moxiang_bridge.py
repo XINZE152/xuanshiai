@@ -34,7 +34,9 @@ from app.services.ai.prompts.moxiang_master import (
 )
 from app.services.voice.realtime.provider import RealtimeProviderConfig
 from app.services.voice.realtime.context import (
+    build_continuous_context,
     build_journey_context,
+    load_continuous_history,
     load_master_history,
     send_json,
 )
@@ -162,13 +164,19 @@ async def consume_realtime_minutes(user_id: int, minutes: int) -> None:
     except Exception:  # noqa: BLE001
         logger.debug("realtime_quota_consume_failed", exc_info=True)
 
+
 @dataclass
 class RealtimeRouteContext:
-    """当前业务会话状态（主体切换时由路由更新）。"""
+    """当前业务会话状态（主体切换时由路由更新）。
+
+    ``flow_version`` 决定回复注入哪一份上下文：continuous_v2 用双主体 +
+    跨会话，legacy 用单主体建构状态。缺省 legacy 保持既有连接行为不变。
+    """
 
     session_id: str
     subject: str
     narrative_context: str
+    flow_version: str = "legacy"
 
 
 class MoxiangRealtimeBridge:
@@ -239,6 +247,14 @@ class MoxiangRealtimeBridge:
         )
 
     async def _build_context(self) -> str:
+        if self.context.flow_version == "continuous_v2":
+            # 双主体 + 跨内部会话：连续对话恢复不依赖当前 session 是否新建。
+            context = await build_continuous_context(
+                self._user_id, session_factory=_db_session_factory
+            )
+            if context is None:
+                raise RuntimeError("continuous context unavailable")
+            return context
         if not self.context.session_id:
             return ""
         context = await build_journey_context(
@@ -251,13 +267,16 @@ class MoxiangRealtimeBridge:
         return context
 
     async def _load_history(self) -> list[dict[str, str]]:
-        if not self.context.session_id:
+        continuous = self.context.flow_version == "continuous_v2"
+        if not continuous and not self.context.session_id:
             return []
         if _db_session_factory is None:
             raise RuntimeError("realtime history unavailable")
 
         try:
             async with _db_session_factory() as db:
+                if continuous:
+                    return await load_continuous_history(db, self._user_id)
                 return await load_master_history(db, self.context.session_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -266,6 +285,7 @@ class MoxiangRealtimeBridge:
                 type(exc).__name__,
             )
             raise RuntimeError("realtime history unavailable") from exc
+
     async def handle_confirm_transcript(
         self,
         transcript_id: str,

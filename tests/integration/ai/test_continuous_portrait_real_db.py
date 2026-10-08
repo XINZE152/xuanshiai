@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.config import settings
 from app.schemas.ai_common import AiConsentGrantRequest
 from app.schemas.ai_profile import ProfileDraftFieldPatchRequest, ProfileFieldPatchAction, ProfileSubject
-from app.services.ai import continuous, profile
+from app.services.ai import continuous, journey, profile
 from app.services.ai.consents import grant_consent, revoke_consent
 from app.services.ai.tasks import TaskError
 from app.workers import ai_worker
@@ -260,9 +261,12 @@ async def test_revoke_regrant_does_not_restore_portraits_or_history(real_db_sess
 
 @pytest.mark.asyncio
 async def test_grant_snapshot_uses_database_second_precision(real_db_session, monkeypatch):
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
     from app.services.ai import consents
-    now = datetime.now(UTC).replace(microsecond=900000)
+    # 基准时间回退 2 秒：本用例只验证 granted_at 被截断到秒，不应依赖宿主与
+    # MySQL 容器的亚秒级时钟一致——容器时钟抖动约 1s 时，granted_at 可能落到
+    # 候选 created_at 之后，导致「授权后产生的证据」过滤误判为空。
+    now = datetime.now(UTC).replace(microsecond=900000) - timedelta(seconds=2)
 
     class Clock:
         @staticmethod
@@ -453,3 +457,315 @@ async def test_same_hash_projection_rebinds_current_authorization(real_db_sessio
     assert rebound["consent_snapshot_id"] == first["consent_snapshot_id"]
     assert rebound["policy_revision"] == POLICY
     assert await service.read_active(**dimension) is not None
+
+
+@pytest.mark.asyncio
+async def test_entry_dimension_cap_isolated_per_subject(real_db_session):
+    """B2：同一会话里 personal 与 ideal_partner 的同维度条目各自算上限。
+
+    旧实现按 ``profile_dimension`` 单列分组，两主体合计超过 3 条时互相挤掉；
+    现在按 (subject, profile_dimension) 分组，各留 3 条。
+    """
+    from app.services.ai.journey import _enforce_entry_dimension_cap
+
+    db = real_db_session
+    session, turn = await seed(db)
+    for subject in ("personal", "ideal_partner"):
+        for idx in range(4):
+            await add_candidate(
+                db, session, turn, subject, "lifestyle", "routine", f"{subject}-routine-{idx}"
+            )
+    await db.commit()
+
+    dismissed = await _enforce_entry_dimension_cap(db, session)
+    await db.commit()
+
+    rows = (await db.execute(text(
+        "SELECT subject, COUNT(*) AS n FROM ai_profile_candidate "
+        "WHERE session_id=:session AND status='active' AND field_kind='entry' "
+        "AND profile_dimension='lifestyle' GROUP BY subject ORDER BY subject"
+    ), {"session": session})).mappings().all()
+    assert {row["subject"]: int(row["n"]) for row in rows} == {
+        "ideal_partner": 3,
+        "personal": 3,
+    }
+    # 种子里另有 1 条 lifestyle 之外的 personal 条目，故只裁剪同维度超出部分。
+    assert dismissed == 2
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+class _CapturingExtractGateway:
+    """按固定 outcome 应答，并记录真实下发的抽取请求（替代模型调用）。"""
+
+    def __init__(self, outcome: object) -> None:
+        self.outcome = outcome
+        self.requests: list[object] = []
+
+    async def structured_extract(self, context: object, request: object) -> object:
+        del context
+        self.requests.append(request)
+        return self.outcome
+
+
+async def _claim_and_start(db, worker_id: str, task_id: str):
+    """真实租约链：claim（queued→leased）后只启动目标任务并返回它。"""
+    from app.services.ai.tasks import claim_tasks, start_task
+
+    claimed = await claim_tasks(db, worker_id, _utc_now(), 10)
+    targets = [task for task in claimed if task.task_id == task_id]
+    assert len(targets) == 1, [task.task_id for task in claimed]
+    started = await start_task(db, targets[0].task_id, worker_id)
+    await db.commit()
+    return started
+
+
+@pytest.mark.asyncio
+async def test_natural_language_modify_replaces_entry_and_invalidates_old_candidate(
+    real_db_session, real_db_engine, monkeypatch
+):
+    """B3：正式条目 A → 聊天修订为 B → 差异显示替换 → 正式字段与 Memory 只留 B。
+
+    走真实链路：submit_journey_turn 入队 → claim/start 租约链 →
+    extract_journey_candidates 抽取。验证下发摘要带被修订条目的 field_key、
+    modify 候选保留替换目标、越界目标只丢单条、旧 active 候选退出候选池、
+    快照按同 key 覆盖（不是新增一条）、预览显示 changed、确认后正式 revision
+    与 Memory 只以 B 生效。
+    """
+    from app.services.ai.base import ExtractedPatch, StructuredExtractResult
+    from app.services.ai.candidates import compute_candidate_content_hash
+    from app.services.ai.gateway import InvokeOutcome
+    from app.services.ai.memory.policy import MemoryPolicy
+    from app.services.ai.memory.projections import MemoryProjectionService
+    from app.services.ai.memory.service import MemoryService
+
+    db = real_db_session
+    session, _turn = await seed(db)
+    first = await build(db)
+    await generate(db, real_db_engine, monkeypatch)
+    published = await continuous.confirm_continuous_preview(
+        db, first["preview_id"], USER, 0, "b3-publish-a"
+    )
+    await db.commit()
+
+    target = (await db.execute(text(
+        "SELECT field_key,category,content FROM ai_profile_revision_field "
+        "WHERE revision_id=:revision AND field_kind='entry' ORDER BY id LIMIT 1"
+    ), {"revision": published["revision_id"]})).mappings().first()
+    old_key = str(target["field_key"])
+    old_content = str(target["content"])
+    old_category = str(target["category"])
+    # 旧 claim 由真实确认链写入（confirmed）；这里只复核基线，不手工构造。
+    service = MemoryService(db)
+    old_identity = MemoryPolicy.candidate_identity(
+        "entry", None, old_category,
+        compute_candidate_content_hash(
+            "personal", "entry", None, old_category, None, old_content
+        ),
+    )
+    old_claim = await service.find_claim_by_field_identity(
+        owner_user_id=USER, subject="personal", identity=old_identity
+    )
+    assert old_claim is not None and str(old_claim["status"]) == "confirmed"
+
+    revised = "改成：喜欢安静阅读，也更看重深度沟通"
+    outcome = InvokeOutcome(result=StructuredExtractResult(
+        schema_version=profile.PROFILE_SCHEMA_VERSION,
+        patches=(
+            ExtractedPatch(
+                action="modify", category=old_category, content=revised,
+                replaces_field_key=old_key, subject=ProfileSubject.PERSONAL,
+                confidence=0.9, assertion_mode="explicit",
+            ),
+            ExtractedPatch(
+                action="modify", category="interests", content="越界修订不应落库",
+                replaces_field_key="entry_not_in_published_digest",
+                subject=ProfileSubject.PERSONAL, confidence=0.9,
+            ),
+        ),
+    ))
+    gateway = _CapturingExtractGateway(outcome)
+    monkeypatch.setattr(journey, "AIGateway", lambda **kwargs: gateway)
+
+    submission = await journey.submit_journey_turn(
+        db, session_id=session, owner_user_id=USER, client_turn_id="b3-modify-turn",
+        answer_text="之前那条改成更喜欢深度沟通", flow_version="continuous_v2",
+    )
+    await db.commit()
+    started = await _claim_and_start(db, "worker-b3", str(submission.task_id))
+    result = await journey.extract_journey_candidates(db, started, "worker-b3")
+    await db.commit()
+    assert result is not None
+
+    # 1) 真实下发的摘要必须带被修订条目的 field_key，否则模型无从定位。
+    assert gateway.requests, "抽取请求未被下发"
+    request = gateway.requests[0]
+    assert request.continuous_v2 is True
+    assert set(request.subjects) == {"personal", "ideal_partner"}
+    digest = str(request.entry_digest or "")
+    assert old_key in digest and old_content in digest
+
+    # 2) 合法 modify 保留替换目标；越界目标只丢单条，不影响同一轮其它候选。
+    rows = (await db.execute(text(
+        "SELECT field_key,category,content,status FROM ai_profile_candidate "
+        "WHERE user_id=:user AND subject='personal' AND field_kind='entry'"
+    ), {"user": USER})).mappings().all()
+    revised_rows = [row for row in rows if row["content"] == revised]
+    assert len(revised_rows) == 1
+    assert str(revised_rows[0]["field_key"]) == old_key
+    assert not [row for row in rows if row["content"] == "越界修订不应落库"]
+
+    # 3) 被替换条目的旧 active 候选退出候选池（跨会话生效，行与审计保留）。
+    old_candidates = [row for row in rows if row["content"] == old_content]
+    assert old_candidates and str(old_candidates[0]["status"]) == "dismissed"
+
+    # 4) 自动成稿按同 key 覆盖，而不是新增一条。
+    state = await build(db)
+    fields = (await db.execute(text(
+        "SELECT field_key,field_kind,content FROM ai_profile_draft_field WHERE draft_id=:id"
+    ), {"id": state["draft_id"]})).mappings().all()
+    assert len(fields) == 3, [(row["field_key"], row["content"]) for row in fields]
+    replaced = [row for row in fields if row["field_key"] == old_key]
+    assert len(replaced) == 1 and replaced[0]["content"] == revised
+
+    # 5) 预览明确显示替换与旧值。
+    await generate(db, real_db_engine, monkeypatch)
+    preview = await continuous.get_continuous_preview(db, state["preview_id"], USER)
+    assert preview["generation_status"] == "completed", preview
+    assert len(preview["fields"]) == 3
+    changed = [item for item in preview["fields"] if item["field_key"] == old_key][0]
+    assert changed["change"] == "changed"
+    assert changed["previous_display_value"] == old_content
+
+    # 6) 确认后正式 revision 只留修订内容，旧内容从正式字段中消失。
+    await continuous.confirm_continuous_preview(db, state["preview_id"], USER, 0, "b3-confirm-b")
+    await db.commit()
+    live = (await db.execute(text(
+        "SELECT field_key,content FROM ai_profile_revision_field WHERE revision_id=("
+        "SELECT id FROM ai_profile_revision WHERE user_id=:user AND subject='personal' "
+        "ORDER BY revision_no DESC LIMIT 1)"
+    ), {"user": USER})).mappings().all()
+    contents = {str(row["field_key"]): str(row["content"]) for row in live}
+    assert len(contents) == 3
+    assert contents[old_key] == revised
+    assert old_content not in contents.values()
+
+    # 7) 旧事实建墓碑，新事实成为唯一有效值（投影消费者同步看不到旧条目）。
+    suppression = await service.read_suppression(
+        owner_user_id=USER, subject="personal", namespace="moxiang",
+        canonical_key=str(old_claim["canonical_key"]),
+    )
+    assert suppression is not None and str(suppression["status"]) == "active"
+    values = [
+        entry["value"]
+        for entry in await MemoryProjectionService(db)._collect_entries(USER, "personal_profile")
+    ]
+    assert revised in values
+    assert old_content not in values
+
+
+@pytest.mark.asyncio
+async def test_refresh_after_draft_deletion_suppresses_missing_memory_field(
+    real_db_session, real_db_engine, monkeypatch
+):
+    """B4：正式稿有 A → 未确认稿删除 A → 新证据 → refresh 合并 → 确认后 Memory 不再留 A。
+
+    删除通过真实草稿 API（DELETE, expected_revision=0）完成；refresh 合并把墓碑
+    行剔出新快照，确认时草稿里已看不到 deleted 行。只有对照正式基线补 suppress
+    才能让旧记忆随正式稿一起消失，投影重建结果也不再包含 A。
+    """
+    from app.services.ai.candidates import compute_candidate_content_hash
+    from app.services.ai.memory.policy import MemoryPolicy
+    from app.services.ai.memory.projections import MemoryProjectionService
+    from app.services.ai.memory.service import MemoryService
+
+    db = real_db_session
+    session, turn = await seed(db)
+    first = await build(db)
+    await generate(db, real_db_engine, monkeypatch)
+    await continuous.confirm_continuous_preview(db, first["preview_id"], USER, 0, "b4-publish-a")
+    await db.commit()
+
+    projection = MemoryProjectionService(db)
+    dimension = dict(owner_user_id=USER, function_key="search", purpose="candidate_filter",
+                     data_category="personal_profile")
+    before = await projection.build(**dimension)
+    assert len(before["entries"]) == 3
+    target = min(before["entries"], key=lambda entry: str(entry["claim_id"]))
+    target_value = str(target["value"])
+    target_category = str(target["field_key"])
+    target_field = (await db.execute(text(
+        "SELECT field_key FROM ai_profile_draft_field WHERE draft_id=:id AND content=:content"
+    ), {"id": first["draft_id"], "content": target_value})).mappings().first()
+    assert target_field is not None
+    target_field_key = str(target_field["field_key"])
+    service = MemoryService(db)
+    target_claim = await service.find_claim_by_field_identity(
+        owner_user_id=USER, subject="personal",
+        identity=MemoryPolicy.candidate_identity(
+            "entry", None, target_category,
+            compute_candidate_content_hash(
+                "personal", "entry", None, target_category, None, target_value
+            ),
+        ),
+    )
+    assert target_claim is not None and str(target_claim["status"]) == "confirmed"
+
+    # 新证据 → 未确认稿（保留基线 + 合并新证据）。
+    await add_candidate(db, session, turn, "personal", "lifestyle", "routine", "喜欢早睡")
+    await db.commit()
+    second = await build(db, refresh=True)
+    # 用户在新草稿里真实删除这一条（DELETE 走草稿 API，expected_revision=0）。
+    await profile.confirm_profile_draft(
+        db, second["draft_id"], USER,
+        [ProfileDraftFieldPatchRequest(
+            field_key=target_field_key, action=ProfileFieldPatchAction.DELETE,
+            expected_revision=0,
+        )],
+        0, "b4-delete",
+    )
+    await db.commit()
+
+    # 随后又出现新证据，触发显式 refresh 合并：墓碑行被剔出新快照。
+    await add_candidate(db, session, turn, "personal", "lifestyle", "diet", "爱吃辣")
+    await db.commit()
+    third = await build(db, refresh=True)
+    await db.commit()
+    fields = (await db.execute(text(
+        "SELECT field_key,content FROM ai_profile_draft_field WHERE draft_id=:id"
+    ), {"id": third["draft_id"]})).mappings().all()
+    keys = {str(row["field_key"]) for row in fields}
+    values = {str(row["content"]) for row in fields}
+    assert target_field_key not in keys, "refresh 后墓碑行不应回到新快照"
+    assert target_value not in values
+    assert len(fields) == 4, sorted(values)
+    assert {"喜欢早睡", "爱吃辣"}.issubset(values)
+
+    await generate(db, real_db_engine, monkeypatch)
+    await continuous.confirm_continuous_preview(db, third["preview_id"], USER, 0, "b4-confirm")
+    await db.commit()
+
+    live = (await db.execute(text(
+        "SELECT content FROM ai_profile_revision_field WHERE revision_id=("
+        "SELECT id FROM ai_profile_revision WHERE user_id=:user AND subject='personal' "
+        "ORDER BY revision_no DESC LIMIT 1)"
+    ), {"user": USER})).scalars().all()
+    live_values = {str(value) for value in live}
+    assert len(live_values) == 4
+    assert target_value not in live_values
+    assert {"喜欢早睡", "爱吃辣"}.issubset(live_values)
+
+    # 基线存在但最终快照消失的字段补 suppress；投影重建不再包含被删除条目。
+    suppression = await service.read_suppression(
+        owner_user_id=USER, subject="personal", namespace="moxiang",
+        canonical_key=str(target_claim["canonical_key"]),
+    )
+    assert suppression is not None and str(suppression["status"]) == "active"
+    assert await projection.read_active(**dimension) is None
+    rebuilt = await projection.build(**dimension)
+    rebuilt_values = [str(entry["value"]) for entry in rebuilt["entries"]]
+    assert len(rebuilt_values) == 4
+    assert target_value not in rebuilt_values
+    assert {"喜欢早睡", "爱吃辣"}.issubset(set(rebuilt_values))

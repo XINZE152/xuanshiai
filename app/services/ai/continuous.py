@@ -153,6 +153,17 @@ def _versions(candidates: list[dict]) -> list[str]:
     return sorted({f"{row['candidate_id']}:{row['content_hash']}" for row in candidates})
 
 
+def _is_snapshot_entry(row: dict | None) -> bool:
+    """判断快照行是否为可被同 key 替换的 entry 行。
+
+    正式 revision 行与草稿行都带 ``field_kind``；缺失该列的历史数据按
+    structured 处理（保守：宁可不替换，也不误覆盖结构化字段）。
+    """
+    if not row:
+        return False
+    return str(row.get("field_kind") or "structured") == "entry"
+
+
 def ready_to_build(candidates: list[dict], baseline: list[dict], has_published: bool) -> bool:
     """首次三维三证据；增量一次有效变化即可。冲突底线必须先澄清。"""
     previous = {str(row["content_hash"]) for row in baseline}
@@ -313,7 +324,19 @@ async def build_continuous_draft(db: AsyncSession, user_id: int, subject: str, *
                 snapshot[str(row["field_key"])] = dict(row)
     for row in candidates:
         if f"{row['candidate_id']}:{row['content_hash']}" not in previous_versions:
-            key = str(row.get("field_key") or f"entry_{row['candidate_id']}")
+            # 结构化候选照旧按自身字段键落到快照（不涉及替换语义）；entry 候选
+            # 只在带替换目标、且目标仍是当前快照里的 entry 行时按同 key 覆盖，
+            # 成为该条目的新版本。目标已被用户删除/驳回、或目标 key 不属于
+            # entry 行时一律回退新 key——绝不复活墓碑，也不误并到别的字段。
+            target_key = str(row.get("field_key") or "")
+            if not target_key:
+                key = f"entry_{row['candidate_id']}"
+            elif str(row.get("field_kind") or "structured") == "structured":
+                key = target_key
+            elif _is_snapshot_entry(snapshot.get(target_key)):
+                key = target_key
+            else:
+                key = f"entry_{row['candidate_id']}"
             snapshot[key] = row
     if not snapshot:
         raise LookupError("CONTINUOUS_BUILD_NOT_READY")

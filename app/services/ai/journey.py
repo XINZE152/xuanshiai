@@ -50,7 +50,9 @@ from app.services.ai.profile import (
     ProfileSessionNotFound,
     ProfileSessionStale,
     ProfileTurn,
+    _entry_digest_with_keys,
     _insert_turn,
+    _load_published_entry_rows,
     _load_revision_fields,
     find_turn_by_client_id,
     hash_request,
@@ -320,8 +322,12 @@ async def _enforce_entry_dimension_cap(db: AsyncSession, session_id: str) -> int
     """Dismiss active entry candidates beyond the per-dimension cap (#12).
 
     Keeps the ``MAX_ACTIVE_ENTRIES_PER_DIMENSION`` highest-confidence rows per
-    dimension (ties broken by recency, then id) and moves the rest to the
-    terminal ``dismissed`` status.  Returns the number of dismissed rows.
+    *subject and* dimension (ties broken by recency, then id) and moves the
+    rest to the terminal ``dismissed`` status.  Returns the number of
+    dismissed rows.
+
+    同一会话同时承载 personal 与 ideal_partner：只按维度分组会让两个主体互相
+    挤掉候选，因此上限按主体独立计算。
     """
     result = await db.execute(
         text(
@@ -330,7 +336,7 @@ async def _enforce_entry_dimension_cap(db: AsyncSession, session_id: str) -> int
             "  SELECT candidate_id FROM ("
             "    SELECT candidate_id, "
             "           ROW_NUMBER() OVER ("
-            "             PARTITION BY profile_dimension "
+            "             PARTITION BY subject, profile_dimension "
             "             ORDER BY confidence DESC, updated_at DESC, id DESC"
             "           ) AS rn "
             "    FROM ai_profile_candidate "
@@ -390,6 +396,103 @@ def _existing_candidates_digest(candidates: tuple[CandidateRecord, ...]) -> str:
             detail = f"{candidate.category}：{content}"
         lines.append(f"- [{label}] {detail}")
     return "\n".join(lines)
+
+async def _continuous_entry_targets(
+    db: AsyncSession, owner_user_id: int, subjects: tuple[str, ...]
+) -> tuple[str | None, dict[str, frozenset[str]], dict[str, dict[str, dict[str, Any]]]]:
+    """双主体正式稿条目：摘要（含 field_key）+ 合法替换目标 + 目标内容索引。
+
+    摘要只含外部已发布内容（field_key 是服务端生成的条目键，不含用户隐私以外
+    的信息）；``entry_rows`` 供成稿替换后按内容定位需要失效的旧 active 候选。
+    """
+    digest_lines: list[str] = []
+    keys_by_subject: dict[str, frozenset[str]] = {}
+    rows_by_subject: dict[str, dict[str, dict[str, Any]]] = {}
+    for subject in subjects:
+        rows = await _load_published_entry_rows(db, owner_user_id, subject)
+        digest = _entry_digest_with_keys(rows)
+        keys_by_subject[subject] = frozenset(
+            str(row.get("field_key")) for row in rows if str(row.get("field_key") or "")
+        )
+        rows_by_subject[subject] = {
+            str(row.get("field_key")): dict(row)
+            for row in rows
+            if str(row.get("field_key") or "")
+        }
+        if digest:
+            # 双主体共用一次抽取：每行加主体前缀，模型据此选对主体目标。
+            label = "个人画像" if subject == "personal" else "理想型画像"
+            digest_lines.append("\n".join(f"[{label}] {line}" for line in digest.splitlines()))
+    return ("\n".join(digest_lines) or None), keys_by_subject, rows_by_subject
+
+
+def _replaced_entry_pairs(
+    candidates: tuple[CandidateRecord, ...],
+    published_by_key: dict[str, dict[str, Any]],
+) -> tuple[tuple[str, str], ...]:
+    """本次被替换的正式条目：(旧 field_key, 旧 content_hash)。
+
+    只对带替换目标的 entry 候选生效；content_hash 用发布行的内容按 entry 语义
+    重算，与旧 active 候选的 content_hash 可直接比较。
+    """
+    pairs: list[tuple[str, str]] = []
+    for candidate in candidates:
+        if candidate.field_kind != "entry" or not candidate.field_key:
+            continue
+        row = published_by_key.get(str(candidate.field_key))
+        if row is None:
+            continue
+        content = str(row.get("content") or "").strip()
+        if not content:
+            continue
+        content_hash = compute_candidate_content_hash(
+            candidate.subject, "entry", None, row.get("category"), None, content
+        )
+        pairs.append((str(candidate.field_key), content_hash))
+    return tuple(dict.fromkeys(pairs))
+
+
+async def _dismiss_replaced_entry_candidates(
+    db: AsyncSession,
+    *,
+    owner_user_id: int,
+    subject: str,
+    replaced: tuple[tuple[str, str], ...],
+) -> int:
+    """把被替换条目的旧 active 候选移出候选池（保留行，保留审计）。
+
+    被替换内容可能沉淀在更早的会话里，所以按 (user, subject, content_hash)
+    更新而不限当前会话；只动 entry 类、active 状态的候选，已 promoted /
+    dismissed 的行保持原状（正式稿与审计不受影响）。
+    """
+    hashes = sorted({content_hash for _, content_hash in replaced})
+    if not hashes:
+        return 0
+    placeholders = ", ".join(f":hash_{idx}" for idx in range(len(hashes)))
+    params: dict[str, Any] = {
+        "user_id": owner_user_id,
+        "subject": subject,
+        **{f"hash_{idx}": value for idx, value in enumerate(hashes)},
+    }
+    result = await db.execute(
+        text(
+            "UPDATE ai_profile_candidate SET status = 'dismissed', "
+            "updated_at = UTC_TIMESTAMP() "
+            "WHERE user_id = :user_id AND subject = :subject "
+            "AND field_kind = 'entry' AND status = 'active' "
+            f"AND content_hash IN ({placeholders})"
+        ),
+        params,
+    )
+    dismissed = int(result.rowcount or 0)
+    if dismissed:
+        logger.info(
+            "moxiang_replaced_entry_candidates_dismissed user_id=%s subject=%s count=%d",
+            owner_user_id,
+            subject,
+            dismissed,
+        )
+    return dismissed
 
 
 def _structured_display_value(value: Any) -> str:
@@ -805,12 +908,22 @@ async def extract_journey_candidates(
     active_candidates = await list_session_candidates(
         db, session_id=session_id, active_only=True
     )
+    # continuous_v2 的 master 抽取要能定位「改成哪一条」：下发双主体正式稿条目
+    # 摘要（含 field_key）并记住合法目标；legacy 不加载、不下发，行为零变化。
+    entry_digest: str | None = None
+    entry_keys: dict[str, frozenset[str]] = {}
+    entry_rows: dict[str, dict[str, dict[str, Any]]] = {}
+    if continuous_v2:
+        entry_digest, entry_keys, entry_rows = await _continuous_entry_targets(
+            db, task.owner_user_id, ("personal", "ideal_partner")
+        )
     request = StructuredExtractRequest(
         subject=session.subject.value,
         turn_texts=(turn.answer_text,),
         consent_version=session.consent_version,
         policy_revision=session.policy_revision or PROFILE_POLICY_REVISION,
         session_kind="master",
+        entry_digest=entry_digest,
         existing_digest=_existing_candidates_digest(active_candidates) or None,
         continuous_v2=continuous_v2,
         subjects=("personal", "ideal_partner") if continuous_v2 else (session.subject.value,),
@@ -846,6 +959,9 @@ async def extract_journey_candidates(
                 policy_revision=session.policy_revision or PROFILE_POLICY_REVISION,
                 source_turn_id=turn.turn_id,
                 owned_source_turn_ids=(turn.turn_id,),
+                replaceable_entry_keys=(
+                    entry_keys.get(candidate_subject) if continuous_v2 else None
+                ),
             )
     except (AttributeError, TypeError, ValueError) as exc:
         logger.warning(
@@ -871,6 +987,18 @@ async def extract_journey_candidates(
                 assertion_mode=assertion_modes.get(candidate.content_hash, "inferred"),
                 source_turn_id=turn.turn_id,
             )
+    if continuous_v2:
+        for candidate_subject, extracted in extracted_by_subject.items():
+            replaced_pairs = _replaced_entry_pairs(
+                extracted, entry_rows.get(candidate_subject, {})
+            )
+            if replaced_pairs:
+                await _dismiss_replaced_entry_candidates(
+                    db,
+                    owner_user_id=task.owner_user_id,
+                    subject=candidate_subject,
+                    replaced=replaced_pairs,
+                )
     await _enforce_entry_dimension_cap(db, session.session_id)
     if continuous_v2:
         from app.services.ai.continuous import build_continuous_draft

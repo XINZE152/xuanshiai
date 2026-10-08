@@ -157,7 +157,9 @@ from app.services.voice.realtime.moxiang_bridge import (
     release_session_slot,
 )
 from app.services.voice.realtime.context import (
+    build_continuous_context as _build_continuous_context,
     build_journey_context as _build_journey_context,
+    load_continuous_history as _load_continuous_history,
     load_master_history as _load_master_history,
     send_json as _send_json,
 )
@@ -167,9 +169,22 @@ from app.services.voice.realtime.transcript_confirmation import (
     validate_client_turn_id,
     validate_turn_text,
 )
+async def _journey_build_context(
+    session_id: str,
+    subject: str,
+    *,
+    user_id: int,
+    flow_version: str = "legacy",
+) -> str | None:
+    """读取旅程上下文；数据库读取失败不得伪装成空上下文。
 
-async def _journey_build_context(session_id: str, subject: str) -> str | None:
-    """读取旅程上下文；数据库读取失败不得伪装成空上下文。"""
+    continuous_v2 走双主体 + 跨会话的连续上下文；legacy 保持单主体旧行为，
+    避免用另一份画像改变既有旅程的回复口径。
+    """
+    if flow_version == "continuous_v2":
+        return await _build_continuous_context(
+            user_id, session_factory=_db_session_factory
+        )
     if not session_id:
         return None
     context = await _build_journey_context(
@@ -178,6 +193,16 @@ async def _journey_build_context(session_id: str, subject: str) -> str | None:
     if context is None:
         raise RuntimeError("journey context unavailable")
     return context
+
+
+async def _moxiang_history(
+    db: Any, user_id: int, session_id: str, *, flow_version: str = "legacy"
+) -> list[dict[str, str]]:
+    """按流程读取对话历史：continuous_v2 跨内部会话，legacy 限当前会话。"""
+    if flow_version == "continuous_v2":
+        return await _load_continuous_history(db, user_id)
+    return await _load_master_history(db, session_id)
+
 
 logger = logging.getLogger(__name__)
 
@@ -276,11 +301,17 @@ async def _push_streamed_reply(
     build_context: str | None = None,
     flow_version: str = "legacy",
 ) -> None:
-    """流式推送墨相师回复；continuous_v2 使用最新双主体上下文。"""
+    """流式推送墨相师回复。
+
+    ``build_context`` 是本次回复要注入的恢复上下文：continuous_v2 走
+    ``set_continuous_context`` 的双主体块，legacy 走 ``set_build_context``
+    的建构状态块。两者不能同时写入同一段文本，否则 prompt 会重复注入。
+    """
     if build_context is not None:
-        orchestrator.set_build_context(build_context)
         if flow_version == "continuous_v2":
             orchestrator.set_continuous_context(build_context)
+        else:
+            orchestrator.set_build_context(build_context)
     await _send_json(ws, {"type": "ai_thinking"})
     full_reply = ""
     try:
@@ -847,7 +878,12 @@ async def moxiang_master_conversation(
             await _push_streamed_reply(
                 ws, orchestrator, confirmed_text, request_id=request_id,
                 subject=turn_subject,
-                build_context=await _journey_build_context(turn_session_id, turn_subject),
+                build_context=await _journey_build_context(
+                    turn_session_id,
+                    turn_subject,
+                    user_id=user_id,
+                    flow_version="continuous_v2",
+                ),
                 flow_version="continuous_v2",
             )
             await _finish_journey_turn(
@@ -932,7 +968,14 @@ async def moxiang_master_conversation(
                             )
                         ).mappings().first()
                         await db.commit()
-                        history = await _load_master_history(db, session.session_id)
+                        history = await _moxiang_history(
+                            db,
+                            user_id,
+                            session.session_id,
+                            flow_version=(
+                                "continuous_v2" if continuous_v2 else "legacy"
+                            ),
+                        )
                 except Exception as exc:  # noqa: BLE001
                     code = "AI_CONSENT_REQUIRED" if isinstance(exc, AIConsentRequired) else "AI_TEMPORARILY_UNAVAILABLE"
                     logger.warning(
@@ -958,6 +1001,9 @@ async def moxiang_master_conversation(
                                 session_id=session.session_id,
                                 subject=requested_subject,
                                 narrative_context=narrative_ctx,
+                                flow_version=(
+                                    "continuous_v2" if continuous_v2 else "legacy"
+                                ),
                             ),
                             poll_tasks=poll_tasks,
                             emit=lambda event: _send_json(ws, event),
@@ -968,6 +1014,9 @@ async def moxiang_master_conversation(
                         realtime_bridge.context.session_id = session.session_id
                         realtime_bridge.context.subject = requested_subject
                         realtime_bridge.context.narrative_context = narrative_ctx
+                        realtime_bridge.context.flow_version = (
+                            "continuous_v2" if continuous_v2 else "legacy"
+                        )
                         if realtime_bridge.session is not None:
                             await realtime_bridge.session.mark_context_dirty()
                 journey_ready_payload: dict[str, Any] = {
@@ -1046,10 +1095,14 @@ async def moxiang_master_conversation(
                         ).mappings().first()
                         await db.commit()
                         session_new = session.created
-                        history = await _load_master_history(
-                            db, session.session_id
+                        history = await _moxiang_history(
+                            db,
+                            user_id,
+                            session.session_id,
+                            flow_version=(
+                                "continuous_v2" if continuous_v2_active else "legacy"
+                            ),
                         )
-                    # 只有目标会话和上下文均加载成功后才切换，失败时保持原主体。
                     sessions_by_subject[requested_subject] = session.session_id
                     active_subject = requested_subject
                     orchestrator.hydrate_history(history)
@@ -1057,6 +1110,9 @@ async def moxiang_master_conversation(
                         # 主体切换：实时会话换业务上下文，不换供应商连接。
                         realtime_bridge.context.session_id = session.session_id
                         realtime_bridge.context.subject = requested_subject
+                        realtime_bridge.context.flow_version = (
+                            "continuous_v2" if continuous_v2_active else "legacy"
+                        )
                         if realtime_bridge.session is not None:
                             await realtime_bridge.session.mark_context_dirty()
                 except Exception as exc:  # noqa: BLE001
@@ -1147,7 +1203,10 @@ async def moxiang_master_conversation(
                     request_id=request_id,
                     subject=turn_subject,
                     build_context=await _journey_build_context(
-                        turn_session_id, turn_subject
+                        turn_session_id,
+                        turn_subject,
+                        user_id=user_id,
+                        flow_version="continuous_v2" if continuous_v2_active else "legacy",
                     ),
                     flow_version="continuous_v2" if continuous_v2_active else "legacy",
                 )
@@ -1453,7 +1512,12 @@ async def moxiang_master_conversation(
                 await _push_streamed_reply(
                     ws, orchestrator, final_transcript, request_id=request_id,
                     subject=turn_subject,
-                    build_context=await _journey_build_context(turn_session_id, turn_subject),
+                    build_context=await _journey_build_context(
+                        turn_session_id,
+                        turn_subject,
+                        user_id=user_id,
+                        flow_version="legacy",
+                    ),
                     flow_version="legacy",
                 )
                 await _finish_journey_turn(ws, orchestrator, user_id, turn_session_id, turn_subject, task_id, poll_tasks)
@@ -1575,10 +1639,12 @@ async def moxiang_master_conversation(
                     ws,
                     orchestrator,
                     rev_text,
-                    request_id=request_id,
                     subject=turn_subject,
                     build_context=await _journey_build_context(
-                        turn_session_id, turn_subject
+                        turn_session_id,
+                        turn_subject,
+                        user_id=user_id,
+                        flow_version="continuous_v2" if continuous_v2_active else "legacy",
                     ),
                     flow_version="continuous_v2" if continuous_v2_active else "legacy",
                 )

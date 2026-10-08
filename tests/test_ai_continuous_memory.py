@@ -322,3 +322,115 @@ async def test_entry_replacement_suppresses_old_identity_before_confirming_new_e
         "propose",
         "confirm_claim",
     ]
+
+
+async def test_baseline_field_missing_from_final_snapshot_is_suppressed() -> None:
+    """B4：未确认稿删除后 refresh 合并会剔掉墓碑行，确认时必须对照基线补 suppress。
+
+    触发顺序：正式稿有 A → 新草稿删除 A → 又有新证据 → 刷新合并 → 确认。
+    此时 draft.fields 里已经没有 deleted/rejected 行，只有基线里能看出 A 消失。
+    """
+    removed = _field(
+        "entry-old",
+        kind="entry",
+        category="personality",
+        content="我习惯先倾听",
+        value=None,
+    )
+    kept = _field("city_code", value="4403")
+    service = _FakeMemoryService()
+    removed_hash = compute_candidate_content_hash(
+        "personal", "entry", None, removed.category, None, removed.content
+    )
+    canonical = MemoryPolicy.canonical_key(
+        "personal",
+        bucket_for_dimension(
+            removed.field_kind, removed.field_key, removed.category, removed.content
+        ),
+        MemoryPolicy.candidate_identity("entry", None, removed.category, removed_hash),
+    )
+    service.claims[canonical] = {
+        "claim_id": "claim-entry-old",
+        "status": "confirmed",
+        "last_event_seq": 3,
+        "importance": 0.5,
+        "constraint_type": None,
+        "value_json": json.dumps(removed.content, ensure_ascii=False),
+    }
+
+    result = await forward_continuous_confirmation_to_memory(
+        None,  # type: ignore[arg-type]
+        _draft(kept),
+        (kept,),
+        previous_fields=(removed, kept),
+        revision_id=13,
+        source_revision={},
+        consent_snapshot=CONSENT,
+        idempotency_key="continuous-confirm:preview-missing",
+        memory_service=service,
+    )
+
+    assert result.suppressed == 1
+    assert result.proposed == 1
+    assert result.confirmed == 1
+    assert [name for name, _ in service.calls] == [
+        "propose",
+        "confirm_claim",
+        "suppress_claim",
+    ]
+    assert (
+        service.claims[canonical]["status"] == "suppressed"
+    )
+
+
+async def test_missing_field_suppress_deduplicates_with_explicit_tombstone() -> None:
+    """同一个字段既有显式墓碑又是基线缺失时，只允许产生一次 suppress。"""
+    removed = _field(
+        "entry-old",
+        kind="entry",
+        category="personality",
+        content="我习惯先倾听",
+        value=None,
+    )
+    tombstone = _field(
+        "entry-old",
+        kind="entry",
+        category="personality",
+        content="我习惯先倾听",
+        value=None,
+        status="deleted",
+    )
+    service = _FakeMemoryService()
+    removed_hash = compute_candidate_content_hash(
+        "personal", "entry", None, removed.category, None, removed.content
+    )
+    canonical = MemoryPolicy.canonical_key(
+        "personal",
+        bucket_for_dimension(
+            removed.field_kind, removed.field_key, removed.category, removed.content
+        ),
+        MemoryPolicy.candidate_identity("entry", None, removed.category, removed_hash),
+    )
+    service.claims[canonical] = {
+        "claim_id": "claim-entry-old",
+        "status": "confirmed",
+        "last_event_seq": 3,
+        "importance": 0.5,
+        "constraint_type": None,
+        "value_json": json.dumps(removed.content, ensure_ascii=False),
+    }
+
+    result = await forward_continuous_confirmation_to_memory(
+        None,  # type: ignore[arg-type]
+        _draft(tombstone),
+        (),
+        previous_fields=(removed,),
+        revision_no=4,
+        source_revision={},
+        consent_snapshot=CONSENT,
+        idempotency_key="continuous-confirm:preview-missing-dedupe",
+        memory_service=service,
+    )
+
+    assert result.suppressed == 1
+    assert [name for name, _ in service.calls] == ["suppress_claim"]

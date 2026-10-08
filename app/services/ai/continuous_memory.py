@@ -285,7 +285,9 @@ async def forward_continuous_confirmation_to_memory(
     新字段使用 ``user_confirmed`` 来源先 propose、再 confirm；已有 proposed
     Claim 只在本次冻结确认边界内 confirm。基线继承且同值的 confirmed Claim
     幂等跳过；重新提供并审阅的同值事实也写新确认，不能沿用撤权前事件。
-    变化调用既有 correct_claim。明确 deleted/rejected 字段调用 suppress_claim。
+    变化调用既有 correct_claim。明确 deleted/rejected 字段调用 suppress_claim；
+    基线存在但最终快照里已消失的字段（未确认稿删除后在 refresh 合并中随墓碑行
+    被剔除）同样 suppress——否则正式稿已不含该条，旧记忆仍会被投影消费者使用。
     ``previous_fields`` 可传入基线正式 revision 的字段（对象或 mapping）；
     entry 内容修改会为旧 identity 建立删除墓碑，避免旧条目留在下游投影。
 
@@ -333,10 +335,31 @@ async def forward_continuous_confirmation_to_memory(
         old = prior_by_key.get(str(old_key)) if old_key else prior_by_key.get(str(_attr(field, "field_key")))
         if old is not None and _field_identity(old) != _field_identity(field):
             replaced_fields.append(old)
+    # 第三类：基线里有、最终快照里已经没有的字段。删除发生在未确认稿上（refresh
+    # 合并时墓碑行被剔出新快照），确认时草稿已看不到 deleted/rejected 行，只靠
+    # deleted_fields 会漏掉——正式稿不再含该条，旧 Memory 却会继续被投影消费。
+    active_keys = set(active_by_key)
+    tombstoned_keys = {
+        str(_attr(field, "field_key")) for field in deleted_fields
+    }
+    replaced_keys = {
+        str(_attr(field, "field_key")) for field in replaced_fields
+    }
+    # 与显式墓碑、被替换项按 field_key 去重：同一字段只发一次 suppress，
+    # 幂等键 ``_action_key(base, key, "suppress")`` 也随之稳定。
+    missing_fields = tuple(
+        field
+        for key, field in prior_by_key.items()
+        if key not in active_keys
+        and key not in replaced_keys
+        and key not in tombstoned_keys
+    )
     actions: list[tuple[str, Any, str]] = [
         ("deleted", field, "replace") for field in replaced_fields
     ] + [("active", field, "confirm") for field in final_fields] + [
         ("deleted", field, "suppress") for field in deleted_fields
+    ] + [
+        ("deleted", field, "suppress") for field in missing_fields
     ]
 
     proposed = confirmed = corrected = suppressed = skipped = 0

@@ -351,7 +351,11 @@ def build_profile_master_extract_prompt(
         f"【第 {idx + 1} 句】\n{text}" for idx, text in enumerate(turn_texts) if text
     ) or "（用户尚未陈述）"
     digest_block = (
-        f"\n该维度当前已发布的条目（modify 时 replaces_field_key 从中选取）：\n{entry_digest}\n"
+        "\n用户当前已发布的条目（按主体分组，每行 field_key｜分类：内容）：\n"
+        f"{entry_digest}\n"
+        "用户明确纠正、补充或改写其中某一条时，用 action=modify 并让 "
+        "replaces_field_key 等于该条目的 field_key（只能选同一主体、且必须逐字"
+        "取自本摘要，禁止臆造）；无法与摘要对应时一律用 action=add。\n"
         if entry_digest else ""
     )
     existing_block = (

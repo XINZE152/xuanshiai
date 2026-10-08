@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Iterable
 from typing import Any, Protocol
 
@@ -36,6 +37,8 @@ from app.schemas.ai_moxiang import (
     CandidateRecord,
     CandidateRecordSchema,
 )
+logger = logging.getLogger(__name__)
+
 
 # 内容 hash 计算的字段顺序：必须稳定，跨进程 / 跨重启一致。
 _HASH_FIELDS_ORDER: tuple[str, ...] = (
@@ -451,12 +454,19 @@ def candidates_from_master_result(
     policy_revision: str,
     source_turn_id: str,
     owned_source_turn_ids: Iterable[str] | None = None,
+    replaceable_entry_keys: Iterable[str] | None = None,
 ) -> tuple[CandidateRecord, ...]:
     """Map one subject's typed provider result into private evidence.
 
     The source ids are server-owned: provider output may omit them, but it can
     never introduce an id outside the caller's owned set.  A continuous_v2
     result may contain both subjects; callers pass a filtered result per subject.
+
+    ``replaceable_entry_keys`` 是该主体当前正式稿的 entry field_key 集合
+    （continuous_v2 master 抽取专用）。传入时 modify patch 的替换目标写入候选
+    ``field_key``，成稿按同 key 覆盖执行替换；目标不在集合内的 modify 只丢弃
+    该条并留 warning，不影响同一轮的其他候选。``None``（legacy 与 update
+    路径）保持原行为：entry 候选的 ``field_key`` 始终为空。
     """
     expected_subject = ProfileSubject(subject)
     allowed_source_ids = frozenset(
@@ -469,6 +479,11 @@ def candidates_from_master_result(
 
     candidates: list[CandidateRecord] = []
     seen_hashes: set[str] = set()
+    replaceable_targets = (
+        frozenset(str(item) for item in replaceable_entry_keys if str(item))
+        if replaceable_entry_keys is not None
+        else None
+    )
 
     def append_candidate(
         *,
@@ -508,8 +523,11 @@ def candidates_from_master_result(
         profile_dimension = bucket_for_dimension(
             field_kind, field_key, category, content
         )
+        # entry 的语义身份不覆盖替换目标：Memory identity、断言模式索引与
+        # 投影反解都按 field_key=None 计算，替换目标只落在候选 field_key 列。
+        hash_field_key = field_key if field_kind == "structured" else None
         content_hash = compute_candidate_content_hash(
-            subject, field_kind, field_key, category, value, content
+            subject, field_kind, hash_field_key, category, value, content
         )
         if content_hash in seen_hashes:
             return
@@ -561,9 +579,24 @@ def candidates_from_master_result(
             item_source_ids=entry.source_turn_ids,
         )
     for patch in result.patches:
+        patch_target_key: str | None = None
+        if replaceable_targets is not None and patch.action == "modify":
+            target_key = str(patch.replaces_field_key or "")
+            if target_key not in replaceable_targets:
+                # 目标不在本主体正式稿：模型幻觉或跨主体引用，丢弃单条并留痕，
+                # 不让一条坏 key 把整轮抽取判成终态失败（与 provider 边界
+                # _drop_invalid_extract_item 的先例一致）。
+                logger.warning(
+                    "moxiang_modify_target_dropped subject=%s category=%s target_len=%s",
+                    subject,
+                    patch.category,
+                    len(target_key),
+                )
+                continue
+            patch_target_key = target_key
         append_candidate(
             field_kind="entry",
-            field_key=None,
+            field_key=patch_target_key,
             category=patch.category,
             content=patch.content,
             value=None,
