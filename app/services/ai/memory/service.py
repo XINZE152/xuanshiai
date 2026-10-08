@@ -585,6 +585,8 @@ class MemoryService:
         importance: float,
         constraint_type: str | None = None,
         idempotency_key: str | None = None,
+        reviewed_revision_ref: str | None = None,
+        reviewed_value: Any = None,
     ) -> MemoryEventRecord:
         """用户确认：只有本动作能把 Claim 升级为 confirmed 并设定重要度/硬约束。"""
 
@@ -604,10 +606,20 @@ class MemoryService:
             raise MemoryRevisionConflict(
                 f"claim {claim_id!r} revision {row['last_event_seq']} != expected {expected_revision}"
             )
-        if str(row["status"]) != "proposed":
+        reviewed = reviewed_revision_ref is not None
+        if reviewed and not reviewed_revision_ref.startswith("continuous-v2:revision:"):
+            raise MemoryClaimStateDenied("reviewed confirmation requires a formal revision reference")
+        allowed = {"proposed", "user_corrected"} if reviewed else {"proposed"}
+        if str(row["status"]) not in allowed:
             raise MemoryClaimStateDenied(
                 f"claim {claim_id!r} status {row['status']!r} is not confirmable"
             )
+        if reviewed:
+            tombstone = await self.read_suppression(
+                owner_user_id=owner_user_id, subject=str(row["subject"]),
+                namespace=str(row["namespace"]), canonical_key=str(row["canonical_key"]),
+            )
+            MemoryPolicy.assert_not_suppressed(str(tombstone["status"]) if tombstone else None)
         stability = max(
             float(row["stability"]),
             MemoryPolicy.derive_stability(MemorySourceKind.USER_CONFIRMED, 1.0),
@@ -621,7 +633,7 @@ class MemoryService:
             payload={
                 "canonical_key": str(row["canonical_key"]),
                 "dimension": row["dimension"],
-                "value": _loads(row["value_json"]),
+                "value": reviewed_value if reviewed else _loads(row["value_json"]),
                 "confidence": float(row["confidence"]) if row["confidence"] is not None else None,
                 "stability": stability,
                 "importance": float(importance),
@@ -630,7 +642,8 @@ class MemoryService:
                 "fact_kind": str(row["fact_kind"]),
             },
             source_kind=MemorySourceKind.USER_CONFIRMED,
-            source_ref=f"memory:claim:{claim_id}",
+            source_ref=reviewed_revision_ref or f"memory:claim:{claim_id}",
+            causal_event_ids=(str(row["last_event_id"]),) if reviewed else (),
             idempotency_key=key,
         )
         return await self._ledger.append(event)

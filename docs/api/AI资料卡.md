@@ -9,6 +9,7 @@
 | 2026-09-22 | v1.0 | 首次公开 `POST /ai/profile-card/summarize`、`GET /ai/profile-card/draft`、`POST /ai/profile-card/draft/apply`。 |
 | 2026-10-02 | v1.1（本地实施，未发布） | 变更前：客户端按最新草稿采用，缺少资料版本保护，资料写入可能提前提交。变更后：summarize 返回稳定 `draft_id`；GET 精确取稿并返回 `base_profile_revision`；apply 增加来源/资料版本校验、明确幂等冲突、标签 merge/replace_selection 与原子事务。旧客户端省略新增入参仍兼容；新版页面缺少版本信息时停止写入，禁止降级重发。 |
 | 2026-10-03 | v1.1 联调说明（未发布） | 补充客户端同键同内容重试、终态任务重试与隐私可见范围说明；真实 MySQL 和静态检查不替代真实登录、UTS 编译或真机验收。 |
+| 2026-10-08 | v1.2（本地实施，未发布） | 新增 `GET /ai/profile-card/export`（海报公开导出）：只返回当前 `personal` 正式版本上「已采用」的公开字段（公开介绍 + 个人标签），明确排除心理洞察、原始对话、`ideal_partner` 与未采用内容；要求 `revision_id` 与当前正式版本一致，否则 `409 RESULT_STALE`。 |
 
 通用请求头：
 
@@ -431,3 +432,54 @@ Idempotency-Key: apply-key-0001
 ```
 
 `accepted` 不允许 `height`，返回 422。身高只能出现在 `rejected`，并且仍然不会被写入。
+
+---
+
+#### 海报公开导出
+
+`GET /api/v1/ai/profile-card/export?revision_id=<当前正式版本 ID>`
+
+用途：为「生成专属画像海报」提供**唯一**公开数据来源。海报不得再直接读取个人画像叙事中的心理洞察（依恋风格、底线、小结等），那些内容仅本人可见。可见性因此与公开资料卡采用结果严格一致。
+
+请求头：`Authorization: Bearer <access_token>` 必需。无请求体，不需要 `Idempotency-Key`（幂等只读）。
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `revision_id` | integer ≥ 1 | 是 | 调用方当前查看的 `personal` 正式版本 ID。与服务端当前正式版本不一致时返回 `409 RESULT_STALE`，防止迟到页面导出错误版本。 |
+
+成功响应 `200`：
+
+```json
+{
+  "status": "ready",
+  "subject": "personal",
+  "revision_id": 42,
+  "source_revision_id": 42,
+  "public": {
+    "persona_title": "我的公开介绍",
+    "persona_tags": ["周末徒步", "看展"],
+    "self_intro": "喜欢徒步和看展，希望认真沟通。"
+  }
+}
+```
+
+规则：
+
+- 只导出 `personal`；请求 `ideal_partner` 返回 `400 AI_INPUT_INVALID`。对方私密偏好永不进入海报。
+- 只导出**已采用**（`ai_profile_card_draft.status='applied'`）且在 `applied_meta` 公开白名单内（`self_intro`、`personal_tags`）的字段。未采用内容不导出。
+- 资料卡草稿的 `source_revision_id` 必须等于当前正式版本，否则 `409 RESULT_STALE`。
+- 当前 `personal` 叙事必须为 `confirmed` 且其 `revision_id` 指向当前正式版本；否则 `404 PROFILE_CARD_EXPORT_NOT_AVAILABLE`。
+- 若用户隐私设置为「仅会员可见详情」，`persona_tags` 返回空数组（与公开资料保持一致）。
+- 公开内容全部为空时返回 `404 PROFILE_CARD_EXPORT_NOT_AVAILABLE`，前端给可解释提示，不渲染空海报。
+
+错误：
+
+| 状态 | code | 场景 |
+| --- | --- | --- |
+| 400 | `AI_INPUT_INVALID` | `revision_id` 非法或 subject 不是 personal |
+| 403 | `AI_CONSENT_REQUIRED` | 未授权或已撤回 `profile_text_extract` |
+| 404 | `PROFILE_CARD_EXPORT_NOT_AVAILABLE` | 无正式版本 / 叙事未确认 / 无可公开内容 |
+| 409 | `RESULT_STALE` | `revision_id` 或资料卡来源版本与当前正式版本不一致 |
+| 503 | `AI_TEMPORARILY_UNAVAILABLE` | 未预期的导出失败（可重试） |

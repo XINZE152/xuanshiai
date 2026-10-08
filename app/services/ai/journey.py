@@ -99,7 +99,8 @@ class JourneyInvite:
 
 
 def _safe_payload(
-    *, session_id: str, turn_id: str, client_turn_id: str, subject: str
+    *, session_id: str, turn_id: str, client_turn_id: str, subject: str,
+    flow_version: str = "legacy",
 ) -> str:
     """Return task metadata without user text or provider payloads."""
     return json.dumps(
@@ -108,9 +109,11 @@ def _safe_payload(
             "turn_id": turn_id,
             "client_turn_id": client_turn_id,
             "subject": subject,
+            "flow_version": flow_version,
         },
         ensure_ascii=False,
     )
+
 
 
 def journey_task_key(session_id: str, client_turn_id: str) -> str:
@@ -125,6 +128,7 @@ async def submit_journey_turn(
     owner_user_id: int,
     client_turn_id: str,
     answer_text: str,
+    flow_version: str = "legacy",
 ) -> JourneyTurnSubmission:
     """Persist one final turn and enqueue the dedicated candidate task.
 
@@ -134,7 +138,10 @@ async def submit_journey_turn(
     turn or candidate task.
     """
     normalized = normalize_profile_answer(answer_text)
-    session = await load_owned_active_session(db, session_id, owner_user_id)
+    session = await load_owned_active_session(
+        db, session_id, owner_user_id,
+        **({"continuous": True} if flow_version == "continuous_v2" else {}),
+    )
     existing = await find_turn_by_client_id(db, session_id, client_turn_id)
     digest = hash_request(session_id, client_turn_id, normalized)
     task_key = journey_task_key(session_id, client_turn_id)
@@ -202,6 +209,7 @@ async def submit_journey_turn(
                 turn_id=turn.turn_id,
                 client_turn_id=client_turn_id,
                 subject=session.subject.value,
+                flow_version=(flow_version if flow_version == "continuous_v2" else "legacy"),
             ),
             "task_id": task.task_id,
         },
@@ -572,6 +580,77 @@ async def compose_journey_build_context(
         pending_summary=pending_summary,
     )
 
+async def compose_continuous_context(
+    db: AsyncSession, *, user_id: int, session_id: str | None = None
+) -> str:
+    """组合 continuous_v2 回复上下文，不把候选误说成已确认事实。
+
+    上下文固定包含两主体正式稿、本人基础资料、近期本人历史和待核对候选。
+    每个来源独立容错；读取失败会显式标记为暂不可用，绝不当成空白从而诱发
+    重复提问或丢失已有理解。
+    """
+    from app.services.ai.continuous import (
+        _candidates, _latest_revision, _require_consent, _revision_fields,
+        list_continuous_turns,
+    )
+
+    # 授权检查不能容错成空上下文；重授权不会恢复已撤回的历史与候选。
+    consent = await _require_consent(db, user_id)
+    parts: list[str] = [
+        "连续对话上下文（仅供知遇保持连续，不是用户本轮新证据）：",
+        "正式画像、基础资料和历史读取失败时，不得假设用户从未提供过；应避免重复追问，必要时温和说明正在恢复。",
+    ]
+    for subject, label in (("personal", "本人的正式画像"), ("ideal_partner", "伴侣偏好的正式画像")):
+        try:
+            revision = await _latest_revision(db, user_id, subject)
+            if revision is None:
+                parts.append(f"{label}：暂无已确认内容。")
+            else:
+                rows = await _revision_fields(db, int(revision["id"]))
+                parts.append(f"{label}（已确认）：\n{_revision_fields_digest(rows) or '当前版本无可展示字段。'}")
+        except Exception:  # noqa: BLE001 - 上下文失败必须显式保留
+            logger.warning("continuous_context_revision_failed subject=%s", subject)
+            parts.append(f"{label}：读取失败，不能当作空白。")
+    try:
+        profile = await get_profile(db, user_id)
+        base_lines = [
+            f"- 年龄：{profile.get('age')}",
+            f"- 所在城市：{profile.get('residence_city_code')}",
+            f"- 婚姻状态：{profile.get('is_married')}",
+            f"- 学历：{profile.get('education_level')}",
+            f"- 职业：{profile.get('occupation')}",
+        ]
+        rendered = [line for line in base_lines if not line.endswith("：None")]
+        parts.append("基础资料（仅作背景）：\n" + ("\n".join(rendered) or "暂无可展示字段。"))
+    except Exception:  # noqa: BLE001 - 不将读取失败伪装为空
+        logger.warning("continuous_context_profile_failed user_id=%s", user_id)
+        parts.append("基础资料：读取失败，不能当作空白。")
+    try:
+        history, _ = await list_continuous_turns(db, user_id, 12)
+        history_lines = [
+            f"{'用户' if str(row.get('role')) == 'user' else '知遇'}：{str(row.get('answer_text') or '').strip()}"
+            for row in history if str(row.get("answer_text") or "").strip()
+        ]
+        parts.append("近期本人对话历史（仅作参考）：\n" + ("\n".join(history_lines) or "暂无可展示记录。"))
+    except Exception:  # noqa: BLE001 - 失败不可伪装成无历史
+        logger.warning("continuous_context_history_failed user_id=%s", user_id)
+        parts.append("近期本人对话历史：读取失败，不能当作用户从未说过。")
+    try:
+        pending = []
+        for subject in ("personal", "ideal_partner"):
+            pending.extend(await _candidates(db, user_id, subject, consent))
+        pending_lines: list[str] = []
+        for row in pending:
+            subject = str(row.get("subject") or "")
+            detail = str(row.get("content") or row.get("value_json") or "").strip()
+            if detail:
+                pending_lines.append(f"- [{subject}] {detail[:200]}")
+        parts.append("待核对候选（不能作为已确认事实）：\n" + ("\n".join(pending_lines[:40]) or "暂无。"))
+    except Exception:  # noqa: BLE001 - 候选失败也要显式保留
+        logger.warning("continuous_context_candidates_failed user_id=%s", user_id)
+        parts.append("待核对候选：读取失败，不能当作暂无候选。")
+    return "\n\n".join(parts)
+
 
 def _shadow_source_kind(assertion_mode: str) -> str:
     """断言方式 → 来源类型：显式映射，绝不从 confidence 反推。"""
@@ -594,6 +673,9 @@ def _assertion_mode_by_content_hash(
 
     mapping: dict[str, str] = {}
     for item in (*result.fields, *result.entries, *result.patches):
+        item_subject = getattr(item, "subject", None)
+        if getattr(item_subject, "value", item_subject) != subject:
+            continue
         is_structured = hasattr(item, "field_key")
         field_key = getattr(item, "field_key", None)
         category = getattr(item, "category", None)
@@ -674,7 +756,7 @@ async def _shadow_write_candidate_memory(
 async def extract_journey_candidates(
     db: AsyncSession, task: AiTaskRecord, worker_id: str
 ) -> tuple[str, RevisionVector] | None:
-    """Worker handler: turn -> active candidate pool, never draft fields."""
+    """Worker：一次抽取落双主体候选；新版各主体独立尝试冻结成稿。"""
     payload = task.payload_summary or {}
     session_id = str(payload.get("session_id") or "")
     turn_id = str(payload.get("turn_id") or "")
@@ -686,7 +768,10 @@ async def extract_journey_candidates(
         )
         return None
     try:
-        session = await load_owned_active_session(db, session_id, task.owner_user_id)
+        session = await load_owned_active_session(
+            db, session_id, task.owner_user_id,
+            **({"continuous": True} if payload.get("flow_version") == "continuous_v2" else {}),
+        )
         turn = await find_turn_by_client_id(db, session_id, client_turn_id)
     except (AIConsentRequired, ProfileSessionNotFound, ProfileSessionStale):
         # 只有授权/会话终态才是不可重试的语义。瞬时 DB 故障放行给 worker
@@ -715,6 +800,8 @@ async def extract_journey_candidates(
         input_revision=task.source_revision_json or {},
         policy_revision=session.policy_revision or PROFILE_POLICY_REVISION,
     )
+    flow_version = str(payload.get("flow_version") or "legacy")
+    continuous_v2 = flow_version == "continuous_v2"
     active_candidates = await list_session_candidates(
         db, session_id=session_id, active_only=True
     )
@@ -725,6 +812,8 @@ async def extract_journey_candidates(
         policy_revision=session.policy_revision or PROFILE_POLICY_REVISION,
         session_kind="master",
         existing_digest=_existing_candidates_digest(active_candidates) or None,
+        continuous_v2=continuous_v2,
+        subjects=("personal", "ideal_partner") if continuous_v2 else (session.subject.value,),
     )
     outcome = await AIGateway(
         timeout_seconds=settings.ai_gateway_timeout_seconds
@@ -741,17 +830,24 @@ async def extract_journey_candidates(
     try:
         if outcome.result.schema_version != PROFILE_SCHEMA_VERSION:
             raise ValueError("provider result schema version does not match")
-        extracted = candidates_from_master_result(
-            subject=session.subject.value,
-            result=outcome.result,
-            consent_version=session.consent_version,
-            policy_revision=session.policy_revision or PROFILE_POLICY_REVISION,
-            source_turn_id=turn.turn_id,
-        )
+        subjects = ("personal", "ideal_partner") if continuous_v2 else (session.subject.value,)
+        extracted_by_subject: dict[str, tuple[CandidateRecord, ...]] = {}
+        for candidate_subject in subjects:
+            result = outcome.result.model_copy(update={
+                "fields": tuple(x for x in outcome.result.fields if x.subject.value == candidate_subject),
+                "entries": tuple(x for x in outcome.result.entries if x.subject.value == candidate_subject),
+                "patches": tuple(x for x in outcome.result.patches if x.subject.value == candidate_subject),
+                "clarifying_question": None,
+            }) if continuous_v2 else outcome.result
+            extracted_by_subject[candidate_subject] = candidates_from_master_result(
+                subject=candidate_subject,
+                result=result,
+                consent_version=session.consent_version,
+                policy_revision=session.policy_revision or PROFILE_POLICY_REVISION,
+                source_turn_id=turn.turn_id,
+                owned_source_turn_ids=(turn.turn_id,),
+            )
     except (AttributeError, TypeError, ValueError) as exc:
-        # 单条候选违规会让整轮抽取失败，但根因是供应商输出漂移（dots 抖动），
-        # 重试很可能成功：留痕后放行给 worker 边界转成可重试失败，不再把用户
-        # 这一轮的有效证据永久丢弃（旧行为 retryable=False 等于整轮陪葬）。
         logger.warning(
             "moxiang_candidate_result_rejected task_id=%s prompt_version=%s error=%s",
             task.task_id,
@@ -759,24 +855,42 @@ async def extract_journey_candidates(
             type(exc).__name__,
         )
         raise
-    assertion_modes = _assertion_mode_by_content_hash(outcome.result, session.subject.value)
-    for item in extracted:
-        candidate = replace(
-            item,
-            candidate_id=uuid.uuid4().hex,
-            session_id=session.session_id,
-            user_id=task.owner_user_id,
-        )
-        await _upsert_candidate(db, candidate, source_turn_id=turn.turn_id)
-        # Shadow Write：候选 upsert 成功后沉淀记忆事件；失败不阻塞旧链路。
-        await _shadow_write_candidate_memory(
-            db,
-            candidate,
-            assertion_mode=assertion_modes.get(candidate.content_hash, "inferred"),
-            source_turn_id=turn.turn_id,
-        )
-    # #12：本轮 upsert 后统一裁剪，保证任一维度的活跃 entry 证据不超上限。
+    for candidate_subject, extracted in extracted_by_subject.items():
+        assertion_modes = _assertion_mode_by_content_hash(outcome.result, candidate_subject)
+        for item in extracted:
+            candidate = replace(
+                item,
+                candidate_id=uuid.uuid4().hex,
+                session_id=session.session_id,
+                user_id=task.owner_user_id,
+            )
+            await _upsert_candidate(db, candidate, source_turn_id=turn.turn_id)
+            await _shadow_write_candidate_memory(
+                db,
+                candidate,
+                assertion_mode=assertion_modes.get(candidate.content_hash, "inferred"),
+                source_turn_id=turn.turn_id,
+            )
     await _enforce_entry_dimension_cap(db, session.session_id)
+    if continuous_v2:
+        from app.services.ai.continuous import build_continuous_draft
+
+        for candidate_subject in ("personal", "ideal_partner"):
+            try:
+                await build_continuous_draft(
+                    db,
+                    task.owner_user_id,
+                    candidate_subject,
+                    refresh=False,
+                    idempotency_key=f"continuous-auto:{task.task_id}:{candidate_subject}",
+                )
+            except LookupError:
+                # 尚未达到该主体的冻结门槛；候选已经落库，不能丢失。
+                logger.info(
+                    "continuous_draft_not_ready task_id=%s subject=%s",
+                    task.task_id,
+                    candidate_subject,
+                )
     return f"moxiang-candidate:{task.task_id}", session.revision_vector
 
 

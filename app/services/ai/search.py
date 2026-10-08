@@ -107,6 +107,8 @@ SEARCH_PARSE_TASK_TYPE = "search_parse"
 SEARCH_SUGGEST_TASK_TYPE = "search_suggest"
 SEARCH_EXECUTE_TASK_TYPE = "search_execute"
 SEARCH_CLEANUP_TASK_TYPE = "cleanup"
+# 解析任务成功后的 result_ref 形态：`search-draft:<draft_id>`（见 parse_search_draft）。
+SEARCH_DRAFT_RESULT_REF_PREFIX = "search-draft:"
 # 结果证据 TTL：与统一方案 §8.3 示例的 result_expires_at（10 分钟）一致。
 SEARCH_RESULT_TTL_MINUTES = 10
 SEARCH_PAGE_SIZE_DEFAULT = 20
@@ -1055,6 +1057,31 @@ def normalize_search_query(query_text: str) -> str:
     return normalized
 
 
+async def _recover_replayed_draft_id(
+    db: AsyncSession, owner_user_id: int, task: AiTaskRecord
+) -> str:
+    """同键重放时恢复草稿引用。
+
+    正常路径从 ``payload_summary.draft_id`` 取；任务进入 succeeded 后该列被清空，
+    此时只能从 ``result_ref``（``search-draft:<draft_id>``）恢复。恢复出的草稿必须
+    仍属于同一 owner，否则视为无效引用，继续走"缺少草稿引用"分支。
+    """
+    payload = task.payload_summary or {}
+    draft_id = str(payload.get("draft_id") or "").strip()
+    if draft_id:
+        return draft_id
+    result_ref = str(task.result_ref or "").strip()
+    if not result_ref.startswith(SEARCH_DRAFT_RESULT_REF_PREFIX):
+        return ""
+    recovered = result_ref[len(SEARCH_DRAFT_RESULT_REF_PREFIX):].strip()
+    if not recovered:
+        return ""
+    row = await _load_draft_row(db, recovered)
+    if row is None or int(row["user_id"]) != owner_user_id:
+        return ""
+    return recovered
+
+
 async def create_search_draft(
     db: AsyncSession,
     owner_user_id: int,
@@ -1079,8 +1106,9 @@ async def create_search_draft(
     )
     if existing is not None:
         _replay_or_conflict(existing, request_hash)
-        payload = existing.payload_summary or {}
-        existing_draft_id = payload.get("draft_id")
+        # 任务成功后 payload_summary 会被清空（只剩 result_ref）；同键重放不能因此
+        # 直接判定"缺少草稿引用"，而应从结果引用恢复引用后正常返回。
+        existing_draft_id = await _recover_replayed_draft_id(db, owner_user_id, existing)
         if not existing_draft_id:
             raise TaskError(
                 code="AI_INPUT_INVALID",

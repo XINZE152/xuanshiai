@@ -47,6 +47,9 @@ class StructuredExtractRequest:
     # master 会话专用：本会话已沉淀的活跃候选摘要，供抽取器跨轮去重；
     # 其余会话为 None。
     existing_digest: str | None = None
+    continuous_v2: bool = False
+    # continuous_v2 一次抽取两个主体；legacy 保持 subject 单主体契约。
+    subjects: tuple[str, ...] = ()
 
 
 class ExtractedField(BaseModel):

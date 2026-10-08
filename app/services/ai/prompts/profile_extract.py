@@ -321,44 +321,61 @@ def build_profile_master_extract_prompt(
     turn_texts: tuple[str, ...],
     entry_digest: str | None = None,
     existing_digest: str | None = None,
+    subjects: tuple[str, ...] | None = None,
 ) -> str:
-    """构造 master 会话对话抽取 prompt（设计 Task 6）。
+    """构造 master 抽取 prompt。
 
-    ``turn_texts`` 是本会话按时间顺序的用户陈述；``entry_digest`` 是该维度
-    已发布条目摘要，供 modify patch 定位被改写条目，可为 None。
-    ``existing_digest`` 是本会话已沉淀的活跃候选摘要（防跨轮重复抽取），
-    可为 None。契约：允许返回 0 条 fields / patches，禁止返回澄清问题——
-    澄清由墨相师对话承担。
+    legacy 只抽取 ``subject``；continuous_v2 传入两个 subjects，在一次
+    provider 调用中按每条证据标注 subject，避免把混合表达拆成两次模型调用。
     """
-    is_personal = subject == ProfileSubject.PERSONAL.value
-    subject_label = "个人画像" if is_personal else "理想型画像"
-    field_guide = _PERSONAL_FIELD_GUIDE if is_personal else _IDEAL_PARTNER_FIELD_GUIDE
+    requested_subjects = tuple(subjects or (subject,))
+    dual = set(requested_subjects) == {"personal", "ideal_partner"}
+    if any(item not in {"personal", "ideal_partner"} for item in requested_subjects):
+        raise ValueError("master extraction subjects must be personal or ideal_partner")
+    subject_label = "个人画像与理想型画像" if dual else (
+        "个人画像" if subject == ProfileSubject.PERSONAL.value else "理想型画像"
+    )
+    field_guides = (
+        (_PERSONAL_FIELD_GUIDE, "personal"),
+        (_IDEAL_PARTNER_FIELD_GUIDE, "ideal_partner"),
+    ) if dual else ((
+        _PERSONAL_FIELD_GUIDE if subject == ProfileSubject.PERSONAL.value else _IDEAL_PARTNER_FIELD_GUIDE,
+        subject,
+    ),)
     field_lines = "\n".join(
-        f"  - {key}：{description}" for key, description in field_guide.items()
+        f"  - [{owner}] {key}：{description}"
+        for guide, owner in field_guides
+        for key, description in guide.items()
     )
     dialogue_block = "\n\n".join(
         f"【第 {idx + 1} 句】\n{text}" for idx, text in enumerate(turn_texts) if text
+    ) or "（用户尚未陈述）"
+    digest_block = (
+        f"\n该维度当前已发布的条目（modify 时 replaces_field_key 从中选取）：\n{entry_digest}\n"
+        if entry_digest else ""
     )
-    if not dialogue_block:
-        dialogue_block = "（用户尚未陈述）"
-    digest_block = ""
-    if entry_digest:
-        digest_block = (
-            f"\n该维度当前已发布的条目（modify 时 replaces_field_key 从中选取）：\n"
-            f"{entry_digest}\n"
-        )
-    existing_block = ""
-    if existing_digest:
-        existing_block = (
-            "\n本会话已沉淀的候选（不要重复输出语义相同的内容，除非用户带来新细节）：\n"
-            f"{existing_digest}\n"
+    existing_block = (
+        "\n本会话已沉淀的候选（不要重复输出语义相同的内容，除非用户带来新细节）：\n"
+        f"{existing_digest}\n" if existing_digest else ""
+    )
+    subject_contract = ""
+    if dual:
+        subject_contract = (
+            "这是一次双主体抽取，但只能输出一组 JSON。每个 fields/patches 条目都必须"
+            "带 subject，值只能是 personal 或 ideal_partner。用户自己的事实、感受和相处"
+            "模式归 personal；用户明确表达的未来伴侣偏好归 ideal_partner。具体第三人观察、"
+            "否定、引用、犹豫或不确定表达不得转成明确候选，保留为空并在 unknown_or_ambiguous"
+            "中简短标记，供对话层澄清。混合表达要分别拆成两条，不要重复整句。\n"
         )
     return wrap_structured_prompt(
         f"{_MASTER_SYSTEM_HEADER}\n\n"
         f"建构目标：{subject_label}。\n"
+        f"{subject_contract}"
         f"可固化的白名单字段及其值格式：\n{field_lines}\n\n"
         f"{digest_block}{existing_block}\n"
-        f"{_MASTER_JSON_FORMAT_INSTRUCTION}\n\n"
+        f"{_MASTER_JSON_FORMAT_INSTRUCTION}\n"
+        "双主体模式下，每个 field/patch 还必须包含 subject 字段；"
+        "根对象可包含 unknown_or_ambiguous 数组。\n\n"
         f"以下是用户在本会话中的陈述：\n{dialogue_block}"
     )
 

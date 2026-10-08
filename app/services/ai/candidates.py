@@ -418,6 +418,31 @@ def extract_master_candidates(
     return tuple(candidates)
 
 
+def _unconfirmed_partner_observation(source_span: str | None, content: str | None) -> bool:
+    """拒绝把具体第三人、引用、否定或犹豫直接写成择偶偏好。"""
+    text = " ".join(item.strip() for item in (source_span, content) if item)
+    if not text:
+        return False
+    negative_or_uncertain_cues = (
+        "不喜欢", "不希望", "不想", "不能接受", "不确定", "可能", "也许",
+        "不一定", "不代表", "不是我的标准", "据说", "听说",
+    )
+    if any(cue in text for cue in negative_or_uncertain_cues):
+        return True
+    preference_cues = (
+        "我希望", "我想找", "我看重", "我更看重", "我喜欢", "我偏好",
+        "我会被", "我在意", "期待对方", "找对象", "择偶", "受不了不",
+        "希望对方",
+    )
+    if any(cue in text for cue in preference_cues):
+        return False
+    observation_cues = (
+        "他", "她", "对方", "那个人", "我男朋友", "我女朋友", "我前任",
+        "只是",
+    )
+    return any(cue in text for cue in observation_cues)
+
+
 def candidates_from_master_result(
     *,
     subject: str,
@@ -425,17 +450,20 @@ def candidates_from_master_result(
     consent_version: str,
     policy_revision: str,
     source_turn_id: str,
+    owned_source_turn_ids: Iterable[str] | None = None,
 ) -> tuple[CandidateRecord, ...]:
-    """Map a typed moxiang Provider result into private, six-dimension evidence.
+    """Map one subject's typed provider result into private evidence.
 
-    The conversation prompt returns ``patches``.  The shared mock/provider
-    contract can additionally return ``fields`` or ``entries``; accepting all
-    three typed shapes keeps the journey deterministic in testing while the
-    worker still rejects malformed subjects, categories and schema versions.
-    The server, not the provider, owns provenance, so every candidate is tied
-    to the persisted turn being processed.
+    The source ids are server-owned: provider output may omit them, but it can
+    never introduce an id outside the caller's owned set.  A continuous_v2
+    result may contain both subjects; callers pass a filtered result per subject.
     """
     expected_subject = ProfileSubject(subject)
+    allowed_source_ids = frozenset(
+        str(item) for item in (owned_source_turn_ids or (source_turn_id,)) if str(item)
+    )
+    if source_turn_id not in allowed_source_ids:
+        raise ValueError("source turn is not owned by the journey")
     if result.clarifying_question:
         raise ValueError("moxiang candidate extractor must not emit a question")
 
@@ -452,9 +480,14 @@ def candidates_from_master_result(
         confidence: Any,
         item_subject: Any,
         source_span: Any,
+        item_source_ids: Iterable[str] = (),
     ) -> None:
         if item_subject is not expected_subject:
             raise ValueError("provider subject does not match journey subject")
+        provider_source_ids = tuple(str(item) for item in item_source_ids if str(item))
+        if provider_source_ids and not set(provider_source_ids).issubset(allowed_source_ids):
+            raise ValueError("provider source id is not owned by the journey")
+        source_ids = provider_source_ids or (source_turn_id,)
         if field_kind == "structured":
             if field_key not in AI_FIELD_ALLOWLIST:
                 raise ValueError("provider field is not in the allowlist")
@@ -464,6 +497,10 @@ def candidates_from_master_result(
             content = content.strip()
         else:
             raise ValueError("provider candidate kind is invalid")
+        if expected_subject is ProfileSubject.IDEAL_PARTNER and _unconfirmed_partner_observation(
+            source_span, content
+        ):
+            return
         if isinstance(confidence, bool) or not 0.0 <= float(confidence) <= 1.0:
             raise ValueError("provider confidence is outside the allowed range")
         if source_span is not None and not isinstance(source_span, str):
@@ -490,7 +527,7 @@ def candidates_from_master_result(
                 content=content,
                 value=value,
                 confidence=float(confidence),
-                source_turn_ids=(source_turn_id,),
+                source_turn_ids=source_ids,
                 source_span=source_span,
                 consent_version=consent_version,
                 policy_revision=policy_revision,
@@ -509,6 +546,7 @@ def candidates_from_master_result(
             confidence=field.confidence,
             item_subject=field.subject,
             source_span=field.source_span or field.source_quote,
+            item_source_ids=field.source_turn_ids,
         )
     for entry in result.entries:
         append_candidate(
@@ -520,6 +558,7 @@ def candidates_from_master_result(
             confidence=entry.confidence,
             item_subject=entry.subject,
             source_span=entry.source_span or entry.source_quote,
+            item_source_ids=entry.source_turn_ids,
         )
     for patch in result.patches:
         append_candidate(
@@ -531,6 +570,7 @@ def candidates_from_master_result(
             confidence=patch.confidence,
             item_subject=patch.subject,
             source_span=patch.source_span or patch.source_quote,
+            item_source_ids=patch.source_turn_ids,
         )
     return tuple(candidates)
 

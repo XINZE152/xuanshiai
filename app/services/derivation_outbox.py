@@ -461,7 +461,7 @@ def _first_mapping_row(result: Any) -> dict[str, Any] | None:
     return mappings().first()
 
 
-async def _mark_derived_results_stale(db: AsyncSession, user_id: int) -> None:
+async def _mark_derived_results_stale(db: AsyncSession, user_id: int, *, strict: bool = False) -> None:
     """Best-effort stale marking of derived result tables that already exist.
 
     ai_search_result / ai_compatibility_snapshot belong to Task 10/11; marking
@@ -471,6 +471,7 @@ async def _mark_derived_results_stale(db: AsyncSession, user_id: int) -> None:
     at debug; any other failure is logged at warning so a real update error
     (e.g. connection lost, schema drift on an existing table) is not silently
     swallowed.
+    整份确认使用 strict=True：任何失效失败（包括缺表）都回滚确认事务。
     """
     await _mark_stale_best_effort(
         db,
@@ -480,6 +481,7 @@ async def _mark_derived_results_stale(db: AsyncSession, user_id: int) -> None:
         "WHERE r.target_user_id = :user_id OR s.user_id = :user_id",
         {"user_id": user_id},
         table="ai_search_result",
+        strict=strict,
     )
     await _mark_stale_best_effort(
         db,
@@ -489,6 +491,7 @@ async def _mark_derived_results_stale(db: AsyncSession, user_id: int) -> None:
         "AND status NOT IN ('stale', 'blocked')",
         {"user_id": user_id},
         table="ai_compatibility_snapshot",
+        strict=strict,
     )
     # WP-P6：推荐快照同样派生自画像/可见性——拉黑/注销/撤权事件后必须同步
     # 失效（双向），否则被拉黑者在对方的推荐列表里最长滞留一个 TTL（24h）。
@@ -502,6 +505,7 @@ async def _mark_derived_results_stale(db: AsyncSession, user_id: int) -> None:
         "AND status = 'ready'",
         {"user_id": user_id},
         table="ai_recommendation_snapshot",
+        strict=strict,
     )
 
 
@@ -523,14 +527,19 @@ async def _mark_stale_best_effort(
     params: dict[str, Any],
     *,
     table: str,
+    strict: bool = False,
 ) -> None:
     from sqlalchemy.exc import NoSuchTableError, OperationalError, ProgrammingError
 
     try:
         await db.execute(text(statement), params)
     except NoSuchTableError:
+        if strict:
+            raise
         logger.debug("%s not present, skip stale marking", table, exc_info=True)
     except (OperationalError, ProgrammingError) as exc:
+        if strict:
+            raise
         if _is_missing_table_error(exc):
             logger.debug("%s not present, skip stale marking", table, exc_info=True)
         else:
@@ -538,6 +547,8 @@ async def _mark_stale_best_effort(
                 "%s stale marking failed user_id=%s; needs retry", table, params.get("user_id"), exc_info=True
             )
     except Exception:
+        if strict:
+            raise
         logger.warning(
             "%s stale marking failed user_id=%s; needs retry", table, params.get("user_id"), exc_info=True
         )

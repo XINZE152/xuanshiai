@@ -91,8 +91,7 @@ class AiAvatarReplyResult(BaseModel):
     category: Literal["basic", "interest", "expectation", "platform", "general"]
     source: Literal["real-ai"] = "real-ai"
     handoffRequired: bool = False
-    handoffStatus: Literal["not_requested"] = "not_requested"
-
+    handoffStatus: Literal["not_requested", "pending", "answered"] = "not_requested"
 
 class AiAvatarSendResponse(BaseModel):
     """Conversation snapshot returned after a successful AI reply."""

@@ -52,8 +52,9 @@ from app.core.config import settings
 from app.db.session import session_factory
 from app.schemas.ai_common import AiTaskStatus
 from app.services.ai.audit import emit_ai_metric
-from app.services.ai.profile import extract_profile_turn
+from app.services.ai.continuous import generate_continuous_preview_handler
 from app.services.ai.journey import extract_journey_candidates
+from app.services.ai.profile import extract_profile_turn
 from app.services.ai.task_events import TERMINAL_TASK_STATUSES, notify_task_event
 from app.services.ai.tasks import (
     AiTaskRecord,
@@ -74,6 +75,7 @@ logger = logging.getLogger(__name__)
 TASK_HANDLERS: dict[str, Callable[..., Awaitable[Any]]] = {
     "profile_extract": extract_profile_turn,
     "moxiang_candidate_extract": extract_journey_candidates,
+    "profile_preview": generate_continuous_preview_handler,
 }
 
 

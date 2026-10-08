@@ -973,6 +973,103 @@ async def _mark_stale(db: AsyncSession, session_id: str) -> None:
     await db.commit()
 
 
+async def _preempt_active_slot(db: AsyncSession, row: dict[str, Any]) -> None:
+    """Release the active slot held by ``row``（标记 stale）但**不** commit。
+
+    与 ``_mark_stale`` 的差别是本调用留在调用方事务里：抢占与紧随其后的
+    INSERT 必须同生共死——若 INSERT 撞 ``uk_ai_profile_session_active``，
+    rollback 会连抢占一起撤销，由回读分支重新判定，不会留下「旧会话已
+    stale、新会话没建成」的空槽。
+
+    ``WHERE active_status = 1`` 使重复抢占为 no-op。代价是被抢占会话若正在
+    extracting，其已完成的抽取草稿会随 ``active_status = 0`` 永久不可达（无
+    报错、LLM 成本已花）——是否应拒绝抢占属于产品口径，本次不改，只留日
+    志让丢弃可检索（见下）。
+    """
+    await db.execute(
+        text(
+            "UPDATE ai_profile_session SET status = 'stale', active_status = 0, "
+            "ended_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() "
+            "WHERE session_id = :session_id AND active_status = 1"
+        ),
+        {"session_id": str(row["session_id"])},
+    )
+    logger.warning(
+        "moxiang_preempt_profile_session preempted_session=%s kind=%s "
+        "status=%s subject=%s",
+        row.get("session_id"),
+        row.get("session_kind") or "build",
+        row.get("status"),
+        row.get("subject"),
+    )
+
+
+async def _insert_master_session(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    owner_user_id: int,
+    subject_value: str,
+    consent_version: str,
+    consent_snapshot: dict[str, Any],
+    revision: RevisionVector,
+    expires_at: datetime,
+) -> ProfileSession:
+    """INSERT 一行 ``kind='master'`` 活动会话，返回可直接提交的首轮会话。
+
+    主路径与唯一键冲突后的重试路径共用，保证两条路径写出的行完全一致。
+    唯一键冲突以 ``IntegrityError`` 原样上抛，由调用方决定回读/重试策略。
+    """
+    policy_revision = consent_snapshot.get("policy_revision") or PROFILE_POLICY_REVISION
+    await db.execute(
+        text(
+            "INSERT INTO ai_profile_session "
+            "(session_id, user_id, subject, input_mode, session_kind, status, active_status, "
+            " consent_version, policy_revision, current_question_id, "
+            " profile_revision, preference_revision, expires_at, created_at, updated_at) "
+            "VALUES (:session_id, :user_id, :subject, 'text', 'master', 'draft', 1, "
+            " :consent_version, :policy_revision, NULL, "
+            " :profile_revision, :preference_revision, :expires_at, "
+            " UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+        ),
+        {
+            "session_id": session_id,
+            "user_id": owner_user_id,
+            "subject": subject_value,
+            "consent_version": consent_version,
+            "policy_revision": policy_revision,
+            "profile_revision": revision.profile,
+            "preference_revision": revision.preference,
+            "expires_at": expires_at,
+        },
+    )
+    return _session_from_row(
+        {
+            "session_id": session_id,
+            "user_id": owner_user_id,
+            "subject": subject_value,
+            "input_mode": "text",
+            "session_kind": "master",
+            "status": ProfileSessionStatus.DRAFT.value,
+            "active_status": 1,
+            "consent_version": consent_version,
+            "policy_revision": policy_revision,
+            "current_question_id": None,
+            "profile_revision": revision.profile,
+            "preference_revision": revision.preference,
+            "expires_at": expires_at,
+            "ended_at": None,
+            "created_at": _now_utc(),
+            "updated_at": _now_utc(),
+        },
+        revision=revision,
+        consent_snapshot=consent_snapshot,
+        field_keys=frozenset(),
+        confirmed_keys=frozenset(),
+        created=True,
+    )
+
+
 async def _fail_extract_session(db: AsyncSession, session_id: str) -> None:
     """Mark a session failed after a terminal extraction failure and commit.
 
@@ -1036,10 +1133,20 @@ async def _reuse_active_session(
 async def _update_session_status(
     db: AsyncSession, session_id: str, status: ProfileSessionStatus
 ) -> None:
+    """Advance the status of a **still-active** session.
+
+    ``AND active_status = 1`` 是终态守卫：会话被墨相师抢占后（``_preempt_active_slot``
+    置 ``stale`` + ``active_status = 0``）已释放活动槽，此后任何状态推进都必须落空。
+    否则在飞的抽取任务会按**加载时**的 ``extracting`` 快照把 stale 行改回
+    ``awaiting_confirmation``，造出「status 活跃但槽已释放」的自相矛盾行——
+    ``load_owned_active_session`` 只认 ``active_status``，用户侧表现为 404。
+    与 ``_fail_extract_session`` 的 ``WHERE status = 'extracting'`` 同风格。
+    """
     await db.execute(
         text(
             "UPDATE ai_profile_session SET status = :status, "
-            "updated_at = UTC_TIMESTAMP() WHERE session_id = :session_id"
+            "updated_at = UTC_TIMESTAMP() "
+            "WHERE session_id = :session_id AND active_status = 1"
         ),
         {"status": status.value, "session_id": session_id},
     )
@@ -1111,6 +1218,10 @@ async def create_profile_session(
         # IntegrityError→回读回放模式：回滚本请求事务后回读既有活动会话复用，
         # 不产生第二个 session；回读仍无 → 原样上抛。rollback 只作用于本请求
         # 事务，不会误回滚赢家已提交的会话。
+        # 这里刻意**不**按 session_kind 过滤：build 的契约是「一个 user+subject
+        # 只有一个活动会话，复用现成的那一个」，与函数开头的前置复用一致。若要收紧
+        # 成只复用 build 行，必须连前置复用一起改并先回 PRODUCT.md 确认口径——
+        # 只在冲突分支加校验会得到「是否发生竞态决定返回哪种会话」的分裂契约。
         await db.rollback()
         existing = await _find_active_session(db, owner_user_id, subject_value)
         if existing is None:
@@ -1260,8 +1371,10 @@ async def create_master_session(
 
     与 build/update 共用唯一活动槽位：仅复用同主体的 master 会话（WS 重连/
     重复 session_start 不丢上下文）。若活动槽是旧 build/update，会保留其数据并
-    标记 stale、释放活动槽，再新建 kind='master'、status=draft 行。校验授权；
-    不 commit。
+    标记 stale、释放活动槽，再新建 kind='master'、status=draft 行。唯一键冲突
+    后若回读到的是非 master 行（并发抢占被 rollback 撤销），重新抢占并重试一次，
+    仍冲突抛 ``ProfileSessionStale`` 交上层重试——绝不复用别的 kind。校验授权；
+    不 commit（冲突分支的 rollback 除外）。
     """
     subject_value = subject.value if isinstance(subject, ProfileSubject) else str(subject)
     if subject_value not in {ProfileSubject.PERSONAL.value, ProfileSubject.IDEAL_PARTNER.value}:
@@ -1281,88 +1394,63 @@ async def create_master_session(
                     db, existing, revision=revision, consent_snapshot=consent_snapshot
                 )
             except ProfileSessionStale:
-                # 过期或版本漂移的活动槽已在 _reuse_active_session 内关槽；
-                # 落到下方新建分支，保证 session_start 返回可直接提交的会话，
-                # 而不是把 stale 会话透传给首个 turn 再失败。
-                # 注意：此处绝不能再进入下方 build/update 关槽分支——existing
-                # 已不可用（曾因置空后在关槽分支下标读取而 TypeError）。
-                existing = None
+                # 过期或版本漂移的活动槽已在 _reuse_active_session 内关槽；落到
+                # 下方新建分支，保证 session_start 返回可直接提交的会话，而不是把
+                # stale 会话透传给首个 turn 再失败。必须留在 master 分支内：槽已
+                # 释放，再走下面的抢占分支只会对同一行重复写终态。
+                pass
         else:
             # 旧 build/update 会话不能静默复用为 master：抽取 handler 会按
             # session_kind 分流，误复用会把墨相师轮次送进题库/更新路径。保留旧数据，
             # 仅关闭活动槽并标记 stale，再创建新的 master 会话。
-            await db.execute(
-                text(
-                    "UPDATE ai_profile_session SET status = 'stale', active_status = 0, "
-                    "ended_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() "
-                    "WHERE session_id = :session_id AND active_status = 1"
-                ),
-                {"session_id": str(existing["session_id"])},
-            )
+            await _preempt_active_slot(db, existing)
     session_id = uuid.uuid4().hex
     expires_at = _now_utc() + timedelta(days=settings.ai_profile_session_expire_days)
-    policy_revision = consent_snapshot.get("policy_revision") or PROFILE_POLICY_REVISION
     try:
-        await db.execute(
-            text(
-                "INSERT INTO ai_profile_session "
-                "(session_id, user_id, subject, input_mode, session_kind, status, active_status, "
-                " consent_version, policy_revision, current_question_id, "
-                " profile_revision, preference_revision, expires_at, created_at, updated_at) "
-                "VALUES (:session_id, :user_id, :subject, 'text', 'master', 'draft', 1, "
-                " :consent_version, :policy_revision, NULL, "
-                " :profile_revision, :preference_revision, :expires_at, "
-                " UTC_TIMESTAMP(), UTC_TIMESTAMP())"
-            ),
-            {
-                "session_id": session_id,
-                "user_id": owner_user_id,
-                "subject": subject_value,
-                "consent_version": consent_version,
-                "policy_revision": policy_revision,
-                "profile_revision": revision.profile,
-                "preference_revision": revision.preference,
-                "expires_at": expires_at,
-            },
+        return await _insert_master_session(
+            db,
+            session_id=session_id,
+            owner_user_id=owner_user_id,
+            subject_value=subject_value,
+            consent_version=consent_version,
+            consent_snapshot=consent_snapshot,
+            revision=revision,
+            expires_at=expires_at,
         )
     except IntegrityError:
-        # 并发首次创建同 user+subject：唯一槽位冲突（两个请求都通过了前置检
-        # 查）。与 build 创建同款的 IntegrityError→回读回放：master 语义是
-        # 复用而非拒绝，回读复用赢家的活动会话（WS 重连竞态不丢上下文）；
-        # 回读仍无 → 原样上抛。
+        # 并发首次创建同 user+subject：唯一槽位冲突（两个请求都通过了前置检查）。
+        # 与 build 创建同款的 IntegrityError→回读回放：master 语义是复用而非拒绝
+        # （WS 重连竞态不丢上下文）。但回读之前有两点必须防：
+        #   1. rollback 会连带撤销本事务**尚未提交**的抢占写入；
+        #   2. _find_active_session 不按 session_kind 过滤。
+        # 于是回读有可能命中 build/update 行——直接复用正是上面刚禁止的误复用，
+        # 并且带 created=False 让 WS 跳过开场白（呈现空白对话）。所以只有 master
+        # 行才复用；否则重新抢占并再试一次 INSERT，仍冲突就按 PROFILE_SESSION_STALE
+        # 交给上层可重试错误，绝不静默把墨相师轮次接进别的抽取通道。
         await db.rollback()
-        existing = await _find_active_session(db, owner_user_id, subject_value)
-        if existing is None:
+        rival = await _find_active_session(db, owner_user_id, subject_value)
+        if rival is None:
             raise
-        return await _reuse_active_session(
-            db, existing, revision=revision, consent_snapshot=consent_snapshot
-        )
-    row = {
-        "session_id": session_id,
-        "user_id": owner_user_id,
-        "subject": subject_value,
-        "input_mode": "text",
-        "session_kind": "master",
-        "status": ProfileSessionStatus.DRAFT.value,
-        "active_status": 1,
-        "consent_version": consent_version,
-        "policy_revision": policy_revision,
-        "current_question_id": None,
-        "profile_revision": revision.profile,
-        "preference_revision": revision.preference,
-        "expires_at": expires_at,
-        "ended_at": None,
-        "created_at": _now_utc(),
-        "updated_at": _now_utc(),
-    }
-    return _session_from_row(
-        row,
-        revision=revision,
-        consent_snapshot=consent_snapshot,
-        field_keys=frozenset(),
-        confirmed_keys=frozenset(),
-        created=True,
-    )
+        if str(rival.get("session_kind") or "build") == "master":
+            return await _reuse_active_session(
+                db, rival, revision=revision, consent_snapshot=consent_snapshot
+            )
+        await _preempt_active_slot(db, rival)
+        try:
+            return await _insert_master_session(
+                db,
+                session_id=uuid.uuid4().hex,
+                owner_user_id=owner_user_id,
+                subject_value=subject_value,
+                consent_version=consent_version,
+                consent_snapshot=consent_snapshot,
+                revision=revision,
+                expires_at=_now_utc()
+                + timedelta(days=settings.ai_profile_session_expire_days),
+            )
+        except IntegrityError as exc:
+            # 仍有别的请求占着活动槽：不抢第二次、不猜赢家，交上层重试。
+            raise ProfileSessionStale() from exc
 
 
 async def persist_master_assistant_reply(
@@ -1530,7 +1618,7 @@ async def load_owned_session(
 
 
 async def load_owned_active_session(
-    db: AsyncSession, session_id: str, owner_user_id: int
+    db: AsyncSession, session_id: str, owner_user_id: int, *, continuous: bool = False
 ) -> ProfileSession:
     """Load an owned session that is still usable for turn submission.
 
@@ -1553,8 +1641,16 @@ async def load_owned_active_session(
     # 资料/偏好版本变化 → 会话 stale，需重新创建。
     stored = _stored_revision(row)
     if stored != RevisionVector(profile=revision.profile, preference=revision.preference):
-        await _mark_stale(db, session_id)
-        raise ProfileSessionStale()
+        if continuous and row.get("session_kind") == "master":
+            # 连续对话不是画像草稿；任一主体确认后重读上下文即可继续。
+            await db.execute(text(
+                "UPDATE ai_profile_session SET profile_revision=:profile,preference_revision=:preference "
+                "WHERE session_id=:session_id AND user_id=:user_id"
+            ), {"profile": revision.profile, "preference": revision.preference,
+                "session_id": session_id, "user_id": owner_user_id})
+        else:
+            await _mark_stale(db, session_id)
+            raise ProfileSessionStale()
     if _is_expired(row.get("expires_at")):
         await _mark_stale(db, session_id)
         raise ProfileSessionStale()
@@ -3271,6 +3367,16 @@ async def confirm_profile_draft(
     ``expected_revision + 1``，返回新草稿。不 commit。
     """
     draft = await load_owned_draft_for_update(db, draft_id, owner_user_id)
+    is_continuous = draft.schema_version == "profile-continuous-v2"
+    if is_continuous:
+        from app.services.ai.continuous import _require_consent
+
+        consent = await _require_consent(db, owner_user_id)
+        if any(draft.consent_snapshot.get(key) != consent.get(key)
+               for key in ("version", "granted_at", "policy_revision")):
+            raise AIConsentRequired()
+        if any(action.action is ProfileFieldPatchAction.CONFIRM for action in actions):
+            raise TaskError(code="PREVIEW_REQUIRED", message="请阅读完整成稿后整份确认", status_code=409)
     request_hash = hash_profile_patch_request(draft_id, expected_revision, actions)
     history_entry = (
         draft.operation_history.get("operations", {}).get(idempotency_key)
@@ -3392,7 +3498,18 @@ async def confirm_profile_draft(
             ),
             {"revision": draft.revision + 1, "draft_id": draft_id},
         )
-    await _forward_draft_actions_to_memory(db, draft, actions)
+    if is_continuous:
+        # 编辑不是确认：禁止提前向记忆/公开投影转发，旧预览立即失效。
+        await db.execute(text(
+            "UPDATE ai_profile_draft_field SET confirmation_status='suggested' "
+            "WHERE draft_id=:draft_id AND confirmation_status='confirmed'"
+        ), {"draft_id": draft_id})
+        await db.execute(text(
+            "UPDATE ai_profile_preview SET status='stale' "
+            "WHERE draft_id=:draft_id AND status='active'"
+        ), {"draft_id": draft_id})
+    else:
+        await _forward_draft_actions_to_memory(db, draft, actions)
     updated = await load_owned_draft(db, draft_id, owner_user_id)
     if idempotency_key:
         history = dict(updated.operation_history or {"operations": {}})
@@ -3748,6 +3865,8 @@ async def publish_profile_draft(
             narrative_task_id=narrative_existing.task_id if narrative_existing else None,
         )
     draft = await load_owned_draft_for_update(db, draft_id, owner_user_id)
+    if draft.schema_version == "profile-continuous-v2":
+        raise TaskError(code="PREVIEW_REQUIRED", message="新版草稿须通过完整成稿整份确认", status_code=409)
     request_hash = hash_publish_request(draft_id, expected_revision)
     # The draft row lock serializes concurrent publishes of the same draft.
     # Re-check the idempotency row after acquiring it: a retry that entered
@@ -5008,16 +5127,27 @@ async def load_published_narrative(
     """
     result = await db.execute(
         text(
-            "SELECT summary_text, status "
-            "FROM ai_profile_summary "
-            "WHERE user_id = :user_id AND subject = :subject "
-            "ORDER BY created_at DESC LIMIT 1"
+            "SELECT s.summary_text,s.status,s.revision_id,d.schema_version,d.status AS draft_status,d.consent_snapshot_json "
+            "FROM ai_profile_summary s LEFT JOIN ai_profile_draft d ON d.draft_id=s.draft_id "
+            "WHERE s.user_id = :user_id AND s.subject = :subject "
+            "AND s.status NOT IN ('deleted','stale') ORDER BY s.created_at DESC,s.id DESC LIMIT 1"
         ),
         {"user_id": user_id, "subject": subject},
     )
     row = result.mappings().first()
     if row is None or not row.get("summary_text"):
         return None
+    if row.get("schema_version") == "profile-continuous-v2":
+        from app.services.ai.continuous import _consent, _json, _latest_revision
+
+        consent = await _consent(db, user_id)
+        meta = _json(row.get("consent_snapshot_json"), {})
+        if (not consent or row.get("draft_status") != "published"
+                or any(meta.get(key) != consent.get(key) for key in ("version", "granted_at", "policy_revision"))):
+            return None
+        latest = await _latest_revision(db, user_id, subject)
+        if not latest or latest["id"] != row.get("revision_id"):
+            return None
     raw_text = str(row["summary_text"])
     try:
         data = json.loads(raw_text)
@@ -5025,7 +5155,7 @@ async def load_published_narrative(
             return {"status": "pending", "data": None}
     except (ValueError, TypeError):
         return {"status": "pending", "data": None}
-    return {"status": str(row.get("status") or "published"), "data": data}
+    return {"status": str(row.get("status") or "published"), "data": data, "revision_id": row.get("revision_id")}
 
 
 async def confirm_profile_narrative(
@@ -5066,15 +5196,18 @@ async def request_narrative_regenerate(
     """
     revision_result = await db.execute(
         text(
-            "SELECT id FROM ai_profile_revision "
-            "WHERE user_id = :user_id AND subject = :subject "
-            "ORDER BY revision_no DESC, id DESC LIMIT 1"
+            "SELECT r.id,d.schema_version FROM ai_profile_revision r "
+            "LEFT JOIN ai_profile_draft d ON d.draft_id=r.draft_id "
+            "WHERE r.user_id = :user_id AND r.subject = :subject "
+            "ORDER BY r.revision_no DESC, r.id DESC LIMIT 1"
         ),
         {"user_id": user_id, "subject": subject},
     )
     revision_row = await _first_row(revision_result)
     if revision_row is None:
         raise AIInputError("尚未生成过画像叙事层，无法重新生成")
+    if revision_row.get("schema_version") == "profile-continuous-v2":
+        raise TaskError(code="PREVIEW_REQUIRED", message="新版叙事改写须作为新成稿重新审阅", status_code=409)
     revision_id = int(revision_row["id"])
     request_hash = hash_narrative_request(revision_id, subject)
     existing = await _find_write_task(

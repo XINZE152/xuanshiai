@@ -228,10 +228,13 @@ def test_transition_table_covers_every_event_type() -> None:
         assert isinstance(to_status, str)
 
 
-def test_claim_confirm_transition_only_from_proposed() -> None:
+def test_claim_confirm_transition_allows_proposed_and_reviewed_correction() -> None:
     node_type, from_statuses, to_status = MEMORY_EVENT_TRANSITIONS["claim_confirmed"]
     assert node_type == MemoryNodeType.CLAIM
-    assert from_statuses == frozenset({"proposed"})
+    # continuous_v2 整稿审阅会把「先 correct 再 confirm」的内部路径引入，
+    # 因此 claim_confirmed 除 proposed 外还允许 user_corrected；
+    # 普通 MemoryService.confirm_claim() 入口仍只接受 proposed（见 service 层测试）。
+    assert from_statuses == frozenset({"proposed", "user_corrected"})
     assert to_status == "confirmed"
 
 

@@ -51,13 +51,17 @@ from app.schemas.ai_profile import (
     ProfilePublishedFieldsPage,
     ProfileSessionModeRequest,
     ProfileSessionRead,
-    ProfilePreviewDetailResponse,
     ProfilePreviewResponse,
-    ProfileSkipQuestionRequest,
+    ProfilePreviewDetailResponse,
+    ProfilePreviewRequest,
+    ProfilePublishRequest,
+    ContinuousConfirmRequest,
     ProfileSubject,
+    ProfileSkipQuestionRequest,
     ProfileTurnCreateRequest,
     ProfileTurnSubmissionRead,
 )
+from app.services.ai.tasks import TaskError
 from app.services.ai.flags import AiFeature, AiFeatureDisabledError, require_ai_feature
 from app.services.ai.providers import sanitize_narrative_dimension_icon
 from app.services.ai.profile import (
@@ -94,8 +98,12 @@ from app.services.ai.profile import (
     skip_profile_question,
     submit_profile_turn,
 )
-from app.services.ai.tasks import TaskError
-
+from app.services.ai.continuous import (
+    CONTINUOUS_DRAFT_SCHEMA_VERSION,
+    confirm_continuous_preview,
+    ensure_continuous_preview,
+    get_continuous_preview,
+)
 router = APIRouter()
 
 # Idempotency-Key 契约（§7.5）：8-128 位 ASCII，禁止空白。
@@ -610,7 +618,7 @@ async def patch_profile_draft_route(
 )
 async def publish_profile_draft_route(
     draft_id: str = Path(..., min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$"),
-    payload: dict | None = Body(default=None),
+    payload: ProfilePublishRequest | None = Body(default=None),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -626,6 +634,18 @@ async def publish_profile_draft_route(
     匹配且 status=active,否则 409 ``DRAFT_VERSION_CONFLICT``。不传则走旧流程(向后兼容)。
     """
     _require_profile_feature()
+    marker = (await db.execute(
+        __import__("sqlalchemy").text(
+            "SELECT schema_version FROM ai_profile_draft WHERE draft_id=:draft_id AND user_id=:user_id"
+        ),
+        {"draft_id": draft_id, "user_id": current.id},
+    )).mappings().first()
+    if marker and marker.get("schema_version") == CONTINUOUS_DRAFT_SCHEMA_VERSION:
+        raise _error_response(
+            "CONTINUOUS_CONFIRM_REQUIRED",
+            "continuous_v2 草稿必须通过完整预览确认",
+            status.HTTP_409_CONFLICT,
+        )
     _check_idempotency_key(idempotency_key)
     if expected_revision is None:
         raise _error_response(
@@ -633,15 +653,7 @@ async def publish_profile_draft_route(
             "publish 必须携带 expected_revision 查询参数",
             status.HTTP_400_BAD_REQUEST,
         )
-    preview_id = None
-    if isinstance(payload, dict):
-        preview_id = payload.get("preview_id")
-        if preview_id is not None and (not isinstance(preview_id, str) or not preview_id):
-            raise _error_response(
-                "AI_INPUT_INVALID",
-                "preview_id 必须为非空字符串或省略",
-                status.HTTP_400_BAD_REQUEST,
-            )
+    preview_id = payload.preview_id if payload is not None else None
     if preview_id:
         try:
             from app.services.ai.preview import (
@@ -700,6 +712,56 @@ async def publish_profile_draft_route(
         field_count=len(revision.changed_field_keys) if revision else None,
         narrative_task_id=submission.narrative_task_id,
     )
+@router.post(
+    "/profile-previews/{preview_id}/confirm",
+    response_model=ProfilePublishAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="确认 continuous_v2 完整预览",
+)
+async def confirm_continuous_preview_route(
+    preview_id: str = Path(..., min_length=1, max_length=96),
+    body: ContinuousConfirmRequest = Body(...),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ProfilePublishAccepted:
+    """Confirm a frozen continuous_v2 preview in one transaction."""
+    _require_profile_feature()
+    _check_idempotency_key(idempotency_key)
+    try:
+        confirmed = await confirm_continuous_preview(
+            db, preview_id, current.id, body.expected_revision, idempotency_key or ""
+        )
+    except PermissionError as exc:
+        raise _error_response(
+            "AI_CONSENT_REQUIRED", "请先完成画像文本抽取授权", status.HTTP_403_FORBIDDEN
+        ) from exc
+    except LookupError as exc:
+        code = str(exc)
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if code == "PREVIEW_NOT_FOUND"
+            else status.HTTP_409_CONFLICT
+        )
+        message = (
+            "预览不存在或不属于当前用户"
+            if code == "PREVIEW_NOT_FOUND"
+            else "预览尚未完成，请重新审阅"
+        )
+        raise _error_response(code, message, status_code) from exc
+    except ValueError as exc:
+        raise _error_response(
+            "DRAFT_VERSION_CONFLICT",
+            "预览或草稿版本已变化，请刷新后重试",
+            status.HTTP_409_CONFLICT,
+        ) from exc
+    except TaskError as exc:
+        raise _error_response(
+            exc.code, exc.message, exc.status_code, retryable=exc.retryable
+        ) from exc
+    response = ProfilePublishAccepted.model_validate(confirmed)
+    await db.commit()
+    return response
 
 
 # ===== Phase 3 P3-01: 成稿预览 =====
@@ -711,36 +773,42 @@ async def publish_profile_draft_route(
 )
 async def create_profile_preview_route(
     draft_id: str = Path(..., min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$"),
-    payload: dict | None = Body(default=None),
+    payload: ProfilePreviewRequest = Body(...),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ProfilePreviewResponse:
-    """为当前草稿 revision 生成/复用预览。
-
-    请求 body: ``{"expected_revision": <int>}`` —— 必须等于 draft.expected_revision。
-    响应: ``{preview_id, draft_id, expected_revision, status, content}``。
-    旧客户端不传 preview_id 仍可走 publish(向后兼容)。
-    """
+    """为当前草稿 revision 生成/复用预览。"""
     _require_profile_feature()
-    if not isinstance(payload, dict):
-        raise _error_response(
-            "AI_INPUT_INVALID",
-            "body 必须为 JSON 对象,包含 expected_revision",
-            status.HTTP_400_BAD_REQUEST,
-        )
-    expected_revision = payload.get("expected_revision")
-    if not isinstance(expected_revision, int) or expected_revision < 0:
-        raise _error_response(
-            "AI_INPUT_INVALID",
-            "expected_revision 必须为非负整数",
-            status.HTTP_400_BAD_REQUEST,
-        )
+    expected_revision = payload.expected_revision
     try:
         from app.services.ai.preview import (
             PreviewConflict,
             SqlPreviewRepository,
             generate_preview,
         )
+
+        if idempotency_key:
+            _check_idempotency_key(idempotency_key)
+        marker_result = await db.execute(
+            __import__("sqlalchemy").text(
+                "SELECT schema_version FROM ai_profile_draft "
+                "WHERE draft_id=:draft_id AND user_id=:user_id"
+            ),
+            {"draft_id": draft_id, "user_id": current.id},
+        )
+        marker = marker_result.mappings().first()
+        if marker and marker.get("schema_version") == CONTINUOUS_DRAFT_SCHEMA_VERSION:
+            data = await ensure_continuous_preview(
+                db,
+                draft_id,
+                current.id,
+                expected_revision,
+                idempotency_key or uuid4().hex,
+            )
+            response = ProfilePreviewResponse.model_validate(data)
+            await db.commit()
+            return response
 
         preview_repo = SqlPreviewRepository(db)
         rec = await generate_preview(
@@ -749,14 +817,38 @@ async def create_profile_preview_route(
             expected_revision=expected_revision,
             repo=preview_repo,
         )
+    except PermissionError as exc:
+        raise _error_response(
+            "AI_CONSENT_REQUIRED", "请先完成画像文本抽取授权", status.HTTP_403_FORBIDDEN
+        ) from exc
+    except LookupError as exc:
+        code = str(exc)
+        raise _error_response(
+            code,
+            "预览不存在或尚未准备好",
+            status.HTTP_404_NOT_FOUND
+            if code == "PREVIEW_NOT_FOUND"
+            else status.HTTP_409_CONFLICT,
+        ) from exc
+    except ValueError as exc:
+        raise _error_response(
+            "DRAFT_VERSION_CONFLICT",
+            "草稿版本已变化，请刷新后重试",
+            status.HTTP_409_CONFLICT,
+        ) from exc
     except PreviewConflict as exc:
-        # DRAFT_NOT_FOUND → 404;DRAFT_VERSION_CONFLICT → 409
         status_code = (
             status.HTTP_404_NOT_FOUND
             if exc.code == "DRAFT_NOT_FOUND"
             else status.HTTP_409_CONFLICT
         )
         raise _error_response(exc.code, exc.message, status_code) from exc
+    except TaskError as exc:
+        raise _error_response(
+            exc.code, exc.message, exc.status_code, retryable=exc.retryable
+        ) from exc
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise _error_response(
             "AI_TEMPORARILY_UNAVAILABLE",
@@ -773,8 +865,11 @@ async def create_profile_preview_route(
         status=rec.status,
         content=rec.content,
         task_id=rec.task_id,
+        flow_version=rec.flow_version,
+        generation_status=rec.generation_status,
+        fields=rec.fields or [],
+        boundary_changed=rec.boundary_changed,
     )
-
 
 @router.get(
     "/profile-previews/{preview_id}",
@@ -790,12 +885,40 @@ async def get_profile_preview_route(
     """读取本人预览;越权/不存在 → 404。"""
     _require_profile_feature()
     try:
+        marker_result = await db.execute(
+            __import__("sqlalchemy").text(
+                "SELECT schema_version FROM ai_profile_draft "
+                "WHERE draft_id=(SELECT draft_id FROM ai_profile_preview "
+                "WHERE preview_id=:preview_id AND user_id=:user_id) "
+                "AND user_id=:user_id"
+            ),
+            {"preview_id": preview_id, "user_id": current.id},
+        )
+        marker = marker_result.mappings().first()
+        if marker and marker.get("schema_version") == CONTINUOUS_DRAFT_SCHEMA_VERSION:
+            data = await get_continuous_preview(db, preview_id, current.id)
+            if data is None:
+                raise _error_response(
+                    "PREVIEW_NOT_FOUND",
+                    "预览不存在或不属于当前用户",
+                    status.HTTP_404_NOT_FOUND,
+                )
+            return ProfilePreviewDetailResponse.model_validate(data)
+
         from app.services.ai.preview import SqlPreviewRepository, get_preview
 
         preview_repo = SqlPreviewRepository(db)
         rec = await get_preview(
             user_id=current.id, preview_id=preview_id, repo=preview_repo
         )
+    except PermissionError as exc:
+        raise _error_response(
+            "AI_CONSENT_REQUIRED",
+            "请先完成画像文本抽取授权",
+            status.HTTP_403_FORBIDDEN,
+        ) from exc
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise _error_response(
             "AI_TEMPORARILY_UNAVAILABLE",
@@ -815,6 +938,10 @@ async def get_profile_preview_route(
         status=rec.status,
         content=rec.content,
         task_id=rec.task_id,
+        flow_version=rec.flow_version,
+        generation_status=rec.generation_status,
+        fields=rec.fields or [],
+        boundary_changed=rec.boundary_changed,
         last_error=rec.last_error,
         created_at=rec.created_at,
         updated_at=rec.updated_at,
@@ -963,6 +1090,7 @@ async def get_profile_narrative_route(
         return ProfileNarrativeRead(
             subject=subject.value,
             status="pending",
+            revision_id=None,
         )
     data: dict = narrative["data"]
     raw_dimensions = list(data.get("dimensions") or [])
@@ -978,6 +1106,11 @@ async def get_profile_narrative_route(
     return ProfileNarrativeRead(
         subject=subject.value,
         status=str(narrative.get("status") or "published"),
+        revision_id=(
+            int(narrative["revision_id"])
+            if narrative.get("revision_id") is not None
+            else None
+        ),
         persona_title=str(data.get("persona_title") or ""),
         persona_tags=list(data.get("persona_tags") or []),
         insight=str(data.get("insight") or ""),
@@ -1019,6 +1152,11 @@ async def confirm_profile_narrative_route(
     return ProfileNarrativeRead(
         subject=subject.value,
         status=str((narrative or {}).get("status") or "confirmed"),
+        revision_id=(
+            int((narrative or {})["revision_id"])
+            if (narrative or {}).get("revision_id") is not None
+            else None
+        ),
         persona_title=str(data.get("persona_title") or ""),
         persona_tags=list(data.get("persona_tags") or []),
         insight=str(data.get("insight") or ""),

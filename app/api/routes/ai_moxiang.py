@@ -27,7 +27,8 @@ import json
 import re
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query, status
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user
@@ -40,7 +41,18 @@ from app.schemas.ai_moxiang import (
     MoxiangTurn,
     MoxiangTurnsResponse,
 )
-from app.schemas.ai_profile import ProfileSubject
+from app.schemas.ai_profile import (
+    ContinuousBuildRequest,
+    ContinuousStateResponse,
+    ContinuousTurnRead,
+    ContinuousTurnsResponse,
+    ProfileSubject,
+)
+from app.services.ai.continuous import (
+    build_continuous_draft,
+    build_state as build_continuous_state,
+    list_continuous_turns,
+)
 from app.services.ai.flags import AiFeature, AiFeatureDisabledError, require_ai_feature
 from app.services.ai.moxiang_state import build_state_response, list_turns
 from app.services.ai.moxiang_state_db import MoxiangStateSqlRepository
@@ -51,10 +63,11 @@ from app.services.ai.profile import (
     create_master_session,
     load_owned_session,
 )
+from app.services.ai.tasks import TaskError
 
 router = APIRouter()
 
-_SUBJECT_PATTERN = re.compile(r"^(personal|ideal_partner)$")
+_IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
 
 def _request_id() -> str:
@@ -78,17 +91,13 @@ def _error_response(
 
 
 def _require_journey_feature() -> None:
-    """Phase 2 P1-C 沿用 ``ai_moxiang_journey_enabled`` 开关(契约 v1.1 §10)。
-
-    默认关闭:关闭时返回 503,前端显示"暂不可用"；客户端不得回退旧协议。
-    """
+    """Require the existing journey and profile feature gates."""
     if not bool(getattr(settings, "ai_moxiang_journey_enabled", False)):
         raise _error_response(
             "AI_FEATURE_DISABLED",
             "墨相师连续旅程当前未启用",
             status.HTTP_503_SERVICE_UNAVAILABLE,
         )
-    # 额外: profile 主开关也必须开(否则 consent 检查 + 任务写入都会失败)
     try:
         require_ai_feature(AiFeature.PROFILE, settings)
     except AiFeatureDisabledError as exc:
@@ -97,6 +106,66 @@ def _require_journey_feature() -> None:
             "AI 画像功能当前不可用",
             status.HTTP_503_SERVICE_UNAVAILABLE,
         ) from exc
+
+
+def _continuous_response(payload: dict) -> ContinuousStateResponse:
+    return ContinuousStateResponse.model_validate(payload)
+
+
+@router.get("/moxiang/continuous/state", response_model=ContinuousStateResponse)
+async def get_continuous_state(
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ContinuousStateResponse:
+    _require_journey_feature()
+    return _continuous_response(await build_continuous_state(db, current_user.id))
+
+
+@router.get("/moxiang/continuous/turns", response_model=ContinuousTurnsResponse)
+async def get_continuous_turns(
+    limit: int = Query(default=50, ge=1, le=100),
+    before_id: str | None = Query(default=None, max_length=32),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ContinuousTurnsResponse:
+    _require_journey_feature()
+    try:
+        turns, next_id = await list_continuous_turns(db, current_user.id, limit, before_id)
+    except PermissionError as exc:
+        raise _error_response("AI_CONSENT_REQUIRED", "请先完成画像文本抽取授权", 403) from exc
+    except ValueError as exc:
+        raise _error_response("AI_INPUT_INVALID", str(exc), status.HTTP_400_BAD_REQUEST) from exc
+    return ContinuousTurnsResponse(
+        turns=[ContinuousTurnRead.model_validate(item) for item in turns],
+        next_before_id=next_id,
+    )
+
+
+@router.post("/moxiang/continuous/build", response_model=ContinuousStateResponse)
+async def build_continuous_route(
+    subject: ProfileSubject = Query(...),
+    body: ContinuousBuildRequest = Body(default=ContinuousBuildRequest()),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ContinuousStateResponse:
+    _require_journey_feature()
+    if not idempotency_key or not _IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
+        raise _error_response("AI_INPUT_INVALID", "Idempotency-Key 必须为 8-128 位 ASCII 字符", 400)
+    try:
+        payload = await build_continuous_draft(
+            db, current_user.id, subject.value, refresh=body.refresh, idempotency_key=idempotency_key
+        )
+    except PermissionError as exc:
+        raise _error_response("AI_CONSENT_REQUIRED", "请先完成画像文本抽取授权", 403) from exc
+    except LookupError as exc:
+        raise _error_response("CONTINUOUS_BUILD_NOT_READY", "当前主体暂无足够可确认的新信息", 409) from exc
+    except ValueError as exc:
+        raise _error_response("AI_INPUT_INVALID", str(exc), 400) from exc
+    except TaskError as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code, retryable=exc.retryable) from exc
+    await db.commit()
+    return _continuous_response(payload)
 
 
 @router.get("/moxiang/state", response_model=MoxiangStateResponse)
@@ -211,7 +280,9 @@ async def start_journey(
       - 若 ``can_start_ideal_partner=false``(personal 未发布且无 ideal_partner
         历史)→ 返回 403 ``AI_INPUT_INVALID``,文案明确提示用户先完成我的墨相。
       - 否则调用 ``create_master_session`` 创建/恢复 master session;
-      - 返回 ``{ subject, session_id, journey_stage, already_existed }``。
+      - 返回 ``{ subject, session_id, journey_stage, already_existed }``；
+        ``already_existed`` 表示复用了既有活动会话（非本次插入），
+        ``journey_stage`` 取该会话的真实阶段。
     """
     _require_journey_feature()
     if subject != ProfileSubject.IDEAL_PARTNER.value:
@@ -257,12 +328,25 @@ async def start_journey(
             retryable=True,
         ) from exc
 
+    # journey_stage 不在 profile 服务的会话列集合里，与 WS session_start 同源：
+    # 按 session_id 实查，取不到行才回落默认阶段。
+    stage_row = (
+        await db.execute(
+            sql_text(
+                "SELECT journey_stage FROM ai_profile_session "
+                "WHERE session_id = :session_id"
+            ),
+            {"session_id": session.session_id},
+        )
+    ).mappings().first()
     await db.commit()
     return {
         "subject": subject,
         "session_id": session.session_id,
-        "journey_stage": "chatting",
-        "already_existed": False,
+        "journey_stage": str((stage_row or {}).get("journey_stage") or "chatting"),
+        # created 只对「本次请求插入的行」为 True，复用（含并发冲突后回读复用
+        # 赢家会话）为 False——与 WS 侧 ``resumed: not session.created`` 同源。
+        "already_existed": not session.created,
     }
 
 

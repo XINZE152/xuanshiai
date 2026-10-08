@@ -341,6 +341,8 @@ class MockAIProvider:
         self, request: StructuredExtractRequest
     ) -> StructuredExtractResult:
         self._check_failure("structured_extract")
+        if request.continuous_v2 and set(request.subjects) == {"personal", "ideal_partner"}:
+            return await self.structured_extract_dual_fixture(request)
         fixture = (
             "profile-ideal-partner-v1"
             if request.subject == ProfileSubject.IDEAL_PARTNER.value
@@ -349,6 +351,55 @@ class MockAIProvider:
         if "schema_invalid" in self._failures or "structured_extract:schema_invalid" in self._failures:
             fixture = "profile-schema-invalid"
         return await self.structured_extract_fixture(fixture, request=request)
+
+    async def structured_extract_dual_fixture(
+        self, request: StructuredExtractRequest
+    ) -> StructuredExtractResult:
+        """Mock 的连续双主体 fixture：单次调用按语义拆分两组候选。"""
+        text = " ".join(request.turn_texts).strip()
+        fields: list[ExtractedField] = []
+        patches: list[ExtractedPatch] = []
+        unknown: list[str] = []
+        if any(token in text for token in ("不确定", "可能", "也许", "不代表", "不知道")):
+            unknown.append(text[:200])
+        if any(token in text for token in ("安静", "慢热", "内向", "外向")):
+            fields.append(ExtractedField(
+                field_key="lifestyle_tags",
+                subject=ProfileSubject.PERSONAL,
+                value=["安静"],
+                source_quote=text[:200],
+                confidence=0.86,
+                assertion_mode="explicit",
+                policy_revision=request.policy_revision,
+            ))
+        if any(token in text for token in ("旅行", "看展", "阅读", "运动")):
+            fields.append(ExtractedField(
+                field_key="interest_tags",
+                subject=ProfileSubject.PERSONAL,
+                value=[token for token in ("旅行", "看展", "阅读", "运动") if token in text],
+                source_quote=text[:200],
+                confidence=0.9,
+                assertion_mode="explicit",
+                policy_revision=request.policy_revision,
+            ))
+        preference = any(token in text for token in ("我希望", "我想找", "我看重", "希望对方", "想要对方"))
+        if preference and any(token in text for token in ("沟通", "温柔", "稳定", "倾听", "愿意")):
+            patches.append(ExtractedPatch(
+                action="add",
+                category="values",
+                content="希望未来伴侣愿意沟通、认真回应",
+                subject=ProfileSubject.IDEAL_PARTNER,
+                source_quote=text[:200],
+                confidence=0.86,
+                assertion_mode="explicit",
+                policy_revision=request.policy_revision,
+            ))
+        return StructuredExtractResult(
+            schema_version=_PROFILE_SCHEMA_VERSION,
+            fields=tuple(fields),
+            patches=tuple(patches),
+            unknown_or_ambiguous=tuple(unknown),
+        )
 
     async def parse_search_query(
         self, request: SearchParseRequest
@@ -1250,21 +1301,18 @@ class _OpenAICompatProvider:
     async def _structured_extract_master(
         self, request: StructuredExtractRequest
     ) -> StructuredExtractResult:
-        """master 会话对话抽取：产出白名单字段与六维 entry patch，禁止澄清。
-
-        ``fields`` 解析遵循普通建构抽取相同的 allowlist 纪律；``patches``
-        保留六维自由条目。master prompt 契约禁止澄清问题、允许 0 条结果；若
-        模型违反契约仍返回非空 clarifying_question，原样透传给 handler——
-        handler 侧对契约违规终态失败（fail-closed），provider 不静默吞掉。
-        """
+        """master 会话抽取；continuous_v2 一次返回两主体、保留未知项。"""
+        subjects = request.subjects or (request.subject,)
         prompt = build_profile_master_extract_prompt(
             request.subject,
             request.turn_texts,
             entry_digest=request.entry_digest,
             existing_digest=request.existing_digest,
+            subjects=subjects,
         )
         data = await self._chat_json(prompt)
-        subject = ProfileSubject(request.subject)
+        dual = set(subjects) == {"personal", "ideal_partner"}
+        default_subject = ProfileSubject(request.subject)
         fields_data = data.get("fields", []) if isinstance(data, dict) else []
         fields: list[ExtractedField] = []
         for item in fields_data:
@@ -1274,13 +1322,21 @@ class _OpenAICompatProvider:
             if field_key not in request.allowlist:
                 continue
             try:
+                item_subject = ProfileSubject(item.get("subject")) if dual else default_subject
+                if dual and item_subject.value not in subjects:
+                    continue
                 fields.append(
                     ExtractedField(
                         field_key=field_key,
-                        subject=subject,
+                        subject=item_subject,
                         value=item.get("value"),
-                        source_quote=item.get("source_quote"),
+                        source_turn_ids=tuple(
+                            str(value)
+                            for value in item.get("source_turn_ids", ())
+                            if str(value)
+                        ),
                         confidence=_safe_confidence(item.get("confidence")),
+                        assertion_mode=item.get("assertion_mode", "inferred"),
                         needs_confirmation=True,
                         confirmation_status="suggested",
                         schema_version=_PROFILE_SCHEMA_VERSION,
@@ -1288,23 +1344,31 @@ class _OpenAICompatProvider:
                         policy_revision=request.policy_revision,
                     )
                 )
-            except ValidationError:
-                continue
+            except (ValidationError, ValueError):
+                _drop_invalid_extract_item("profile_master_field", item)
         patches_data = data.get("patches", []) if isinstance(data, dict) else []
         patches: list[ExtractedPatch] = []
         for item in patches_data:
             if not isinstance(item, dict):
                 continue
             try:
+                item_subject = ProfileSubject(item.get("subject")) if dual else default_subject
+                if dual and item_subject.value not in subjects:
+                    continue
                 patches.append(
                     ExtractedPatch(
                         action=item.get("action", ""),
                         category=normalize_entry_category(item.get("category")),
                         content=item.get("content", ""),
                         replaces_field_key=item.get("replaces_field_key"),
-                        subject=subject,
-                        source_quote=item.get("source_quote"),
+                        subject=item_subject,
+                        source_turn_ids=tuple(
+                            str(value)
+                            for value in item.get("source_turn_ids", ())
+                            if str(value)
+                        ),
                         confidence=_safe_confidence(item.get("confidence")),
+                        assertion_mode=item.get("assertion_mode", "inferred"),
                         needs_confirmation=True,
                         confirmation_status="suggested",
                         schema_version=_PROFILE_SCHEMA_VERSION,
@@ -1312,18 +1376,20 @@ class _OpenAICompatProvider:
                         policy_revision=request.policy_revision,
                     )
                 )
-            except ValidationError:
+            except (ValidationError, ValueError):
                 _drop_invalid_extract_item("profile_master_patch", item)
-                continue
         question = data.get("clarifying_question") if isinstance(data, dict) else None
         if not isinstance(question, str) or not question.strip():
             question = None
+        unknown = data.get("unknown_or_ambiguous", ()) if isinstance(data, dict) else ()
+        if not isinstance(unknown, (list, tuple)):
+            unknown = ()
         return StructuredExtractResult(
             schema_version=_PROFILE_SCHEMA_VERSION,
             fields=tuple(fields),
-            entries=(),
-            clarifying_question=question,
             patches=tuple(patches),
+            clarifying_question=question,
+            unknown_or_ambiguous=tuple(str(item)[:200] for item in unknown if str(item).strip()),
         )
 
     async def parse_search_query(

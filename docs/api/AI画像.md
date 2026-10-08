@@ -1394,3 +1394,478 @@ WS /voice/moxiang-master
 - 当前搜索页和首页展示不主动调用新 AI 搜索/兼容度接口；接口已提供给后续接入，旧推荐 `match_score` 继续保持 `legacy-rule-v1` 语义。
 
 历史恢复契约：统一请求层的 `{ success, data }` 包由前端 `api/ai-moxiang.uts` 解包；后端 `answer_text` 映射为消息 `content`。错误响应不会覆盖当前本地消息流，空会话可安全恢复。
+
+---
+
+# 18. continuous_v2 连续双画像 HTTP 契约
+
+**变更记录（2026-10-07，HTTP 文档收口）：** 按当前路由、Schema 与 `services/ai/continuous.py` 收敛连续 state/turns/build、冻结预览、整份确认、旧接口拒绝、授权撤回和迁移说明。本文不预先声明尚未实现的 export 安全字段；后续新增字段必须先有实际 Schema/路由，再按加法字段更新契约。
+
+本节只描述已实现的 `continuous_v2` HTTP 边界；实时对话消息和 WS 恢复细节仍见《墨相师实时整理 WebSocket》。`flow_version=continuous_v2` 是响应中的服务端能力标识，不是请求 query/header，也不能通过省略它把新版草稿降级成旧流程。
+
+### 18.1 公共约定、认证、授权与错误 envelope
+
+- **完整前缀：** `/api/v1/ai`。以下 URL 已包含完整路径；所有接口均要求登录，资源只允许当前用户访问。
+- **AI 门禁：** `state`、`turns`、`build` 受已有 AI PROFILE 门禁和墨相师旅程开关控制；预览/确认受 AI PROFILE 门禁控制。门禁未开启返回 `503 AI_FEATURE_DISABLED`，不把关闭状态伪装成空成功。
+- **授权：** `profile_text_extract` 有效时，`turns`、`build`、预览创建/读取、整份确认才能读取或写回私密画像数据。`state` 在已登录但未授权时可返回 `200` 的空双主体快照（`consent_granted=false`），不返回授权前私密资料；其余需要授权的入口返回 `403 AI_CONSENT_REQUIRED`。
+- **属主和隐私：** 每次读写均按当前用户校验资源归属；不存在、非本人或不适用于新版的草稿/预览统一按相应 `404` 处理，不泄露他人资源存在性。任务 Worker 写回前还会重新校验授权版本、隐私 revision、策略 revision 和资源版本。
+- **请求/响应媒体类型：** 写接口使用 `Content-Type: application/json`，响应为 `application/json`；GET 无请求体。前端公共请求层如额外包装 `{success,data}`，本节示例仍以 HTTP 原始 JSON 为准。
+
+公共请求头：
+
+| Header | 位置/类型 | 必填 | 校验与含义 | 合法/非法 |
+|---|---|---:|---|---|
+| `Authorization` | header/string | 是 | `Bearer <access_token>`；仅访问本人 | `Bearer <access_token>` / 缺失→`401` |
+| `Content-Type` | header/string | 写请求是 | JSON 请求体 | `application/json` / 非 JSON body→`422` |
+| `Idempotency-Key` | header/string | build、confirm、PATCH 必填；preview POST 可选 | `^[A-Za-z0-9._:-]{8,128}$`；各接口按自身规则防重：build 同 key 同摘要回读当前安全状态，confirm/PATCH 回放首次结果，preview 按 `draft_id + expected_revision` 复用活动任务；同 key 不同摘要→`409 TASK_IDEMPOTENCY_CONFLICT` | `continuous-build-001` / `bad key`→`400 AI_INPUT_INVALID` |
+| `X-Request-ID` | header/string | 否 | 1..128 位 `[A-Za-z0-9._:-]`，只用于错误/日志关联，不改变业务幂等 | `req_01J...` / 非法格式→既有请求校验错误 |
+
+连续接口业务错误的统一 envelope：
+
+```json
+{
+  "detail": {
+    "code": "DRAFT_VERSION_CONFLICT",
+    "message": "预览或草稿版本已变化，请刷新后重试",
+    "request_id": "req_01JXc5...",
+    "retryable": false,
+    "retry_after_ms": 0
+  }
+}
+```
+
+`code` 是稳定机器码，`message` 供展示/诊断，`request_id` 用于关联日志，`retryable` 只表示后台任务是否允许重试，`retry_after_ms` 为建议等待毫秒数。FastAPI 参数校验失败仍是标准 `422` `detail` 数组（含 `loc/msg/type`），不能被文档或客户端当成业务成功。
+
+### 18.2 响应模型（含全部嵌套字段）
+
+#### `ContinuousStateResponse`（state/build）
+
+| 字段 | JSON 类型/是否必返 | 空值、枚举与业务含义 |
+|---|---|---|
+| `flow_version` | string/是 | 固定 `continuous_v2` |
+| `consent_granted` | boolean/是 | 当前 `profile_text_extract` 是否有效；false 时两个主体均为空状态 |
+| `session_id` | string/null/是 | 可恢复的活动 master session；没有活动 session 为 null |
+| `personal` | `SubjectState`/是 | 描述用户本人的画像，不是第三方事实 |
+| `ideal_partner` | `SubjectState`/是 | 描述用户自己的伴侣偏好，不是第三方画像 |
+
+`SubjectState` 的字段：
+
+| 字段 | JSON 类型/是否必返 | 空值、枚举与业务含义 |
+|---|---|---|
+| `subject` | string/是 | `personal` 或 `ideal_partner` |
+| `status` | string/是 | `collecting` 整理中；`generating` 真实任务处理中；`awaiting_confirmation` 预览可审阅；`confirmed` 已有正式版；`failed` 可重试；`stale` 版本需刷新/核对 |
+| `overall_percent` | number 0..100/是 | 画像理解覆盖度，不是生成倒计时；不由前端计时器增加 |
+| `dimensions` | object/是 | 六维 key 到维度状态的映射；无授权仍返回结构化空维度 |
+| `dimensions.<dimension>.percent` | number 0..100/是 | 该维度覆盖度 |
+| `dimensions.<dimension>.evidence_count` | integer >=0/是 | 当前授权和版本范围内的有效来源证据数 |
+| `draft_id` | string/null/是 | 当前 continuous 草稿；无稿为 null |
+| `expected_revision` | integer >=0/null/是 | 草稿乐观锁版本；不是正式 `revision_id` |
+| `preview_id` | string/null/是 | 当前冻结预览；无预览为 null |
+| `task_id` | string/null/是 | 当前成稿任务；无任务为 null |
+| `published_revision_id` | integer/string/null/是 | 当前授权内正式版本 ID；无正式版本为 null |
+| `has_updates` | boolean/是 | 冻结稿/正式稿之后有尚未合入的新证据 |
+| `last_error` | string/null/是 | 稳定错误类别；不包含原始对话或 Provider trace |
+
+维度 key 固定为：`personality_social`、`intimacy_pattern`、`lifestyle`、`emotional_expression`、`relationship_boundaries`、`future_expectations`。当前实现的新用户空状态会返回六个 key，每个 `percent=0`、`evidence_count=0`，不是 `{}`。
+
+#### `ContinuousTurnsResponse`
+
+| 字段 | JSON 类型/是否必返 | 含义 |
+|---|---|---|
+| `turns` | array/是 | 当前用户授权范围内的用户/助手消息；无记录为 `[]` |
+| `turns[].turn_id` | string/是 | 原始来源 ID；客户端按它去重 |
+| `turns[].turn_no` | integer/是 | 原 session 内序号，不是分页游标 |
+| `turns[].role` | string/是 | `user` 或 `assistant` |
+| `turns[].answer_text` | string/是 | 消息正文；接口返回原文，普通日志不记录原文 |
+| `turns[].client_turn_id` | string/是 | 客户端幂等关联 ID；历史旧行可能为空串 |
+| `turns[].created_at` | string/null/是 | ISO-8601 创建时间；未知为 null |
+| `next_before_id` | string/null/是 | 下一页游标；没有更早记录为 null。当前接口没有 `page/total/has_more` |
+
+#### `ProfilePreviewResponse` / `ProfilePreviewDetailResponse`
+
+POST 预览返回 `ProfilePreviewResponse`；GET 预览在此基础上增加 `last_error`、`created_at`、`updated_at` 三个诊断字段。
+
+| 字段 | JSON 类型/POST 必返/GET 必返 | 空值、枚举与业务含义 |
+|---|---|---|
+| `preview_id` | string/是/是 | 冻结预览 ID |
+| `draft_id` | string/是/是 | 所属 continuous 草稿 ID |
+| `expected_revision` | integer/是/是 | 该预览绑定的草稿版本 |
+| `subject` | string/是/是 | `personal` 或 `ideal_partner` |
+| `status` | string/是/是 | `active` 可处理；`confirmed` 已确认；`stale` 需刷新；`failed` 生成失败 |
+| `content` | string/是/是 | 完整可读正文；任务未完成或失败时为 `""` |
+| `task_id` | string/null/是/是 | 真实成稿任务 ID；旧预览可能为 null |
+| `flow_version` | string/null/是/是 | 新稿为 `continuous_v2`；旧预览可为 null |
+| `generation_status` | string/null/是/是 | `queued`、`processing`、`completed`、`failed`；旧预览可为 null |
+| `fields` | array/是/是 | 完整可审阅字段；未完成时为 `[]` |
+| `fields[].field_key` | string/是/是 | 稳定字段 ID |
+| `fields[].field_kind` | string/是/是 | `structured` 结构化值或 `entry` 叙述条目 |
+| `fields[].category` | string/null/是/是 | 条目分类；结构化字段可为 null |
+| `fields[].content` | string/是/是 | 条目正文或结构字段的文本化内容；无正文为空串 |
+| `fields[].display_value` | string/null/是/是 | 面向用户阅读的值；无独立展示值为 null |
+| `fields[].value_json` | JSON value/null/是/是 | 保持原始标量/数组/对象类型；不能强制转字符串 |
+| `fields[].change` | string/是/是 | `added` 新增、`changed` 修改、`unchanged` 继承 |
+| `fields[].previous_display_value` | string/null/是/是 | 相对正式基线的旧展示值；新增为 null |
+| `boundary_changed` | boolean/是/是 | 关系边界字段相对正式基线发生变化时为 true |
+| `last_error` | string/null/否/是 | 稳定任务错误码；POST 不返回，GET 无错为 null |
+| `created_at` | string/null/否/是 | ISO-8601 创建时间；旧记录未知为 null |
+| `updated_at` | string/null/否/是 | ISO-8601 更新时间；旧记录未知为 null |
+
+#### `ProfilePublishAccepted`（整份确认和旧 publish 的响应模型）
+
+| 字段 | JSON 类型/是否必返 | 含义 |
+|---|---|---|
+| `task_id` | string/是 | 正式投影/清理任务 ID，不是再次生成正文的 ID |
+| `status` | string/是 | `queued`、`leased`、`running`、`retry_wait`、`succeeded`、`failed`、`cancelled`、`superseded` |
+| `stage` | string/null/是 | 任务阶段；continuous confirm 当前为 null |
+| `poll_after_ms` | integer >=0/是 | 建议轮询间隔；新确认默认 1000，回放可为 0 |
+| `expires_at` | string(datetime)/null/是 | 任务到期时间；当前未设置为 null |
+| `replayed` | boolean/是 | 是否回放已有幂等结果 |
+| `revision_id` | integer/null/是 | 已生效正式画像版本 ID；正常确认有值 |
+| `revision_no` | integer/null/是 | 该主体正式版本序号 |
+| `subject` | string/null/是 | `personal` 或 `ideal_partner` |
+| `field_count` | integer/null/是 | 冻结稿实际确认字段数 |
+| `narrative_task_id` | string/null/是 | continuous_v2 固定为 null，不另生成一份不同正文 |
+
+### 18.3 读取双主体状态
+
+**基本信息：** `GET /api/v1/ai/moxiang/continuous/state`；成功 `200 OK`；需要登录；无业务 query；无请求体；响应为 `ContinuousStateResponse`。
+
+合法请求：
+
+```http
+GET /api/v1/ai/moxiang/continuous/state HTTP/1.1
+Authorization: Bearer <access_token>
+```
+
+非法示例：缺少 `Authorization` → `401`；已登录但旅程或 AI PROFILE 门禁关闭 → `503 AI_FEATURE_DISABLED`。已登录且未授权时不是 403，而是 `200` 空双主体状态并带 `consent_granted=false`。
+
+成功示例（已登录、已授权、无历史；六维结构由服务端返回）：
+
+```json
+{
+  "flow_version": "continuous_v2",
+  "consent_granted": true,
+  "session_id": null,
+  "personal": {
+    "subject": "personal",
+    "status": "collecting",
+    "overall_percent": 0.0,
+    "dimensions": {
+      "personality_social": {"percent": 0.0, "evidence_count": 0},
+      "intimacy_pattern": {"percent": 0.0, "evidence_count": 0},
+      "lifestyle": {"percent": 0.0, "evidence_count": 0},
+      "emotional_expression": {"percent": 0.0, "evidence_count": 0},
+      "relationship_boundaries": {"percent": 0.0, "evidence_count": 0},
+      "future_expectations": {"percent": 0.0, "evidence_count": 0}
+    },
+    "draft_id": null,
+    "expected_revision": null,
+    "preview_id": null,
+    "task_id": null,
+    "published_revision_id": null,
+    "has_updates": false,
+    "last_error": null
+  },
+  "ideal_partner": {
+    "subject": "ideal_partner",
+    "status": "collecting",
+    "overall_percent": 0.0,
+    "dimensions": {
+      "personality_social": {"percent": 0.0, "evidence_count": 0},
+      "intimacy_pattern": {"percent": 0.0, "evidence_count": 0},
+      "lifestyle": {"percent": 0.0, "evidence_count": 0},
+      "emotional_expression": {"percent": 0.0, "evidence_count": 0},
+      "relationship_boundaries": {"percent": 0.0, "evidence_count": 0},
+      "future_expectations": {"percent": 0.0, "evidence_count": 0}
+    },
+    "draft_id": null,
+    "expected_revision": null,
+    "preview_id": null,
+    "task_id": null,
+    "published_revision_id": null,
+    "has_updates": false,
+    "last_error": null
+  }
+}
+```
+
+用途：进入页面、重连和从后台恢复时先取快照；GET 不创建任务、不写库、不消耗生成额度。前端不得按时间自行增加 `overall_percent` 或把 `generating` 当作已确认。
+
+### 18.4 读取连续历史
+
+**基本信息：** `GET /api/v1/ai/moxiang/continuous/turns`；成功 `200 OK`；需要登录和有效 `profile_text_extract` 授权；无请求体；响应为 `ContinuousTurnsResponse`。只聚合当前用户有效 master session 的用户/助手轮次，按来源 ID 去重，不按文本去重。
+
+| 参数 | 位置/类型 | 必填/默认 | 校验与含义 | 合法/非法 |
+|---|---|---:|---|---|
+| `limit` | query/integer | 否/50 | 1..100；页内最多消息数 | `50` / `101`→`422` |
+| `before_id` | query/string | 否/null | 最长 32；必须是正数字数据库游标，读取更早消息 | `123` / `0` 或 `abc`→`400 AI_INPUT_INVALID` |
+
+合法请求：
+
+```http
+GET /api/v1/ai/moxiang/continuous/turns?limit=50&before_id=123 HTTP/1.1
+Authorization: Bearer <access_token>
+```
+
+成功示例：
+
+```json
+{
+  "turns": [
+    {
+      "turn_id": "u1",
+      "turn_no": 1,
+      "role": "user",
+      "answer_text": "合成样例：喜欢阅读",
+      "client_turn_id": "c1",
+      "created_at": "2026-10-07T00:20:00"
+    },
+    {
+      "turn_id": "a1",
+      "turn_no": 2,
+      "role": "assistant",
+      "answer_text": "我记下了你的兴趣。",
+      "client_turn_id": "",
+      "created_at": "2026-10-07T00:20:01"
+    }
+  ],
+  "next_before_id": null
+}
+```
+
+无数据固定为 `{"turns": [], "next_before_id": null}`。首次不传游标；后续请求只使用服务端返回的 `next_before_id`。撤权后清理本地私密缓存并停止读取；读取失败不能当成空历史。
+
+### 18.5 创建/复用连续成稿任务
+
+**基本信息：** `POST /api/v1/ai/moxiang/continuous/build?subject={subject}`；成功 `200 OK`；需要登录、有效授权、旅程/PROFILE 门禁；请求和响应为 JSON；响应为完整 `ContinuousStateResponse`。任意一个主体都可以先 build，不要求另一主体先完成。
+
+| 参数 | 位置/类型 | 必填/默认 | 校验与业务含义 | 合法/非法 |
+|---|---|---:|---|---|
+| `subject` | query/enum string | 是/无 | `personal` 或 `ideal_partner` | `personal` / `third_person`→`422` |
+| `refresh` | body/boolean | 否/false | false 复用当前草稿/预览；true 明确合并新证据并使旧活动预览失效 | `true` / `{}`→`422` |
+| `Idempotency-Key` | header/string | 是 | 8..128 位 ASCII；同 key 同 body 回放，不重复建任务 | `build-0001` / 缺失或 `bad`→`400 AI_INPUT_INVALID` |
+
+合法请求：
+
+```http
+POST /api/v1/ai/moxiang/continuous/build?subject=personal HTTP/1.1
+Authorization: Bearer <access_token>
+Content-Type: application/json
+Idempotency-Key: build-0001
+
+{"refresh": false}
+```
+
+非法示例：`subject=third_person`→`422`；`{"refresh":"yes"}`→`422`；缺少或非法 `Idempotency-Key`→`400 AI_INPUT_INVALID`；无授权→`403 AI_CONSENT_REQUIRED`。
+
+使用规则：首次成稿需当前主体至少 3 个有效维度、至少 3 条达到现有高置信标准且有来源的证据，且没有必须先澄清的底线冲突；已有正式版本时一次有效变化即可形成增量稿。证据不足、无有效增量或底线待澄清返回 `409 CONTINUOUS_BUILD_NOT_READY`，不是伪造的空成功。每个主体的内容版本最多一个真实生成任务；复用不增加任务。200 只表示任务/快照已接受，不能表示正文已生成；随后用 `preview_id` GET 轮询真实状态。
+
+### 18.6 创建及读取冻结预览
+
+#### 18.6.1 创建/复用预览
+
+**基本信息：** `POST /api/v1/ai/profile-drafts/{draft_id}/preview`；成功 `202 Accepted`；需要登录和有效 AI PROFILE 授权；JSON 请求/响应；响应为 `ProfilePreviewResponse`。这是 continuous 草稿的合法成稿入口；同一 `draft_id + expected_revision` 的活动任务会复用。`Idempotency-Key` 在当前路由是可选 header，但客户端应在网络结果不明时固定使用同一 key；省略时服务端生成内部 key，不应把每次无 key 调用当成同一业务请求。
+
+| 参数 | 位置/类型 | 必填/默认 | 校验与含义 | 合法/非法 |
+|---|---|---:|---|---|
+| `draft_id` | path/string | 是/无 | 1..64，`^[a-z0-9_]+$`；必须是本人草稿 | `d1_abc` / `../x`→`422` |
+| `expected_revision` | body/integer | 是/无 | `>=0` 且等于当前草稿版本 | `0` / `-1`→`422`；旧版本→`409 DRAFT_VERSION_CONFLICT` |
+| `Idempotency-Key` | header/string | 否/无 | 若提供则按公共规则校验 | `preview-0001` / `bad`→`400 AI_INPUT_INVALID` |
+
+合法请求：
+
+```http
+POST /api/v1/ai/profile-drafts/d1_abc/preview HTTP/1.1
+Authorization: Bearer <access_token>
+Content-Type: application/json
+Idempotency-Key: preview-0001
+
+{"expected_revision": 0}
+```
+
+等待中的成功响应仍返回完整 `ProfilePreviewResponse`：`content=""`、`fields=[]`、`generation_status=queued|processing`；任务完成后才返回完整正文和完整字段。服务端不以单个示例字段代替完整稿。
+
+#### 18.6.2 读取预览
+
+**基本信息：** `GET /api/v1/ai/profile-previews/{preview_id}`；成功 `200 OK`；需要登录和有效授权；无请求体；响应为 `ProfilePreviewDetailResponse`。
+
+合法请求：
+
+```http
+GET /api/v1/ai/profile-previews/p1_abc HTTP/1.1
+Authorization: Bearer <access_token>
+```
+
+非法示例：超过 96 字的 `preview_id`→`422`；不存在、非本人或不是 `profile-continuous-v2` 预览→`404 PREVIEW_NOT_FOUND`；撤权→`403 AI_CONSENT_REQUIRED`。成功成稿示例：
+
+```json
+{
+  "preview_id": "p1_abc",
+  "draft_id": "d1_abc",
+  "expected_revision": 0,
+  "subject": "personal",
+  "status": "active",
+  "content": "安静而认真的你\n喜欢阅读，重视沟通。",
+  "task_id": "t1",
+  "flow_version": "continuous_v2",
+  "generation_status": "completed",
+  "fields": [{
+    "field_key": "entry_personality_1",
+    "field_kind": "entry",
+    "category": "personality",
+    "content": "喜欢阅读",
+    "display_value": "喜欢阅读",
+    "value_json": null,
+    "change": "added",
+    "previous_display_value": null
+  }],
+  "boundary_changed": false,
+  "last_error": null,
+  "created_at": "2026-10-07T00:20:00",
+  "updated_at": "2026-10-07T00:20:03"
+}
+```
+
+GET 只读、不创建任务、不扣生成额度。预览正文和字段在任务完成前必须按空值处理；失败后采用服务端新 preview/revision 重新审阅，不复用失败快照确认。
+
+### 18.7 原子整份确认
+
+**基本信息：** `POST /api/v1/ai/profile-previews/{preview_id}/confirm`；成功 `202 Accepted`；需要登录、有效 `profile_text_extract` 授权和 AI PROFILE 门禁；JSON 请求/响应；响应为 `ProfilePublishAccepted`。确认事务校验属主、授权代次、任务完成、预览/草稿版本、正式基线和冻结字段摘要，然后写一个正式 revision 并触发既有投影任务。
+
+| 参数 | 位置/类型 | 必填/默认 | 校验与含义 | 合法/非法 |
+|---|---|---:|---|---|
+| `preview_id` | path/string | 是/无 | 1..96；必须是本人 continuous 冻结预览 | `p1_abc` / 超长→`422` |
+| `expected_revision` | body/integer | 是/无 | `>=0`，等于冻结预览绑定的草稿版本 | `0` / `-1`→`422`；版本变化→`409 DRAFT_VERSION_CONFLICT` |
+| `Idempotency-Key` | header/string | 是 | 8..128 位 ASCII；超时重试保留同 key 和同 body | `confirm-0001` / 缺失→`400 AI_INPUT_INVALID` |
+
+合法请求：
+
+```http
+POST /api/v1/ai/profile-previews/p1_abc/confirm HTTP/1.1
+Authorization: Bearer <access_token>
+Content-Type: application/json
+Idempotency-Key: confirm-0001
+
+{"expected_revision": 0}
+```
+
+成功示例：
+
+```json
+{
+  "task_id": "t2",
+  "status": "queued",
+  "stage": null,
+  "poll_after_ms": 1000,
+  "expires_at": null,
+  "replayed": false,
+  "revision_id": 11,
+  "revision_no": 3,
+  "subject": "personal",
+  "field_count": 4,
+  "narrative_task_id": null
+}
+```
+
+确认必须基于用户已经阅读的完整 `content`、`fields`、差异和 `boundary_changed`。任务未完成、正文为空、字段为空或预览已失败返回 `409 PREVIEW_NOT_READY`；重复同 key 或同一 preview 的重复提交只回放同一正式结果，不创建第二个 revision。确认不等于公开展示，不要求另一主体就绪，也不终止另一主体的整理。
+
+### 18.8 编辑、旧接口拒绝与迁移
+
+#### 18.8.1 continuous 草稿编辑
+
+**PATCH `/api/v1/ai/profile-drafts/{draft_id}`** 仍使用本文旧 PATCH 的 URL 和 `ProfileDraftPatchRequest`，成功 `200 OK`，需要本人登录、有效授权、JSON 和必填 `Idempotency-Key`。本节只列新版相关的实际边界，不重写未触及的旧 API：
+
+| 参数 | 位置/类型 | 必填/默认 | continuous_v2 规则 |
+|---|---|---:|---|
+| `draft_id` | path/string | 是/无 | 1..64，`^[a-z0-9_]+$`，本人草稿 |
+| `expected_revision` | body/integer | 是/无 | `>=0`，草稿级乐观锁 |
+| `actions` | body/array | 是/无 | 1..50 项；每项原子应用 |
+| `actions[].field_key` | body/string | 是/无 | 1..64，已存在字段键 |
+| `actions[].action` | body/enum | 是/无 | continuous 只允许 `replace`、`reject`、`delete`；`confirm` 返回 `409 PREVIEW_REQUIRED` |
+| `actions[].value` | body/JSON value | 否/null | `replace` 时保持该字段原合法类型；delete/reject 不需要值 |
+| `actions[].expected_revision` | body/integer | 是/无 | `>=0`，必须与当前草稿 revision 一致 |
+
+合法请求：
+
+```http
+PATCH /api/v1/ai/profile-drafts/d1_abc HTTP/1.1
+Authorization: Bearer <access_token>
+Content-Type: application/json
+Idempotency-Key: edit-0001
+
+{"expected_revision":0,"actions":[{"field_key":"entry_personality_1","action":"replace","value":"更喜欢安静阅读","expected_revision":0}]}
+```
+
+非法示例：`actions=[]`→`422`；旧 revision→`409 DRAFT_VERSION_CONFLICT`；`action=confirm`→`409 PREVIEW_REQUIRED`；本次编辑或明确 `refresh` 成功后旧 preview 会变为 `stale`，不能用旧正文确认新字段。成功的 `ProfileDraftRead` 全部字段仍按本文旧 PATCH Schema 返回；未确认字段不进入正式画像或正式记忆。
+
+#### 18.8.2 旧接口拒绝边界
+
+- **旧逐条 PATCH confirm：** continuous 草稿调用 `PATCH /api/v1/ai/profile-drafts/{draft_id}` 的 `action=confirm` 返回 `409 PREVIEW_REQUIRED`，不能绕过完整成稿审阅。
+- **旧 publish：** `POST /api/v1/ai/profile-drafts/{draft_id}/publish?expected_revision=0` 对 `schema_version=profile-continuous-v2` 草稿返回 `409 CONTINUOUS_CONFIRM_REQUIRED`，即使 body 携带 `preview_id` 也不把旧 publish 变成新版确认入口。旧 publish 继续服务 legacy 草稿。
+- **旧 narrative regenerate：** `POST /api/v1/ai/profiles/{subject}/narrative/regenerate` 对 continuous 正式版本返回 `409 PREVIEW_REQUIRED`；新版正文改写必须生成新的 continuous 草稿、预览并再次整份确认。
+- **旧 narrative confirm：** `POST /api/v1/ai/profiles/{subject}/narrative/confirm` 不是 continuous preview 的确认入口，不能替代本节 18.7，也不创建新版正式 revision；客户端不得用它确认未审阅稿。
+
+#### 18.8.3 授权撤回与恢复
+
+撤权使用既有授权接口（本节只记录其对 continuous 的 HTTP 影响）：
+
+```http
+DELETE /api/v1/ai/consents/profile_text_extract HTTP/1.1
+Authorization: Bearer <access_token>
+Idempotency-Key: revoke-0001
+X-Expected-Privacy-Revision: 3
+```
+
+该接口成功 `202 Accepted`，无请求体，响应 `AiConsentOperationResponse`：
+
+| 字段 | 类型/空值 | 含义 |
+|---|---|---|
+| `operation_id` | string/必返 | 授权操作 ID |
+| `scope` | string/必返 | `profile_text_extract` 等授权 scope |
+| `operation` | string/必返 | 固定 `revoke` |
+| `status` | string/必返 | 撤权操作状态 |
+| `consent` | `AiConsentRead`/null | 撤权后通常为 null；若有值，继续包含 `scope`、`version`、`policy_revision`、`granted_at` 四个字段 |
+| `consent.scope` | string/是 | 授权 scope |
+| `consent.version` | string/是 | 授权文案版本 |
+| `consent.policy_revision` | string/是 | 授权策略版本 |
+| `consent.granted_at` | string(datetime)/是 | 授权时间；撤权响应通常不返回 consent |
+| `cleanup_task_id` | string/null | 异步清理任务；撤权无可清理任务时为 null |
+| `privacy_revision` | integer/是 | 新隐私 revision，后续任务写回围栏依据 |
+
+成功示例：
+{"operation_id":"op1","scope":"profile_text_extract","operation":"revoke","status":"revoked","consent":null,"cleanup_task_id":"cleanup1","privacy_revision":4}
+```json
+{"operation_id":"op1","scope":"profile_text_extract","operation":"revoke","status":"accepted","consent":null,"cleanup_task_id":"cleanup1","privacy_revision":4}
+```
+
+
+非法示例：缺 `X-Expected-Privacy-Revision` 或小于 0→`422`；缺失/非法 `Idempotency-Key`→`400 AI_INPUT_INVALID`；旧隐私 revision→既有 `409` 冲突。撤权事务在响应前取消 queued/leased/running/retry_wait 任务，删除/隐藏相关草稿、取消活动会话、使相关 feature projection 失效并标记搜索结果 stale；cleanup task 继续处理保留期清理。撤权后：`state` 可返回无私密数据的 `consent_granted=false` 空状态；`turns`、build、preview、confirm 返回 `403 AI_CONSENT_REQUIRED`；continuous narrative 不返回旧正文；重新授权不会自动复活撤权前 continuous 正式数据。
+
+#### 18.8.4 迁移顺序与兼容周期
+
+| `404` | `DRAFT_NOT_FOUND` / `PREVIEW_NOT_FOUND` | 草稿/预览不存在、非本人或不是新版适用资源 | 回到 state/档案恢复，不猜测资源内容 |
+
+旧客户端不声明新版能力时继续使用旧 `profile-sessions`、逐条 PATCH 和 legacy publish 协议至少一个兼容周期；旧草稿、正式 revision、候选和会话记录保留。有效 legacy 草稿继续从 legacy 入口使用，过期/冲突草稿不静默删除、发布或转换为已确认；新版草稿由 `schema_version=profile-continuous-v2` 识别，旧的确认/发布/改写入口只能拒绝或不产生新版正式版本；PATCH 仍可用于 `replace`/`reject`/`delete` 编辑，但不能把未审阅字段写入正式画像。旧正式版本可作为 continuous 的授权内正式基线，但撤权、版本冲突或策略变化后必须重新校验。
+
+### 18.9 公共错误、状态、幂等与运行边界
+
+| HTTP | 业务码/来源 | 触发条件 | 客户端处理 |
+|---|---|---|---|
+| `400` | `AI_INPUT_INVALID` | before_id 非正数字、缺失/非法必填幂等键、业务输入非法 | 按 message/detail 修正；不要盲目重试 |
+| `401` | 既有登录错误 | Bearer 缺失、失效或无法解析 | 清理私密缓存并重新登录 |
+| `403` | `AI_CONSENT_REQUIRED` | 未授权、撤权或授权版本/策略 revision 不一致 | 停止读取私密内容，展示授权状态；重新授权后重新取 state |
+| `404` | `PREVIEW_NOT_FOUND` | 预览不存在、非本人或不是新版适用预览 | 回到 state/档案恢复，不猜测资源内容 |
+| `409` | `CONTINUOUS_BUILD_NOT_READY` | 证据不足、无有效增量或底线冲突待澄清 | 继续对话/补充证据，不循环创建任务 |
+| `409` | `PREVIEW_NOT_READY` | 真实成稿任务尚未完成、失败或正文/字段不完整 | GET 只读等待；失败按服务端新 preview/revision 重试 |
+| `409` | `DRAFT_VERSION_CONFLICT` | 草稿、预览、正式基线、隐私/策略版本变化 | 刷新 state/preview，重新审阅后再确认 |
+| `409` | `TASK_IDEMPOTENCY_CONFLICT` | 同 key 用于不同请求摘要或请求处理中 | 保留原 key 核对原请求；新意图换新 key |
+| `409` | `PREVIEW_REQUIRED` | 旧 PATCH confirm 或旧 narrative regenerate 试图绕过新版完整审阅 | 改走 build→preview→confirm |
+| `409` | `CONTINUOUS_CONFIRM_REQUIRED` | 旧 publish 试图发布 continuous 草稿 | 改走 preview confirm |
+| `422` | FastAPI validation | path/query/body/header 类型、长度、枚举或必填参数不合法 | 根据 `detail.loc/msg/type` 修正 |
+| `429` | 既有 `AI_QUOTA_EXCEEDED` 等 TaskError | 任务/Provider 额度或限流 | 仅按 `retryable`/`retry_after_ms` 退避；重复回放不新增扣次 |
+| `503` | `AI_FEATURE_DISABLED` | 旅程或 AI PROFILE 门禁关闭 | 展示稳定禁用状态，不重试同一请求 |
+| `503` | 既有 `AI_TEMPORARILY_UNAVAILABLE` 等 TaskError | Provider/任务基础设施临时不可用 | 仅在 `retryable=true` 时退避重试 |
+
+所有写入遵循实际接口的幂等矩阵：build/confirm/PATCH 的 key 必填；preview POST 可选但建议提供；GET 不需要 key。相同 key + 相同摘要会回放既有操作或当前安全快照，不重复生成任务、正式 revision 或 narrative；confirm 重试返回同一正式结果；同 key + 不同摘要返回 `409 TASK_IDEMPOTENCY_CONFLICT`。GET 不写库、不扣额度；真实生成任务才可能消耗既有 Gateway/任务额度，本协议不新增收费或固定每日次数，也不承诺固定生成秒数。
+
+撤权、删除或版本失效后，Worker 在任何写回前必须再次校验授权和版本；旧记录保留不代表仍可读或可恢复使用。确认后的正式画像才进入既有授权、可见性和投影链；行为信号不能修改正式字段或明确底线，也不能冒充用户确认。

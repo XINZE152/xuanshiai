@@ -13,10 +13,12 @@ from app.core.config import settings
 from app.core.logging import request_id_context
 from app.db.session import get_db
 from app.schemas.ai_common import AiErrorResponse
+from app.schemas.ai_profile import ProfileSubject
 from app.schemas.ai_profile_card import (
     ProfileCardApplyRequest,
     ProfileCardApplyResponse,
     ProfileCardDraftRead,
+    ProfileCardExportResponse,
     ProfileCardSummarizeAccepted,
     ProfileCardSummarizeRequest,
 )
@@ -29,6 +31,11 @@ from app.services.ai.profile_card import (
     apply_profile_card_draft,
     load_profile_card_draft,
     request_profile_card_summarize,
+)
+from app.services.ai.profile_card_export import (
+    ProfileCardExportStale,
+    ProfileCardExportUnavailable,
+    export_public_profile_card,
 )
 from app.services.ai.tasks import TaskError
 
@@ -208,3 +215,46 @@ async def apply_profile_card_draft_route(
             retryable=True,
         ) from exc
     return ProfileCardApplyResponse.model_validate(result)
+
+
+@router.get(
+    "/profile-card/export",
+    response_model=ProfileCardExportResponse,
+    status_code=status.HTTP_200_OK,
+    summary="导出当前 personal 正式版本已采用的公开资料卡字段（海报用）",
+)
+async def export_profile_card_route(
+    revision_id: int = Query(
+        ...,
+        ge=1,
+        description="调用方当前查看的 personal 正式版本 ID；与服务端当前正式版本不一致时返回 409",
+    ),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProfileCardExportResponse:
+    _require_profile_feature()
+    try:
+        payload = await export_public_profile_card(
+            db,
+            current.id,
+            subject=ProfileSubject.PERSONAL,
+            revision_id=revision_id,
+        )
+    except AIConsentRequired as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except AIInputError as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileCardExportStale as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except ProfileCardExportUnavailable as exc:
+        raise _error_response(exc.code, exc.message, exc.status_code) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - 统一包装未知错误
+        raise _error_response(
+            "AI_TEMPORARILY_UNAVAILABLE",
+            "资料卡公开导出暂时不可用",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            retryable=True,
+        ) from exc
+    return ProfileCardExportResponse.model_validate(payload)

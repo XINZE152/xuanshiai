@@ -411,18 +411,16 @@ def build_master_prompt(
     build_context: str = "",
     *,
     subject: str = "personal",
+    continuous_context: str = "",
 ) -> list[dict[str, str]]:
-    """组装多轮消息列表：system + 画像上下文 + 构建上下文 + 历史 + 当前用户消息。
-
-    ``history`` 为 ``[{role, content}, ...]`` 格式，只保留最近若干轮。
-    ``narrative_context`` 来自 :func:`_format_narrative_context`。
-    ``build_context`` 来自 :func:`build_build_context`，空串表示纯聊模式（不注入）。
-    """
+    """组装多轮消息；continuous_v2 追加跨主体恢复上下文。"""
     context_blocks: list[tuple[str, str]] = []
     if narrative_context:
         context_blocks.append(("已发布画像参考", narrative_context))
     if build_context:
         context_blocks.append(("当前建构状态", build_context))
+    if continuous_context:
+        context_blocks.append(("连续对话恢复上下文", continuous_context))
     return build_moxiang_dialogue_messages(
         user_message=user_message,
         subject=subject,

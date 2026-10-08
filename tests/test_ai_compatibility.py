@@ -20,7 +20,7 @@ of being rolled back when ``get_db`` exits.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -256,6 +256,52 @@ def test_sparse_result_marks_unknown_and_coverage_insufficient(
     assert result.pair_score is None
     refs = build_compatibility_evidence(result)
     assert {ref.reason_code for ref in refs} == set(result.reason_codes)
+
+
+# ----------------------------------------------------------------------
+# §5 固定匹配解读：前端话术字典必须与后端 _EVIDENCE_LIMITATIONS 一一对应
+# ----------------------------------------------------------------------
+
+
+def test_evidence_limitations_cover_every_displayable_reason_code() -> None:
+    """可展示原因码必须都有固定话术；不可展示码不得进入展示白名单。
+
+    前端 ``XsaAiMatchSheet.uvue`` 的固定话术字典按本字典逐字对齐，
+    这里钉住后端口径，防止两边模板漂移。
+    """
+    from app.services.ai import compatibility as compat
+
+    displayable_codes = {
+        compat.REASON_AGE,
+        compat.REASON_CITY,
+        compat.REASON_MARRIAGE,
+        compat.REASON_EDUCATION,
+        compat.REASON_HEIGHT,
+        compat.REASON_INCOME,
+        compat.REASON_INTEREST,
+        compat.REASON_GOAL,
+    }
+    for code in displayable_codes:
+        assert code in compat._EVIDENCE_LIMITATIONS, code
+        assert code not in compat._NON_DISPLAYABLE_REASONS, code
+    # 非展示类原因码即使有说明，也不得被判为可展示。
+    for code in compat._NON_DISPLAYABLE_REASONS:
+        assert code not in displayable_codes, code
+
+
+def test_unknown_reason_code_falls_back_without_claiming_satisfaction(
+    rule_set: RuleSet, feature_a: FeatureSet, feature_b: FeatureSet
+) -> None:
+    """未知原因码只走通用 disclaim 兜底，不得被说成「满足」或「不满足」。"""
+    from app.services.ai import compatibility as compat
+
+    result = compute_compatibility(feature_a, feature_b, rule_set)
+    unknown = replace(result, reason_codes=result.reason_codes + ("MADE_UP_CODE",))
+    refs = build_compatibility_evidence(unknown)
+    fabricated = [ref for ref in refs if ref.reason_code == "MADE_UP_CODE"]
+    assert len(fabricated) == 1
+    assert fabricated[0].limitation == compat.DISCLAIMER
+    assert fabricated[0].field_keys == ()
 
 
 # ----------------------------------------------------------------------

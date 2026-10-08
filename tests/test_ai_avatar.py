@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -457,6 +458,48 @@ def test_owner_answers_are_explicit_and_sorted_into_conversation() -> None:
     ]
     assert messages[-1].id == -7
 
+
+def test_pending_handoff_marks_only_the_matching_ai_message() -> None:
+    """A2：待本人补答只能标记对应那条 AI 回答，且不得伪造本人气泡。"""
+    profile = AiAvatarProfileResponse(id=2, name="测试用户", avatar="avatar")
+    base = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    rows = [
+        {"id": 1, "role": "user", "content": "你喜欢什么运动？", "category": "general", "created_at": base},
+        {"id": 2, "role": "assistant", "content": "Ta 暂未填写", "category": "general", "created_at": base},
+        {"id": 3, "role": "user", "content": "你住在哪里？", "category": "general", "created_at": base},
+        {"id": 4, "role": "assistant", "content": "Ta 暂未填写", "category": "general", "created_at": base},
+    ]
+    messages = ai_avatar._map_rows(
+        rows,
+        profile,
+        [],
+        [{"question": "  你喜欢什么运动？  ", "category": "interest"}],
+    )
+    by_id = {message.id: message for message in messages}
+    assert by_id[2].handoffStatus == "pending"
+    assert by_id[2].handoffRequired is True
+    assert by_id[2].category == "interest"
+    # 未转交的问题不能被连带标记。
+    assert by_id[4].handoffStatus == "not_requested"
+    assert by_id[4].handoffRequired is False
+    # 没有本人回答时不得生成 owner-answer 气泡。
+    assert [message.source for message in messages] == ["system", "user", "real-ai", "user", "real-ai"]
+
+
+def test_owner_answer_edit_accepts_answered_status() -> None:
+    """A1：本人再次编辑已回答内容必须可更新，deleted/跨账号继续被拒。"""
+    source = inspect.getsource(ai_avatar.answer_owner_question)
+    assert "status IN ('pending', 'answered')" in source
+    assert "status = 'pending'" not in source
+    assert source.count("status IN ('pending', 'answered')") == 2
+    assert "owner_user_id = :owner_id" in source
+
+
+def test_pending_owner_rows_scoped_to_conversation() -> None:
+    """A2：待补答查询必须限定在同一访客会话内，避免跨会话串号。"""
+    source = inspect.getsource(ai_avatar._pending_owner_rows)
+    assert "conversation_id = :conversation_id" in source
+    assert "status = 'pending'" in source
 
 @pytest.mark.asyncio
 async def test_quota_refund_failure_does_not_mask_original_error(

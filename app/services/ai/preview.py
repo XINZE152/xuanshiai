@@ -41,7 +41,6 @@ class PreviewConflict(Exception):
         self.code = code
         self.message = message
 
-
 @dataclass(frozen=True)
 class PreviewRecord:
     preview_id: str
@@ -55,7 +54,10 @@ class PreviewRecord:
     last_error: str | None
     created_at: str | None
     updated_at: str | None
-
+    flow_version: str | None = None
+    generation_status: str | None = None
+    fields: list[dict[str, Any]] | None = None
+    boundary_changed: bool = False
 
 class PreviewRepository(Protocol):
     """仓储协议(单元测试可直接 fake)。"""
@@ -211,6 +213,7 @@ class SqlPreviewRepository:
 
 
 def _serialize(row: dict[str, Any]) -> PreviewRecord:
+    fields = row.get("fields")
     return PreviewRecord(
         preview_id=str(row.get("preview_id") or ""),
         draft_id=str(row.get("draft_id") or ""),
@@ -223,6 +226,10 @@ def _serialize(row: dict[str, Any]) -> PreviewRecord:
         last_error=row.get("last_error"),
         created_at=str(row["created_at"]) if row.get("created_at") else None,
         updated_at=str(row["updated_at"]) if row.get("updated_at") else None,
+        flow_version=row.get("flow_version"),
+        generation_status=row.get("generation_status"),
+        fields=fields if isinstance(fields, list) else [],
+        boundary_changed=bool(row.get("boundary_changed", False)),
     )
 
 
@@ -285,12 +292,9 @@ async def generate_preview(
 
 
 async def get_preview(
-    *,
-    user_id: int,
-    preview_id: str,
-    repo: PreviewRepository,
+    *, user_id: int, preview_id: str, repo: PreviewRepository,
 ) -> PreviewRecord | None:
-    """按 preview_id 读取;不在当前用户下返回 None(路由层翻译 404)。"""
+    """按 preview_id 读取;越权和不存在统一返回 None。"""
     row = await repo.find_preview_by_id(preview_id, user_id)
     if row is None:
         return None

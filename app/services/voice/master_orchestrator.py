@@ -73,6 +73,7 @@ class MoxiangMasterOrchestrator:
     _history: list[dict[str, str]] = field(default_factory=list)
     _narrative_context: str = ""
     _build_context: str = ""
+    _continuous_context: str = ""
     _last_reply_text: str = ""
     _generation_id: int = 0
     _last_request_id: str = ""
@@ -84,6 +85,10 @@ class MoxiangMasterOrchestrator:
     def set_build_context(self, context: str) -> None:
         """设置建构模式上下文（缺失硬字段/已确认摘要/进度），空串=纯聊模式。"""
         self._build_context = context
+
+    def set_continuous_context(self, context: str) -> None:
+        """刷新 continuous_v2 的双主体恢复上下文；legacy 不受影响。"""
+        self._continuous_context = context
 
     def hydrate_history(self, turns: list[dict[str, str]]) -> None:
         """Restore the recent persisted dialogue for a resumed WS session.
@@ -109,6 +114,7 @@ class MoxiangMasterOrchestrator:
         *,
         request_id: str = "",
         subject: str = "personal",
+        flow_version: str = "legacy",
     ) -> AsyncIterator[tuple[str, str]]:
         """流式生成墨相师回复。
 
@@ -126,6 +132,9 @@ class MoxiangMasterOrchestrator:
             user_text, self._history, self._narrative_context,
             build_context=self._build_context,
             subject=subject,
+            continuous_context=(
+                self._continuous_context if flow_version == "continuous_v2" else ""
+            ),
         )
         error_code: str | None = None
         provider_name = settings.ai_provider

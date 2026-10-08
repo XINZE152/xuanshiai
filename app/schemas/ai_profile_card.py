@@ -136,3 +136,25 @@ class ProfileCardApplyResponse(BaseModel):
     written_fields: list[str] = Field(default_factory=list)
     skipped_fields: list[str] = Field(default_factory=list)
     profile: dict[str, Any] | None = None
+
+
+class ProfileCardPublicPayload(BaseModel):
+    """海报可公开内容白名单：仅已采用的公开介绍与标签，不含心理洞察。"""
+
+    persona_title: str
+    persona_tags: list[str] = Field(default_factory=list)
+    self_intro: str = ""
+
+
+class ProfileCardExportResponse(BaseModel):
+    """``GET /profile-card/export`` 响应：只导出当前正式版本的公开字段。
+
+    ``revision_id`` 为服务端当前 personal 正式版本；调用方传入的
+    ``revision_id`` 与之不一致时返回 409，避免迟到页面导出错误版本。
+    """
+
+    status: Literal["ready"]
+    subject: Literal["personal"]
+    revision_id: int
+    source_revision_id: int
+    public: ProfileCardPublicPayload

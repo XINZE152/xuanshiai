@@ -773,6 +773,10 @@ class ProfileStore:
         if row is None:
             return False
         if "status = 'stale'" in sql:
+            # ``_preempt_active_slot`` 的字面量 SQL 带 ``AND active_status = 1``，
+            # 重复抢占是 no-op；``_mark_stale`` 不带该守卫，仍无条件生效。
+            if "AND active_status = 1" in sql and int(row.get("active_status") or 0) != 1:
+                return False
             row["status"] = "stale"
             row["active_status"] = 0
             row["ended_at"] = _now()
@@ -790,6 +794,11 @@ class ProfileStore:
             row["active_status"] = 0
             row["ended_at"] = _now()
         elif "SET status = :status" in sql:
+            # 镜像真实 SQL 的 ``AND active_status = 1`` 终态守卫：已被抢占的会话
+            # （active_status=0）状态推进必须落空，否则在飞抽取任务会按加载时的
+            # extracting 快照把 stale 行改回 awaiting_confirmation。
+            if "AND active_status = 1" in sql and int(row.get("active_status") or 0) != 1:
+                return False
             row["status"] = str(params["status"])
         elif "skipped_field_keys = :skipped_field_keys" in sql:
             row["skipped_field_keys"] = params.get("skipped_field_keys")

@@ -61,6 +61,11 @@ from app.services.voice.realtime.protocol import (
     PROTOCOL_VERSION_V2,
     GENERATION_STATUSES,
 )
+from app.services.voice.realtime.transcript_confirmation import (
+    TRANSCRIPT_TTL_SECONDS,
+    validate_client_turn_id,
+    validate_turn_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +124,10 @@ class ActiveResponse:
     user_turn_id: str = ""
     task_id: str = ""
     submission_task: asyncio.Task[None] | None = None
+    transcript_id: str = ""
+    confirmed_text: str = ""
+    transcript_confirmed: bool = False
+    transcript_expiry_task: asyncio.Task[None] | None = None
     vendor_text_done: bool = False
     vendor_audio_done: bool = False
     vendor_turn_done: bool = False
@@ -138,7 +147,6 @@ class ActiveResponse:
             "played_ms": self.played_ms,
         }
 
-
 class RealtimeVoiceSession:
     """一条业务 WS 连接内的实时语音会话（生命周期与连接一致）。"""
 
@@ -149,10 +157,13 @@ class RealtimeVoiceSession:
         callbacks: RealtimeSessionCallbacks,
         upstream_factory: Callable[[int], SenseAudioUpstream] | None = None,
         submission_hold_seconds: float = 15.0,
+        require_transcript_confirmation: bool = False,
     ) -> None:
         self._provider_config = provider_config
         self._callbacks = callbacks
         self._submission_hold_seconds = max(1.0, submission_hold_seconds)
+        self._require_transcript_confirmation = require_transcript_confirmation
+        self._transcript_ttl_seconds = TRANSCRIPT_TTL_SECONDS
         self._upstream_factory = upstream_factory
 
         self._upstream: SenseAudioUpstream | None = None
@@ -165,7 +176,10 @@ class RealtimeVoiceSession:
         self._uplink_task: asyncio.Task[None] | None = None
 
         self._active: ActiveResponse | None = None
+        self._transcript_receipts: dict[str, tuple[str, str]] = {}
+        self._transcript_receipt_events: dict[str, dict[str, Any]] = {}
         self._awaiting_final = False  # speech.started 后置位，定稿后清位
+        self._last_transcript_error = ""
         self._pending_client_turn_id = ""
         self._input_open = False
         self._closed = False
@@ -208,13 +222,114 @@ class RealtimeVoiceSession:
         """客户端真实开麦；绑定本轮发言的幂等身份。"""
         if self._closed or not self._input_open:
             return
-        self._pending_client_turn_id = client_turn_id or uuid.uuid4().hex
+        try:
+            self._pending_client_turn_id = validate_client_turn_id(client_turn_id)
+        except AIInputError:
+            self._pending_client_turn_id = uuid.uuid4().hex
+
+    async def handle_confirm_transcript(
+        self, transcript_id: str, text: str, client_turn_id: str = ""
+    ) -> bool:
+        """确认连接内预览；同一确认重放不再次启动业务提交。"""
+        self._last_transcript_error = ""
+        if self._closed or not self._require_transcript_confirmation:
+            return False
+        try:
+            expected_client_turn_id = validate_client_turn_id(client_turn_id)
+        except AIInputError:
+            self._last_transcript_error = "AI_INPUT_INVALID"
+            return False
+        resp = self._active
+        if resp is None or resp.transcript_id != transcript_id:
+            receipt = self._transcript_receipts.get(transcript_id)
+            if receipt is None:
+                return False
+            try:
+                clean_text = validate_turn_text(text)
+            except AIInputError:
+                self._last_transcript_error = "AI_INPUT_INVALID"
+                return False
+            if receipt != (expected_client_turn_id, clean_text):
+                self._last_transcript_error = "TRANSCRIPT_CONFLICT"
+                await self._emit({"type": "error", "code": "TRANSCRIPT_CONFLICT", "message": "同一转写不能以不同内容或身份重复确认"})
+                return False
+            replay_event = self._transcript_receipt_events.get(transcript_id)
+            if replay_event is not None:
+                await self._emit(replay_event)
+            return True
+        if expected_client_turn_id != resp.client_turn_id:
+            self._last_transcript_error = "TRANSCRIPT_CONFLICT"
+            await self._emit({"type": "error", "code": "TRANSCRIPT_CONFLICT", "message": "同一转写不能以不同身份重复确认"})
+            return False
+        try:
+            clean_text = validate_turn_text(text)
+        except AIInputError:
+            self._last_transcript_error = "AI_INPUT_INVALID"
+            return False
+        if resp.transcript_confirmed:
+            if resp.confirmed_text != clean_text:
+                self._last_transcript_error = "TRANSCRIPT_CONFLICT"
+                await self._emit({"type": "error", "code": "TRANSCRIPT_CONFLICT", "message": "同一转写不能以不同内容重复确认"})
+                return False
+            replay_event = self._transcript_receipt_events.get(transcript_id)
+            if replay_event is not None:
+                await self._emit(replay_event)
+            return True
+        if resp.transcript_expiry_task is not None and resp.transcript_expiry_task.done():
+            return False
+        resp.transcript_confirmed = True
+        resp.confirmed_text = clean_text
+        if resp.transcript_expiry_task is not None:
+            resp.transcript_expiry_task.cancel()
+            resp.transcript_expiry_task = None
+        resp.submission_task = self._spawn(self._run_submission(resp, clean_text))
+        return True
+
+    async def handle_cancel_transcript(
+        self, transcript_id: str, client_turn_id: str = ""
+    ) -> bool:
+        """取消尚未确认的预览并作废供应商当前回复。"""
+        self._last_transcript_error = ""
+        if self._closed or not self._require_transcript_confirmation:
+            return False
+        try:
+            expected_client_turn_id = validate_client_turn_id(client_turn_id)
+        except AIInputError:
+            self._last_transcript_error = "AI_INPUT_INVALID"
+            return False
+        resp = self._active
+        if (
+            resp is None
+            or resp.transcript_id != transcript_id
+            or resp.transcript_confirmed
+            or expected_client_turn_id != resp.client_turn_id
+        ):
+            return False
+        if resp.transcript_expiry_task is not None:
+            resp.transcript_expiry_task.cancel()
+            resp.transcript_expiry_task = None
+        resp.hold_buffer.clear()
+        self._active = None
+        await self._emit({"type": "transcript_cancelled", "transcript_id": transcript_id})
+        if self._upstream is not None:
+            await self._upstream.send_cancel()
+        self._spawn(self._rotate_upstream(reason="transcript-cancel"))
+        return True
+
+    async def _expire_transcript(self, resp: ActiveResponse) -> None:
+        await asyncio.sleep(self._transcript_ttl_seconds)
+        if self._active is not resp or resp.transcript_confirmed or self._closed:
+            return
+        resp.hold_buffer.clear()
+        resp.gate_open = False
+        self._active = None
+        await self._emit({"type": "transcript_expired", "transcript_id": resp.transcript_id})
+        if self._upstream is not None:
+            await self._upstream.send_cancel()
+        self._spawn(self._rotate_upstream(reason="transcript-expired"))
 
     async def handle_audio_end(self) -> None:
-        """v2 下 ``audio_end`` 是 no-op：说话结束由供应商 VAD 判定。
-
-        保留事件以兼容旧客户端时序，不据此关闭输入窗口。
-        """
+        """v2 下 ``audio_end`` 是 no-op：说话结束由供应商 VAD 判定。"""
 
     async def handle_interrupt(self, generation_id: str = "") -> None:
         """客户端点击打断：立即作废当前世代并轮转上游。"""
@@ -300,9 +415,13 @@ class RealtimeVoiceSession:
         if resp is not None:
             if resp.playback_status in {"not_started", "playing"}:
                 resp.playback_status = "unknown"
+            if resp.transcript_expiry_task is not None:
+                resp.transcript_expiry_task.cancel()
+                resp.transcript_expiry_task = None
             resp.hold_buffer.clear()
             resp.gate_open = False
-            await self._persist_if_needed(resp)
+            if resp.transcript_confirmed:
+                await self._persist_if_needed(resp)
             self._active = None
         uplink = self._uplink_task
         if uplink is not None:
@@ -320,6 +439,11 @@ class RealtimeVoiceSession:
     # ------------------------------------------------------------------
     # 观测
     # ------------------------------------------------------------------
+
+    @property
+    def last_transcript_error(self) -> str:
+        """最近一次转写命令的明确业务错误；空值表示应由路由判为过期。"""
+        return self._last_transcript_error
 
     @property
     def idle_seconds(self) -> float:
@@ -472,27 +596,22 @@ class RealtimeVoiceSession:
             return
         self._awaiting_final = False
         if self._active is not None:
-            # 未终态的旧回复仍在（turn.done 迟到等）：先作废旧回复再开新轮，
-            # 保证一轮只生成一份口头回复。
             old = self._active
             old.status = "interrupted"
             old.hold_buffer.clear()
             old.gate_open = False
             self._active = None
-            await self._emit(
-                build_response_done_event(old.generation_id, "interrupted")
-            )
-            await self._persist_if_needed(old)
-            logger.warning(
-                "realtime_overlapping_final generation=%s", old.generation_id
-            )
+            await self._emit(build_response_done_event(old.generation_id, "interrupted"))
+            if not self._require_transcript_confirmation or old.transcript_confirmed:
+                await self._persist_if_needed(old)
         clean_text = text.strip()
         if not clean_text:
-            # 空定稿（纯噪声）：重新进入录音，不计发言。
             self._spawn(self._enter_listening())
             return
-        await self._emit({"type": "final_transcript", "text": clean_text})
-        client_turn_id = self._pending_client_turn_id or uuid.uuid4().hex
+        try:
+            client_turn_id = validate_client_turn_id(self._pending_client_turn_id)
+        except AIInputError:
+            client_turn_id = uuid.uuid4().hex
         self._pending_client_turn_id = ""
         resp = ActiveResponse(
             generation_id=uuid.uuid4().hex,
@@ -500,10 +619,21 @@ class RealtimeVoiceSession:
         )
         self._active = resp
         self._input_open = False
+        if self._require_transcript_confirmation:
+            resp.transcript_id = uuid.uuid4().hex
+            await self._emit({
+                "type": "transcript_preview",
+                "transcript_id": resp.transcript_id,
+                "client_turn_id": client_turn_id,
+                "text": clean_text,
+                "expires_in": int(self._transcript_ttl_seconds),
+            })
+            await self._emit(build_input_closed_event())
+            resp.transcript_expiry_task = self._spawn(self._expire_transcript(resp))
+            return
+        await self._emit({"type": "final_transcript", "text": clean_text})
         await self._emit(build_input_closed_event())
-        resp.submission_task = self._spawn(
-            self._run_submission(resp, clean_text)
-        )
+        resp.submission_task = self._spawn(self._run_submission(resp, clean_text))
 
     async def _run_submission(self, resp: ActiveResponse, text: str) -> None:
         """提交最终转写（落库+审核+入队）；决定放行门的开关。"""
@@ -539,9 +669,31 @@ class RealtimeVoiceSession:
             return
         resp.user_turn_id = outcome.turn_id
         resp.task_id = outcome.task_id
+        if resp.transcript_id:
+            self._transcript_receipts[resp.transcript_id] = (
+                resp.client_turn_id, text
+            )
+            if len(self._transcript_receipts) > 128:
+                self._transcript_receipts.pop(next(iter(self._transcript_receipts)))
+            receipt_event = {
+                "type": "transcript_confirmed",
+                "transcript_id": resp.transcript_id,
+                "client_turn_id": resp.client_turn_id,
+                "source_id": resp.user_turn_id,
+                "text": text,
+            }
+            self._transcript_receipt_events[resp.transcript_id] = receipt_event
+            if len(self._transcript_receipt_events) > 128:
+                self._transcript_receipt_events.pop(
+                    next(iter(self._transcript_receipt_events))
+                )
+            await self._emit(receipt_event)
         if resp.status == "streaming" and not resp.gate_open:
             resp.gate_open = True
             await self._flush_hold_buffer(resp)
+            # Provider 可能在用户确认前已经完成文本/音频/turn.done；
+            # 开门后再次检查，确保确认轮次最终只收一份回复。
+            await self._maybe_finalize(resp)
         # 打断发生在提交期间：门保持关闭、缓冲已清空；回复快照由
         # _persist_if_needed 在打断路径中落库，无需在此放行。
 
@@ -605,9 +757,10 @@ class RealtimeVoiceSession:
         await self._finalize_completed(resp)
 
     async def _finalize_completed(self, resp: ActiveResponse) -> None:
-        """按 completed 收尾：发 response_done、落快照、等播放回执。"""
+        """按 completed 收尾；continuous_v2 必须先确认转写。"""
+        if self._require_transcript_confirmation and not resp.transcript_confirmed:
+            return
         resp.finalized = True
-        # 放行门未开（审核慢）：等提交结果决定放行或作废，绝不越门。
         if not resp.gate_open and resp.submission_task is not None:
             try:
                 await asyncio.wait_for(
@@ -624,14 +777,12 @@ class RealtimeVoiceSession:
                 return
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - 提交任务内部已失败并终态化
+            except Exception:
                 return
             if resp.status != "streaming" or not resp.gate_open:
                 return
         resp.status = "completed"
-        await self._emit(
-            build_response_done_event(resp.generation_id, "completed")
-        )
+        await self._emit(build_response_done_event(resp.generation_id, "completed"))
         await self._persist_if_needed(resp)
         await self._sync_response_status(resp)
         # 播放完成回执到达后才进入下一轮（handle_playback_finished）。

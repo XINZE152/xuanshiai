@@ -13,6 +13,8 @@ reads can be exercised without a real database.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import re
 import uuid
@@ -26,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 import app.services.ai.search as search_mod
 from app.api.dependencies import CurrentUser, get_current_user
 from app.core.config import settings
+from app.schemas.ai_common import AiTaskStatus
 from app.db.session import get_db
 from app.main import app
 from app.schemas.ai_search import (
@@ -1910,6 +1913,114 @@ def test_delete_search_snapshot_still_works_when_search_feature_disabled(
 def test_search_handlers_are_registered_into_the_worker() -> None:
     assert "search_parse" in worker_mod.TASK_HANDLERS
     assert "search_execute" in worker_mod.TASK_HANDLERS
+
+
+# ----------------------------------------------------------------------
+# S3：终态同键重放必须恢复草稿引用（payload_summary 已被清空）
+# ----------------------------------------------------------------------
+
+
+class _ReplayRow(dict):
+    def __missing__(self, key):
+        return None
+
+
+def _task_record(**overrides) -> search_mod.AiTaskRecord:
+    """只填恢复逻辑用得到的字段，其余保持同一 owner 的最小默认值。"""
+    fields = dict(
+        id=1,
+        task_id="task-1",
+        owner_user_id=10,
+        task_type="search_parse",
+        scene="search",
+        idempotency_key="idem-1",
+        status=AiTaskStatus.SUCCEEDED,
+        request_digest=None,
+        stage=None,
+        progress_percent=None,
+        attempt_count=1,
+        max_attempts=3,
+        next_run_at=None,
+        lease_owner=None,
+        lease_until=None,
+        consent_snapshot_json=None,
+        source_revision_json=None,
+        payload_summary=None,
+        error_code=None,
+        error_message=None,
+        result_ref=None,
+        created_at=None,
+        updated_at=None,
+        started_at=None,
+        finished_at=None,
+    )
+    fields.update(overrides)
+    return search_mod.AiTaskRecord(**fields)
+
+
+def test_recover_replayed_draft_id_uses_payload_first(monkeypatch) -> None:
+    """payload 仍存在时直接返回其中的草稿引用，不再触碰数据库。"""
+
+    async def must_not_query(*_args, **_kwargs):
+        raise AssertionError("payload 命中时不得再查库")
+
+    monkeypatch.setattr(search_mod, "_load_draft_row", must_not_query)
+    recovered = asyncio.run(
+        search_mod._recover_replayed_draft_id(
+            object(), 10, _task_record(payload_summary={"draft_id": "draft-from-payload"})
+        )
+    )
+    assert recovered == "draft-from-payload"
+
+
+def test_recover_replayed_draft_id_falls_back_to_result_ref(monkeypatch) -> None:
+    """succeeded 任务 payload 被清空后，必须能从 result_ref 恢复同一 owner 的草稿。"""
+    captured: list[str] = []
+
+    async def fake_load_draft_row(_db, draft_id, **_kwargs):
+        captured.append(draft_id)
+        return _ReplayRow({"draft_id": draft_id, "user_id": 10})
+
+    monkeypatch.setattr(search_mod, "_load_draft_row", fake_load_draft_row)
+    recovered = asyncio.run(
+        search_mod._recover_replayed_draft_id(
+            object(), 10, _task_record(result_ref="search-draft:draft-from-ref")
+        )
+    )
+    assert recovered == "draft-from-ref"
+    assert captured == ["draft-from-ref"]
+
+
+def test_recover_replayed_draft_id_rejects_other_owner_and_foreign_ref(monkeypatch) -> None:
+    """跨账号草稿或非草稿结果引用都必须判为无效，不能借重放越权。"""
+
+    async def fake_load_draft_row(_db, draft_id, **_kwargs):
+        return _ReplayRow({"draft_id": draft_id, "user_id": 99})
+
+    monkeypatch.setattr(search_mod, "_load_draft_row", fake_load_draft_row)
+    assert (
+        asyncio.run(
+            search_mod._recover_replayed_draft_id(
+                object(), 10, _task_record(result_ref="search-draft:draft-of-other-user")
+            )
+        )
+        == ""
+    )
+    assert (
+        asyncio.run(
+            search_mod._recover_replayed_draft_id(
+                object(), 10, _task_record(result_ref="search-snapshot:snap-1")
+            )
+        )
+        == ""
+    )
+
+
+def test_create_search_draft_replay_uses_recovery_not_raw_payload() -> None:
+    """create_search_draft 的重放分支必须走恢复函数，而不是直接读 payload 后 400。"""
+    source = inspect.getsource(search_mod.create_search_draft)
+    assert "_recover_replayed_draft_id" in source
+    assert 'payload.get("draft_id")' not in source
 
 
 # ----------------------------------------------------------------------

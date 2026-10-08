@@ -297,11 +297,14 @@ def test_preview_endpoints_reference_typed_response_models() -> None:
     create_schema = schemas[create_ref.split("/")[-1]]
     detail_schema = schemas[get_ref.split("/")[-1]]
 
-    # create 响应键集与历史裸 dict 返回逐键一致（7 键）
+    # 旧七个核心键保留；新版扩展字段必须在 OpenAPI 明确声明，不能 extra=allow 绕过。
     assert set(create_schema["properties"]) == {
         "preview_id", "draft_id", "expected_revision",
         "subject", "status", "content", "task_id",
+        "flow_version", "generation_status", "fields", "boundary_changed",
     }
+    assert create_schema["properties"]["fields"]["items"]["$ref"].endswith("/ProfilePreviewField")
+    assert {"field_key", "field_kind", "change", "value_json"} <= set(schemas["ProfilePreviewField"]["properties"])
     assert create_schema["required"] == [
         "preview_id", "draft_id", "expected_revision",
         "subject", "status", "content",

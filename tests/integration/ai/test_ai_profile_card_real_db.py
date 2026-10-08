@@ -14,9 +14,11 @@ from app.api.dependencies import CurrentUser
 from app.api.routes.ai_profile_card import apply_profile_card_draft_route
 from app.schemas.ai_common import AiConsentGrantRequest
 from app.schemas.ai_profile_card import ProfileCardApplyRequest
+from app.schemas.ai_profile import ProfileSubject
 from app.schemas.auth import ProfileUpdateRequest
 from app.services.ai.consents import grant_consent
-from app.services.ai.profile import AIInputError
+from app.services.ai import profile
+from app.services.ai.profile import AIConsentRequired, AIInputError
 from app.services.ai.profile_card import (
     ProfileCardDraftNotFound,
     ProfileCardVersionConflict,
@@ -332,3 +334,155 @@ async def test_ab_public_visibility_and_removal_use_existing_policy(seeded):
         public = await get_profile(db, USER_A, public=True)
         assert not public["self_intro"] and not public["personal_tags"]
         assert await _target_rows(db, USER_B, [USER_A]) == {}
+
+
+# ---------------------------------------------------------------------------
+# 海报公开导出：只允许当前 personal 正式版本上已采用的公开字段
+# ---------------------------------------------------------------------------
+
+
+async def _adopt(factory, revision: int, draft: str = DRAFT_A, key: str = "s1-export-key") -> None:
+    async with factory() as db:
+        await apply_profile_card_draft(db, USER_A, _body(revision, draft), key)
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_export_returns_only_adopted_public_fields(seeded):
+    from app.services.ai.profile_card_export import export_public_profile_card
+
+    factory, revision = seeded
+    await _adopt(factory, revision)
+    async with factory() as db:
+        payload = await export_public_profile_card(
+            db, USER_A, subject=ProfileSubject.PERSONAL, revision_id=revision
+        )
+    assert payload["status"] == "ready"
+    assert payload["subject"] == "personal"
+    assert payload["revision_id"] == revision
+    # 只导出已采用的公开介绍与标签，不含任何心理洞察/正文/原始对话。
+    assert payload["public"]["self_intro"] == INTRO
+    assert "周末徒步" in payload["public"]["persona_tags"]
+    assert set(payload["public"]) == {"persona_title", "persona_tags", "self_intro"}
+
+
+@pytest.mark.asyncio
+async def test_export_rejects_stale_revision(seeded):
+    from app.services.ai.profile_card_export import (
+        ProfileCardExportStale,
+        export_public_profile_card,
+    )
+
+    factory, revision = seeded
+    await _adopt(factory, revision)
+    async with factory() as db:
+        with pytest.raises(ProfileCardExportStale):
+            await export_public_profile_card(
+                db, USER_A, subject=ProfileSubject.PERSONAL, revision_id=revision + 1
+            )
+
+
+@pytest.mark.asyncio
+async def test_export_requires_confirmed_narrative(seeded):
+    from app.services.ai.profile_card_export import (
+        ProfileCardExportUnavailable,
+        export_public_profile_card,
+    )
+
+    factory, revision = seeded
+    await _adopt(factory, revision)
+    async with factory() as db:
+        await db.execute(
+            text("UPDATE ai_profile_summary SET status='pending_confirmation' WHERE user_id=:uid"),
+            {"uid": USER_A},
+        )
+        await db.commit()
+    async with factory() as db:
+        with pytest.raises(ProfileCardExportUnavailable):
+            await export_public_profile_card(
+                db, USER_A, subject=ProfileSubject.PERSONAL, revision_id=revision
+            )
+
+
+@pytest.mark.asyncio
+async def test_export_rejects_ideal_partner_and_unadopted(seeded):
+    from app.services.ai.profile_card_export import (
+        ProfileCardExportUnavailable,
+        export_public_profile_card,
+    )
+
+    factory, revision = seeded
+    # 未采用任何资料卡草稿：没有公开字段可导出。
+    async with factory() as db:
+        with pytest.raises(ProfileCardExportUnavailable):
+            await export_public_profile_card(
+                db, USER_A, subject=ProfileSubject.PERSONAL, revision_id=revision
+            )
+    await _adopt(factory, revision)
+    # ideal_partner 永不可作为海报来源。
+    async with factory() as db:
+        with pytest.raises(AIInputError):
+            await export_public_profile_card(
+                db, USER_A, subject=ProfileSubject.IDEAL_PARTNER, revision_id=revision
+            )
+
+
+@pytest.mark.asyncio
+async def test_export_requires_active_consent(seeded):
+    from app.services.ai.consents import revoke_consent
+    from app.services.ai.profile_card_export import export_public_profile_card
+
+    factory, revision = seeded
+    await _adopt(factory, revision)
+    async with factory() as db:
+        vector = await profile._load_revision_vector(db, USER_A)
+        await revoke_consent(db, USER_A, "profile_text_extract", "s1-export-revoke", vector.privacy)
+        await db.commit()
+    async with factory() as db:
+        with pytest.raises(AIConsentRequired):
+            await export_public_profile_card(
+                db, USER_A, subject=ProfileSubject.PERSONAL, revision_id=revision
+            )
+
+
+@pytest.mark.asyncio
+async def test_export_route_maps_errors_and_returns_public_payload(seeded):
+    """走真实路由函数：确认 HTTP 层接线、响应模型与错误码映射。"""
+    from app.api.routes.ai_profile_card import export_profile_card_route
+
+    factory, revision = seeded
+    await _adopt(factory, revision)
+    me = CurrentUser(id=USER_A, session_id=1, phone=None, status=1, realname_status=2)
+    async with factory() as db:
+        response = await export_profile_card_route(
+            revision_id=revision, current=me, db=db
+        )
+    assert response.status == "ready"
+    assert response.subject == "personal"
+    assert response.revision_id == revision
+    assert response.public.self_intro == INTRO
+    assert "周末徒步" in response.public.persona_tags
+
+    # 落后版本 → 路由映射为 409 RESULT_STALE。
+    async with factory() as db:
+        with pytest.raises(HTTPException) as stale:
+            await export_profile_card_route(
+                revision_id=revision + 1, current=me, db=db
+            )
+    assert stale.value.status_code == 409
+    assert stale.value.detail["code"] == "RESULT_STALE"
+
+    # 未采用任何草稿 → 404 PROFILE_CARD_EXPORT_NOT_AVAILABLE。
+    async with factory() as db:
+        await db.execute(
+            text("UPDATE ai_profile_card_draft SET status='ready', applied_meta=NULL WHERE user_id=:uid"),
+            {"uid": USER_A},
+        )
+        await db.commit()
+    async with factory() as db:
+        with pytest.raises(HTTPException) as unavailable:
+            await export_profile_card_route(
+                revision_id=revision, current=me, db=db
+            )
+    assert unavailable.value.status_code == 404
+    assert unavailable.value.detail["code"] == "PROFILE_CARD_EXPORT_NOT_AVAILABLE"

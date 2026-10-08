@@ -157,10 +157,27 @@ from app.services.voice.realtime.moxiang_bridge import (
     release_session_slot,
 )
 from app.services.voice.realtime.context import (
-    build_journey_context as _journey_build_context,
+    build_journey_context as _build_journey_context,
     load_master_history as _load_master_history,
     send_json as _send_json,
 )
+from app.services.voice.realtime.transcript_confirmation import (
+    TranscriptBoundary,
+    TranscriptCommand,
+    validate_client_turn_id,
+    validate_turn_text,
+)
+
+async def _journey_build_context(session_id: str, subject: str) -> str | None:
+    """读取旅程上下文；数据库读取失败不得伪装成空上下文。"""
+    if not session_id:
+        return None
+    context = await _build_journey_context(
+        session_id, subject, session_factory=_db_session_factory
+    )
+    if context is None:
+        raise RuntimeError("journey context unavailable")
+    return context
 
 logger = logging.getLogger(__name__)
 
@@ -222,21 +239,22 @@ async def _load_narrative_context(user_id: int) -> str:
         async with session_factory() as db:
             result = await db.execute(
                 sql_text(
-                    "SELECT summary_text, status "
+                    "SELECT summary_text, status, subject "
                     "FROM ai_profile_summary "
-                    "WHERE user_id = :uid AND subject = 'personal' "
-                    "ORDER BY created_at DESC LIMIT 1"
+                    "WHERE user_id = :uid AND subject IN ('personal','ideal_partner') "
+                    "AND status IN ('confirmed','published') "
+                    "ORDER BY created_at DESC"
                 ),
                 {"uid": user_id},
             )
-            row = result.mappings().first()
-            if row is None or not row.get("summary_text"):
-                return ""
-            raw = str(row["summary_text"])
-            data = json.loads(raw) if raw else None
-            if not isinstance(data, dict):
-                return ""
-            return _format_narrative_context(data)
+            rows = result.mappings().all()
+            contexts: list[str] = []
+            for row in rows:
+                raw = str(row.get("summary_text") or "")
+                data = json.loads(raw) if raw else None
+                if isinstance(data, dict):
+                    contexts.append(f"[{row.get('subject')}]\n{_format_narrative_context(data)}")
+            return "\n".join(contexts)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "moxiang_narrative_load_failed user_id=%s err=%s",
@@ -256,19 +274,21 @@ async def _push_streamed_reply(
     request_id: str,
     subject: str,
     build_context: str | None = None,
+    flow_version: str = "legacy",
 ) -> None:
-    """流式推送墨相师回复：ai_thinking → ai_content* → ai_reply。
-
-    ``build_context`` 非 None 时刷新建构模式上下文（缺失硬字段/进度/已确认摘要），
-    让知遇围绕尚未了解的部分提问；None 表示保持当前模式不变（纯聊不注入）。
-    """
+    """流式推送墨相师回复；continuous_v2 使用最新双主体上下文。"""
     if build_context is not None:
         orchestrator.set_build_context(build_context)
+        if flow_version == "continuous_v2":
+            orchestrator.set_continuous_context(build_context)
     await _send_json(ws, {"type": "ai_thinking"})
     full_reply = ""
     try:
         async for kind, chunk_text in orchestrator.stream_reply(
-            user_text, request_id=request_id, subject=subject
+            user_text,
+            request_id=request_id,
+            subject=subject,
+            flow_version=flow_version,
         ):
             if kind == "content":
                 full_reply += chunk_text
@@ -656,7 +676,8 @@ async def _wait_candidate_and_push(
 
 
 async def _submit_journey_candidate_turn(
-    user_id: int, session_id: str, client_turn_id: str, text_content: str
+    user_id: int, session_id: str, client_turn_id: str, text_content: str,
+    flow_version: str = "legacy",
 ) -> tuple[str, str]:
     """Persist one final transcript and enqueue its dedicated candidate task.
 
@@ -672,6 +693,7 @@ async def _submit_journey_candidate_turn(
             owner_user_id=user_id,
             client_turn_id=client_turn_id,
             answer_text=text_content,
+            flow_version=flow_version,
         )
         await db.commit()
     return str(submission.turn.turn_id or ""), str(submission.task_id or "")
@@ -747,13 +769,15 @@ async def moxiang_master_conversation(
     )
     asr_client: Any = None
     partial_task: asyncio.Task[None] | None = None
-    # 每个主体绑定独立的自然对话会话；回复上下文仍属于当前连接。
     sessions_by_subject: dict[str, str] = {}
-    active_subject = ProfileSubject.PERSONAL.value
     poll_tasks: set[asyncio.Task[None]] = set()
+    active_subject = "personal"
     journey_active = False
     journey_consent_version = "profile-text-v1"
-    # 实时语音 v2：协商成功后启用；bridge 承载实时会话与业务回调。
+    # continuous_v2 的半双工 ASR 也必须先经过预览确认；legacy 保持原行为。
+    transcript_boundary = TranscriptBoundary()
+    half_duplex_client_turn_id = ""
+    continuous_v2_active = False
     realtime_v2 = False
     realtime_bridge: MoxiangRealtimeBridge | None = None
     watchdog_task: asyncio.Task[None] | None = None
@@ -771,7 +795,8 @@ async def moxiang_master_conversation(
         if not turn_session_id or _db_session_factory is None:
             return "", ""
         turn_id, task_id = await _submit_journey_candidate_turn(
-            user_id, turn_session_id, client_turn_id, text
+            user_id, turn_session_id, client_turn_id, text,
+            flow_version="continuous_v2" if continuous_v2_active else "legacy",
         )
         if task_id:
             await _send_json(
@@ -791,6 +816,49 @@ async def moxiang_master_conversation(
             poll_tasks.add(watch_task)
             watch_task.add_done_callback(poll_tasks.discard)
         return turn_id, task_id
+    async def _commit_half_duplex_transcript(message: dict[str, Any]) -> None:
+        """continuous_v2 半双工确认：先校验连接绑定，再走统一 journey 提交。"""
+        try:
+            command = TranscriptCommand.model_validate(message)
+            confirmed_text = validate_turn_text(command.text or "")
+        except Exception as exc:  # noqa: BLE001
+            await _send_error(ws, "AI_INPUT_INVALID", str(exc))
+            return
+        try:
+            replay = transcript_boundary.replay(command, confirmed_text, sessions_by_subject.get(active_subject, ""))
+            if replay is not None:
+                await _send_json(ws, replay)
+                return
+            pending = transcript_boundary.resolve(command, sessions_by_subject.get(active_subject, ""))
+            if pending is None:
+                raise AIInputError("TRANSCRIPT_STALE")
+            turn_id, task_id = await _submit_realtime_candidate(
+                confirmed_text, pending.client_turn_id
+            )
+            receipt = {
+                "type": "transcript_confirmed", "transcript_id": pending.transcript_id,
+                "client_turn_id": pending.client_turn_id, "source_id": turn_id,
+                "session_id": pending.session_id, "text": confirmed_text,
+            }
+            transcript_boundary.complete(command, confirmed_text, receipt)
+            await _send_json(ws, receipt)
+            turn_subject = active_subject
+            turn_session_id = sessions_by_subject.get(turn_subject, "")
+            await _push_streamed_reply(
+                ws, orchestrator, confirmed_text, request_id=request_id,
+                subject=turn_subject,
+                build_context=await _journey_build_context(turn_session_id, turn_subject),
+                flow_version="continuous_v2",
+            )
+            await _finish_journey_turn(
+                ws, orchestrator, user_id, turn_session_id, turn_subject,
+                task_id, poll_tasks,
+            )
+        except AIInputError as exc:
+            code = str(exc) if str(exc) in {"TRANSCRIPT_STALE", "TRANSCRIPT_EXPIRED", "TRANSCRIPT_CONFLICT"} else "AI_INPUT_INVALID"
+            await _send_error(ws, code, str(exc))
+        except Exception:  # noqa: BLE001
+            await _send_error(ws, "AI_TEMPORARILY_UNAVAILABLE", "本轮语音暂时无法保存")
 
     try:
         while True:
@@ -807,7 +875,10 @@ async def moxiang_master_conversation(
                 continue
 
             msg_type = message.get("type")
-
+            flow_version = str(message.get("flow_version") or "")
+            continuous_v2 = flow_version == "continuous_v2"
+            if msg_type == "session_start":
+                continuous_v2_active = continuous_v2
             if msg_type == "session_start":
                 requested_mode = str(message.get("mode", ""))
                 if requested_mode != _MOXIANG_JOURNEY_MODE:
@@ -891,6 +962,7 @@ async def moxiang_master_conversation(
                             poll_tasks=poll_tasks,
                             emit=lambda event: _send_json(ws, event),
                             submit_candidate=_submit_realtime_candidate,
+                            require_transcript_confirmation=continuous_v2_active,
                         )
                     else:
                         realtime_bridge.context.session_id = session.session_id
@@ -920,6 +992,11 @@ async def moxiang_master_conversation(
                             "format": AUDIO_FORMAT,
                         },
                     }
+                if continuous_v2 and _db_session_factory is not None:
+                    from app.services.ai.continuous import build_state
+                    async with _db_session_factory() as state_db:
+                        continuous_state = await build_state(state_db, user_id)
+                    await _send_json(ws, {"type": "continuous_state", "state": continuous_state})
                 await _send_json(ws, journey_ready_payload)
                 await _push_journey_progress(ws, session.session_id, requested_subject)
                 if session.created:
@@ -1052,6 +1129,7 @@ async def moxiang_master_conversation(
                         turn_session_id,
                         str(message.get("clientTurnId") or uuid.uuid4().hex),
                         text_content,
+                        flow_version="continuous_v2" if continuous_v2_active else "legacy",
                     )
                     await _send_json(
                         ws,
@@ -1071,6 +1149,7 @@ async def moxiang_master_conversation(
                     build_context=await _journey_build_context(
                         turn_session_id, turn_subject
                     ),
+                    flow_version="continuous_v2" if continuous_v2_active else "legacy",
                 )
                 await _finish_journey_turn(
                     ws,
@@ -1132,7 +1211,81 @@ async def moxiang_master_conversation(
                         ws, subject=invite.subject, draft_id=draft_id
                     )
 
+            elif msg_type == "confirm_transcript":
+                if not continuous_v2_active:
+                    await _send_error(ws, "AI_INPUT_INVALID", "当前协议不支持转写确认")
+                    continue
+                if realtime_v2 and realtime_bridge is not None:
+                    confirmed = await realtime_bridge.handle_confirm_transcript(
+                        str(message.get("transcript_id") or ""),
+                        str(message.get("text") or ""),
+                        str(message.get("client_turn_id") or ""),
+                        str(message.get("session_id") or ""),
+                    )
+                    if not confirmed:
+                        error_code = (
+                            realtime_bridge.session.last_transcript_error
+                            if realtime_bridge.session is not None
+                            else ""
+                        )
+                        if error_code not in {"TRANSCRIPT_CONFLICT", "AI_INPUT_INVALID"}:
+                            error_code = "TRANSCRIPT_STALE"
+                        await _send_error(
+                            ws,
+                            error_code,
+                            "转写确认参数冲突" if error_code == "TRANSCRIPT_CONFLICT" else "转写预览已失效，请重新录音",
+                        )
+                    continue
+                await _commit_half_duplex_transcript(message)
+
+            elif msg_type == "cancel_transcript":
+                if not continuous_v2_active:
+                    await _send_error(ws, "AI_INPUT_INVALID", "当前协议不支持转写取消")
+                    continue
+                if realtime_v2 and realtime_bridge is not None:
+                    cancelled = await realtime_bridge.handle_cancel_transcript(
+                        str(message.get("transcript_id") or ""),
+                        str(message.get("client_turn_id") or ""),
+                        str(message.get("session_id") or ""),
+                    )
+                    if not cancelled:
+                        error_code = (
+                            realtime_bridge.session.last_transcript_error
+                            if realtime_bridge.session is not None
+                            else ""
+                        )
+                        if error_code != "AI_INPUT_INVALID":
+                            error_code = "TRANSCRIPT_STALE"
+                        await _send_error(
+                            ws,
+                            error_code,
+                            "转写参数非法" if error_code == "AI_INPUT_INVALID" else "转写预览已失效",
+                        )
+                    continue
+                try:
+                    command = TranscriptCommand.model_validate(message)
+                    pending = transcript_boundary.resolve(
+                        command, sessions_by_subject.get(active_subject, "")
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    code = str(exc) if str(exc) in {"TRANSCRIPT_STALE", "TRANSCRIPT_EXPIRED"} else "AI_INPUT_INVALID"
+                    await _send_error(ws, code, str(exc))
+                    continue
+                transcript_boundary.clear()
+                await _send_json(
+                    ws,
+                    {"type": "transcript_cancelled", "transcript_id": pending.transcript_id},
+                )
+
             elif msg_type == "audio_start":
+                if continuous_v2_active and not realtime_v2:
+                    try:
+                        half_duplex_client_turn_id = validate_client_turn_id(
+                            str(message.get("client_turn_id") or uuid.uuid4().hex)
+                        )
+                    except AIInputError as exc:
+                        await _send_error(ws, "AI_INPUT_INVALID", str(exc))
+                        continue
                 # v2 实时路径：audio_start 只表示客户端准备录音；上游由
                 # voice_ready 驱动，首个 audio_start 时建立实时会话。
                 if realtime_v2 and realtime_bridge is not None:
@@ -1270,58 +1423,40 @@ async def moxiang_master_conversation(
                     )
                     asr_client = None
                     continue
+                if final_transcript and continuous_v2_active:
+                    turn_session_id = sessions_by_subject.get(active_subject, "")
+                    try:
+                        pending = transcript_boundary.stage(
+                            final_transcript, half_duplex_client_turn_id or uuid.uuid4().hex,
+                            turn_session_id,
+                        )
+                        await _send_json(ws, pending.preview())
+                    except AIInputError as exc:
+                        await _send_error(ws, "AI_INPUT_INVALID", str(exc))
+                    half_duplex_client_turn_id = ""
+                    asr_client = None
+                    continue
                 if final_transcript:
                     await _send_json(
                         ws,
                         {"type": "final_transcript", "text": final_transcript},
                     )
-                # 只有最终转写进入候选任务；partial_transcript 从不落库。
+                # legacy 保留原有 audio_end 直接提交行为。
                 turn_subject = active_subject
-                turn_session_id = (
-                    sessions_by_subject.get(turn_subject, "")
-                    if journey_active
-                    else ""
-                )
+                turn_session_id = sessions_by_subject.get(turn_subject, "") if journey_active else ""
                 task_id = ""
-                if (
-                    turn_session_id
-                    and _db_session_factory is not None
-                    and final_transcript.strip()
-                ):
+                if turn_session_id and _db_session_factory is not None and final_transcript.strip():
                     _turn_id, task_id = await _submit_journey_candidate_turn(
-                        user_id,
-                        turn_session_id,
-                        uuid.uuid4().hex,
-                        final_transcript,
+                        user_id, turn_session_id, uuid.uuid4().hex, final_transcript,
                     )
-                    await _send_json(
-                        ws,
-                        {
-                            "type": "extraction_status",
-                            "subject": turn_subject,
-                            "task_id": task_id,
-                            "status": "queued",
-                        },
-                    )
+                    await _send_json(ws, {"type": "extraction_status", "subject": turn_subject, "task_id": task_id, "status": "queued"})
                 await _push_streamed_reply(
-                    ws,
-                    orchestrator,
-                    final_transcript,
-                    request_id=request_id,
+                    ws, orchestrator, final_transcript, request_id=request_id,
                     subject=turn_subject,
-                    build_context=await _journey_build_context(
-                        turn_session_id, turn_subject
-                    ),
+                    build_context=await _journey_build_context(turn_session_id, turn_subject),
+                    flow_version="legacy",
                 )
-                await _finish_journey_turn(
-                    ws,
-                    orchestrator,
-                    user_id,
-                    turn_session_id,
-                    turn_subject,
-                    task_id,
-                    poll_tasks,
-                )
+                await _finish_journey_turn(ws, orchestrator, user_id, turn_session_id, turn_subject, task_id, poll_tasks)
                 asr_client = None
 
             elif msg_type == "voice_input_begin":
@@ -1425,6 +1560,7 @@ async def moxiang_master_conversation(
                         turn_session_id,
                         str(message.get("clientTurnId") or uuid.uuid4().hex),
                         rev_text,
+                        flow_version="continuous_v2" if continuous_v2_active else "legacy",
                     )
                     await _send_json(
                         ws,
@@ -1444,6 +1580,7 @@ async def moxiang_master_conversation(
                     build_context=await _journey_build_context(
                         turn_session_id, turn_subject
                     ),
+                    flow_version="continuous_v2" if continuous_v2_active else "legacy",
                 )
                 await _finish_journey_turn(
                     ws,

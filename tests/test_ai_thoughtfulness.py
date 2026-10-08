@@ -1,3 +1,4 @@
+import asyncio
 import json
 import inspect
 
@@ -6,6 +7,7 @@ from pydantic import ValidationError
 
 from app.api.routes import ai
 from app.schemas.ai import AIProfileThoughtfulnessRequest, AIProfileThoughtfulnessResponse
+from app.services import ai_assistant
 from app.services.ai import THOUGHTFULNESS_KEY_LABELS, _thoughtfulness_row_to_response, analyze_thoughtfulness
 from app.services.ai_provider import _mock_response
 
@@ -79,3 +81,116 @@ def test_thoughtfulness_reanalysis_carries_run_id_and_rewrite_guard() -> None:
     assert "analysis_run_id" in source
     assert "THOUGHTFULNESS_REWRITE" in source
     assert "上一版结果" in source
+
+class _Row(dict):
+    """SQLAlchemy Row 的替身：缺失列返回 None，贴近 LEFT JOIN 未命中的行为。"""
+
+    def __missing__(self, key: str) -> None:
+        return None
+
+
+class _FakeMappings:
+    def __init__(self, row) -> None:
+        self._row = row
+
+    def first(self):
+        return self._row
+
+    def one(self):
+        return self._row
+
+
+class _FakeResult:
+    def __init__(self, row=None, scalar_value=0) -> None:
+        self._row = row
+        self._scalar = scalar_value
+
+    def mappings(self) -> _FakeMappings:
+        return _FakeMappings(self._row)
+
+    def scalar(self):
+        return self._scalar
+
+
+class _FakeDb:
+    """按 SQL 片段分派的最小 AsyncSession 替身，只覆盖用心度用到的四类查询。"""
+
+    def __init__(self, profile_row, previous_row=None, final_row=None) -> None:
+        self.profile_row = profile_row
+        self.previous_row = previous_row
+        self.final_row = final_row or {
+            "score": 88, "summary": "落库摘要", "todos": [],
+            "created_at": "2026-10-07T10:00:00", "updated_at": "2026-10-07T10:00:00",
+        }
+        self.statements: list[str] = []
+        self.committed = False
+
+    async def execute(self, statement, params=None) -> _FakeResult:
+        sql = str(statement)
+        self.statements.append(sql)
+        if "COUNT(*) FROM user_media" in sql:
+            return _FakeResult(None, 3)
+        if "SELECT summary, todos" in sql:
+            return _FakeResult(self.previous_row)
+        if "SELECT score, summary, todos" in sql:
+            return _FakeResult(self.final_row)
+        return _FakeResult(self.profile_row)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+def _patch_thoughtfulness_model(monkeypatch) -> dict:
+    """替换额度消耗与模型调用，捕获真正喂给模型的用户消息。"""
+    captured: dict = {}
+
+    async def fake_quota(db, user_id, code, limit):
+        return "quota-key"
+
+    async def fake_complete(messages, json_mode=False, scene=""):
+        captured["prompt"] = messages[-1]["content"]
+        return json.dumps({"score": 80, "summary": "模型摘要", "todos": []})
+
+    monkeypatch.setattr(ai_assistant, "_consume_ai_quota", fake_quota)
+    monkeypatch.setattr(ai_assistant, "complete", fake_complete)
+    return captured
+
+
+def test_analyze_thoughtfulness_reads_saved_qa_answers_column() -> None:
+    source = inspect.getsource(analyze_thoughtfulness)
+    assert "p.qa_answers" in source
+
+
+def test_analyze_thoughtfulness_prompt_contains_saved_qa_answers(monkeypatch) -> None:
+    captured = _patch_thoughtfulness_model(monkeypatch)
+    profile_row = _Row({
+        "nickname": "小爱",
+        "avatar": "https://cdn/avatar.webp",
+        "self_intro": "周末喜欢爬山和做饭",
+        "qa_answers": json.dumps([
+            {"question_id": 2, "question": "喜欢什么运动", "answer": "周末常去奥森打羽毛球"},
+            {"question_id": 3, "question": "你期待的爱情是什么样子的", "answer": ""},
+        ], ensure_ascii=False),
+    })
+    db = _FakeDb(profile_row)
+
+    response = asyncio.run(analyze_thoughtfulness(
+        db, 7, AIProfileThoughtfulnessRequest(trigger="save", edited_keys=["qa_answers"]),
+    ))
+
+    prompt = captured["prompt"]
+    assert response.score == 88  # 返回值是 INSERT 后重读的落库行，不是模型原始分
+    assert "关于我问答「喜欢什么运动」：周末常去奥森打羽毛球" in prompt
+    # 空答案不得当成已回答，且未答题数必须如实告诉模型。
+    assert "关于我问答：已回答 1 题，未回答 2 题" in prompt
+    assert "「你期待的爱情是什么样子的」：" not in prompt
+    assert db.committed is True
+
+
+def test_analyze_thoughtfulness_prompt_handles_missing_qa_column(monkeypatch) -> None:
+    captured = _patch_thoughtfulness_model(monkeypatch)
+    db = _FakeDb(_Row({"nickname": "小爱", "qa_answers": None}))
+
+    asyncio.run(analyze_thoughtfulness(db, 7, AIProfileThoughtfulnessRequest(trigger="manual")))
+
+    assert "关于我问答：已回答 0 题，未回答 3 题" in captured["prompt"]

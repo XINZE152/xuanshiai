@@ -83,10 +83,27 @@ class RecordingMemorySession:
         sql = str(statement)
         values = dict(params or {})
         self.writes.append((sql, values))
+        # 清理会额外「读取」当前 active profile_text_extract 授权以派生快照 ID。
+        # 这是只读查询，不属于对授权证据的写操作（写断言仍只针对 UPDATE/DELETE）。
+        if "FROM ai_consent_grant" in sql and "COUNT(*)" not in sql:
+            return _MappingResult(self.counts.get("consent_snapshot_row"))
         return _Rowcount(1)
 
     async def commit(self) -> None:
         self.commits += 1
+
+
+class _MappingResult:
+    """可 ``mappings().first()`` 的只读结果替身（供 consent 快照读取使用）。"""
+
+    def __init__(self, row: dict[str, Any] | None) -> None:
+        self._row = row
+
+    def mappings(self) -> "_MappingResult":
+        return self
+
+    def first(self) -> dict[str, Any] | None:
+        return self._row
 
 
 class _Rowcount:

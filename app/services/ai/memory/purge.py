@@ -34,9 +34,18 @@ append-only + 视图行 ``status``，逐表打 marker 需改 6 张表的写入�
     - ``ai_memory_projection``：有围栏时只删已失效（``status <> 'active'``）
       的投影——撤回的同步半部已把旧代投影置 invalidated，重建的新代投影
       仍是 active，不能删。
+    - ``ai_memory_projection_grant``：有围栏时**完全不动**。授权表按
+      ``(owner_user_id, function_key, purpose, data_category)`` 唯一，重新授权走
+      ``ON DUPLICATE KEY UPDATE`` 复活**同一行**，旧代的身份信息已被覆盖；表内
+      又无任何可区分代际的列（``granted_at`` 仅秒级精度，同秒「撤回+重授权」新旧
+      时间相等），因此清理侧**无法**从 grant 行反推「是不是当前代」，任何在此处
+      写条件都是不可靠判据。授权撤销由**撤回路径自身**负责：撤回事务内
+      ``revoke_projection_dimensions_for_owner`` 已同步撤销全部 active grant
+      （见 ``consent_producers.py``；「暂停使用」与「删除并忘记」同样调用），
+      与清理任务的入队处在同一事务，无需依赖迟到的清理补做。
+      全量清理（账号注销）仍照旧撤销全部 active grant。
     - ``ai_memory_suppression``：保留行（墓碑是「不要再记起来」的依据），
       仅把 ``last_event_id`` / ``last_event_seq`` 清为占位。
-    - ``ai_memory_projection_grant``：保留行（审计），``status='revoked'``。
     - ``ai_memory_owner_sequence``：仅全量清理时删除。
     - ``ai_consent_grant``：完全保留（撤回记录本身是合规证据）。
 
@@ -243,6 +252,10 @@ async def purge_memory_for_owner(
     )
     # 投影无 event 序号：有围栏时只删已失效的旧代投影，保留 active 的新代投影。
     projection_scope = view_scope if full_wipe else " AND status <> 'active'"
+    # 授权同样无序号：只在**全量清理**（账号注销）时撤销，有围栏时完全不碰。
+    # 授权表无任何可分代的列，清理侧无法判断「是否当前代」（详见模块 docstring）；
+    # 撤回路径已在同一事务内同步撤销全部 active grant，此处无需补做。
+    grant_scope = "" if full_wipe else " AND 1 = 0"
     projections = await _count(
         db,
         "SELECT COUNT(*) FROM ai_memory_projection "
@@ -267,7 +280,7 @@ async def purge_memory_for_owner(
     grants = await _count(
         db,
         "SELECT COUNT(*) FROM ai_memory_projection_grant "
-        "WHERE owner_user_id = :owner_user_id AND status = 'active'",
+        "WHERE owner_user_id = :owner_user_id" + grant_scope,
         params,
     )
     owner_sequence = (
@@ -356,7 +369,7 @@ async def purge_memory_for_owner(
         db,
         "UPDATE ai_memory_projection_grant SET status = 'revoked', "
         "revoked_at = COALESCE(revoked_at, UTC_TIMESTAMP()) "
-        "WHERE owner_user_id = :owner_user_id AND status = 'active'",
+        "WHERE owner_user_id = :owner_user_id" + grant_scope,
         params,
     )
     # 账本最后删除（append-only 纪律只在正常写入路径生效，清理是治理动作）。

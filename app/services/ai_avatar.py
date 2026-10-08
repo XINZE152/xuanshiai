@@ -566,6 +566,21 @@ async def _owner_answer_rows(db: AsyncSession, conversation_id: int | None) -> l
     )
     return list(result.mappings().all())
 
+async def _pending_owner_rows(db: AsyncSession, conversation_id: int | None) -> list[Any]:
+    """Load pending owner handoffs for the same visitor conversation."""
+    if conversation_id is None:
+        return []
+    result = await db.execute(
+        text(
+            """SELECT question, category
+               FROM ai_avatar_owner_qa
+               WHERE conversation_id = :conversation_id AND status = 'pending'
+               ORDER BY created_at ASC, id ASC"""
+        ),
+        {"conversation_id": conversation_id},
+    )
+    return list(result.mappings().all())
+
 
 def _owner_qa_response(row: Any) -> AiAvatarOwnerQuestionResponse:
     return AiAvatarOwnerQuestionResponse(
@@ -684,11 +699,12 @@ async def answer_owner_question(
     body: AiAvatarOwnerAnswerRequest,
 ) -> AiAvatarOwnerDashboardResponse:
     await assert_text_allowed(db, body.answer, field="回答")
+    # 本人只能更新自己名下仍有效的问题：pending 首次回答，answered 再次编辑；deleted 与跨账号记录继续返回 404。
     result = await db.execute(
         text(
             """SELECT id FROM ai_avatar_owner_qa
                WHERE id = :question_id AND owner_user_id = :owner_id
-                 AND status = 'pending'"""
+                 AND status IN ('pending', 'answered')"""
         ),
         {"question_id": question_id, "owner_id": owner_id},
     )
@@ -699,7 +715,8 @@ async def answer_owner_question(
             """UPDATE ai_avatar_owner_qa
                SET answer = :answer, status = 'answered',
                    answered_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP()
-               WHERE id = :question_id AND owner_user_id = :owner_id"""
+               WHERE id = :question_id AND owner_user_id = :owner_id
+                 AND status IN ('pending', 'answered')"""
         ),
         {"answer": body.answer, "question_id": question_id, "owner_id": owner_id},
     )
@@ -753,12 +770,29 @@ def _map_rows(
     rows: list[Any],
     profile: AiAvatarProfileResponse,
     owner_answer_rows: list[Any] | None = None,
+    pending_owner_rows: list[Any] | None = None,
 ) -> list[AiAvatarMessageResponse]:
+    # 待本人补答只标记"本次提问对应的问题还没有本人回答"的那条 AI 消息：
+    # 用规范化后的问题文本精确匹配，不能给整段会话都贴上待补答标签，也不能
+    # 在没有本人回答时伪造一条"本人"气泡。
+    pending_by_question = {
+        _normalize_owner_question(str(row["question"])): row
+        for row in (pending_owner_rows or [])
+    }
     messages = [_system_message(profile)]
     timeline: list[tuple[int, int, AiAvatarMessageResponse]] = []
+    waiting: Any = None
     for row in rows:
         is_mine = row["role"] == "user"
         timestamp = _timestamp_ms(row["created_at"])
+        if is_mine:
+            waiting = pending_by_question.get(_normalize_owner_question(str(row["content"])))
+            handoff_status = "not_requested"
+            category = row["category"] or "general"
+        else:
+            handoff_status = "pending" if waiting is not None else "not_requested"
+            category = (waiting.get("category") if waiting is not None else None) or row["category"] or "general"
+            waiting = None
         timeline.append(
             (
                 timestamp,
@@ -770,7 +804,9 @@ def _map_rows(
                     isMine=is_mine,
                     avatar=None if is_mine else profile.avatar,
                     source="user" if is_mine else "real-ai",
-                    category=row["category"] or "general",
+                    category=category,
+                    handoffRequired=handoff_status == "pending",
+                    handoffStatus=handoff_status,
                 ),
             )
         )
@@ -810,9 +846,10 @@ async def get_ai_conversation(
     conversation_id = await _conversation_id(db, viewer_id, target_id)
     rows = await _history_rows(db, conversation_id)
     owner_answer_rows = await _owner_answer_rows(db, conversation_id)
+    pending_owner_rows = await _pending_owner_rows(db, conversation_id)
     return AiAvatarConversationResponse(
         targetUserId=target_id,
-        messages=_map_rows(rows, context.profile, owner_answer_rows),
+        messages=_map_rows(rows, context.profile, owner_answer_rows, pending_owner_rows),
     )
 
 
@@ -919,9 +956,16 @@ async def send_ai_message(
 
     updated_rows = await _history_rows(db, conversation_id)
     owner_answer_rows = await _owner_answer_rows(db, conversation_id)
+    pending_owner_rows = await _pending_owner_rows(db, conversation_id)
+    pending_handoff = len(pending_owner_rows) > 0
     response = AiAvatarSendResponse(
-        messages=_map_rows(updated_rows, context.profile, owner_answer_rows),
-        result=AiAvatarReplyResult(reply=reply, category=category),
+        messages=_map_rows(updated_rows, context.profile, owner_answer_rows, pending_owner_rows),
+        result=AiAvatarReplyResult(
+            reply=reply,
+            category=category,
+            handoffRequired=pending_handoff,
+            handoffStatus="pending" if pending_handoff else "not_requested",
+        ),
     )
     if reservation is not None:
         await complete_idempotency(db, reservation, response.model_dump(mode="json"))

@@ -184,3 +184,49 @@ ticket，或 session 已撤销/账号已封禁时，在 `accept()` 前以 `1008`
 `moxiang_candidate_extract` → 显式打开生产开关 → 发布新前端。退役迁移以
 `AI_LEGACY_MOXIANG_RETIRED` 审计取消存量旧 master `profile_extract`，不删除对话、
 候选、邀请或草稿。旧版 `profile_build` 会收到 `AI_INPUT_INVALID`，无兼容层。
+
+## 7. continuous_v2 语音确认协议
+
+客户端在 `session_start` 声明 `flow_version: "continuous_v2"`。该业务流程标识与实时音频 `protocolVersion: 2` 独立：continuous_v2 默认使用兼容的半双工 ASR；只有显式声明音频 v2 且通过实时语音门禁才启用供应商 VAD/PCM 下行。
+
+### 客户端消息
+
+半双工录音开始时发送 `audio_start`，可携带 `client_turn_id`；结束发送 `audio_end`。ASR partial 仅展示，不入库。ASR final 返回预览，不得直接创建 turn：
+
+```json
+{"type":"transcript_preview","transcript_id":"tr-1","client_turn_id":"ct-1","session_id":"s-1","text":"我喜欢安静","expires_in":120}
+```
+
+用户可以编辑后确认：
+
+```json
+{"type":"confirm_transcript","transcript_id":"tr-1","client_turn_id":"ct-1","session_id":"s-1","text":"我更喜欢安静地独处。"}
+```
+
+或取消：
+
+```json
+{"type":"cancel_transcript","transcript_id":"tr-1","client_turn_id":"ct-1","session_id":"s-1"}
+```
+
+`text` 必须是 1-2000 个字符，`client_turn_id` 为 1-128 位字母、数字、`-` 或 `_`。预览绑定当前 WS、session 和身份；断线后预览失效，过期后不得确认。确认才复用 `submit_journey_turn(..., flow_version="continuous_v2")`，并以 `client_turn_id` 幂等。
+
+### 服务端确认回执
+
+```json
+{"type":"transcript_confirmed","transcript_id":"tr-1","client_turn_id":"ct-1","session_id":"s-1","source_id":"turn-1","text":"我更喜欢安静地独处。"}
+```
+
+前端只在 `transcript_confirmed` 后把文本加入聊天，并按 `source_id` 去重。取消返回 `transcript_cancelled`，超时返回 `transcript_expired`；partial、重复 final、取消、过期、断线重连旧回执均不产生 turn、回复或抽取任务。
+
+### 错误与幂等
+
+| code | 触发条件 |
+| --- | --- |
+| `AI_INPUT_INVALID` | 字段缺失、文本为空/过长、身份格式非法 |
+| `TRANSCRIPT_STALE` | 预览不存在、连接/session 不匹配或已取消 |
+| `TRANSCRIPT_EXPIRED` | 预览 TTL 已过 |
+| `TRANSCRIPT_CONFLICT` | 已完成回执使用不同文本或身份重放 |
+| `AI_TEMPORARILY_UNAVAILABLE` | 确认后的统一旅程提交暂时失败 |
+
+同一连接、同一 `transcript_id`、同一 `client_turn_id` 与相同文本的确认重试回放同一 `transcript_confirmed`；冲突参数不会再次提交。legacy 客户端不携带 `flow_version` 时保留原 `audio_end` 直接提交行为。

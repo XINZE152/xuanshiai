@@ -415,7 +415,9 @@ async def grant_consent(
         return _decode_operation(existing, digest)
     if current_privacy != expected_privacy_revision:
         raise ConsentError("AI_CONSENT_VERSION_CONFLICT", "privacy revision is stale", 409)
-    granted_at = datetime.now(UTC).replace(tzinfo=None)
+    # 既有列为 datetime(0)，显式截秒避免 MySQL 四舍五入到未来一秒，
+    # 导致同次授权后的会话/来源被 created_at >= granted_at 误排除。
+    granted_at = datetime.now(UTC).replace(tzinfo=None, microsecond=0)
     # 缺陷8：撤销同一 (user_id, scope) 下任何已有的活跃授权，使 grant 成为
     # 「撤销旧 + 授予新」的原子操作，避免唯一键含 granted_at 导致重复授予两行。
     await db.execute(

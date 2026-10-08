@@ -190,7 +190,8 @@ MEMORY_EVENT_TRANSITIONS: dict[str, MemoryTransition] = {
         MemoryNodeType.CLAIM, frozenset(), "proposed"
     ),
     MemoryEventType.CLAIM_CONFIRMED.value: MemoryTransition(
-        MemoryNodeType.CLAIM, frozenset({"proposed"}), "confirmed"
+        # user_corrected 仅可经完整稿再次审阅的服务层入口确认，普通 API 仍拒绝。
+        MemoryNodeType.CLAIM, frozenset({"proposed", "user_corrected"}), "confirmed"
     ),
     MemoryEventType.CLAIM_SUPERSEDED.value: MemoryTransition(
         MemoryNodeType.CLAIM, frozenset({"proposed", "confirmed"}), "superseded"

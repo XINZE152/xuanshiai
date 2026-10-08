@@ -118,3 +118,38 @@ jobs:
           tests/test_finance_commission_anchor.py
           tests/test_activity_signup_soft_delete.py
           tests/test_matchmaker_crm_data_scope.py -q
+
+  # 画像会话契约（master 活动槽抢占与复用、会话状态终态守卫、journey/start 响应
+  # 字段）：全部为不依赖 DB 的内存假库单元契约。test_master_session.py 与
+  # test_ai_profile_sessions.py 此前未被任何 job 执行，属既有缺口，一并补上。
+  ai-profile-session-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ENVIRONMENT: testing
+      AUTO_INIT_DB: "false"
+      DATABASE_URL: mysql+aiomysql://ci:ci@127.0.0.1:1/ci_unreachable
+      REDIS_URL: redis://127.0.0.1:1/5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install backend and dev dependencies
+        run: uv sync --locked --extra dev
+      - name: Ruff (profile session and moxiang journey scope)
+        run: >-
+          uv run --no-sync ruff check
+          app/api/routes/ai_moxiang.py app/services/ai/profile.py
+          tests/test_ai_profile_sessions.py tests/test_master_session.py
+          tests/test_moxiang_journey_start_contract.py
+      - name: Profile session and moxiang journey contracts
+        env:
+          UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-ai-session-uploads
+        run: >-
+          uv run --no-sync pytest
+          tests/test_master_session.py
+          tests/test_moxiang_journey_start_contract.py
+          tests/test_ai_profile_sessions.py
+          tests/test_ai_profile_publish.py
+          tests/test_ai_profile_entries.py -q

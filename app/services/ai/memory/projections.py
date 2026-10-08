@@ -165,7 +165,9 @@ class MemoryProjectionService:
     )
     _SQL_PROJECTION_REACTIVATE = (
         "UPDATE ai_memory_projection SET status = 'active', invalidated_at = NULL, "
-        "invalidated_reason = NULL WHERE projection_id = :projection_id "
+        "invalidated_reason = NULL, consent_snapshot_id = :consent_snapshot_id, "
+        "policy_revision = :policy_revision, built_at = UTC_TIMESTAMP() "
+        "WHERE projection_id = :projection_id "
         "AND status = 'invalidated'"
     )
     _SQL_PROJECTION_MAX_VERSION = (
@@ -184,14 +186,42 @@ class MemoryProjectionService:
         ":projection_input_hash, 'active', NULL, NULL, :entries_json, "
         ":policy_revision, :consent_snapshot_id, UTC_TIMESTAMP())"
     )
+    # 不能只检查 confirmed：撤权清理是异步的，重授权不能复活旧代事实。
+    # 事件时间约束正常授权，撤回事务的持久化 outbox 围栏覆盖同秒重授权。
     _SQL_CLAIMS_CONFIRMED = (
-        "SELECT claim_id, owner_user_id, subject, namespace, canonical_key, "
-        "dimension, value_json, confidence, stability, importance, "
-        "constraint_type, importance_confirmed, fact_kind, status, source_kind, "
-        "last_event_id, last_event_seq FROM ai_memory_claim "
-        "WHERE owner_user_id = :owner_user_id "
-        "AND subject IN ({subjects}) AND status = 'confirmed' ORDER BY claim_id"
+        "SELECT c.* FROM ai_memory_claim c WHERE c.owner_user_id = :owner_user_id "
+        "AND c.subject IN ({subjects}) AND c.status = 'confirmed' "
+        "AND EXISTS (SELECT 1 FROM ai_memory_event e JOIN ai_consent_grant g "
+        "ON g.user_id=e.owner_user_id AND g.scope=e.consent_scope AND g.revoked_at IS NULL "
+        "WHERE e.event_id=c.last_event_id AND e.owner_user_id=c.owner_user_id "
+        "AND e.consent_scope='profile_text_extract' AND e.occurred_at >= g.granted_at) "
+        "AND c.last_event_seq > COALESCE((SELECT MAX(CAST(JSON_UNQUOTE("
+        "JSON_EXTRACT(o.payload_minimal,'$.fence_seq')) AS UNSIGNED)) "
+        "FROM derivation_outbox o WHERE o.aggregate_type='user' "
+        "AND o.aggregate_id=CAST(:owner_user_id AS CHAR) AND o.event_type='ai_consent_revoked' "
+        "AND JSON_CONTAINS(o.changed_fields,JSON_QUOTE('ai_consent_revoked:profile_text_extract'))),0) "
+        "ORDER BY c.claim_id"
     )
+
+    async def invalidate_for_subject(self, owner_user_id: int, subject: str) -> int:
+        """整稿确认事务内先停用旧版；既有记忆事件 outbox 负责异步重建。"""
+        if subject not in {"personal", "ideal_partner"}:
+            raise ProjectionPolicyDenied("unsupported profile subject")
+        await self._lock_owner(owner_user_id)
+        rows = (await self._db.execute(
+            text(self._SQL_PROJECTION_ACTIVE_ALL), {"owner_user_id": owner_user_id}
+        )).mappings().all()
+        invalidated = 0
+        for row in rows:
+            if subject not in _subjects_for_category(str(row["data_category"])):
+                continue
+            await self._db.execute(text(self._SQL_PROJECTION_INVALIDATE_BY_ID), {
+                "projection_id": str(row["projection_id"]),
+                "invalidated_reason": "continuous_profile_confirmed",
+            })
+            invalidated += 1
+        return invalidated
+
     _SQL_GRANTS_ACTIVE_SCAN = (
         "SELECT grant_id, owner_user_id, function_key, purpose, data_category, "
         "status, consent_snapshot_id, policy_revision FROM "
@@ -614,7 +644,9 @@ class MemoryProjectionService:
                     purpose=purpose,
                     data_category=data_category,
                 )
-                if current is not None and str(current["projection_input_hash"]) == input_hash:
+                if (current is not None and str(current["projection_input_hash"]) == input_hash
+                        and str(current["consent_snapshot_id"]) == self._snapshot_id(consent)
+                        and str(current["policy_revision"]) == self._current_revision()):
                     await self._enqueue_rebuild_notification(
                         owner_user_id=owner_user_id,
                         function_key=function_key,
@@ -745,7 +777,9 @@ class MemoryProjectionService:
             purpose=purpose,
             data_category=data_category,
         )
-        if existing is not None and str(existing["projection_input_hash"]) == input_hash:
+        if (existing is not None and str(existing["projection_input_hash"]) == input_hash
+                and str(existing["consent_snapshot_id"]) == snapshot_id
+                and str(existing["policy_revision"]) == self._current_revision()):
             return existing
         # 同内容的历史版本（如 revoke→re-grant 后重建）：接管激活，不插新版。
         same_hash = (
@@ -769,12 +803,15 @@ class MemoryProjectionService:
             )
             await self._db.execute(
                 text(self._SQL_PROJECTION_REACTIVATE),
-                {"projection_id": str(same_hash["projection_id"])},
+                {"projection_id": str(same_hash["projection_id"]),
+                 "consent_snapshot_id": snapshot_id, "policy_revision": self._current_revision()},
             )
             reactivated = dict(same_hash)
             reactivated["status"] = "active"
             reactivated["invalidated_at"] = None
             reactivated["invalidated_reason"] = None
+            reactivated["consent_snapshot_id"] = snapshot_id
+            reactivated["policy_revision"] = self._current_revision()
             reactivated["entries"] = json.loads(str(reactivated["entries_json"]))
             reactivated.pop("entries_json", None)
             return reactivated

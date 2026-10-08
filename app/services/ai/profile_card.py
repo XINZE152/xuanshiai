@@ -57,6 +57,7 @@ logger = logging.getLogger(__name__)
 
 PROFILE_CARD_SUMMARIZE_TASK_TYPE = "profile_card_summarize"
 PROFILE_CARD_DAILY_LIMIT = 5
+MAX_PROFILE_CARD_ADOPT_TAGS = 3
 _READABLE_STATUSES = frozenset({"queued", "running", "ready", "partial"})
 # applied 也可再 apply：采用后用户仍可对同一草稿发起 replace_existing 覆盖，
 # 重复并发由 expected_revision（每次 apply 后 +1）与幂等键回放守卫。
@@ -736,9 +737,10 @@ async def _apply_profile_card_draft(
         current_profile_revision = await _load_profile_revision(db, user_id)
         if current_profile_revision != int(body.base_profile_revision):
             raise ProfileCardVersionConflict()
-
     accepted = body.accepted
     if accepted.personal_tags is not None:
+        if len(accepted.personal_tags) > MAX_PROFILE_CARD_ADOPT_TAGS:
+            raise AIInputError(f"本次公开介绍最多采用 {MAX_PROFILE_CARD_ADOPT_TAGS} 个新标签")
         if len(accepted.personal_tags) > MAX_PERSONAL_TAGS:
             raise AIInputError(f"个人标签最多选择 {MAX_PERSONAL_TAGS} 个")
         if len(set(accepted.personal_tags)) != len(accepted.personal_tags):
@@ -822,6 +824,7 @@ async def _apply_profile_card_draft(
 
     applied_meta = {
         "ai_generated": [key for key in written],
+        "public_fields": [key for key in written if key in {"self_intro", "personal_tags"}],
         "user_edited": True,
         "label": "AI 生成后经用户修改",
     }
