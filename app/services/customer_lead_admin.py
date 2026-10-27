@@ -787,31 +787,32 @@ async def promoter_acquisition_stats(
 ) -> list[CustomerLeadPromoterStat]:
     """推广红娘获客统计（A13）：含男/女拆分。gender 列未迁移时男女相关列落 0。"""
     has_gender = "gender" in await _lead_columns(db)
-    where = ["promoter_id IS NOT NULL"]
+    where = ["cl.promoter_id IS NOT NULL"]
     params: dict[str, Any] = {}
     if "deleted_at" in await _lead_columns(db):
-        where.append("deleted_at IS NULL")
+        where.append("cl.deleted_at IS NULL")
     if scope:
         where.append(f"({scope})")
         params.update(scope_params or {})
     if promoter_id is not None:
-        where.append("promoter_id = :promoter_id")
+        where.append("cl.promoter_id = :promoter_id")
         params["promoter_id"] = promoter_id
     clause = " AND ".join(where)
     if has_gender:
-        gender_cols = ("SUM(gender = 1) male, SUM(gender = 2) female, "
-                       "SUM(gender = 1 AND audit_status = 'active' AND status NOT IN ('LOST','CLOSED')) valid_male, "
-                       "SUM(gender = 2 AND audit_status = 'active' AND status NOT IN ('LOST','CLOSED')) valid_female")
+        # users 表也有 gender，JOIN 后必须带 cl. 前缀，否则 MySQL 1052 列歧义
+        gender_cols = ("SUM(cl.gender = 1) male, SUM(cl.gender = 2) female, "
+                       "SUM(cl.gender = 1 AND cl.audit_status = 'active' AND cl.status NOT IN ('LOST','CLOSED')) valid_male, "
+                       "SUM(cl.gender = 2 AND cl.audit_status = 'active' AND cl.status NOT IN ('LOST','CLOSED')) valid_female")
     else:
         gender_cols = "0 male, 0 female, 0 valid_male, 0 valid_female"
-    rows = (await db.execute(text(f"""SELECT promoter_id,
-        COALESCE(NULLIF(u.nickname, ''), u.phone, CONCAT('红娘', promoter_id)) promoter_name,
+    rows = (await db.execute(text(f"""SELECT cl.promoter_id,
+        COALESCE(NULLIF(u.nickname, ''), u.phone, CONCAT('红娘', cl.promoter_id)) promoter_name,
         COUNT(*) total, {gender_cols},
-        SUM(audit_status = 'pending') pending,
-        SUM(status IN ('LOST','CLOSED')) invalid
+        SUM(cl.audit_status = 'pending') pending,
+        SUM(cl.status IN ('LOST','CLOSED')) invalid
         FROM customer_lead cl LEFT JOIN users u ON u.id = cl.promoter_id
         WHERE {clause}
-        GROUP BY promoter_id, promoter_name
+        GROUP BY cl.promoter_id, promoter_name
         ORDER BY total DESC"""), params)).mappings().all()
     return [CustomerLeadPromoterStat(
         promoter_id=int(r["promoter_id"]), promoter_name=str(r["promoter_name"] or ""),
