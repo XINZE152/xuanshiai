@@ -607,6 +607,20 @@ class DatabaseManager:
                     f"(CASE WHEN `status` IN ('LOST','CLOSED') OR `deleted_at` IS NOT NULL "
                     f"THEN NULL ELSE NULLIF(TRIM(`{base}`), '') END) STORED"
                 )
+                # 存量有重复有效联系方式时建不上唯一键（1062）。这里与
+                # _ensure_customer_lead_contact_uniqueness 保持同一口径：跳过索引、
+                # 只提示人工清理，绝不把它记成阻断项——否则一个数据问题会让整个
+                # 服务拒绝启动（测试服就存在重复手机号）。
+                cursor.execute(
+                    f"SELECT 1 FROM `customer_lead` WHERE `{column}` IS NOT NULL "
+                    f"GROUP BY `{column}` HAVING COUNT(*) > 1 LIMIT 1"
+                )
+                if cursor.fetchone():
+                    logger.warning(
+                        f"customer_lead 存在重复有效联系方式（{column}），已重建生成列但跳过"
+                        f"唯一索引 uk_customer_lead_{column}，请先运行 scripts/dedupe_customer_leads.py 清理"
+                    )
+                    continue
                 cursor.execute(
                     f"ALTER TABLE `customer_lead` ADD UNIQUE KEY `uk_customer_lead_{column}` (`{column}`)"
                 )
