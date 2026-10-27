@@ -1,8 +1,9 @@
-"""客源来源 / 标签字典（A14）的接口契约。
+"""客源来源字典（A14）的接口契约。
 
-来源落 `customer_lead_source` 字典表，标签复用既有 `customer_lead_tag` 表。
-字典为全局配置（与 `lead_options` 口径一致），不随数据范围（D-16）收敛；
-删除时若仍被有效客源引用则返回 409，与商家分类删除的守卫一致。
+来源落 `customer_lead_source` 字典表。字典为全局配置（与
+`lead_options` 口径一致），不随数据范围（D-16）收敛；删除时若仍
+被有效客源引用则返回 409，与商家分类删除的守卫一致。
+（客源标签字典已下线，本契约仅供 `sources` 使用。）
 """
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator

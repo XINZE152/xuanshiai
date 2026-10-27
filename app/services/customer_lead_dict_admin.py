@@ -1,15 +1,13 @@
-"""客源来源 / 标签字典（A14）后台服务。
+"""客源来源字典（A14）后台服务。
 
-来源写入新建的 `customer_lead_source` 表；标签复用既有 `customer_lead_tag` 表。
-两类结构一致（name/enabled/sort，来源另有 color），用 kind 参数化同一套
-list/create/update/delete/reorder，避免重复实现。
+来源写入 `customer_lead_source` 表，提供统一的
+list/create/update/delete/reorder。
 
 与自由文本 `customer_lead.source` 的兼容：字典是运营维护的「候选来源」，客源
 录入仍按名称写自由文本，两者按 name 对齐；删除字典项不影响历史客源的 source
 文本，但仍有有效客源引用该名称时禁止删除（409），避免下拉字典与在用数据脱节。
 
-字典为全局配置型数据，与服务红娘 / 推广红娘 / 标签同口径，不做数据范围收敛
-（D-16 只约束按归属可见的业务行）。
+字典为全局配置型数据，不做数据范围收敛（D-16 只约束按归属可见的业务行）。
 """
 
 from typing import Any
@@ -21,21 +19,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.customer_lead_dict_admin import LeadDictCreate, LeadDictItem, LeadDictUpdate
 
-# kind 与前端契约路径段一致，用复数 sources / tags（对齐
-# GET /admin/customer-leads/options 返回的 sources / tags 分组命名）。
-_TABLE: dict[str, str] = {"sources": "customer_lead_source", "tags": "customer_lead_tag"}
-_TYPE_LABEL: dict[str, str] = {"sources": "sources", "tags": "tags"}
-# 标签表无 color 列；来源表有。按 kind 决定可写列集合。
-_COLUMNS: dict[str, set[str]] = {"sources": {"name", "color", "enabled", "sort"}, "tags": {"name", "enabled", "sort"}}
+# kind 与前端契约路径段一致，用复数 sources（对齐
+# GET /admin/customer-leads/options 返回的 sources 分组命名）。
+_TABLE: dict[str, str] = {"sources": "customer_lead_source"}
+_TYPE_LABEL: dict[str, str] = {"sources": "sources"}
+# 来源表有 color 列。
+_COLUMNS: dict[str, set[str]] = {"sources": {"name", "color", "enabled", "sort"}}
 
-# 统计仍在使用该字典项的有效客源数（标签 JOIN 关联表；来源按名称匹配自由文本）。
+# 统计仍在使用该字典项的有效客源数（来源按名称匹配自由文本）。
 _REFERENCED_SQL: dict[str, str] = {
     "sources": (
         "SELECT COUNT(*) FROM customer_lead WHERE source = :name AND deleted_at IS NULL"
-    ),
-    "tags": (
-        "SELECT COUNT(*) FROM customer_lead_tag_relation r JOIN customer_lead cl ON cl.id = r.lead_id "
-        "WHERE r.tag_id = :id AND cl.deleted_at IS NULL"
     ),
 }
 
@@ -139,9 +133,6 @@ async def delete_dict(db: AsyncSession, kind: str, item_id: int) -> None:
     if referenced > 0:
         raise HTTPException(409, detail=f"仍有 {referenced} 条有效客源使用该名称，无法删除")
     await db.execute(text(f"DELETE FROM {_table(kind)} WHERE id = :id"), {"id": item_id})
-    if kind == "tags":
-        # 标签关联表可能残留（引用计数为 0 时一般无行），一并清理保证一致性。
-        await db.execute(text("DELETE FROM customer_lead_tag_relation WHERE tag_id = :id"), {"id": item_id})
     await db.commit()
 
 

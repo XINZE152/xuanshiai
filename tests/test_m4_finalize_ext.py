@@ -90,13 +90,14 @@ def _make_workbook(rows: list[list[object]]) -> bytes:
 def test_parse_import_file_ok() -> None:
     content = _make_workbook([
         ["张女士", "13800000001", "zhang_wx", "抖音", "中", "备注A"],
-        ["李先生", "13800000002", "", "", "高", ""],
+        ["李先生", "13800000002", "", "", "B", ""],
         ["", "", "", "", "", ""],  # 整行空白，应被跳过
     ])
     rows = lead_service.parse_import_file(content, "leads.xlsx")
     assert len(rows) == 2
     assert rows[0].name == "张女士"
-    assert rows[0].intention_level == 2
+    assert rows[0].intention_level == 4  # 旧粗粒度「中」按回退规则落到 D 档（4）
+    assert rows[1].intention_level == 2  # 字母「B」直接落到 2（B 类初步沟通）
     assert rows[1].source == "批量导入"  # 留空回退默认来源
     assert rows[1].wechat is None
 
@@ -179,7 +180,6 @@ def test_customer_lead_convert_schema() -> None:
             "matchmaker_id": None,
             "organization_id": None,
             "promoter_id": None,
-            "tags": [],
             "next_follow_at": None,
             "converted_user_id": 10,
             "remark": None,

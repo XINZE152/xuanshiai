@@ -900,6 +900,7 @@ class DatabaseManager:
                 (119, NULL, '相亲卡管理', '/lovecard', 'menu', 'platform.lovecard.read', 'lovecard', 290, 1),
                 (120, NULL, '互动内容', '/interact-content', 'menu', 'platform.interact.read', 'chat', 300, 1),
                 (121, NULL, '联盟活动', '/active-alliance', 'menu', 'platform.alliance.read', 'alliance', 310, 1),
+                (122, NULL, '兴趣标签', '/interest-tags', 'menu', 'interest_tag.manage', 'tag', 320, 1),
                 (1121, 112, '短信编辑', NULL, 'button', 'platform.sms.write', NULL, 1, 1),
                 (1131, 113, '公众号编辑', NULL, 'button', 'platform.wechat.write', NULL, 1, 1),
                 (1141, 114, '合同编辑', NULL, 'button', 'finance.contract.write', NULL, 1, 1),
@@ -3581,7 +3582,7 @@ class DatabaseManager:
         columns = {
             "customer_lead": {
                 "promoter_id": "`promoter_id` bigint unsigned DEFAULT NULL COMMENT '推广红娘用户ID'",
-                "audit_status": "`audit_status` varchar(16) NOT NULL DEFAULT 'active' COMMENT 'active有效/pending待核'",
+                "audit_status": "`audit_status` varchar(16) NOT NULL DEFAULT 'active' COMMENT 'active有效/pending待核/rejected无效'",
             },
             "meeting_record": {
                 "member_visible": "`member_visible` tinyint NOT NULL DEFAULT 1 COMMENT '会员端是否可见 1是 0隐藏'",

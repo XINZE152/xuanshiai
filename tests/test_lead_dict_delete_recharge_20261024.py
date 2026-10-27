@@ -4,8 +4,8 @@
 - A16：客源软删除——列表 / 统计 / 详情 SQL 在迁移已执行时排除 deleted_at；
   未迁移时缺列降级不加谓词；单条删除缺列 503；批量删除部分成功 + 一份汇总审计；
   batch-delete 静态路径先于 /{lead_id} 注册；请求体边界。
-- A14：来源 / 标签字典——kind 参数校验、列集合（tag 无 color）、引用守卫 SQL、
-  reorder 逐条写 sort、字典路由挂在 /admin/customer-leads/{sources,tags}。
+- A14：来源字典——kind 参数校验、引用守卫 SQL、reorder 逐条写 sort、
+  字典路由挂在 /admin/customer-leads/sources。（客源标签字典已下线。）
 - A17：核验额度充值——默认 provider=disabled、套餐目录只读、订单列与建表 DDL 一致、
   路由注册。
 """
@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
@@ -21,7 +20,7 @@ from app.api.routes import customer_leads_admin as lead_routes
 from app.api.routes import member_auth_admin as auth_routes
 from app.db.business_schema import BUSINESS_TABLES
 from app.schemas.customer_lead_admin import CustomerLeadBatchDeleteRequest
-from app.schemas.customer_lead_dict_admin import LeadDictCreate, LeadDictOrder, LeadDictUpdate
+from app.schemas.customer_lead_dict_admin import LeadDictOrder, LeadDictUpdate
 from app.schemas.member_auth_recharge_admin import QuotaPackage, RechargeCreateRequest, RechargeOrder
 from app.services import customer_lead_dict_admin as dict_service
 from app.services import member_auth_recharge_admin as recharge_service
@@ -167,14 +166,12 @@ async def test_dict_rejects_unknown_kind() -> None:
     assert exc.value.status_code == 422
 
 
-def test_dict_columns_exclude_color_for_tags() -> None:
+def test_dict_columns_include_color_for_sources() -> None:
     assert "color" in dict_service._COLUMNS["sources"]
-    assert "color" not in dict_service._COLUMNS["tags"]
 
 
 def test_dict_referenced_sql_targets_correct_tables() -> None:
     assert "FROM customer_lead" in dict_service._REFERENCED_SQL["sources"]
-    assert "customer_lead_tag_relation" in dict_service._REFERENCED_SQL["tags"]
     assert "deleted_at IS NULL" in dict_service._REFERENCED_SQL["sources"]
 
 
@@ -204,15 +201,14 @@ def test_dict_routes_registered_under_customer_leads() -> None:
     # 前端契约：复数段、挂在 /admin/customer-leads 下
     for static in (
         "/admin/customer-leads/sources",
-        "/admin/customer-leads/tags",
         "/admin/customer-leads/sources/reorder",
-        "/admin/customer-leads/tags/reorder",
     ):
         assert static in paths
     # 静态字典段必须先于 /{lead_id} 动态路由注册，否则被抢占
     dynamic_idx = paths.index("/admin/customer-leads/{lead_id}")
     assert paths.index("/admin/customer-leads/sources") < dynamic_idx
-    assert paths.index("/admin/customer-leads/tags") < dynamic_idx
+    # 客源标签字典路由已下线
+    assert "/admin/customer-leads/tags" not in paths
     # 旧的独立字典路由已下线
     assert not hasattr(lead_routes, "dict_router")
 

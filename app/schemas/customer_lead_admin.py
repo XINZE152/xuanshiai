@@ -9,8 +9,8 @@ from app.schemas.auth import PreferenceResponse
 
 
 LeadStatus = Literal["NEW", "CONTACTED", "INTENDED", "CONVERTED", "LOST", "CLOSED"]
-# 客源审核状态：active 有效 / pending 待核
-LeadAuditStatus = Literal["active", "pending"]
+# 客源审核状态：active 有效 / pending 待核 / rejected 无效
+LeadAuditStatus = Literal["active", "pending", "rejected"]
 # 客源性别（A13）：0未知 1男 2女，与 users.gender 同语义
 LeadGender = Literal[0, 1, 2]
 
@@ -28,26 +28,16 @@ class CustomerLeadCreate(BaseModel):
     phone: str | None = Field(default=None, max_length=32)
     wechat: str | None = Field(default=None, max_length=128)
     source: str = Field(min_length=1, max_length=64)
-    intention_level: Literal[1, 2, 3] = 1
+    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] = 1
     gender: LeadGender = Field(default=0, description="性别 0未知 1男 2女（A13）")
     remark: str | None = Field(default=None, max_length=2000)
     promoter_id: int | None = Field(default=None, ge=1, description="推广红娘用户ID")
     audit_status: LeadAuditStatus = "active"
-    tags: list[str] = Field(default_factory=list, max_length=20, description="客源标签名称")
 
     @field_validator("phone", "wechat", mode="before")
     @classmethod
     def normalize_contact(cls, value: object) -> object:
         return _strip_contact(value)
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def normalize_tags(cls, value: object) -> object:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
 
     @model_validator(mode="after")
     def require_contact(self) -> "CustomerLeadCreate":
@@ -60,15 +50,13 @@ class CustomerLeadUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     phone: str | None = Field(default=None, max_length=32)
     wechat: str | None = Field(default=None, max_length=128)
-    intention_level: Literal[1, 2, 3] | None = None
+    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] | None = None
     gender: LeadGender | None = None
     status: LeadStatus | None = None
     remark: str | None = Field(default=None, max_length=2000)
     next_follow_at: datetime | None = None
     promoter_id: int | None = Field(default=None, ge=1)
     audit_status: LeadAuditStatus | None = None
-    # 追加标签，不清空已有标签（批量打标签用）。空数组视为不改动标签。
-    tags: list[str] = Field(default_factory=list, max_length=20, description="追加的客源标签名称")
 
     @field_validator("phone", "wechat", mode="before")
     @classmethod
@@ -77,7 +65,7 @@ class CustomerLeadUpdate(BaseModel):
 
     @model_validator(mode="after")
     def require_update(self) -> "CustomerLeadUpdate":
-        if not self.tags and all(value is None for value in (self.name, self.phone, self.wechat, self.intention_level, self.gender, self.status, self.remark, self.next_follow_at, self.promoter_id, self.audit_status)):
+        if all(value is None for value in (self.name, self.phone, self.wechat, self.intention_level, self.gender, self.status, self.remark, self.next_follow_at, self.promoter_id, self.audit_status)):
             raise ValueError("至少提供一个需要修改的字段")
         return self
 
@@ -96,7 +84,7 @@ class CustomerLeadAssignment(BaseModel):
 class CustomerLeadFollowUpCreate(BaseModel):
     method: Literal["PHONE", "WECHAT", "VISIT", "OTHER"]
     content: str = Field(min_length=1, max_length=2000)
-    intention_level: Literal[1, 2, 3] | None = None
+    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] | None = None
     next_follow_at: datetime | None = None
 
 
@@ -117,14 +105,13 @@ class CustomerLead(BaseModel):
     phone: str | None
     wechat: str | None
     source: str
-    intention_level: Literal[1, 2, 3]
+    intention_level: Literal[1, 2, 3, 4, 5, 6, 7]
     gender: LeadGender = 0
     status: LeadStatus
     audit_status: LeadAuditStatus = "active"
     matchmaker_id: int | None
     organization_id: int | None
     promoter_id: int | None = None
-    tags: list[str] = Field(default_factory=list)
     next_follow_at: datetime | None
     converted_user_id: int | None
     remark: str | None
@@ -204,7 +191,7 @@ class CustomerLeadImportRow(BaseModel):
     phone: str | None = Field(default=None, max_length=32)
     wechat: str | None = Field(default=None, max_length=128)
     source: str = Field(min_length=1, max_length=64)
-    intention_level: Literal[1, 2, 3] = 1
+    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] = 1
     gender: LeadGender = Field(default=0, description="性别 0未知 1男 2女（A13）")
     remark: str | None = Field(default=None, max_length=2000)
 
@@ -240,7 +227,6 @@ class CustomerLeadOptions(BaseModel):
     sources: list[CustomerLeadOption] = Field(default_factory=list)
     matchmakers: list[CustomerLeadOption] = Field(default_factory=list)
     promoters: list[CustomerLeadOption] = Field(default_factory=list)
-    tags: list[CustomerLeadOption] = Field(default_factory=list)
 
 
 class CustomerLeadFollowUpRecord(BaseModel):

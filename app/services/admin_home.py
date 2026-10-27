@@ -375,14 +375,9 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
     peak_monthly = (await db.execute(text(f"""SELECT DATE_FORMAT(users.created_at, '%Y-%m') label, COUNT(*) value
         FROM users WHERE users.status = 1 AND {ordinary_users} AND {user_scope}
         GROUP BY DATE_FORMAT(users.created_at, '%Y-%m') ORDER BY value DESC, label DESC LIMIT 1"""), scope_params)).mappings().first()
-    # 客户意向统计：客源线索的意向标签分布。标签字典存于 customer_lead_tag，
-    # 通过 customer_lead_tag_relation 关联客源；返回固定 9 类，缺失计 0。
-    tag_rows = (await db.execute(text("""SELECT tag.name label, COUNT(*) value
-        FROM customer_lead_tag_relation relation
-        JOIN customer_lead_tag tag ON tag.id = relation.tag_id
-        GROUP BY tag.name"""))).mappings().all()
-    tag_counts = {str(row["label"]).replace(" ", ""): int(row["value"] or 0) for row in tag_rows}
-    intention_report = [{"label": label, "count": tag_counts.get(label.replace(" ", ""), 0)} for label in MEMBER_INTENTION_CATALOG]
+    # 客户意向统计：客源标签功能已下线（customer_lead_tag 表移除），意向分布暂无数据源，
+    # 保持固定 9 类响应结构、各类恒计 0。
+    intention_report = [{"label": label, "count": 0} for label in MEMBER_INTENTION_CATALOG]
     return {
         "from_date": str(from_date), "to_date": str(to_date),
         "groups": {"follow": follow, "intention": intention, "basic": gender, "requirement": requirement, "browse": browse, "popularity": popularity,

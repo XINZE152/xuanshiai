@@ -30,30 +30,40 @@ from app.services.customer_lead_contact import (
 )
 
 LEAD_SELECT = """SELECT id, name, phone, wechat, source, intention_level, status, audit_status, matchmaker_id,
-    organization_id, promoter_id, next_follow_at, converted_user_id, remark, created_by, created_at, updated_at,
-    (SELECT GROUP_CONCAT(t.name ORDER BY t.id SEPARATOR ',')
-        FROM customer_lead_tag_relation r JOIN customer_lead_tag t ON t.id = r.tag_id
-        WHERE r.lead_id = customer_lead.id) AS tags_raw
+    organization_id, promoter_id, next_follow_at, converted_user_id, remark, created_by, created_at, updated_at
     FROM customer_lead"""
 
 _LEAD_GENDER_RE = re.compile(r"\bFROM customer_lead\b")
 
 
 def _apply_gender_column(select_sql: str) -> str:
-    """在客源主表外层 FROM 前补 gender 列。
-
-    用 ``\bFROM customer_lead\b`` 只匹配外层表引用：子查询里的
-    ``FROM customer_lead_tag_relation`` 因 ``customer_lead`` 后紧跟 ``_``（单词字符）
-    不构成词边界，不会被误匹配，避免把 gender 注入标量子查询导致 MySQL 1241
-    （Operand should contain 1 column(s)）。
-    """
+    """在客源主表外层 FROM 前补 gender 列。"""
     return _LEAD_GENDER_RE.sub(", CAST(gender AS SIGNED) AS gender FROM customer_lead", select_sql)
 
 
 # 导入模板表头（顺序即模板列顺序）
 _TEMPLATE_HEADERS: list[str] = ["姓名", "手机号", "微信号", "来源", "意向程度", "备注"]
-_TEMPLATE_SAMPLE: list[str] = ["示例：张女士", "13800000000", "zhang_wx", "抖音", "中", "示例行，导入前请删除"]
-_INTENTION_ALIASES: dict[str, int] = {"低": 1, "中": 2, "高": 3, "1": 1, "2": 2, "3": 3}
+_TEMPLATE_SAMPLE: list[str] = ["示例：张女士", "13800000000", "zhang_wx", "抖音", "B", "示例行，导入前请删除"]
+# 客户意向七档（A-G），与后台筛选 / 首页意向统计标签同口径。
+LEAD_INTENTION_GRADES: dict[int, str] = {
+    1: "A类未接",
+    2: "B类初步沟通",
+    3: "C类深入沟通未缔结",
+    4: "D类待确定到店时间",
+    5: "E类已确定到店",
+    6: "F类预约需二邀",
+    7: "G类已到店未签约",
+}
+# 导入别名：数字 1-7 / 字母 A-G（大小写）/ 全称 / 旧粗粒度（低→A、中→D、高→F）。
+_INTENTION_ALIASES: dict[str, int] = {
+    **{str(g): g for g in LEAD_INTENTION_GRADES},
+    **{chr(64 + g): g for g in LEAD_INTENTION_GRADES},
+    **{chr(64 + g).lower(): g for g in LEAD_INTENTION_GRADES},
+    **{label: g for g, label in LEAD_INTENTION_GRADES.items()},
+    "低": 1,
+    "中": 4,
+    "高": 6,
+}
 
 
 def _lead(row: Any, redaction_level: str = REDACTION_LEVEL_STANDARD) -> CustomerLead:
@@ -63,8 +73,6 @@ def _lead(row: Any, redaction_level: str = REDACTION_LEVEL_STANDARD) -> Customer
     调用方忘记传等级时落到最严格一档，不会泄露完整值。
     """
     payload = dict(row)
-    raw = payload.pop("tags_raw", None)
-    payload["tags"] = [item for item in (raw or "").split(",") if item]
     payload["wechat"] = mask_contact(payload.get("wechat"), redaction_level)
     return CustomerLead(**payload)
 
@@ -80,19 +88,6 @@ async def _validate_owner(db: AsyncSession, assignment: CustomerLeadAssignment) 
         result = await db.execute(text("SELECT 1 FROM organization WHERE id = :id AND org_type = 'store' AND status = 1"), {"id": assignment.organization_id})
         if not result.scalar():
             raise HTTPException(422, detail="门店不存在或已停用")
-
-
-async def _sync_tags(db: AsyncSession, lead_id: int, tags: list[str]) -> None:
-    """按名称写入客源标签关联；不存在的标签名自动补建配置行。"""
-    names = [name.strip() for name in tags if name and name.strip()]
-    if not names:
-        return
-    await db.execute(text("DELETE FROM customer_lead_tag_relation WHERE lead_id = :id"), {"id": lead_id})
-    for name in dict.fromkeys(names):
-        await db.execute(text("""INSERT IGNORE INTO customer_lead_tag (name, enabled, sort) VALUES (:name, 1, 0)"""), {"name": name})
-        tag_id = (await db.execute(text("SELECT id FROM customer_lead_tag WHERE name = :name"), {"name": name})).scalar()
-        if tag_id:
-            await db.execute(text("""INSERT IGNORE INTO customer_lead_tag_relation (lead_id, tag_id) VALUES (:lead_id, :tag_id)"""), {"lead_id": lead_id, "tag_id": int(tag_id)})
 
 
 async def _ensure_user_in_scope(db: AsyncSession, user_id: int | None, scope: str | None, scope_params: dict[str, Any] | None) -> None:
@@ -113,7 +108,7 @@ async def create_lead(db: AsyncSession, account_id: int, request: CustomerLeadCr
     await ensure_contact_available(db, phone, wechat)
     try:
         insert_columns = ["name", "phone", "wechat", "source", "intention_level", "remark", "promoter_id", "audit_status", "created_by"]
-        insert_payload = {**request.model_dump(exclude={"tags"}), "phone": phone, "wechat": wechat, "created_by": account_id}
+        insert_payload = {**request.model_dump(), "phone": phone, "wechat": wechat, "created_by": account_id}
         if "gender" in await _lead_columns(db):
             insert_columns.append("gender")
         insert_sql = f"""INSERT INTO customer_lead
@@ -121,7 +116,6 @@ async def create_lead(db: AsyncSession, account_id: int, request: CustomerLeadCr
             VALUES (:{', '.join(insert_columns)})"""
         result = await db.execute(text(insert_sql), insert_payload)
         lead_id = int(result.lastrowid)
-        await _sync_tags(db, lead_id, request.tags)
         await db.execute(text("""INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id)
             VALUES (:actor, 'customer_lead.create', 'customer_lead', :id)"""), {"actor": account_id, "id": lead_id})
         await db.commit()
@@ -311,7 +305,6 @@ async def list_leads(
     xiangqin_status: int | None = None,
     bind_mode: str | None = None,
     wechat_added: int | None = None,
-    tags: str | None = None,
     age_min: int | None = None,
     age_max: int | None = None,
     height_min: int | None = None,
@@ -402,13 +395,6 @@ async def list_leads(
     elif has_wechat is False:
         where.append("(wechat IS NULL OR TRIM(wechat) = '')")
 
-    tag_names = _split_multi(tags)
-    if tag_names:
-        where.append(f"""EXISTS (SELECT 1 FROM customer_lead_tag_relation tr
-            JOIN customer_lead_tag lt ON lt.id = tr.tag_id
-            WHERE tr.lead_id = customer_lead.id
-              AND lt.name IN ({_placeholders('tag', tag_names, params)}))""")
-
     # 以下筛选项依赖新增列，缺列时跳过。
     def has(name: str) -> bool:
         return name in columns
@@ -476,8 +462,6 @@ async def update_lead(
     # gender 列未迁移时从写入字段剔除，避免 Unknown column 500（先发版后迁移）。
     if "gender" in values and "gender" not in await _lead_columns(db):
         values.pop("gender")
-    # tags 不是 customer_lead 的列，必须先从写入字段里剔除，再单独走标签同步。
-    new_tags = [t.strip() for t in (values.pop("tags", None) or []) if t and t.strip()]
     # 掩码值不写回：表单预填的是脱敏后的展示值，原样落库会把真实微信号毁成 ***
     if is_masked_value(values.get("wechat")):
         values.pop("wechat")
@@ -496,11 +480,6 @@ async def update_lead(
     _merge_scope(update_where, update_params, scope, scope_params)
     try:
         await db.execute(text(f"UPDATE customer_lead SET {set_clause}updated_at = UTC_TIMESTAMP() WHERE {' AND '.join(update_where)}"), update_params)
-        if new_tags:
-            # _sync_tags 会先清空该线索的标签关联，所以传入「已有 + 新增」的并集，
-            # 保持批量打标签的追加语义，而不是覆盖掉原有标签。
-            existing_tags = [n for n in (current.tags or [])]
-            await _sync_tags(db, lead_id, list(dict.fromkeys([*existing_tags, *new_tags])))
         await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) VALUES (:actor, 'customer_lead.update', 'customer_lead', :id)"), {"actor": account_id, "id": lead_id})
         await db.commit()
     except IntegrityError:
@@ -1071,7 +1050,6 @@ async def _insert_leads(
     default_matchmaker_id: int | None = None,
     default_promoter_id: int | None = None,
     default_audit_status: str = "active",
-    default_tags: list[str] | None = None,
     start_index: int = 2,
     assignment_scope: str | None = None,
     assignment_scope_params: dict[str, Any] | None = None,
@@ -1081,7 +1059,6 @@ async def _insert_leads(
     errors: list[str] = []
     await _ensure_user_in_scope(db, default_matchmaker_id, assignment_scope, assignment_scope_params)
     await _ensure_user_in_scope(db, default_promoter_id, assignment_scope, assignment_scope_params)
-    tag_names = [name.strip() for name in (default_tags or []) if name and name.strip()]
     for index, row in enumerate(rows, start=start_index):  # Excel 数据从第 2 行起
         if not row.phone and not row.wechat:
             failed += 1
@@ -1119,7 +1096,6 @@ async def _insert_leads(
                 },
             )
             lead_id = int(result.lastrowid)
-            await _sync_tags(db, lead_id, tag_names)
             await db.execute(text("""INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id)
                 VALUES (:actor, 'customer_lead.import', 'customer_lead', :id)"""),
                 {"actor": account_id, "id": lead_id},
@@ -1246,7 +1222,6 @@ async def import_leads_file(
     default_source: str = "批量导入",
     default_matchmaker_id: int | None = None,
     default_promoter_id: int | None = None,
-    default_tags: list[str] | None = None,
     dup_mode: str = "skip",
     assignment_scope: str | None = None,
     assignment_scope_params: dict[str, Any] | None = None,
@@ -1262,7 +1237,6 @@ async def import_leads_file(
         default_matchmaker_id=default_matchmaker_id,
         default_promoter_id=default_promoter_id,
         default_audit_status=audit_status,
-        default_tags=default_tags,
         assignment_scope=assignment_scope,
         assignment_scope_params=assignment_scope_params,
     )
@@ -1274,9 +1248,9 @@ async def lead_options(
     scope: str | None = None,
     scope_params: dict[str, Any] | None = None,
 ) -> CustomerLeadOptions:
-    """客源线索页面下拉字典：来源、服务红娘、推广红娘、标签。
+    """客源线索页面下拉字典：来源、服务红娘、推广红娘。
 
-    「来源」取自本账号可见的线索集合（带作用域，D-16）；红娘/推广/标签为全局
+    「来源」取自本账号可见的线索集合（带作用域，D-16）；红娘/推广为全局
     配置型字典，不随数据范围收敛。
     """
     source_where = ["source <> ''"]
@@ -1313,8 +1287,4 @@ async def lead_options(
             FROM user_matchmaker_apply a JOIN users u ON u.id = a.user_id
             WHERE a.application_type = 'promoter' AND a.status = 1 ORDER BY u.id"""))).mappings().all()
     ]
-    tags = [
-        CustomerLeadOption(value=row["name"], label=row["name"])
-        for row in (await db.execute(text("SELECT name FROM customer_lead_tag WHERE enabled = 1 ORDER BY sort, id"))).mappings().all()
-    ]
-    return CustomerLeadOptions(sources=sources, matchmakers=matchmakers, promoters=promoters, tags=tags)
+    return CustomerLeadOptions(sources=sources, matchmakers=matchmakers, promoters=promoters)

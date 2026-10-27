@@ -103,7 +103,7 @@ BUSINESS_TABLES = {
             `phone` varchar(32) DEFAULT NULL,
             `wechat` varchar(128) DEFAULT NULL,
             `source` varchar(64) NOT NULL,
-            `intention_level` tinyint NOT NULL DEFAULT '1' COMMENT '1低 2中 3高',
+            `intention_level` tinyint NOT NULL DEFAULT '1' COMMENT '客户意向 A-G 七档：1 A未接 2 B初步沟通 3 C深入沟通未缔结 4 D待确定到店 5 E已确定到店 6 F预约需二邀 7 G已到店未签约',
             `gender` tinyint NOT NULL DEFAULT 0 COMMENT '性别 0未知 1男 2女（A13）',
             `status` varchar(32) NOT NULL DEFAULT 'NEW' COMMENT 'NEW/CONTACTED/INTENDED/CONVERTED/LOST/CLOSED',
             `active_phone` varchar(32) GENERATED ALWAYS AS (CASE WHEN `status` IN ('LOST','CLOSED') OR `deleted_at` IS NOT NULL THEN NULL ELSE NULLIF(TRIM(`phone`), '') END) STORED COMMENT '有效手机号（弃海/关闭/删除为NULL，唯一）',
@@ -111,7 +111,7 @@ BUSINESS_TABLES = {
             `matchmaker_id` bigint unsigned DEFAULT NULL,
             `organization_id` bigint unsigned DEFAULT NULL,
             `promoter_id` bigint unsigned DEFAULT NULL COMMENT '推广红娘用户ID',
-            `audit_status` varchar(16) NOT NULL DEFAULT 'active' COMMENT 'active有效/pending待核',
+            `audit_status` varchar(16) NOT NULL DEFAULT 'active' COMMENT 'active有效/pending待核/rejected无效',
             `next_follow_at` datetime DEFAULT NULL,
             `converted_user_id` bigint unsigned DEFAULT NULL,
             `remark` varchar(2000) DEFAULT NULL,
@@ -174,19 +174,6 @@ BUSINESS_TABLES = {
             PRIMARY KEY (`id`), KEY `idx_lead_call_note` (`lead_id`, `created_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='客源通话小记'
     """,
-    "customer_lead_tag": """
-        CREATE TABLE IF NOT EXISTS `customer_lead_tag` (
-            `id` bigint unsigned NOT NULL AUTO_INCREMENT, `name` varchar(64) NOT NULL, `color` varchar(16) DEFAULT NULL,
-            `enabled` tinyint NOT NULL DEFAULT 1, `sort` int NOT NULL DEFAULT 0,
-            PRIMARY KEY (`id`), UNIQUE KEY `uk_customer_lead_tag` (`name`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='客源标签配置'
-    """,
-    "customer_lead_tag_relation": """
-        CREATE TABLE IF NOT EXISTS `customer_lead_tag_relation` (
-            `lead_id` bigint unsigned NOT NULL, `tag_id` bigint unsigned NOT NULL,
-            PRIMARY KEY (`lead_id`, `tag_id`), KEY `idx_customer_lead_tag` (`tag_id`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='客源标签关联'
-    """,
     "customer_lead_source": """
         CREATE TABLE IF NOT EXISTS `customer_lead_source` (
             `id` bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -200,6 +187,34 @@ BUSINESS_TABLES = {
             UNIQUE KEY `uk_customer_lead_source` (`name`),
             KEY `idx_customer_lead_source_sort` (`enabled`, `sort`, `id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='客源来源字典配置'
+    """,
+    "interest_tag_category": """
+        CREATE TABLE IF NOT EXISTS `interest_tag_category` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `key` varchar(64) NOT NULL COMMENT '分类稳定 key（前端/存储引用，不可改名）',
+            `label` varchar(64) NOT NULL COMMENT '分类展示名',
+            `sort` int NOT NULL DEFAULT 0 COMMENT '排序，越小越靠前',
+            `enabled` tinyint NOT NULL DEFAULT 1 COMMENT '是否启用 1是 0否',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_interest_tag_category_key` (`key`),
+            KEY `idx_interest_tag_category_sort` (`enabled`, `sort`, `id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='兴趣标签分类目录'
+    """,
+    "interest_tag": """
+        CREATE TABLE IF NOT EXISTS `interest_tag` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `category_key` varchar(64) NOT NULL COMMENT '所属分类 interest_tag_category.key',
+            `name` varchar(64) NOT NULL COMMENT '标签名称',
+            `sort` int NOT NULL DEFAULT 0 COMMENT '分类内排序，越小越靠前',
+            `enabled` tinyint NOT NULL DEFAULT 1 COMMENT '是否启用 1是 0否',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_interest_tag_category_name` (`category_key`, `name`),
+            KEY `idx_interest_tag_sort` (`category_key`, `enabled`, `sort`, `id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='兴趣标签目录'
     """,
     "member_auth_recharge_order": """
         CREATE TABLE IF NOT EXISTS `member_auth_recharge_order` (

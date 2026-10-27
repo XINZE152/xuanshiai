@@ -173,7 +173,6 @@ def _lead_row(**overrides) -> dict:
         "matchmaker_id": None, "organization_id": None, "promoter_id": None,
         "next_follow_at": None, "converted_user_id": None, "remark": None,
         "created_by": 1, "created_at": NOW, "updated_at": NOW,
-        "tags_raw": None,
     }
     row.update(overrides)
     return row

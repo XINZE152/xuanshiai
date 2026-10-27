@@ -48,7 +48,7 @@ async def lead_list(
     source: str | None = Query(None, max_length=64),
     matchmaker_id: int | None = Query(None, ge=1),
     search: str | None = Query(None, max_length=64),
-    intention_level: int | None = Query(None, ge=1, le=3, description="意向程度 1低 2中 3高"),
+    intention_level: int | None = Query(None, ge=1, le=7, description="客户意向 A-G 七档：1 A未接 2 B初步沟通 3 C深入沟通未缔结 4 D待确定到店 5 E已确定到店 6 F预约需二邀 7 G已到店未签约"),
     gender: int | None = Query(None, ge=0, le=2, description="性别 0未知 1男 2女（A13）"),
     start_date: str | None = Query(None, max_length=10, description="录入时间起（含，兼容前端空字符串）"),
     end_date: str | None = Query(None, max_length=10, description="录入时间止（含，兼容前端空字符串）"),
@@ -58,7 +58,6 @@ async def lead_list(
     xiangqin_status: int | None = Query(None, ge=1, le=5, description="相亲状态 1公开相亲 2委托红娘 3完全私密 4关闭相亲 5已经脱单"),
     bind_mode: str | None = Query(None, pattern="^(bind|auto|custom)$", description="落户方式 bind绑定已有账号/auto自动生成账号/custom自定义创建"),
     wechat_added: int | None = Query(None, ge=0, le=2, description="加微信结果 0未添加 1已加上 2没加上"),
-    tags: str | None = Query(None, max_length=255, description="标签多选，英文逗号分隔，任一命中"),
     age_min: int | None = Query(None, ge=16, le=100),
     age_max: int | None = Query(None, ge=16, le=100),
     height_min: int | None = Query(None, ge=80, le=250),
@@ -73,7 +72,7 @@ async def lead_list(
     has_phone: bool | None = Query(None, description="是否登记手机号"),
     has_wechat: bool | None = Query(None, description="是否登记微信号"),
     assigned: bool | None = Query(None, description="分派状态筛选：true 已分派 / false 待分派（B11）"),
-    audit_status: str | None = Query(None, pattern="^(active|pending)$", description="审核状态：active 有效 / pending 待核（B11）"),
+    audit_status: str | None = Query(None, pattern="^(active|pending|rejected)$", description="审核状态：active 有效 / pending 待核 / rejected 无效（B11）"),
     stored: bool | None = Query(None, description="入库情况：true 已入库(已转会员) / false 未入库（B11）"),
     order: str | None = Query(None, pattern="^(latest|earliest)$", description="记录排序，默认 latest"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
@@ -96,7 +95,6 @@ async def lead_list(
         xiangqin_status=xiangqin_status,
         bind_mode=bind_mode,
         wechat_added=wechat_added,
-        tags=tags,
         age_min=age_min,
         age_max=age_max,
         height_min=height_min,
@@ -156,7 +154,7 @@ async def follow_records(
     page_size: int = Query(20, ge=1, le=100),
     matchmaker_id: int | None = Query(None, ge=1, description="按服务红娘过滤"),
     promoter_id: int | None = Query(None, ge=1, description="按推广红娘过滤"),
-    intention_level: int | None = Query(None, ge=1, le=3),
+    intention_level: int | None = Query(None, ge=1, le=7),
     start_date: str | None = Query(None, max_length=10, description="跟进时间起（含）"),
     end_date: str | None = Query(None, max_length=10, description="跟进时间止（含）"),
     search: str | None = Query(None, max_length=64, description="跟进内容/客源称呼模糊匹配"),
@@ -214,8 +212,8 @@ async def promoter_statistics(
     return await promoter_acquisition_stats(db, promoter_id=promoter_id, scope=scope, scope_params=scope_params)
 
 
-# ─────────────────── A14 来源 / 标签字典 CRUD ───────────────────
-# 前端契约路径：/admin/customer-leads/sources 、/admin/customer-leads/tags（复数）。
+# ─────────────────── A14 来源字典 CRUD ───────────────────
+# 前端契约路径：/admin/customer-leads/sources（复数）。
 # 与同域 /{lead_id} 动态路由共用 router，故必须排在前面（静态段先于 {lead_id} 注册）。
 # 字典为全局配置，不需数据范围收敛；写入需 customer_lead.manage。
 
@@ -257,42 +255,6 @@ async def source_dict_delete(item_id: int = Path(..., ge=1), current: CurrentMat
 
 
 @declare_permission("customer_lead.manage")
-@router.get("/tags", response_model=list[LeadDictItem], summary="标签字典列表")
-async def tag_dict_list(current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[LeadDictItem]:
-    current.require("customer_lead.manage")
-    return await dict_service.list_dict(db, "tags")
-
-
-@declare_permission("customer_lead.manage")
-@router.post("/tags/reorder", status_code=204, summary="标签重排")
-async def tag_dict_reorder(body: LeadDictOrder, current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> None:
-    current.require("customer_lead.manage")
-    await dict_service.reorder_dict(db, "tags", body.ids)
-
-
-@declare_permission("customer_lead.manage")
-@router.post("/tags", response_model=LeadDictItem, status_code=201, summary="新增标签")
-async def tag_dict_create(body: LeadDictCreate, current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> LeadDictItem:
-    current.require("customer_lead.manage")
-    return await dict_service.create_dict(db, "tags", body)
-
-
-@declare_permission("customer_lead.manage")
-@router.patch("/tags/{item_id}", response_model=LeadDictItem, summary="修改标签")
-async def tag_dict_update(item_id: int = Path(..., ge=1), body: LeadDictUpdate = ..., current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> LeadDictItem:
-    current.require("customer_lead.manage")
-    return await dict_service.update_dict(db, "tags", item_id, body)
-
-
-@declare_permission("customer_lead.manage")
-@router.delete("/tags/{item_id}", status_code=204, summary="删除标签")
-async def tag_dict_delete(item_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> Response:
-    current.require("customer_lead.manage")
-    await dict_service.delete_dict(db, "tags", item_id)
-    return Response(status_code=204)
-
-
-@declare_permission("customer_lead.manage")
 @router.get("/import-template", summary="下载客源批量导入模板")
 async def lead_import_template(current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin)) -> Response:
     current.require("customer_lead.manage")
@@ -323,17 +285,15 @@ async def abandonment_list(current: CurrentMatchmakerAdmin = Depends(get_current
 @router.post("/import", response_model=CustomerLeadImportSummary, summary="上传 Excel 批量导入客源线索")
 async def lead_import(
     file: UploadFile = File(..., description="按模板填写的 .xlsx 文件"),
-    audit_status: str = Form("active", pattern="^(active|pending)$", description="本次导入的审核状态：active 有效 / pending 待核"),
+    audit_status: str = Form("active", pattern="^(active|pending|rejected)$", description="本次导入的审核状态：active 有效 / pending 待核 / rejected 无效"),
     default_source: str = Form("批量导入", max_length=64, description="留空或不匹配时的默认来源"),
     default_matchmaker_id: int | None = Form(None, description="默认分派红娘用户ID"),
     default_promoter_id: int | None = Form(None, description="默认推广红娘用户ID"),
-    default_tags: str = Form("", max_length=255, description="默认标签，英文逗号分隔"),
     dup_mode: str = Form("skip", pattern="^(skip|append)$", description="昵称/联系方式重复处理：skip 不导入 / append 仍然导入"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> CustomerLeadImportSummary:
     current.require("customer_lead.manage")
-    tags = [item.strip() for item in default_tags.split(",") if item.strip()]
     # 导入可指定默认红娘/推广红娘，属写操作，必须先按四档数据范围校验目标用户
     # （与 lead_create 同口径，D-16）。
     params: dict[str, object] = {}
@@ -347,7 +307,6 @@ async def lead_import(
         default_source=default_source or "批量导入",
         default_matchmaker_id=default_matchmaker_id,
         default_promoter_id=default_promoter_id,
-        default_tags=tags,
         dup_mode=dup_mode,
         assignment_scope=assignment_scope,
         assignment_scope_params=params,
