@@ -579,15 +579,28 @@ class DatabaseManager:
                 ("active_wechat", "varchar(128)", "wechat"),
             ):
                 cursor.execute(
-                    "SELECT GENERATION_EXPRESSION FROM information_schema.COLUMNS "
+                    "SELECT GENERATION_EXPRESSION AS generation_expression "
+                    "FROM information_schema.COLUMNS "
                     "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'customer_lead' "
                     "AND COLUMN_NAME = %s",
                     (column,),
                 )
                 row = cursor.fetchone()
-                if not row or "deleted_at" in (row[0] or ""):
+                # initialize_database 用的是 DictCursor，行只能按键取值。
+                # 早期写成 row[0]，对字典行抛 KeyError(0)，异常文本恰好是 "0"，
+                # 于是整段迁移被记成「customer_lead 软删除列/来源字典表: 0」的
+                # 阻断项，启动阶段直接 RuntimeError（PR #65 CI 事故）。
+                expression = (row or {}).get("generation_expression") or ""
+                if not row or "deleted_at" in expression:
                     continue
-                cursor.execute(f"ALTER TABLE `customer_lead` DROP INDEX `uk_customer_lead_{column}`")
+                # 旧库可能只有生成列、没有同名唯一索引（历史上手工建过表），
+                # DROP INDEX 不存在会抛 1091 并让整段迁移失败，先探测再删。
+                cursor.execute(
+                    "SHOW INDEX FROM `customer_lead` WHERE Key_name = %s",
+                    (f"uk_customer_lead_{column}",),
+                )
+                if cursor.fetchone():
+                    cursor.execute(f"ALTER TABLE `customer_lead` DROP INDEX `uk_customer_lead_{column}`")
                 cursor.execute(f"ALTER TABLE `customer_lead` DROP COLUMN `{column}`")
                 cursor.execute(
                     f"ALTER TABLE `customer_lead` ADD COLUMN `{column}` {ddl} GENERATED ALWAYS AS "
