@@ -194,6 +194,8 @@ Content-Type: application/json
 
 ## 变更记录
 
+- 2026-10-27（A12-积分 BUG 修复）：后台「发放积分 / 扣减积分」`credit-grants`/`credit-deductions` 的写入账本由 `account_ledger`改为 C 端 `user_points`（type=5、滚动余额）。**`points` 列口径不变（仍取 `user_points` 最新 `balance`），但自此后台发放会即时拉高列表「积分」列，不再误涨「余额」列**（历史误发不回填）。`balance` 列仍取 `account_ledger`。详见 `docs/api/扣减积分接口-2026-10-24.md`。
+
 - 2026-10-24（A12-积分排序）：`sort_by` 白名单新增 `points` 与 `integral`（两 token 同口径，均按 `user_points` 最新 `balance` 降序、`u.id` 兜底），复用列表 `points` 展示列同一表达式 `MEMBER_POINTS_EXPR`，**不新建 users 列**。修复「`sort_by=integral` 直接 422」。只读、向后兼容。
 - 2026-10-24（A12-会员删除）：`GET /admin/matchmaker/members` 与会员详情在 `users.deleted_at` 列存在时默认追加 `u.deleted_at IS NULL`，排除软删会员（列缺失时不拼，向后兼容）。新增 `DELETE /members/{member_id}` 与 `POST /members/batch-delete`（软删、敏感写、作用域收口、逐条归类），完整契约见 `docs/api/会员删除与批量删除接口-2026-10-24.md`。
 - 2026-10-24（A12-属地刷新）：新增 `GET /members/region-resolver`、`POST /members/refresh-ip-region`、`POST /members/refresh-phone-region`（provider 门控骨架，缺省 `disabled`→`503`，未接真实厂商，不写库）。契约见 `docs/api/一键刷新属地接口-2026-10-24.md`。

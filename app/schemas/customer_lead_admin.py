@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.schemas.auth import PreferenceResponse
+
 
 LeadStatus = Literal["NEW", "CONTACTED", "INTENDED", "CONVERTED", "LOST", "CLOSED"]
 # 客源审核状态：active 有效 / pending 待核
@@ -301,3 +303,17 @@ class CustomerLeadPromoterStat(BaseModel):
     valid_female: int = 0
     pending: int = 0
     invalid: int = 0
+
+
+class LeadPreferenceResponse(BaseModel):
+    """客源线索「择偶要求」读写响应（方案①：复用 user_partner_preference）。
+
+    择偶要求挂在线索入库后生成的账号（converted_user_id）上，字段口径与 C 端
+    ``PreferenceResponse`` 完全一致。未入库线索没有可挂载的账号，``editable`` 为
+    False、``preference`` 为 None，前端据此置灰该 tab；GET 不报错，PUT 返回 409。
+    """
+
+    lead_id: int
+    converted_user_id: int | None = None
+    editable: bool = False
+    preference: PreferenceResponse | None = None

@@ -6,9 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentMatchmakerAdmin, declare_permission, get_current_matchmaker_admin, require_sensitive_operation
 from app.core.sensitive_fields import redaction_level_from_permissions
 from app.db.session import get_db
-from app.schemas.customer_lead_admin import CustomerLead, CustomerLeadAbandonment, CustomerLeadAbandonRequest, CustomerLeadBatchDeleteFailure, CustomerLeadBatchDeleteRequest, CustomerLeadBatchDeleteResult, CustomerLeadBatchImportRequest, CustomerLeadAssignment, CustomerLeadConvertRequest, CustomerLeadConvertResult, CustomerLeadCreate, CustomerLeadBatchImportResult, CustomerLeadFollowUp, CustomerLeadFollowUpCreate, CustomerLeadFollowUpRecordPage, CustomerLeadFollowBucket, MatchmakerFollowStat, CustomerLeadPromoterStat, CustomerLeadImportSummary, CustomerLeadOptions, CustomerLeadPage, CustomerLeadRestoreRequest, CustomerLeadStatistics, CustomerLeadUpdate
+from app.schemas.customer_lead_admin import CustomerLead, CustomerLeadAbandonment, CustomerLeadAbandonRequest, CustomerLeadBatchDeleteFailure, CustomerLeadBatchDeleteRequest, CustomerLeadBatchDeleteResult, CustomerLeadBatchImportRequest, CustomerLeadAssignment, CustomerLeadConvertRequest, CustomerLeadConvertResult, CustomerLeadCreate, CustomerLeadBatchImportResult, CustomerLeadFollowUp, CustomerLeadFollowUpCreate, CustomerLeadFollowUpRecordPage, CustomerLeadFollowBucket, MatchmakerFollowStat, CustomerLeadPromoterStat, CustomerLeadImportSummary, CustomerLeadOptions, CustomerLeadPage, CustomerLeadRestoreRequest, CustomerLeadStatistics, CustomerLeadUpdate, LeadPreferenceResponse
+from app.schemas.auth import PreferenceUpdateRequest
 from app.schemas.customer_lead_dict_admin import LeadDictCreate, LeadDictItem, LeadDictOrder, LeadDictUpdate
-from app.services.customer_lead_admin import abandon_lead, add_follow_up, assign_lead, batch_delete_leads, batch_import_leads, build_import_template, convert_lead, create_lead, delete_lead, get_lead, import_leads_file, lead_options, lead_statistics, lead_follow_statistics, list_abandonments, list_follow_ups, list_follow_up_records, list_leads, matchmaker_follow_stats, promoter_acquisition_stats, restore_lead, update_lead
+from app.services.customer_lead_admin import abandon_lead, add_follow_up, assign_lead, batch_delete_leads, batch_import_leads, build_import_template, convert_lead, create_lead, delete_lead, get_lead, get_lead_preferences, import_leads_file, lead_options, lead_statistics, lead_follow_statistics, list_abandonments, list_follow_ups, list_follow_up_records, list_leads, matchmaker_follow_stats, promoter_acquisition_stats, restore_lead, update_lead, update_lead_preferences
 from app.services import customer_lead_dict_admin as dict_service
 from app.services.sensitive_operations import (
     abort_sensitive_operation,
@@ -398,6 +399,24 @@ async def follow_up_list(lead_id: int = Path(..., ge=1), page: int = Query(1, ge
     current.require("customer_lead.manage")
     scope, scope_params = _lead_scope(current)
     return await list_follow_ups(db, lead_id, page, page_size, scope=scope, scope_params=scope_params)
+
+
+@declare_permission("customer_lead.manage")
+@router.get("/{lead_id}/preferences", response_model=LeadPreferenceResponse, summary="查询客源线索择偶要求")
+async def lead_preference_get(lead_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> LeadPreferenceResponse:
+    """读取线索入库账号的择偶要求；未入库时返回 editable=False（不报错）。"""
+    current.require("customer_lead.manage")
+    scope, scope_params = _lead_scope(current)
+    return await get_lead_preferences(db, lead_id, scope=scope, scope_params=scope_params)
+
+
+@declare_permission("customer_lead.manage")
+@router.put("/{lead_id}/preferences", response_model=LeadPreferenceResponse, summary="修改客源线索择偶要求")
+async def lead_preference_put(lead_id: int = Path(..., ge=1), body: PreferenceUpdateRequest = ..., current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> LeadPreferenceResponse:
+    """写入线索入库账号的择偶要求（复用 C 端 user_partner_preference）；未入库返回 409。"""
+    current.require("customer_lead.manage")
+    scope, scope_params = _lead_scope(current)
+    return await update_lead_preferences(db, current.account.id, lead_id, body, scope=scope, scope_params=scope_params)
 
 
 @declare_permission("customer_lead.manage")

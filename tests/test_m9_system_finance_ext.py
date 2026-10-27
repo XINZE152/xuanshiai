@@ -143,17 +143,16 @@ def test_m9_credit_grants_audit_logged() -> None:
     assert "after_json" in src, "audit_log 必须含 after_json"
 
 
-def test_m9_credit_grants_uses_account_ledger() -> None:
-    """admin_grant_credits 写 account_ledger（CREDIT/AVAILABLE/source_type=admin_grant）"""
+def test_m9_credit_grants_uses_user_points() -> None:
+    """A12-积分修复：admin_grant_credits 写 user_points（type=5/滚动余额/source_type=admin_grant）。"""
     from app.services.finance import admin_grant_credits
 
     src = inspect.getsource(admin_grant_credits)
-    assert "INSERT INTO account_ledger" in src
-    assert "'CREDIT'" in src or '"CREDIT"' in src
-    assert "'AVAILABLE'" in src or '"AVAILABLE"' in src
-    assert "'admin_grant'" in src or '"admin_grant"' in src
-    # idempotency_key 必须含 credit-grant
-    assert "credit-grant" in src, "idempotency_key 必须含 credit-grant 前缀"
+    assert "INSERT INTO user_points" in src
+    assert "INSERT INTO account_ledger" not in src
+    assert "admin_grant" in src
+    assert "_points_balance" in src            # 读最新滚动余额
+    assert "operator_id" in src                # 记录后台操作人
 
 
 def test_m9_credit_grants_batch_500() -> None:

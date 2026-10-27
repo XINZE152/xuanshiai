@@ -358,7 +358,7 @@ async def credit_records(
 
 @admin_router.post("/credit-grants", response_model=CreditGrantResult, status_code=201, summary="后台手动发放积分（积分明细-发放积分）")
 async def grant_credits(body: CreditGrantRequest = Body(...), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> CreditGrantResult:
-    """按 target_type 解析账户集 → 写 account_ledger(CREDIT, AVAILABLE, source_type='admin_grant') → 写 business_audit_log。"""
+    """按 target_type 解析账户集 → 写 user_points（type=5、正数、滚动余额、source_type='admin_grant'）→ 写 business_audit_log。"""
     admin.require("finance.write")
     return await admin_grant_credits(db, _finance_actor(admin), body)
 
@@ -370,10 +370,10 @@ async def deduct_credits(
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> CreditDeductResult:
-    """A12-积分：与发放积分对称的扣减（写 account_ledger DEBIT）。
+    """A12-积分：与发放积分对称的扣减（写 user_points type=5、负数、滚动余额）。
 
     敏感写：Header Idempotency-Key + Query confirm=true（缺 confirm → 428，缺/非法幂等键 → 422）。
-    扣减前加行锁并校验可用积分，任一不足整批 409，不产生部分扣减。
+    扣减前对本批用户 user_points 最新行加行锁并校验积分充足，任一不足整批 409，不产生部分扣减。
     """
     admin.require("finance.write")
     reservation, replayed = await begin_sensitive_operation(

@@ -328,15 +328,15 @@ class CreditGrantResult(BaseModel):
 
     granted_count: int = Field(description="实际发放的账户数（去重后）")
     total_amount: int = Field(description="总发放积分数 = granted_count * amount")
-    sample_ledger_ids: list[int] = Field(default_factory=list, description="前 10 条 ledger.id 样本")
+    sample_ledger_ids: list[int] = Field(default_factory=list, description="前 10 条 user_points.id 样本（发放行）")
     target_user_ids: list[int] = Field(default_factory=list, description="实际命中的 user_id 列表")
 
 
 class CreditDeductRequest(BaseModel):
-    """后台「积分明细-扣减积分」弹窗入参（与发放积分对称，写 account_ledger DEBIT）。
+    """后台「积分明细-扣减积分」弹窗入参（与发放积分对称，写 user_points 负数行）。
 
-    口径：与「发放积分」`credit-grants` 同一账本（`account_ledger` account_type='user'），
-    保证积分明细页发放/扣减同页可见；不直改 C 端 `user_points`（遵设计文档「积分不支持前端直接修改」）。
+    口径（A12-积分修复）：与「发放积分」`credit-grants` 同一账本（`user_points` type=5），
+    保证积分明细页发放/扣减同页可见，且列表「积分」列随发放/扣减即时变动。
     """
 
     target_type: Literal["all", "member", "verified", "matchmaker_team"] = Field(
@@ -361,7 +361,7 @@ class CreditDeductResult(BaseModel):
 
     deducted_count: int = Field(description="实际扣减的账户数（去重后）")
     total_amount: int = Field(description="总扣减积分数 = deducted_count * amount")
-    sample_ledger_ids: list[int] = Field(default_factory=list, description="前 10 条 ledger.id 样本")
+    sample_ledger_ids: list[int] = Field(default_factory=list, description="前 10 条 user_points.id 样本（扣减行）")
     target_user_ids: list[int] = Field(default_factory=list, description="实际命中的 user_id 列表")
 
 
@@ -410,8 +410,8 @@ class UserWalletResponse(BaseModel):
 
 # ------------------------- 积分明细列表 -------------------------
 # 积分明细页（/system-credit-history）此前只有「发放积分」写接口，没有查询接口。
-# 数据取自 account_ledger 中 account_type='user' 的积分流水（direction=CREDIT 为入账、
-# DEBIT 为消耗），与「发放积分」写入的 source_type='admin_grant' 同源。
+# 数据取自 C 端积分账本 user_points（amount>0 为入账、<0 为消耗），后台发放/扣减写入
+# source_type='admin_grant'（type=5），与「发放/扣减积分」写入同源。
 
 # 会员范围 -> SQL 附加条件（u 为 users 别名）。
 CREDIT_MEMBER_SCOPE_SQL: dict[str, str] = {
@@ -425,7 +425,7 @@ CREDIT_MEMBER_SCOPE_SQL: dict[str, str] = {
     ),
 }
 
-# 积分类别 -> account_ledger.source_type。
+# 积分类别 -> user_points.source_type。
 CREDIT_CATEGORY_SOURCES: dict[str, tuple[str, ...]] = {
     "recharge": ("admin_grant",),
     "gift_exchange": ("gift_exchange",),
@@ -437,15 +437,15 @@ CREDIT_CATEGORY_SOURCES: dict[str, tuple[str, ...]] = {
 class CreditRecordItem(BaseModel):
     """积分明细单条流水。"""
 
-    id: int = Field(description="account_ledger.id")
+    id: int = Field(description="user_points.id")
     user_id: int = Field(description="会员 users.id")
     nickname: str | None = Field(default=None, description="会员昵称")
     avatar: str | None = Field(default=None, description="会员头像")
     phone: str | None = Field(default=None, description="会员手机号（按敏感等级脱敏后下发）")
     direction: str = Field(description="CREDIT 入账 / DEBIT 消耗")
     amount: Decimal = Field(description="变动积分数，正数")
-    state: str = Field(description="PENDING/AVAILABLE/REVERSED")
-    source_type: str = Field(description="流水来源类型，如 admin_grant")
+    state: str = Field(description="流水状态；user_points 无冲正概念，恒为 AVAILABLE")
+    source_type: str = Field(description="流水来源类型，如 admin_grant（后台发放/扣减）；C 端既有行为 system")
     action_source: str = Field(description="操作来源文案，管理员操作为『管理员操作』")
     category: str | None = Field(default=None, description="积分类别编码；未归类时为 null")
     operator_id: int | None = Field(default=None, description="操作人 users.id；非人工操作时为 null")

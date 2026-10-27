@@ -651,29 +651,47 @@ async def _resolve_credit_targets(db: AsyncSession, target_type: str, user_ids: 
     raise HTTPException(422, detail=f"不支持的发放目标类型：{target_type}")
 
 
+async def _points_balance(db: AsyncSession, user_id: int, *, lock: bool = False) -> int:
+    """读取 user_points 最新一条滚动余额（无流水为 0）。lock=True 时对最新行加行锁。"""
+    suffix = " FOR UPDATE" if lock else ""
+    row = (await db.execute(
+        text(f"SELECT balance FROM user_points WHERE user_id=:id ORDER BY id DESC LIMIT 1{suffix}"),
+        {"id": user_id},
+    )).first()
+    return int(row[0]) if row else 0
+
+
 async def admin_grant_credits(db: AsyncSession, admin: CurrentUser, request: CreditGrantRequest) -> CreditGrantResult:
+    """后台发放积分：写 user_points（type=5 后台发放/扣减，滚动余额，source_type='admin_grant'）。
+
+    口径修复（A12）：此前写 account_ledger，导致会员列表「余额」列被虚增、「积分」列恒为 0。
+    现改为直写 C 端积分账本 user_points，发放后列表「积分」列即时上涨、不再污染「余额」。
+    """
     targets = await _resolve_credit_targets(db, request.target_type, request.user_ids)
     if not targets:
         raise HTTPException(404, detail="发放目标为空，请检查 target_type 或 user_ids")
     batch_size = 500
-    ledger_ids: list[int] = []
+    point_ids: list[int] = []
     for offset in range(0, len(targets), batch_size):
         batch = targets[offset : offset + batch_size]
         for user_id in batch:
+            before = await _points_balance(db, user_id, lock=True)
+            after = before + request.amount
             result = await db.execute(
                 text(
-                    """INSERT INTO account_ledger
-                       (account_type, account_id, direction, amount, state, source_type, source_id, idempotency_key)
-                       VALUES ('user', :user_id, 'CREDIT', :amount, 'AVAILABLE', 'admin_grant', :source_id, :key)"""
+                    """INSERT INTO user_points
+                       (user_id, type, amount, balance, `desc`, source_type, operator_id)
+                       VALUES (:user_id, 5, :amount, :balance, :description, 'admin_grant', :operator_id)"""
                 ),
                 {
                     "user_id": user_id,
                     "amount": request.amount,
-                    "source_id": admin.id,
-                    "key": f"credit-grant:{admin.id}:{user_id}:{request.amount}:{request.reason}",
+                    "balance": after,
+                    "description": request.reason,
+                    "operator_id": admin.id,
                 },
             )
-            ledger_ids.append(int(result.lastrowid or 0))
+            point_ids.append(int(result.lastrowid or 0))
     # 单条 audit_log（前端/财务对账只需要一次总览）
     await db.execute(
         text(
@@ -690,7 +708,7 @@ async def admin_grant_credits(db: AsyncSession, admin: CurrentUser, request: Cre
                     "granted_count": len(targets),
                     "amount_per_user": request.amount,
                     "total_amount": len(targets) * request.amount,
-                    "ledger_ids": ledger_ids[:10],
+                    "point_ids": point_ids[:10],
                 },
                 ensure_ascii=False,
             ),
@@ -700,17 +718,17 @@ async def admin_grant_credits(db: AsyncSession, admin: CurrentUser, request: Cre
     return CreditGrantResult(
         granted_count=len(targets),
         total_amount=len(targets) * request.amount,
-        sample_ledger_ids=ledger_ids[:10],
+        sample_ledger_ids=point_ids[:10],
         target_user_ids=targets,
     )
 
 
 async def admin_deduct_credits(db: AsyncSession, admin: CurrentUser, request: CreditDeductRequest) -> CreditDeductResult:
-    """后台扣减积分（与发放积分对称）：写 account_ledger(DEBIT, AVAILABLE, source_type='admin_grant')。
+    """后台扣减积分（与发放积分对称）：写 user_points（type=5，负数，滚动余额，source_type='admin_grant'）。
 
-    口径：与「发放积分」同一账本（account_ledger account_type='user'），保证积分明细页发放/扣减同页
-    可见；不直改 C 端 user_points（遵设计文档「积分不支持前端直接修改」）。
-    原子性：扣减前对本批账户加行锁并校验可用额度，任一不足则整批 409，不产生部分扣减（与余额扣减同策略）。
+    口径修复（A12）：与发放同账本 user_points，扣减后列表「积分」列即时下降。
+    原子性：扣减前对本批每个用户 user_points 最新一行加行锁并校验余额充足，
+    任一不足整批 409，不产生部分扣减（无流水账户视为余额 0，直接进不足名单）。
     """
     targets = await _resolve_credit_targets(db, request.target_type, request.user_ids)
     if not targets:
@@ -723,48 +741,42 @@ async def admin_deduct_credits(db: AsyncSession, admin: CurrentUser, request: Cr
         in_params[key] = uid
         placeholders.append(f":{key}")
     in_clause = ", ".join(placeholders)
-    # 行锁：与余额调整同口径，防并发重复扣减。
-    await db.execute(
-        text(
-            f"""SELECT account_id FROM account_ledger
-                WHERE account_type = 'user' AND account_id IN ({in_clause}) FOR UPDATE"""
-        ),
-        in_params,
-    )
-    avail_rows = (
+    # 行锁：对本批每个用户 user_points 最新一行加锁并读取滚动余额（无流水=0）。
+    locked_rows = (
         await db.execute(
             text(
-                f"""SELECT account_id,
-                    COALESCE(SUM(CASE WHEN state = 'AVAILABLE' AND direction = 'CREDIT' THEN amount
-                                      WHEN state = 'AVAILABLE' AND direction = 'DEBIT' THEN -amount
-                                      ELSE 0 END), 0) AS available
-                    FROM account_ledger WHERE account_type = 'user' AND account_id IN ({in_clause})
-                    GROUP BY account_id"""
+                f"""SELECT up.user_id, up.balance
+                    FROM user_points up
+                    JOIN (SELECT user_id, MAX(id) AS max_id FROM user_points
+                          WHERE user_id IN ({in_clause}) GROUP BY user_id) latest
+                      ON latest.max_id = up.id
+                    FOR UPDATE"""
             ),
             in_params,
         )
     ).all()
-    available = {int(r[0]): Decimal(str(r[1])) for r in avail_rows}
-    need = Decimal(amount)
-    insufficient = [uid for uid in targets if available.get(uid, Decimal(0)) < need]
+    balances = {int(r[0]): int(r[1] or 0) for r in locked_rows}
+    insufficient = [uid for uid in targets if balances.get(uid, 0) < amount]
     if insufficient:
         raise HTTPException(409, detail=f"以下用户可用积分不足，扣减未执行：{insufficient[:20]}")
-    ledger_ids: list[int] = []
+    point_ids: list[int] = []
     for uid in targets:
+        after = balances.get(uid, 0) - amount
         result = await db.execute(
             text(
-                """INSERT INTO account_ledger
-                   (account_type, account_id, direction, amount, state, source_type, source_id, idempotency_key)
-                   VALUES ('user', :user_id, 'DEBIT', :amount, 'AVAILABLE', 'admin_grant', :source_id, :key)"""
+                """INSERT INTO user_points
+                   (user_id, type, amount, balance, `desc`, source_type, operator_id)
+                   VALUES (:user_id, 5, :amount, :balance, :description, 'admin_grant', :operator_id)"""
             ),
             {
                 "user_id": uid,
-                "amount": amount,
-                "source_id": admin.id,
-                "key": f"credit-deduct:{admin.id}:{uid}:{amount}:{request.reason}",
+                "amount": -amount,
+                "balance": after,
+                "description": request.reason,
+                "operator_id": admin.id,
             },
         )
-        ledger_ids.append(int(result.lastrowid or 0))
+        point_ids.append(int(result.lastrowid or 0))
     await db.execute(
         text(
             """INSERT INTO business_audit_log
@@ -780,7 +792,7 @@ async def admin_deduct_credits(db: AsyncSession, admin: CurrentUser, request: Cr
                     "deducted_count": len(targets),
                     "amount_per_user": amount,
                     "total_amount": len(targets) * amount,
-                    "ledger_ids": ledger_ids[:10],
+                    "point_ids": point_ids[:10],
                 },
                 ensure_ascii=False,
             ),
@@ -790,7 +802,7 @@ async def admin_deduct_credits(db: AsyncSession, admin: CurrentUser, request: Cr
     return CreditDeductResult(
         deducted_count=len(targets),
         total_amount=len(targets) * amount,
-        sample_ledger_ids=ledger_ids[:10],
+        sample_ledger_ids=point_ids[:10],
         target_user_ids=targets,
     )
 
@@ -927,14 +939,15 @@ async def admin_get_user_wallet(
 # ============================================
 # 后台「积分明细」页列表 service
 # ============================================
-# 数据来源：account_ledger 中 account_type='user' 的积分流水。发放积分写入
-# source_type='admin_grant'（见 admin_grant_credits），其它类别由各自的业务写入。
+# 数据来源：user_points（C 端积分流水）。后台发放/扣减积分写入 type=5、
+# source_type='admin_grant'（见 admin_grant_credits/admin_deduct_credits），C 端
+# 签到/任务/邀请/兑换写入各自 type、source_type 为 NULL。
 # 会员范围、类别、操作来源、时间区间和关键词都在这里收口；数据可见范围统一走
-# `_account_anchor_scope`，与账本/分成/提现同一口径。
+# `_member_anchor_scope`（user_points 均为个人账户积分，无门店维度）。
 
 
 def _credit_category_of(source_type: str) -> str | None:
-    """把 account_ledger.source_type 反查成页面上的积分类别编码。"""
+    """把 user_points.source_type 反查成页面上的积分类别编码。"""
     for category, sources in CREDIT_CATEGORY_SOURCES.items():
         if source_type in sources:
             return category
@@ -956,14 +969,13 @@ async def admin_list_credit_records(
 ) -> CreditRecordPage:
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
     where = [
-        "al.account_type = 'user'",
-        _account_anchor_scope(admin, params, type_column="al.account_type", account_column="al.account_id"),
+        _member_anchor_scope(admin, params, member_column="up.user_id"),
     ]
     if member_scope in CREDIT_MEMBER_SCOPE_SQL:
         where.append(CREDIT_MEMBER_SCOPE_SQL[member_scope])
     if action_source == "admin":
-        # 页面上「管理员操作」= 后台人工发放/扣减，source_id 记操作人 users.id。
-        where.append("al.source_type = 'admin_grant'")
+        # 页面上「管理员操作」= 后台人工发放/扣减，operator_id 记操作人 users.id。
+        where.append("up.source_type = 'admin_grant'")
     if category in CREDIT_CATEGORY_SOURCES:
         sources = CREDIT_CATEGORY_SOURCES[category]
         placeholders = []
@@ -971,23 +983,24 @@ async def admin_list_credit_records(
             key = f"source_{index}"
             params[key] = source
             placeholders.append(f":{key}")
-        where.append(f"al.source_type IN ({', '.join(placeholders)})")
+        where.append(f"up.source_type IN ({', '.join(placeholders)})")
     if start_date:
-        where.append("al.created_at >= CONCAT(:start_date, ' 00:00:00')")
+        where.append("up.created_at >= CONCAT(:start_date, ' 00:00:00')")
         params["start_date"] = start_date
     if end_date:
-        where.append("al.created_at < DATE_ADD(CONCAT(:end_date, ' 00:00:00'), INTERVAL 1 DAY)")
+        where.append("up.created_at < DATE_ADD(CONCAT(:end_date, ' 00:00:00'), INTERVAL 1 DAY)")
         params["end_date"] = end_date
     if keyword:
         where.append("(u.nickname LIKE CONCAT('%', :keyword, '%') OR u.id = :keyword_id)")
         params["keyword"] = keyword
         params["keyword_id"] = int(keyword) if keyword.isdigit() else -1
     clause = " AND ".join(where)
-    base = """FROM account_ledger al JOIN users u ON u.id = al.account_id
+    base = """FROM user_points up JOIN users u ON u.id = up.user_id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id"""
-    rows = await db.execute(text(f"""SELECT al.id, al.account_id AS user_id, u.nickname, u.avatar, u.phone,
-        al.direction, al.amount, al.state, al.source_type, al.source_id, al.created_at
-        {base} WHERE {clause} ORDER BY al.id DESC LIMIT :limit OFFSET :offset"""), params)
+    rows = await db.execute(text(f"""SELECT up.id, up.user_id, u.nickname, u.avatar, u.phone,
+        CASE WHEN up.amount > 0 THEN 'CREDIT' ELSE 'DEBIT' END AS direction,
+        ABS(up.amount) AS amount, 'AVAILABLE' AS state, up.source_type, up.operator_id, up.created_at
+        {base} WHERE {clause} ORDER BY up.id DESC LIMIT :limit OFFSET :offset"""), params)
     count = await db.execute(text(f"SELECT COUNT(*) {base} WHERE {clause}"),
         {key: value for key, value in params.items() if key not in ("limit", "offset")})
     total = int(count.scalar() or 0)
@@ -995,7 +1008,7 @@ async def admin_list_credit_records(
     items = []
     for row in rows.mappings().all():
         data = dict(row)
-        source_type = str(data["source_type"])
+        source_type = str(data["source_type"]) if data["source_type"] else "system"
         items.append(CreditRecordItem(
             id=data["id"],
             user_id=data["user_id"],
@@ -1008,7 +1021,7 @@ async def admin_list_credit_records(
             source_type=source_type,
             action_source="管理员操作" if source_type == "admin_grant" else "系统",
             category=_credit_category_of(source_type),
-            operator_id=data["source_id"] if source_type == "admin_grant" else None,
+            operator_id=data["operator_id"] if source_type == "admin_grant" else None,
             created_at=data["created_at"],
         ))
     return CreditRecordPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)

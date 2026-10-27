@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.sensitive_fields import REDACTION_LEVEL_STANDARD, is_masked_value, mask_contact
 # 复用登录注册链路的默认角色发放实现，避免入库账号缺少默认 user_role。
 from app.services.auth import ensure_default_user_role
+from app.schemas.auth import PreferenceUpdateRequest
 
 from app.schemas.customer_lead_admin import (
     CustomerLead, CustomerLeadAbandonment, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadFollowUp,
@@ -22,7 +23,7 @@ from app.schemas.customer_lead_admin import (
     CustomerLeadOption, CustomerLeadOptions,
     CustomerLeadPage, CustomerLeadStatistics, CustomerLeadUpdate,
     CustomerLeadFollowUpRecord, CustomerLeadFollowUpRecordPage, CustomerLeadFollowBucket,
-    MatchmakerFollowStat, CustomerLeadPromoterStat,
+    MatchmakerFollowStat, CustomerLeadPromoterStat, LeadPreferenceResponse,
 )
 from app.services.customer_lead_contact import (
     ensure_contact_available, normalize_contact, raise_duplicate_contact,
@@ -499,6 +500,61 @@ async def update_lead(
         await db.rollback()
         raise_duplicate_contact()
     return await get_lead(db, lead_id, redaction_level, scope=scope, scope_params=scope_params)
+
+
+async def get_lead_preferences(
+    db: AsyncSession,
+    lead_id: int,
+    *,
+    scope: str | None = None,
+    scope_params: dict[str, Any] | None = None,
+) -> LeadPreferenceResponse:
+    """读取客源线索的择偶要求（方案①）。
+
+    先走 get_lead 做作用域与存在校验（D-16），再按入库账号读 user_partner_preference。
+    未入库（converted_user_id 为空）时返回 editable=False，不报错，供前端置灰 tab。
+    """
+    lead = await get_lead(db, lead_id, scope=scope, scope_params=scope_params)
+    if not lead.converted_user_id:
+        return LeadPreferenceResponse(lead_id=lead_id, converted_user_id=None, editable=False, preference=None)
+    # 延迟导入避免与 profile 服务形成模块级循环依赖。
+    from app.services.profile import get_preferences
+
+    data = await get_preferences(db, lead.converted_user_id)
+    return LeadPreferenceResponse(
+        lead_id=lead_id, converted_user_id=lead.converted_user_id, editable=True, preference=data
+    )
+
+
+async def update_lead_preferences(
+    db: AsyncSession,
+    account_id: int,
+    lead_id: int,
+    request: PreferenceUpdateRequest,
+    *,
+    scope: str | None = None,
+    scope_params: dict[str, Any] | None = None,
+) -> LeadPreferenceResponse:
+    """写入客源线索的择偶要求（方案①）。
+
+    择偶要求只能挂在线索入库后生成的账号上，故未入库线索直接 409；已入库则复用
+    C 端 update_preferences（含完整度重算与画像 revision 入队），与会员自助编辑同口径。
+    """
+    lead = await get_lead(db, lead_id, scope=scope, scope_params=scope_params)
+    if not lead.converted_user_id:
+        raise HTTPException(409, detail="该客源尚未入库，无法维护择偶要求")
+    from app.services.profile import update_preferences
+
+    data = await update_preferences(db, lead.converted_user_id, request)
+    await db.execute(
+        text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) "
+             "VALUES (:actor, 'customer_lead.preference_update', 'customer_lead', :id)"),
+        {"actor": account_id, "id": lead_id},
+    )
+    await db.commit()
+    return LeadPreferenceResponse(
+        lead_id=lead_id, converted_user_id=lead.converted_user_id, editable=True, preference=data
+    )
 
 
 async def assign_lead(

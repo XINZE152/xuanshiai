@@ -22,13 +22,30 @@ import pytest
 from app.services.customer_lead_contact import find_conflicting_lead_id
 
 
+class _ProbeResult:
+    """软删除列探测（information_schema）的假结果，仅需 .all()。"""
+
+    def __init__(self, rows=None) -> None:
+        self._rows = list(rows or [])
+
+    def all(self):
+        return list(self._rows)
+
+
 class RecordingDB:
     """只记录 SQL 的假会话，返回预设冲突 id。"""
 
     def __init__(self, scalar: int | None = None) -> None:
         self.sql = ""
         self.params: dict[str, Any] = {}
+        self.probe_sql = ""
         self._scalar = scalar
+
+    async def execute(self, statement, params=None):
+        # 服务会先探测 customer_lead.deleted_at 列是否存在（软删除迁移）。
+        # 这里返回空行 = 视为未迁移 → 跳过 deleted_at 谓词，使断言仍针对主查询 SQL 形状。
+        self.probe_sql = str(statement)
+        return _ProbeResult([])
 
     async def scalar(self, statement, params=None):
         self.sql = str(statement)

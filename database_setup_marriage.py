@@ -1758,10 +1758,12 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS `user_points` (
                     `id` bigint unsigned NOT NULL AUTO_INCREMENT,
                     `user_id` bigint unsigned NOT NULL,
-                    `type` tinyint DEFAULT '1' COMMENT '1签到 2任务 3邀请好友 4兑换消费',
+                    `type` tinyint DEFAULT '1' COMMENT '1签到 2任务 3邀请好友 4兑换消费 5后台发放/扣减',
                     `amount` int DEFAULT '0' COMMENT '变动数量（正负）',
                     `balance` int DEFAULT '0' COMMENT '变动后余额',
                     `desc` varchar(255) DEFAULT NULL,
+                    `source_type` varchar(32) DEFAULT NULL COMMENT '流水来源标签，后台发放/扣减=admin_grant（A12-积分修复）',
+                    `operator_id` bigint unsigned DEFAULT NULL COMMENT '后台操作人 users.id；非人工操作为 NULL（A12-积分修复）',
                     `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (`id`),
                     KEY `idx_user` (`user_id`)
