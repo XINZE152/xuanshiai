@@ -22,12 +22,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core import tag_catalog
 from app.core.profile_tags import (
-    ALL_TAG_OPTIONS,
     CUSTOM_TAG_CATEGORY_KEY,
     CUSTOM_TAG_CATEGORY_MAP_KEY,
     display_personal_tags,
-    TAG_CATEGORIES,
     TAG_CATALOG_REVISION,
     normalize_custom_tag_categories,
     personal_tags,
@@ -327,7 +326,7 @@ async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> d
     data["interest_tags"], data["personality_tags"] = split_personal_tags(raw_tags, data["custom_tags"])
     data["tag_selections"] = {
         key: [tag for tag in stored_tags if tag in options]
-        for key, _, options in TAG_CATEGORIES
+        for key, _, options in tag_catalog.category_rows()
         if any(tag in options for tag in stored_tags)
     }
     if data["custom_tags"]:
@@ -394,7 +393,7 @@ async def update_profile(
     if "personal_tags" in values:
         selected = values.pop("personal_tags")
         selected_custom_categories = values.pop("custom_tag_categories", {})
-        selected_custom_tags = [tag for tag in selected if tag not in ALL_TAG_OPTIONS]
+        selected_custom_tags = [tag for tag in selected if tag not in tag_catalog.all_tag_options()]
         for tag in selected_custom_tags:
             decision = await moderate_text(db, tag, field="自定义标签")
             if decision.action != "allow":
@@ -402,7 +401,7 @@ async def update_profile(
         values["interest_tags"], values["personality_tags"] = split_personal_tags(selected, selected_custom_tags)
         values["tag_selections"] = {
             key: [tag for tag in selected if tag in options]
-            for key, _, options in TAG_CATEGORIES if any(tag in options for tag in selected)
+            for key, _, options in tag_catalog.category_rows() if any(tag in options for tag in selected)
         }
         if selected_custom_tags:
             values["tag_selections"][CUSTOM_TAG_CATEGORY_KEY] = selected_custom_tags
@@ -1018,7 +1017,7 @@ async def get_tag_options() -> TagOptionsResponse:
         catalog_revision=TAG_CATALOG_REVISION,
         categories=[
             TagCategoryResponse(key=key, label=label, options=list(options))
-            for key, label, options in TAG_CATEGORIES
+            for key, label, options in tag_catalog.category_rows()
         ],
     )
 

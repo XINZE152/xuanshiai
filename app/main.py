@@ -78,6 +78,19 @@ async def verify_ai_advisor_knowledge_on_startup() -> None:
         logger.warning("AI 军师知识版本校验未能执行：%s", exc)
 
 
+async def load_tag_catalog_on_startup() -> None:
+    """启动期从 interest_tag 两表加载兴趣标签目录缓存；失败回退常量目录，不阻断启动。"""
+    if session_factory is None:
+        return
+    from app.core import tag_catalog
+
+    try:
+        async with session_factory() as db:
+            await tag_catalog.reload(db)
+    except Exception as exc:  # 迁移未跑/表缺失属预期，缓存保持常量回退
+        logger.warning("兴趣标签目录缓存加载失败，回退常量目录：%s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info(
@@ -87,6 +100,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     )
     await initialize_database_on_startup()
     await verify_ai_advisor_knowledge_on_startup()
+    await load_tag_catalog_on_startup()
     yield
     if engine is not None:
         await engine.dispose()

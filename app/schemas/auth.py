@@ -8,7 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.core.profile_tags import ALL_TAG_OPTIONS, TAG_OPTIONS_BY_CATEGORY, LEGACY_TAG_OPTIONS_BY_CATEGORY, PERSONALITY_OPTIONS, MAX_PERSONAL_TAGS, MAX_CUSTOM_TAGS, CUSTOM_TAG_MIN_LENGTH, CUSTOM_TAG_MAX_LENGTH, normalize_custom_tag, validate_personal_tag_selection
+from app.core import tag_catalog
+from app.core.profile_tags import LEGACY_TAG_OPTIONS_BY_CATEGORY, MAX_PERSONAL_TAGS, MAX_CUSTOM_TAGS, CUSTOM_TAG_MIN_LENGTH, CUSTOM_TAG_MAX_LENGTH, normalize_custom_tag, validate_personal_tag_selection
 
 
 MbtiType = Literal[
@@ -197,25 +198,28 @@ class ProfileUpdateRequest(BaseModel):
                 return validate_personal_tag_selection(value)
             if len(value) != len(set(value)):
                 raise ValueError("标签不能重复")
-            if any(tag not in ALL_TAG_OPTIONS for tag in value):
+            if any(tag not in tag_catalog.all_tag_options() for tag in value):
                 raise ValueError("只能选择当前目录中的兴趣标签")
         return value
 
     @model_validator(mode="after")
     def validate_tag_fields(self) -> ProfileUpdateRequest:
+        all_options = tag_catalog.all_tag_options()
+        personality = tag_catalog.personality_options()
+        by_category = tag_catalog.options_by_category()
         if "personal_tags" in self.model_fields_set:
             if self.personal_tags is None:
                 raise ValueError("personal_tags 不能为 null，清空请传 []")
             if self.model_fields_set & {"interest_tags", "personality_tags", "tag_selections"}:
                 raise ValueError("personal_tags 不能与旧标签字段同时提交")
-            custom = [tag for tag in self.personal_tags if tag not in ALL_TAG_OPTIONS]
+            custom = [tag for tag in self.personal_tags if tag not in all_options]
             raw_categories = self.custom_tag_categories or {}
             normalized_categories: dict[str, str] = {}
             for raw_label, category in raw_categories.items():
                 label = normalize_custom_tag(raw_label)
-                if label in ALL_TAG_OPTIONS:
+                if label in all_options:
                     raise ValueError("系统标签无需提交自定义分区")
-                if category not in TAG_OPTIONS_BY_CATEGORY:
+                if category not in by_category:
                     raise ValueError(f"不支持的自定义标签分区: {category}")
                 if label.casefold() in {item.casefold() for item in normalized_categories}:
                     raise ValueError("自定义标签分区不能重复")
@@ -228,9 +232,9 @@ class ProfileUpdateRequest(BaseModel):
             }
         elif "custom_tag_categories" in self.model_fields_set:
             raise ValueError("custom_tag_categories 必须与 personal_tags 同时提交")
-        if any(tag in PERSONALITY_OPTIONS for tag in self.interest_tags or []):
+        if any(tag in personality for tag in self.interest_tags or []):
             raise ValueError("性格标签请通过 personal_tags 或 personality_tags 提交")
-        if any(tag not in PERSONALITY_OPTIONS for tag in self.personality_tags or []):
+        if any(tag not in personality for tag in self.personality_tags or []):
             raise ValueError("personality_tags 只能包含性格标签")
         if self.qa_answers is not None:
             ids = [item.question_id for item in self.qa_answers]
@@ -244,7 +248,7 @@ class ProfileUpdateRequest(BaseModel):
         if value is None:
             return value
         for category, selected in value.items():
-            current = TAG_OPTIONS_BY_CATEGORY.get(category, frozenset())
+            current = tag_catalog.options_by_category().get(category, frozenset())
             legacy = LEGACY_TAG_OPTIONS_BY_CATEGORY.get(category, frozenset())
             if not current and not legacy:
                 raise ValueError(f"不支持的标签分类: {category}")

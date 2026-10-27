@@ -33,6 +33,7 @@ from app.api.routes import (
     community_admin,
     message_admin,
     customer_leads_admin,
+    interest_tags_admin,
     promotion_order_admin,
     discovery,
     finance,
@@ -159,6 +160,7 @@ api_router.include_router(matchmaker_crm_admin.router, tags=["红娘后台"])
 api_router.include_router(member_abandonment_admin.router, tags=["管理后台"])
 api_router.include_router(member_records_admin.router, tags=["红娘后台"])
 api_router.include_router(customer_leads_admin.router, tags=["管理后台"])
+api_router.include_router(interest_tags_admin.router, tags=["管理后台"])
 api_router.include_router(matchmaker_dashboard_admin.router, tags=["红娘后台"])
 api_router.include_router(member_vip_admin.router, tags=["管理后台"])
 api_router.include_router(member_auth_admin.router, tags=["管理后台"])

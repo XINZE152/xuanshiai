@@ -205,13 +205,15 @@ def normalize_custom_tag(value: str) -> str:
 
 def custom_tags(values: list[str]) -> list[str]:
     """Return unique, locally valid custom labels from their explicit storage group."""
+    from app.core import tag_catalog
+    casefold_options = tag_catalog.casefold_map()
     result: list[str] = []
     for value in values:
         try:
             normalized = normalize_custom_tag(value)
         except ValueError:
             continue
-        if normalized.casefold() not in _TAG_OPTION_BY_CASEFOLD and normalized.casefold() not in {item.casefold() for item in result}:
+        if normalized.casefold() not in casefold_options and normalized.casefold() not in {item.casefold() for item in result}:
             result.append(normalized)
     return result[:MAX_CUSTOM_TAGS]
 
@@ -220,9 +222,12 @@ def normalize_custom_tag_categories(
     values: list[str], categories: object
 ) -> dict[str, str]:
     """Keep category assignments for valid custom labels in the current catalog."""
+    from app.core import tag_catalog
     selected = custom_tags(values)
     if not isinstance(categories, dict):
         return {}
+    by_category = tag_catalog.options_by_category()
+    all_options = tag_catalog.all_tag_options()
     normalized_input: dict[str, str] = {}
     for raw_label, raw_category in categories.items():
         try:
@@ -230,7 +235,7 @@ def normalize_custom_tag_categories(
         except ValueError:
             continue
         category = str(raw_category)
-        if category in TAG_OPTIONS_BY_CATEGORY and label not in ALL_TAG_OPTIONS:
+        if category in by_category and label not in all_options:
             normalized_input[label.casefold()] = category
     return {
         label: normalized_input[label.casefold()]
@@ -241,18 +246,21 @@ def normalize_custom_tag_categories(
 
 def validate_personal_tag_selection(values: list[str]) -> list[str]:
     """Validate a mixed system/custom selection and return normalized labels."""
+    from app.core import tag_catalog
+    casefold_options = tag_catalog.casefold_map()
+    all_options = tag_catalog.all_tag_options()
     result: list[str] = []
     seen: set[str] = set()
     custom_count = 0
     for value in values:
         raw = " ".join(str(value).strip().split())
-        normalized = _TAG_OPTION_BY_CASEFOLD.get(raw.casefold())
+        normalized = casefold_options.get(raw.casefold())
         if normalized is None:
             normalized = normalize_custom_tag(raw)
         identity = normalized.casefold()
         if identity in seen:
             raise ValueError("标签不能重复")
-        if normalized not in ALL_TAG_OPTIONS:
+        if normalized not in all_options:
             custom_count += 1
         result.append(normalized)
         seen.add(identity)
@@ -263,8 +271,10 @@ def validate_personal_tag_selection(values: list[str]) -> list[str]:
 
 def personal_tags(values: list[str], stored_custom_tags: list[str] | None = None) -> list[str]:
     """Read legacy values without changing storage or inferring partner preferences."""
+    from app.core import tag_catalog
+    all_options = tag_catalog.all_tag_options()
     allowed_custom = set(custom_tags(stored_custom_tags or []))
-    return list(dict.fromkeys(tag for tag in values if tag in ALL_TAG_OPTIONS or tag in allowed_custom))
+    return list(dict.fromkeys(tag for tag in values if tag in all_options or tag in allowed_custom))
 
 def display_personal_tags(values: list[str], stored_custom_tags: list[str] | None = None) -> list[str]:
     """本人页与他人页共用的展示口径：校验、去重后统一截断到展示上限。
@@ -276,6 +286,8 @@ def display_personal_tags(values: list[str], stored_custom_tags: list[str] | Non
 
 
 def split_personal_tags(values: list[str], stored_custom_tags: list[str] | None = None) -> tuple[list[str], list[str]]:
+    from app.core import tag_catalog
+    personality = tag_catalog.personality_options()
     tags = personal_tags(values, stored_custom_tags)
-    return ([tag for tag in tags if tag not in PERSONALITY_OPTIONS],
-            [tag for tag in tags if tag in PERSONALITY_OPTIONS])
+    return ([tag for tag in tags if tag not in personality],
+            [tag for tag in tags if tag in personality])
