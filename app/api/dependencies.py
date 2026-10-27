@@ -103,7 +103,11 @@ async def get_current_user(
 async def get_verified_user(current: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     """Require a verified phone before social discovery and interaction actions."""
     if not current.phone:
-        raise HTTPException(status_code=403, detail="请先绑定手机号")
+        # detail 用业务码形态（2026-10-27），前端按 code 分流到绑定手机页。
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "PHONE_REQUIRED", "message": "请先绑定手机号", "retryable": False},
+        )
     return current
 
 
@@ -116,7 +120,10 @@ async def get_realname_verified_user(
     posts uses :func:`get_face_verified_user` instead. See PRODUCT.md §互动门槛.
     """
     if current.realname_status != 2:
-        raise HTTPException(status_code=403, detail="请先完成实名认证")
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "REALNAME_REQUIRED", "message": "请先完成实名认证", "retryable": False},
+        )
     return current
 
 

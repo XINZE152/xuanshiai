@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -148,6 +148,10 @@ class PublicProfileResponse(BaseModel):
     is_vip_viewer: bool
     browse_quota_remaining: int | None
     can_apply: bool
+    # 「Ta的理想型」：仅在 full（VIP 或已扣额度）时下发，与 profile 同门禁。
+    # 值为 user_partner_preference 的展示归一结果（含 *_text 文案），见
+    # discovery._public_preference；未解锁或对方未填写时为 None。
+    preference: dict[str, Any] | None = None
 
 
 class FavoriteResponse(BaseModel):
@@ -200,6 +204,9 @@ class ApplicationResponse(BaseModel):
     created_at: datetime
     from_user: RelationUserSummary | None = None
     to_user: RelationUserSummary | None = None
+    # 仅创建接口回填：接收方尚未实名 → 前端提示「对方需实名后才能处理」。
+    # 列表接口不带该值（默认 False），不改变既有契约。
+    target_realname_required: bool = False
 
 
 class ApplicationPage(BaseModel):

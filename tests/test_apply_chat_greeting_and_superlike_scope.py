@@ -108,9 +108,20 @@ def _silence_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     async def runtime_default(_: Any, __: str, ___: str, fallback: Any) -> Any:
         return fallback
 
+    async def realname_not_required(_: Any) -> dict[str, Any]:
+        # 2026-10-27：respond_application 新增接收方实名闸口，走 match_line_permissions 开关。
+        # 这些用例只验证会话/问候/隐藏位，故放开开关，避免假 DB 撞上 user_auth 查询。
+        return {
+            "realname_allowed": True,
+            "be_linked_allowed": None,
+            "apply_daily": None,
+            "active": True,
+        }
+
     monkeypatch.setattr(discovery, "_ensure_target", allow_target)
     monkeypatch.setattr(discovery, "_notify", no_notification)
     monkeypatch.setattr(discovery, "get_runtime_value", runtime_default)
+    monkeypatch.setattr(discovery, "match_line_permissions", realname_not_required)
 
 
 @pytest.mark.asyncio

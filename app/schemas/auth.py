@@ -140,6 +140,24 @@ class ProfileUpdateRequest(BaseModel):
     residence_province_code: str | None = Field(default=None, max_length=32)
     residence_city_code: str | None = Field(default=None, max_length=32)
     residence_district_code: str | None = Field(default=None, max_length=32)
+    # —— 详细资料（2026-10-27，与后台会员管理同一套字段口径）——
+    # 注意：column 名必须与目标表列名逐字一致 —— update_profile 直接把键名
+    # 拼进 SQL（无列白名单），拼错会 Unknown column 500。
+    constellation: str | None = Field(default=None, max_length=16)
+    zodiac: str | None = Field(default=None, max_length=16)
+    household: str | None = Field(default=None, max_length=128)
+    household_province_code: str | None = Field(default=None, max_length=32)
+    household_city_code: str | None = Field(default=None, max_length=32)
+    household_district_code: str | None = Field(default=None, max_length=32)
+    ethnicity: str | None = Field(default=None, max_length=32)
+    house: str | None = Field(default=None, max_length=32)
+    car: str | None = Field(default=None, max_length=32)
+    smoking: str | None = Field(default=None, max_length=32)
+    drinking: str | None = Field(default=None, max_length=32)
+    religion: str | None = Field(default=None, max_length=32)
+    # school / company 落 user_auth（不在 user_profile），由 update_profile 单列更新
+    school: str | None = Field(default=None, max_length=128)
+    company: str | None = Field(default=None, max_length=128)
     self_intro: str | None = Field(default=None, max_length=500)
     personal_tags: list[str] | None = Field(
         default=None, max_length=MAX_PERSONAL_TAGS,
@@ -291,6 +309,23 @@ class ProfileResponse(BaseModel):
     residence_city_code: str | None
     residence_district_code: str | None
     residence_display: str | None = None
+    # —— 详细资料 12 项（2026-10-27）——
+    constellation: str | None = None
+    zodiac: str | None = None
+    household: str | None = None
+    household_display: str | None = None
+    household_province_code: str | None = None
+    household_city_code: str | None = None
+    household_district_code: str | None = None
+    ethnicity: str | None = None
+    house: str | None = None
+    car: str | None = None
+    smoking: str | None = None
+    drinking: str | None = None
+    religion: str | None = None
+    marriage_plan: str | None = None
+    school: str | None = None
+    company: str | None = None
     self_intro: str | None
     qa_answers: list[ProfileQaAnswer] = Field(default_factory=list, description="关于我问答，不计资料完整度")
     personal_tags: list[str] = Field(default_factory=list, description="合并去重后的有效兴趣标签")
@@ -431,6 +466,15 @@ class PreferenceUpdateRequest(BaseModel):
     dating_goal: Literal["倾向恋爱", "倾向结婚"] | None = None
     meeting_pace: Literal["倾向尽快见面", "真诚高效", "了解清楚再见面", "都行看对方的见面意愿"] | None = None
     children_intention: Literal["想要孩子", "看情况决定是否要孩子", "不想要孩子"] | None = None
+    # —— 后台会员管理同一套单选口径（2026-10-27），列已存在于 user_partner_preference ——
+    income_range: str | None = Field(default=None, max_length=32)
+    education_requirement: str | None = Field(default=None, max_length=32)
+    marriage_requirement: str | None = Field(default=None, max_length=32)
+    housing_expectation: str | None = Field(default=None, max_length=32)
+    smoking_expectation: str | None = Field(default=None, max_length=32)
+    drinking_expectation: str | None = Field(default=None, max_length=32)
+    marriage_timeline: str | None = Field(default=None, max_length=32)
+    preferred_occupation: str | None = Field(default=None, max_length=128)
     extra_requirement: str | None = Field(default=None, max_length=255)
 
     @model_validator(mode="after")
@@ -461,6 +505,15 @@ class PreferenceResponse(BaseModel):
     dating_goal: str | None
     meeting_pace: str | None
     children_intention: str | None
+    # —— 后台会员管理同一套单选口径（2026-10-27）——
+    income_range: str | None = None
+    education_requirement: str | None = None
+    marriage_requirement: str | None = None
+    housing_expectation: str | None = None
+    smoking_expectation: str | None = None
+    drinking_expectation: str | None = None
+    marriage_timeline: str | None = None
+    preferred_occupation: str | None = None
     extra_requirement: str | None
 
 

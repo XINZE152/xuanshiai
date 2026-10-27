@@ -1,0 +1,71 @@
+{
+  "name": "business",
+  "target": "business",
+  "requires": [
+    "users",
+    "user_auth",
+    "chat_session",
+    "user_profile",
+    "user_privacy",
+    "user_report",
+    "user_login_log",
+    "payment_order",
+    "user_boost",
+    "user_points",
+    "user_membership"
+  ],
+  "versions": [
+    {
+      "version": "20261027_01_core_schema_gaps",
+      "up": "20261027_01_core_schema_gaps_up.sql",
+      "down": "20261027_01_core_schema_gaps_down.sql",
+      "verify": "20261027_01_core_schema_gaps_verify.sql",
+      "verify_previous": "20261027_01_core_schema_gaps_verify_previous.sql",
+      "sha256": {
+        "up": "3ed735b8bba480259034f6030f0285157c620fe46e576bb7f6bd8d310df37abf",
+        "down": "8b231271ae3fe5984757abf8de9b14890148ce7b9bd89aa6bc92e1d0bcb0ef70",
+        "verify": "c89b309c4484fca6fdc3fa16a50b9c678addb6af36c0a1dcf13acb6325364455",
+        "verify_previous": "361938ebd365900ae8398719d989f08c7f7cc1069e1d324f2e4406da453c5747"
+      }
+    },
+    {
+      "version": "20261027_02_account_security_gaps",
+      "up": "20261027_02_account_security_gaps_up.sql",
+      "down": "20261027_02_account_security_gaps_down.sql",
+      "verify": "20261027_02_account_security_gaps_verify.sql",
+      "verify_previous": "20261027_02_account_security_gaps_verify_previous.sql",
+      "sha256": {
+        "up": "a487bebcc7bb80cf2c9bd647a4410a874606e2a58c012314d2e19cb564d88547",
+        "down": "ce5f1d8ac0b29ae6adec3fbb5fe239e6f30d8ebf8a0fa7c91fab1a961cfed6d3",
+        "verify": "eefdc192a129590331c72baf38ac6c8f356a4915d8d01887f8db1880aa5ed8d9",
+        "verify_previous": "9755c0574303adb63ed2c239cb321fbf65eeb36aaa7766259a06bc6a4f54bca9"
+      }
+    },
+    {
+      "version": "20261027_03_profile_payment_gaps",
+      "up": "20261027_03_profile_payment_gaps_up.sql",
+      "down": "20261027_03_profile_payment_gaps_down.sql",
+      "verify": "20261027_03_profile_payment_gaps_verify.sql",
+      "verify_previous": "20261027_03_profile_payment_gaps_verify_previous.sql",
+      "sha256": {
+        "up": "bcfe5cd3772cde258131cf9acddcc9ab2901e64eef4cff8366b2642c42722820",
+        "down": "902c584db7d35591455b636f7bab07a5cef8b62cddd01e435b3bbcaf8a45d11f",
+        "verify": "9ba40a6ed9f3b9c2f603ce3cd24887a850ce76a48083fdf60d13e7daefb68d55",
+        "verify_previous": "bf41f84d12389e875d344ee37c8a4b151626184e7acdef57162ab93b9f2121a4"
+      }
+    },
+    {
+      "version": "20261027_04_fk_delete_policy",
+      "up": "20261027_04_fk_delete_policy_up.sql",
+      "down": "20261027_04_fk_delete_policy_down.sql",
+      "verify": "20261027_04_fk_delete_policy_verify.sql",
+      "verify_previous": "20261027_04_fk_delete_policy_verify_previous.sql",
+      "sha256": {
+        "up": "791455af102fc583a282a61810493aff37245d366d4e28bb96fec27beec274f8",
+        "down": "160115aed1e8280bc479a47600b7a5cecf60c3999dc3174a6fa43a9dcf061df7",
+        "verify": "de18c09d5a3ba38b7237e83bd7405e61b1415e403a3e98a3fc0c3c9706cb68cc",
+        "verify_previous": "7a96388de7cac7948590d5bc898752b99e76f5f1b52959c88a71292646925113"
+      }
+    }
+  ]
+}

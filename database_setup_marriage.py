@@ -40,6 +40,33 @@ FAIL_CLOSED_COMMUNITY_COLUMNS = frozenset(
     }
 )
 
+# 外键删除策略（P0-2）：金额、积分、会员、举报/申诉证据一律 RESTRICT，禁止级联删除。
+# 用户私有派生数据（MBTI、曝光、行为事件等）仍允许 CASCADE，见 FK_DEFAULT_ON_DELETE。
+FK_DELETE_POLICY = {
+    ("payment_order", "user_id"): "RESTRICT",
+    ("user_points", "user_id"): "RESTRICT",
+    ("user_membership", "user_id"): "RESTRICT",
+    ("user_report", "user_id"): "RESTRICT",
+    ("user_report", "target_user_id"): "RESTRICT",
+    ("report_appeal", "appellant_user_id"): "RESTRICT",
+}
+FK_DEFAULT_ON_DELETE = "CASCADE"
+
+# 这些表/列缺失会让核心链路直接 1054，补列失败必须阻断启动，而不是降级成 WARNING。
+CRITICAL_SCHEMA_TABLES = frozenset(
+    {
+        "users",
+        "user_auth",
+        "user_profile",
+        "user_privacy",
+        "user_report",
+        "user_login_log",
+        "payment_order",
+        "user_boost",
+        "chat_session",
+    }
+)
+
 
 def _validate_database_name(database: str) -> str:
     """只允许配置中的安全数据库标识符，避免拼接 SQL 时产生注入风险。"""
@@ -127,7 +154,43 @@ logger = get_logger(__name__)
 
 class DatabaseManager:
     def __init__(self):
+        # 结构收敛过程中的失败统一记在这里，启动结束前一次性决定是否阻断（见 _raise_on_schema_failures）。
+        self._schema_failures: list[str] = []
         self._ensure_database_exists()
+
+    def _schema_failure_log(self) -> list[tuple[bool, str]]:
+        """Structural convergence failures; tests construct the manager via ``__new__``."""
+        if not hasattr(self, "_schema_failures"):
+            self._schema_failures = []
+        return self._schema_failures
+
+    def _schema_failure(self, description: str, *, blocking: bool = True) -> None:
+        """记录一条结构收敛失败。
+
+        blocking=True：启动末尾直接拒绝启动（缺列/缺关键索引/缺关键外键）；
+        blocking=False：只记 ERROR，留给运维排查（历史数据导致的社区外键等）。
+        """
+        failures = self._schema_failure_log()
+        entry = (blocking, description)
+        if entry not in failures:
+            failures.append(entry)
+
+    def _raise_on_schema_failures(self) -> None:
+        blocking = [message for is_blocking, message in self._schema_failure_log() if is_blocking]
+        if not blocking:
+            return
+        if os.getenv("SCHEMA_BOOTSTRAP_ALLOW_WARNINGS", "false").lower() == "true":
+            logger.error(
+                "schema bootstrap 有 %d 项未收敛（已按 SCHEMA_BOOTSTRAP_ALLOW_WARNINGS=true 继续）: %s",
+                len(blocking),
+                "; ".join(blocking[:20]),
+            )
+            return
+        raise RuntimeError(
+            f"schema bootstrap 未能收敛 {len(blocking)} 项，拒绝带残缺结构启动："
+            + "; ".join(blocking[:20])
+            + "（确认可接受时设置 SCHEMA_BOOTSTRAP_ALLOW_WARNINGS=true）"
+        )
 
     def _ensure_database_exists(self):
         """确保数据库存在，如果不存在则创建"""
@@ -203,8 +266,13 @@ class DatabaseManager:
                     cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_def}")
                     logger.info(f"✅ 已添加字段 {table_name}.{column_name}")
                 except Exception as e:
-                    logger.warning(f"⚠️ 添加字段 {table_name}.{column_name} 失败: {e}")
-                    if (table_name.strip("`"), column_name) in FAIL_CLOSED_COMMUNITY_COLUMNS:
+                    normalized_table = table_name.strip("`")
+                    self._schema_failure(f"ADD COLUMN {normalized_table}.{column_name}: {e}")
+                    logger.error(f"❌ 添加字段 {table_name}.{column_name} 失败: {e}")
+                    if (
+                        (normalized_table, column_name) in FAIL_CLOSED_COMMUNITY_COLUMNS
+                        or normalized_table in CRITICAL_SCHEMA_TABLES
+                    ):
                         raise
 
     def _ensure_required_columns(self, cursor):
@@ -551,7 +619,8 @@ class DatabaseManager:
                 ('其他渠道', 90, 1), ('落地页', 100, 1), ('批量导入', 110, 1)
             """)
         except Exception as exc:
-            logger.warning(f"⚠️ customer_lead 软删除列/来源字典表迁移失败: {exc}")
+            self._schema_failure(f"customer_lead 软删除列/来源字典表: {exc}")
+            logger.error(f"❌ customer_lead 软删除列/来源字典表迁移失败: {exc}")
 
     def _ensure_ai_advisor_indexes(self, cursor):
         """补齐 AI 军师旧表的幂等索引，避免重复请求重复扣额度。"""
@@ -916,7 +985,8 @@ class DatabaseManager:
                 cursor.execute(f"ALTER TABLE {table} {spec}")
                 logger.info(f"✅ 已添加 customer_lead 唯一索引 uk_customer_lead_{column}")
         except Exception as exc:
-            logger.warning(f"⚠️ customer_lead 联系方式唯一约束迁移失败: {exc}")
+            self._schema_failure(f"customer_lead 联系方式唯一约束: {exc}")
+            logger.error(f"❌ customer_lead 联系方式唯一约束迁移失败: {exc}")
 
     def _add_foreign_key(
         self,
@@ -950,11 +1020,18 @@ class DatabaseManager:
             """)
             logger.debug(f"✅ 外键 {fk_name} 已添加")
         except pymysql.MySQLError as e:
-            # 1061: 重复键名, 1062: 重复键, 1215: 无法添加外键约束（通常因为数据类型不匹配或引用表不存在）
-            if e.args[0] in (1061, 1062, 1215):
+            code = int(e.args[0]) if e.args and isinstance(e.args[0], int) else 0
+            # 1061: 重复键名, 1062: 重复键
+            if code in (1061, 1062):
                 logger.debug(f"ℹ️ 外键 {fk_name} 跳过（{e.args[1]}）")
-            else:
-                logger.warning(f"⚠️ 外键 {fk_name} 添加失败: {e}")
+                return
+            # 1215: 无法添加外键约束（引用表不存在 / 类型不匹配 / 存量孤儿数据）。
+            # 金融、积分、会员、举报这类表不允许"悄悄没有外键"，必须记录并在启动末尾阻断。
+            if code == 1215 and (table_name, column) not in FK_DELETE_POLICY:
+                logger.debug(f"ℹ️ 外键 {fk_name} 跳过（{e.args[1]}）")
+                return
+            self._schema_failure(f"FOREIGN KEY {fk_name} ON DELETE {on_delete}: {e}")
+            logger.error(f"❌ 外键 {fk_name} 添加失败: {e}")
 
     def _add_all_foreign_keys(self, cursor):
         """添加所有外键约束"""
@@ -1032,7 +1109,12 @@ class DatabaseManager:
         ]
 
         for table, column in user_id_tables:
-            self._add_foreign_key(cursor, table, column)
+            self._add_foreign_key(
+                cursor,
+                table,
+                column,
+                on_delete=FK_DELETE_POLICY.get((table, column), FK_DEFAULT_ON_DELETE),
+            )
 
         self._add_foreign_key(cursor, "user_report", "reviewed_by", on_delete="SET NULL")
         self._add_foreign_key(cursor, "report_appeal", "reviewed_by", on_delete="SET NULL")
@@ -1050,111 +1132,30 @@ class DatabaseManager:
             )
 
         # 社区相关外键
-        try:
-            # community_comment.post_id → community_post.id
-            cursor.execute("""
-                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
-                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'community_comment'
-                AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME = 'fk_community_comment_post_id'
-            """)
-            if not cursor.fetchone():
-                cursor.execute("""
-                    ALTER TABLE `community_comment`
-                    ADD CONSTRAINT `fk_community_comment_post_id`
-                    FOREIGN KEY (`post_id`) REFERENCES `community_post`(`id`) ON DELETE CASCADE
-                """)
-                logger.debug("✅ 外键 fk_community_comment_post_id 已添加")
-
-            # community_like.target_id → community_post.id 或 community_comment.id（软外键，不强制）
-            # 社区点赞的 target_id 可能是动态ID或评论ID，不添加物理外键
-        except Exception as e:
-            logger.debug(f"ℹ️ 社区外键处理: {e}")
+        # 社区相关外键（community_like.target_id 可能是动态或评论 id，保持软外键不强制）
+        self._add_foreign_key(cursor, "community_comment", "post_id", "community_post", on_delete="CASCADE")
 
         # 纸飞机回复外键
-        try:
-            cursor.execute("""
-                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
-                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'paper_plane_reply'
-                AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME = 'fk_paper_plane_reply_plane_id'
-            """)
-            if not cursor.fetchone():
-                cursor.execute("""
-                    ALTER TABLE `paper_plane_reply`
-                    ADD CONSTRAINT `fk_paper_plane_reply_plane_id`
-                    FOREIGN KEY (`plane_id`) REFERENCES `paper_plane`(`id`) ON DELETE CASCADE
-                """)
-                logger.debug("✅ 外键 fk_paper_plane_reply_plane_id 已添加")
-        except Exception as e:
-            logger.debug(f"ℹ️ 纸飞机外键处理: {e}")
+        self._add_foreign_key(cursor, "paper_plane_reply", "plane_id", "paper_plane", on_delete="CASCADE")
 
         # 红娘评价外键
-        try:
-            cursor.execute("""
-                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
-                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'matchmaker_rating'
-                AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME = 'fk_matchmaker_rating_service_id'
-            """)
-            if not cursor.fetchone():
-                cursor.execute("""
-                    ALTER TABLE `matchmaker_rating`
-                    ADD CONSTRAINT `fk_matchmaker_rating_service_id`
-                    FOREIGN KEY (`service_id`) REFERENCES `matchmaker_service`(`id`) ON DELETE CASCADE
-                """)
-                logger.debug("✅ 外键 fk_matchmaker_rating_service_id 已添加")
-        except Exception as e:
-            logger.debug(f"ℹ️ 红娘评价外键处理: {e}")
+        self._add_foreign_key(cursor, "matchmaker_rating", "service_id", "matchmaker_service", on_delete="CASCADE")
 
         # 活动报名外键
-        try:
-            cursor.execute("""
-                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
-                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'activity_signup'
-                AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME = 'fk_activity_signup_activity_id'
-            """)
-            if not cursor.fetchone():
-                cursor.execute("""
-                    ALTER TABLE `activity_signup`
-                    ADD CONSTRAINT `fk_activity_signup_activity_id`
-                    FOREIGN KEY (`activity_id`) REFERENCES `offline_activity`(`id`) ON DELETE CASCADE
-                """)
-                logger.debug("✅ 外键 fk_activity_signup_activity_id 已添加")
-        except Exception as e:
-            logger.debug(f"ℹ️ 活动报名外键处理: {e}")
+        self._add_foreign_key(cursor, "activity_signup", "activity_id", "offline_activity", on_delete="CASCADE")
 
         # chat_message.session_id → chat_session.id
-        try:
-            cursor.execute("""
-                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
-                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_message'
-                AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME = 'fk_chat_message_session_id'
-            """)
-            if not cursor.fetchone():
-                cursor.execute("""
-                    ALTER TABLE `chat_message`
-                    ADD CONSTRAINT `fk_chat_message_session_id`
-                    FOREIGN KEY (`session_id`) REFERENCES `chat_session`(`id`) ON DELETE CASCADE
-                """)
-                logger.debug("✅ 外键 fk_chat_message_session_id 已添加")
-        except Exception as e:
-            logger.debug(f"ℹ️ 聊天消息外键处理: {e}")
+        self._add_foreign_key(cursor, "chat_message", "session_id", "chat_session", on_delete="CASCADE")
 
-        try:
-            cursor.execute("""
-                SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
-                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ai_avatar_message'
-                AND CONSTRAINT_TYPE = 'FOREIGN KEY'
-                AND CONSTRAINT_NAME = 'fk_ai_avatar_message_conversation_id'
-            """)
-            if not cursor.fetchone():
-                cursor.execute("""
-                    ALTER TABLE `ai_avatar_message`
-                    ADD CONSTRAINT `fk_ai_avatar_message_conversation_id`
-                    FOREIGN KEY (`conversation_id`) REFERENCES `ai_avatar_conversation`(`id`)
-                    ON DELETE CASCADE
-                """)
-                logger.debug("✅ 外键 fk_ai_avatar_message_conversation_id 已添加")
-        except pymysql.MySQLError as e:
-            logger.debug(f"ℹ️ AI 分身消息外键处理: {e}")
+        # ai_avatar_message.conversation_id → ai_avatar_conversation.id
+        # 约束名由 _add_foreign_key 按 fk_{table}_{column} 生成：fk_ai_avatar_message_conversation_id
+        self._add_foreign_key(
+            cursor,
+            "ai_avatar_message",
+            "conversation_id",
+            "ai_avatar_conversation",
+            on_delete="CASCADE",
+        )
 
         self._add_foreign_key(cursor, "ai_avatar_owner_qa", "viewer_user_id", on_delete="SET NULL")
         self._add_foreign_key(
@@ -3445,6 +3446,8 @@ class DatabaseManager:
         self._add_all_foreign_keys(cursor)
 
         logger.info(f"✅ 数据库表结构初始化完成（{len(tables)}张表）")
+        # 结构收敛失败（缺列/缺索引/缺关键外键）在启动末尾统一阻断，避免带残缺结构上线。
+        self._raise_on_schema_failures()
 
     def _ensure_admin_home_columns(self, cursor) -> None:
         """Backfill tenant boundaries for databases created before the admin-home module."""
@@ -3726,8 +3729,12 @@ class DatabaseManager:
                 return
             cursor.execute(f"ALTER TABLE `{table_name}` ADD KEY `{index_name}` {definition}")
             logger.info(f"✅ 已添加索引 {table_name}.{index_name}")
-        except Exception as exc:  # 索引迁移失败不应阻断整体建表
-            logger.warning(f"⚠️ 添加索引 {table_name}.{index_name} 失败: {exc}")
+        except Exception as exc:  # 表不存在时可接受；其他失败记入启动末尾的统一阻断
+            if isinstance(exc, pymysql.MySQLError) and exc.args and int(exc.args[0] or 0) in (1146, 1054):
+                logger.debug(f"ℹ️ 索引 {table_name}.{index_name} 跳过（{exc.args[1]}）")
+                return
+            self._schema_failure(f"INDEX {table_name}.{index_name}: {exc}")
+            logger.error(f"❌ 添加索引 {table_name}.{index_name} 失败: {exc}")
 
     def _backfill_comment_roots(self, cursor) -> None:
         """Resolve legacy nested replies to their top-level root, one depth at a time."""

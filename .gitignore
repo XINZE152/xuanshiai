@@ -60,6 +60,9 @@ outputs
 
 scripts/*
 !scripts/reproduce_upload_exposure.py
+# schema 契约与 baseline 导出器必须随仓库发布，否则 CI 无法执行
+!scripts/schema_contract.py
+!scripts/dump_baseline_schema.py
 artifacts/
 
 # Local runtime logs

@@ -652,19 +652,26 @@ async def test_application_list_keeps_ids_alongside_nested_users(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("incoming", "candidate_alias", "privacy_alias", "completion_alias"),
+    ("incoming", "candidate_alias"),
     [
-        (True, "fu", "fpr", "fc"),
-        (False, "tu", "tpr", "tc"),
+        (True, "fu"),
+        (False, "tu"),
     ],
 )
-async def test_application_lists_filter_the_counterpart_through_visibility(
+async def test_application_lists_filter_only_blocked_counterpart(
     monkeypatch: pytest.MonkeyPatch,
     incoming: bool,
     candidate_alias: str,
-    privacy_alias: str,
-    completion_alias: str,
 ) -> None:
+    """收件箱只过滤拉黑，不再复用发现链路的可见性谓词（2026-10-27）。
+
+    旧实现调用 ``_scene_visibility(VisibilityScene.INTERACTION)``，谓词里含
+    ``who_can_see_me`` / ``match_status``，且未传 ``skip_completion_gate``（默认 False），
+    后果是：对方脱单/暂停/设「完全私密」后历史申请从列表凭空消失；测试号
+    （完整度 <100）收件箱恒空，``DISCOVERY_SKIP_GATES`` 也救不了。
+    收件箱只回答「这条申请还在不在」，因此只保留双向拉黑过滤。
+    """
+
     class EmptyRows:
         def scalar(self) -> int:
             return 0
@@ -689,26 +696,11 @@ async def test_application_lists_filter_the_counterpart_through_visibility(
             self.statements.append(str(statement))
             return EmptyRows()
 
-    seen: list[tuple[str, str, str, str]] = []
+    seen: list[str] = []
 
-    async def scene_visibility(
-        _: object,
-        __: int,
-        scene: object,
-        *,
-        candidate_alias: str = "u",
-        privacy_alias: str = "pr",
-        completion_alias: str = "c",
-    ) -> tuple[dict[str, object], bool, object]:
-        seen.append((str(scene), candidate_alias, privacy_alias, completion_alias))
-        predicate = CandidateVisibilityService().predicate(
-            ViewerContext(user_id=1, realname_status=2, is_vip=True),
-            scene,
-            candidate_alias=candidate_alias,
-            privacy_alias=privacy_alias,
-            completion_alias=completion_alias,
-        )
-        return {}, False, predicate
+    async def scene_visibility(*_args: object, **_kwargs: object):
+        seen.append("called")
+        raise AssertionError("收件箱不应再调用 _scene_visibility")
 
     monkeypatch.setattr(discovery, "_scene_visibility", scene_visibility)
     db = RecordingDb()
@@ -716,17 +708,17 @@ async def test_application_lists_filter_the_counterpart_through_visibility(
     page = await discovery.list_applications(db, 1, incoming, page=1, page_size=20)
 
     assert page.total == 0
-    assert seen == [
-        ("VisibilityScene.INTERACTION", candidate_alias, privacy_alias, completion_alias)
-    ]
+    assert seen == [], "收件箱必须脱离发现链路的可见性谓词"
     application_queries = [
         statement for statement in db.statements if "FROM match_apply" in statement
     ]
-    expected_policy = (
-        f"COALESCE({privacy_alias}.who_can_see_me, 1) IN (1, 2, 3)"
-    )
     assert len(application_queries) == 2
-    assert all(expected_policy in statement for statement in application_queries)
+    for statement in application_queries:
+        assert "FROM user_block bl" in statement
+        assert f"{candidate_alias}.id" in statement
+        assert "who_can_see_me" not in statement
+        assert "match_status" not in statement
+        assert "score, 0) >= 100" not in statement
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,56 @@
+name: Schema contract
+
+# P0-1 门禁：bootstrap 的隐藏补列失败曾只打 WARNING（8ec8ff1），生产不会跑 bootstrap，
+# 缺列只能等 500 才暴露。本工作流用代码建一遍库，再逐列/逐索引比对，任何"应该有但没有"
+# 都让 CI 失败；baseline 提交后再校验 "baseline + migrations" 能否重建同一结构。
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: xuanshiai_contract
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      ENVIRONMENT: testing
+      AUTO_INIT_DB: "true"
+      DATABASE_URL: mysql+aiomysql://root:@127.0.0.1:3306/xuanshiai_contract
+      UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-schema-contract-uploads
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install backend and dev dependencies
+        run: uv sync --locked --extra dev
+      - name: Bootstrap schema from code
+        run: uv run --no-sync python database_setup_marriage.py
+      - name: Diff live schema against code contract
+        run: uv run --no-sync python scripts/schema_contract.py check-db --verbose
+      - name: Schema lifecycle unit contracts
+        run: >-
+          uv run --no-sync pytest
+          tests/test_schema_contract.py
+          tests/test_business_schema_migration_contract.py -q
+      - name: Baseline + business migrations
+        if: ${{ hashFiles('migrations/baseline/schema.sql') != '' }}
+        env:
+          BUSINESS_TEST_DATABASE_URL: mysql://root:@127.0.0.1:3306/xuanshiai_contract_migrated
+        run: |
+          mysql -h127.0.0.1 -uroot -e "DROP DATABASE IF EXISTS xuanshiai_contract_migrated; CREATE DATABASE xuanshiai_contract_migrated CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+          mysql -h127.0.0.1 -uroot xuanshiai_contract_migrated < migrations/baseline/schema.sql
+          uv run --no-sync python scripts/manage_business_migration.py up --target test
+          DATABASE_URL=mysql+aiomysql://root:@127.0.0.1:3306/xuanshiai_contract_migrated \
+            uv run --no-sync python scripts/schema_contract.py check-db --verbose
