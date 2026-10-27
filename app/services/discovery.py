@@ -721,6 +721,129 @@ async def _record_browse(db: AsyncSession, viewer_id: int, target_id: int) -> No
     await db.execute(text("INSERT INTO user_browse_history (user_id, target_user_id) VALUES (:user_id, :target_id)"), {"user_id": viewer_id, "target_id": target_id})
 
 
+_EDUCATION_LABELS: dict[int, str] = {1: "高中及以下", 2: "大专", 3: "本科", 4: "硕士", 5: "博士"}
+
+# 后台择偶单选的三值口径：0=不限 1=正向 2=可接受。文案在服务端出，前端不维护枚举。
+_ENUM_TEXT: dict[str, dict[int, str]] = {
+    "marriage": {0: "不限", 1: "未婚", 2: "离异", 3: "丧偶"},
+    "housing": {0: "不限", 1: "有房", 2: "无房"},
+    "smoking": {0: "不限", 1: "不吸烟", 2: "可接受吸烟"},
+    "drinking": {0: "不限", 1: "不饮酒", 2: "可接受饮酒"},
+}
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _income_min_text(income_min: Any, income_range: Any) -> str:
+    """收入要求文案：优先后台单选档位，其次按 ``income_min``（元）转「x万以上」。"""
+    if income_range:
+        return str(income_range)
+    if income_min is None:
+        return ""
+    try:
+        wan = float(income_min) / 10000
+    except (TypeError, ValueError):
+        return ""
+    if wan <= 0:
+        return ""
+    return f"{wan:.1f}".rstrip("0").rstrip(".") + "万以上"
+
+
+def _preference_distance_text(accept_long_distance: bool, accept_cross_province: bool) -> str:
+    """距离三选一，对应设计稿的三个选项。"""
+    if accept_cross_province:
+        return "距离不是问题"
+    if accept_long_distance:
+        return "异地也可以"
+    return "最好同城"
+
+
+async def _public_preference(db: AsyncSession, user_id: int) -> dict[str, Any] | None:
+    """「Ta的理想型」：他人可见的择偶偏好展示归一。
+
+    与 ``get_profile`` 同门禁（仅 ``view_profile`` 判定为 full 时调用），
+    中文文案（``*_text``）在服务端合成，前端不维护枚举。
+    ``extra_requirement`` 为自由文本（易泄露联系方式、易出现人身攻击），
+    按 2026-10-27 决策**不对他人下发**。
+    """
+    row = (await db.execute(text("""SELECT age_min, age_max, height_min, height_max,
+               education_min, education_requirement, income_min, income_range,
+               marriage_status, marriage_requirement,
+               housing_requirement, housing_expectation,
+               smoking_requirement, smoking_expectation,
+               drinking_requirement, drinking_expectation,
+               preferred_province_code, preferred_city_codes,
+               accept_long_distance, accept_cross_province,
+               dating_goal, meeting_pace, children_intention, marriage_timeline,
+               preferred_occupation
+        FROM user_partner_preference WHERE user_id = :user_id"""), {"user_id": user_id})).mappings().first()
+    if not row:
+        return None
+    data = dict(row)
+    codes = data.get("preferred_city_codes")
+    if isinstance(codes, str):
+        try:
+            codes = json.loads(codes)
+        except json.JSONDecodeError:
+            codes = []
+    data["preferred_city_codes"] = codes if isinstance(codes, list) else []
+    try:
+        from app.services.regions import region_name
+
+        data["preferred_region_text"] = "、".join(
+            name for name in (region_name(str(code)) for code in data["preferred_city_codes"]) if name
+        )
+    except Exception:  # pragma: no cover - 区划数据异常不应影响详情页
+        logger.exception("Failed to resolve preference region names")
+        data["preferred_region_text"] = ""
+    data["distance_text"] = _preference_distance_text(
+        bool(data.get("accept_long_distance")), bool(data.get("accept_cross_province"))
+    )
+    education_min = data.get("education_min")
+    data["education_min_text"] = _EDUCATION_LABELS.get(int(education_min), "") if education_min else ""
+    data["income_min_text"] = _income_min_text(data.get("income_min"), data.get("income_range"))
+    data["marriage_text"] = data.get("marriage_requirement") or _ENUM_TEXT["marriage"].get(
+        _as_int(data.get("marriage_status")), ""
+    )
+    data["housing_text"] = data.get("housing_expectation") or _ENUM_TEXT["housing"].get(
+        _as_int(data.get("housing_requirement")), ""
+    )
+    data["smoking_text"] = data.get("smoking_expectation") or _ENUM_TEXT["smoking"].get(
+        _as_int(data.get("smoking_requirement")), ""
+    )
+    data["drinking_text"] = data.get("drinking_expectation") or _ENUM_TEXT["drinking"].get(
+        _as_int(data.get("drinking_requirement")), ""
+    )
+    data["expected_area"] = data.get("preferred_region_text", "")
+    # 期待标签（relationship_expectation）不在 user_partner_preference 里，
+    # 详情页已由 tag_selections 单独渲染，这里给空数组保证前端契约稳定。
+    data["extras"] = []
+    return data
+
+
+async def public_preference(db: AsyncSession, viewer_id: int, target_id: int) -> dict[str, Any]:
+    """他人择偶偏好（``GET /users/{user_id}/preference-public``）。
+
+    刻意复用 ``view_profile`` 而不是另写一套门禁：
+    - 维护态 / 自看拦截 / 可见性 / ``only_vip_can_see_detail`` 与详情页完全一致；
+    - 额度走 ``_consume_browse``，同一天同一目标重复查看按「已计费」放行，
+      不会因为多调一次接口二次扣次数。
+    未解锁（full=False）或对方没填时返回 ``has_data=False``，前端静默隐藏。
+    """
+    if viewer_id == target_id:
+        raise HTTPException(422, detail="查看自己的择偶要求请使用 /users/me/preferences")
+    detail = await view_profile(db, viewer_id, target_id)
+    preference = detail.preference
+    if not preference:
+        return {"has_data": False, "user_id": target_id}
+    return {"has_data": True, "user_id": target_id, **preference}
+
+
 async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> PublicProfileResponse:
     if not await platform_browse_open(db):
         raise HTTPException(403, detail=await platform_maintenance_message(db))
@@ -746,11 +869,15 @@ async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> Publ
         if privacy:
             if privacy["hide_school"]:
                 profile["education_level"] = None
+                profile["school"] = None
             if privacy["hide_company"]:
                 profile["occupation"] = None
                 profile["industry"] = None
+                profile["company"] = None
+    # 「Ta的理想型」与 profile 同门禁：未解锁（full=False）不查库、不下发。
+    preference = await _public_preference(db, target_id) if full else None
     await db.commit()
-    return PublicProfileResponse(user_id=target_id, card=card, profile=profile, is_vip_viewer=vip, browse_quota_remaining=quota, can_apply=viewer["completion_score"] >= 100)
+    return PublicProfileResponse(user_id=target_id, card=card, profile=profile, is_vip_viewer=vip, browse_quota_remaining=quota, can_apply=viewer["completion_score"] >= 100, preference=preference)
 
 
 async def _target_rows(
@@ -1030,6 +1157,17 @@ async def _refund_quota_after_database_failure(key: str) -> None:
         logger.exception("Failed to refund daily quota after database failure")
 
 
+def _forbidden(code: str, message: str) -> HTTPException:
+    """带业务码的 403。
+
+    ``detail`` 用 dict 形态（与 ``profile.py`` 的 ``GENDER_IMMUTABLE`` 一致），
+    前端可按 ``code`` 分流到「完善资料 / 绑手机 / 实名认证」不同页面。
+    为兼容仍读 ``message`` 的旧客户端，``app.main`` 的异常处理器会把
+    ``detail.message`` 同时提到响应顶层 ``message``。
+    """
+    return HTTPException(403, detail={"code": code, "message": message, "retryable": False})
+
+
 async def create_application(db: AsyncSession, viewer_id: int, target_id: int, request: ApplicationCreateRequest) -> ApplicationResponse:
     await ensure_user_allowed(db, viewer_id, "APPLICATION_RESTRICTED")
     await _lock_user_pair(db, viewer_id, target_id)
@@ -1037,19 +1175,21 @@ async def create_application(db: AsyncSession, viewer_id: int, target_id: int, r
     await _expire_pending_applications(db)
     viewer = await _viewer_context(db, viewer_id)
     if not _skip_discovery_gates() and viewer["completion_score"] < 100:
-        raise HTTPException(403, detail="请先完善资料后再申请认识")
+        raise _forbidden("PROFILE_INCOMPLETE", "请先完善资料后再申请认识")
     if not viewer.get("phone"):
-        raise HTTPException(403, detail="请先绑定手机号")
+        raise _forbidden("PHONE_REQUIRED", "请先绑定手机号")
     line_perm = await match_line_permissions(db)
     # 卡片4「没有实名认证是否允许发起牵线」：no/未配置 = 禁止（与旧行为一致）
     if viewer.get("realname_status") != 2 and line_perm.get("realname_allowed") is not True:
-        raise HTTPException(403, detail="请先完成实名认证")
-    # 卡片4「没有实名认证的是否允许被牵线」：no = 禁止向未实名对象发起；未配置 = 沿用旧行为(允许)
-    if line_perm.get("be_linked_allowed") is False:
-        target_auth = await db.execute(text("SELECT COALESCE(realname_status, 0) AS realname_status FROM user_auth WHERE user_id = :target_id"), {"target_id": target_id})
-        target_status = int((target_auth.mappings().first() or {}).get("realname_status") or 0)
-        if target_status != 2:
-            raise HTTPException(403, detail="对方尚未完成实名认证，暂时无法发起认识申请")
+        raise _forbidden("REALNAME_REQUIRED", "请先完成实名认证")
+    # 2026-10-27 需求：未实名的接收方不再拦截「发起」这一步。
+    # 申请照常写入 match_apply 并推送通知（个人中心-我的申请 / 消息-认识 均可见），
+    # 接收方在点「同意 / 拒绝」时才校验实名（见 respond_application）。
+    # 因此这里只读取对方实名状态，回填给前端做「对方需实名后才能处理」的提示；
+    # 后台卡片4「是否允许被牵线」开关（be_linked_allowed）从此不再拦截发起。
+    target_auth = await db.execute(text("SELECT COALESCE(realname_status, 0) AS realname_status FROM user_auth WHERE user_id = :target_id"), {"target_id": target_id})
+    target_status = int((target_auth.mappings().first() or {}).get("realname_status") or 0)
+    target_realname_required = target_status != 2
     existing = await db.execute(text("SELECT id, status FROM match_apply WHERE ((from_user_id = :from_id AND to_user_id = :to_id) OR (from_user_id = :to_id AND to_user_id = :from_id)) AND status IN (0, 1) LIMIT 1"), {"from_id": viewer_id, "to_id": target_id})
     if existing.first():
         raise HTTPException(409, detail="双方已有进行中的认识申请或匹配")
@@ -1071,27 +1211,26 @@ async def create_application(db: AsyncSession, viewer_id: int, target_id: int, r
         await _refund_quota_after_database_failure(quota_key)
         raise
     created = await db.execute(text("SELECT id, from_user_id, to_user_id, message, status, expire_at, created_at FROM match_apply WHERE id = :id"), {"id": result.lastrowid})
-    return ApplicationResponse(**created.mappings().one())
+    return ApplicationResponse(**created.mappings().one(), target_realname_required=target_realname_required)
 
 
 async def list_applications(db: AsyncSession, viewer_id: int, incoming: bool, page: int, page_size: int) -> ApplicationPage:
     await _expire_pending_applications(db)
     field = "to_user_id" if incoming else "from_user_id"
     candidate_alias = "fu" if incoming else "tu"
-    privacy_alias = "fpr" if incoming else "tpr"
-    completion_alias = "fc" if incoming else "tc"
-    _, _, predicate = await _scene_visibility(
-        db,
-        viewer_id,
-        VisibilityScene.INTERACTION,
-        candidate_alias=candidate_alias,
-        privacy_alias=privacy_alias,
-        completion_alias=completion_alias,
-    )
-    visible = " AND " + predicate.clause
+    # 2026-10-27 修复：收件箱不再复用「发现/推荐」的可见性谓词。
+    # 旧实现用 VisibilityScene.INTERACTION，谓词里含 match_status=1、who_can_see_me IN (1,2,3)
+    # 且默认带完整度门禁（list_applications 未传 skip_completion_gate，DISCOVERY_SKIP_GATES
+    # 对它无效）。后果：对方脱单/暂停/设「完全私密」后，历史申请会从列表凭空消失（记录仍在
+    # match_apply，用户以为被吞）；测试号（完整度 <100）收件箱恒空。
+    # 收件箱只回答「这条申请还在不在」，因此只保留双向拉黑过滤。
+    # 上方 fpr/fc/tpr/tc 四个 JOIN 保留：无副作用，后续排序/联表仍可用。
+    visible = f""" AND NOT EXISTS (
+        SELECT 1 FROM user_block bl
+        WHERE (bl.user_id = :user_id AND bl.target_user_id = {candidate_alias}.id)
+           OR (bl.user_id = {candidate_alias}.id AND bl.target_user_id = :user_id))"""
     params = {
         "user_id": viewer_id,
-        **predicate.params,
         "limit": page_size,
         "offset": (page - 1) * page_size,
     }
@@ -1157,6 +1296,18 @@ async def respond_application(db: AsyncSession, viewer_id: int, application_id: 
     if row["status"] != 0:
         raise HTTPException(409, detail="当前申请已处理")
     await _ensure_target(db, viewer_id, int(row["from_user_id"]))
+    # 2026-10-27 需求：回应方（同意/拒绝的人）必须已实名，未实名引导去认证。
+    # 发起侧已放开（见 create_application），所以这里是唯一的实名闸口。
+    # 受后台卡片4「没有实名认证是否允许发起牵线」开关约束（=yes 时放行），保持后台可控。
+    line_perm = await match_line_permissions(db)
+    if line_perm.get("realname_allowed") is not True:
+        responder_auth = await db.execute(
+            text("SELECT COALESCE(realname_status, 0) AS realname_status FROM user_auth WHERE user_id = :user_id"),
+            {"user_id": viewer_id},
+        )
+        responder_status = int((responder_auth.mappings().first() or {}).get("realname_status") or 0)
+        if responder_status != 2:
+            raise _forbidden("REALNAME_REQUIRED", "请先完成实名认证后再回应认识申请")
     status = 1 if accepted else 2
     await db.execute(text("UPDATE match_apply SET status = :status, responded_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"status": status, "id": application_id})
     if accepted:

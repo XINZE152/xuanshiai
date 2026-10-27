@@ -132,6 +132,60 @@ python database_setup_marriage.py
 
 生产/预发布环境保持 `AUTO_INIT_DB=false`，发布前对已选定并备份的目标库执行 `migrations/chat/20260923_01_chat_message_idempotency_up.sql`，再执行对应 `verify.sql` 并按 `migrations/chat/README.md` 核验；不得在未确认目标环境前执行。开发/测试初始化会通过 `database_setup_marriage.py` 幂等补齐该列与唯一键。回滚步骤见同目录 `README.md`，down 会删除新列中已写入的幂等键。
 
+### 业务 schema 缺口迁移 runner
+
+业务侧版本表为 `business_schema_migration`，清单为 `migrations/business/manifest.json`。runner 只接受 `--target test` 或 `--target development`，不直接接受生产目标；生产发布仍须使用经审批的隔离库和人工窗口。
+
+```powershell
+# 隔离测试库
+$env:BUSINESS_TEST_DATABASE_URL = "mysql://root:实际密码@127.0.0.1:3306/xuanshiai_test"
+.\.venv\Scripts\python.exe scripts\manage_business_migration.py status --target test
+.\.venv\Scripts\python.exe scripts\manage_business_migration.py up --target test
+.\.venv\Scripts\python.exe scripts\manage_business_migration.py verify --target test --expect current
+
+# 仅在确认备份与数据影响后显式允许回滚；down 会删除本迁移新增列中的数据
+$env:BUSINESS_MIGRATION_ALLOW_DOWN = "true"
+.\.venv\Scripts\python.exe scripts\manage_business_migration.py down --target test
+```
+
+当前迁移版本（`migrations/business/manifest.json`，按顺序执行）：
+
+| 版本 | 内容 |
+| --- | --- |
+| `20261027_01_core_schema_gaps` | `users.deleted_at`、`user_auth.id_card_hash/realname_status`、`chat_session.user1_pinned_at/user2_pinned_at` + 2 个索引 |
+| `20261027_02_account_security_gaps` | `users`/`user_auth`/`user_privacy`/`user_report`/`user_login_log` 共 52 列 |
+| `20261027_03_profile_payment_gaps` | `user_profile`/`payment_order`/`user_boost` 共 44 列 |
+| `20261027_04_fk_delete_policy` | 金额/积分/会员/举报证据外键改 `ON DELETE RESTRICT` |
+
+至此 `database_setup_marriage.py` 中 `_ensure_required_columns` 的 101 个隐藏补列全部有对应迁移；
+`verify_previous` 用于确认 down 之后这些列确实消失。
+
+### Schema 契约与 baseline
+
+`database_setup_marriage.py` 的结构由三段拼成（`CREATE TABLE` + 隐藏补列 + 补索引），补列失败
+曾在提交 `8ec8ff1` 中被降级成 WARNING，导致旧库缺列直到接口 500 才暴露。现在有两道闸：
+
+```powershell
+# 1) 用代码建库后，逐表/逐列/逐索引比对（CI: .github/workflows/schema-contract.yml）
+$env:DATABASE_URL = "mysql+aiomysql://root:实际密码@127.0.0.1:3306/xuanshiai_contract"
+.\.venv\Scripts\python.exe database_setup_marriage.py
+.\.venv\Scripts\python.exe scripts\schema_contract.py check-db --verbose
+
+# 2) 从"已验证库"导出 baseline（只读；拒绝 prod/production/live 库名）
+.\.venv\Scripts\python.exe scripts\dump_baseline_schema.py `
+  --database-url "mysql://root:实际密码@127.0.0.1:3306/xuanshiai_verify" `
+  --confirm-database xuanshiai_verify
+```
+
+基线流程、刷新规则与 CI 四个步骤见 `migrations/baseline/README.md`。
+
+bootstrap 的结构收敛失败默认**阻断启动**（缺列/缺关键索引/缺关键外键）。历史数据导致的外键
+无法建立时，可临时设置逃生开关并记录原因：
+
+```env
+SCHEMA_BOOTSTRAP_ALLOW_WARNINGS=true
+```
+
 生产或预发布环境必须配置：
 
 ```env

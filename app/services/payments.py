@@ -22,6 +22,7 @@ from app.schemas.payments import (
 )
 from app.services.discovery import _ensure_target
 from app.services.notifications import emit_notification
+from app.services.admin_config import get_runtime_value
 
 
 BOOST_PACKAGES = {
@@ -106,7 +107,10 @@ async def get_paid_order(db: AsyncSession, user_id: int, order_no: str, order_ty
 
 async def create_spotlight_order(db: AsyncSession, user_id: int, body: SpotlightPaymentRequest, idempotency_key: str) -> PaidOrderResponse:
     await _ensure_target(db, user_id, body.target_user_id)
-    return await _create_order(db, user_id, 2, body.target_user_id, "superlike", "爆灯", Decimal("5.00"), idempotency_key)
+    # 单价走运行期配置，代码只留兜底 —— 避免再次出现「后端写死 5.00、前端 9.9」的口径分裂。
+    # 历史订单金额不回改：payment_order.amount 已落库，改价只影响新订单。
+    spot_price = Decimal(str(await get_runtime_value(db, "finance", "spotlight_price", "9.90")))
+    return await _create_order(db, user_id, 2, body.target_user_id, "superlike", "爆灯", spot_price, idempotency_key)
 
 
 async def complete_test_payment(db: AsyncSession, user_id: int, body: TestPaymentRequest) -> TestPaymentResponse:

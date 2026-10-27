@@ -12,7 +12,7 @@ from uuid import uuid4
 from urllib.parse import parse_qs
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import JSONResponse, Response
@@ -116,6 +116,25 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @application.exception_handler(HTTPException)
+    async def http_exception_with_message(_: Request, exc: HTTPException) -> JSONResponse:
+        """在 ``detail`` 之外补一个顶层 ``message``。
+
+        2026-10-27 起业务 403 的 ``detail`` 改为 ``{"code","message","retryable"}``
+        （前端按 ``code`` 分流到完善资料/绑手机/实名认证）。为兼容仍读
+        ``res.message`` 的旧客户端，把中文文案同时提到顶层；``detail``
+        结构本身保持不变，既有读 ``detail`` / ``detail.code`` 的调用不受影响。
+        """
+        detail = exc.detail
+        payload: dict[str, object] = {"detail": detail}
+        if isinstance(detail, dict):
+            message = detail.get("message")
+            if isinstance(message, str):
+                payload["message"] = message
+        elif isinstance(detail, str):
+            payload["message"] = detail
+        return JSONResponse(status_code=exc.status_code, content=payload, headers=exc.headers)
 
     @application.middleware("http")
     async def log_requests(request: Request, call_next) -> Response:

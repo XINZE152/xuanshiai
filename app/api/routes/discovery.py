@@ -44,6 +44,7 @@ from app.services.discovery import (
     list_favorites,
     list_received_favorites,
     list_superlikes,
+    public_preference,
     respond_application,
     set_favorite,
     save_filter,
@@ -159,6 +160,12 @@ async def received_superlikes(page: int = Query(1, ge=1, le=1000), page_size: in
 @users_router.get("/{user_id}/profile", response_model=PublicProfileResponse, summary="查看他人主页")
 async def public_profile(user_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> PublicProfileResponse:
     return await view_profile(db, current.id, user_id)
+
+
+@users_router.get("/{user_id}/preference-public", summary="查看他人择偶偏好")
+async def public_preference_route(user_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict:
+    """「Ta 的理想型」。与 /{user_id}/profile 同门禁，未解锁返回 has_data=false。"""
+    return await public_preference(db, current.id, user_id)
 
 
 @users_router.get("/{user_id}/visitor-count", response_model=VisitorCountResponse, summary="查看他人主页访问人数")
