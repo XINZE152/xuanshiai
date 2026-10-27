@@ -27,9 +27,16 @@ REBUILD_MARK = "GENERATED ALWAYS AS"
 class _DictRowCursor:
     """复刻 ``pymysql.cursors.DictCursor``：fetchone() 返回字典。"""
 
-    def __init__(self, expressions: dict[str, str], *, existing_unique_indexes: set[str]):
+    def __init__(
+        self,
+        expressions: dict[str, str],
+        *,
+        existing_unique_indexes: set[str],
+        duplicate_columns: set[str] | None = None,
+    ):
         self._expressions = expressions
         self._existing_unique_indexes = existing_unique_indexes
+        self._duplicate_columns = duplicate_columns or set()
         self.executed: list[str] = []
         self._current: dict | None = None
 
@@ -50,6 +57,10 @@ class _DictRowCursor:
             key_name = (params or ("",))[0]
             self._current = {"Key_name": key_name} if key_name in self._existing_unique_indexes else None
             return
+        for column in ("active_phone", "active_wechat"):
+            if statement.startswith(f"SELECT 1 FROM `customer_lead` WHERE `{column}` IS NOT NULL"):
+                self._current = {"1": 1} if column in self._duplicate_columns else None
+                return
         self._current = None
 
     def fetchone(self):
@@ -135,4 +146,30 @@ def test_legacy_expression_without_unique_index_skips_drop_index() -> None:
     assert _failure_texts(manager) == []
     assert _statements(cursor, r"DROP INDEX") == [], "索引不存在时不得下发 DROP INDEX"
     assert _statements(cursor, r"ADD UNIQUE KEY `uk_customer_lead_active_phone`")
+    assert _statements(cursor, r"ADD UNIQUE KEY `uk_customer_lead_active_wechat`")
+
+
+def test_duplicate_contacts_skip_unique_index_without_blocking_startup() -> None:
+    """存量有重复有效联系方式时，建唯一索引必 1062。
+
+    这类数据问题不能记成阻断项——否则测试服这种「有 2 条同号客源」的旧库
+    一升级就拒绝启动。口径与 _ensure_customer_lead_contact_uniqueness 一致：
+    重建生成列、跳过唯一索引、留 warning 提示跑去重脚本。
+    """
+
+    legacy = "(case when (`status` in (_utf8mb4'LOST')) then NULL else trim(`phone`) end)"
+    cursor = _DictRowCursor(
+        {"active_phone": legacy, "active_wechat": legacy},
+        existing_unique_indexes=set(),
+        duplicate_columns={"active_phone"},
+    )
+    manager = _manager()
+
+    manager._ensure_customer_lead_soft_delete_and_source(cursor)
+
+    assert _failure_texts(manager) == [], "重复数据不得升级为阻断项（会让服务拒绝启动）"
+    # 生成列仍然按新定义重建，功能不受影响
+    assert _statements(cursor, rf"ADD COLUMN `active_phone`.*{REBUILD_MARK}.*deleted_at")
+    # 有重复的那列跳过唯一索引；没重复的列照常建
+    assert _statements(cursor, r"ADD UNIQUE KEY `uk_customer_lead_active_phone`") == []
     assert _statements(cursor, r"ADD UNIQUE KEY `uk_customer_lead_active_wechat`")
