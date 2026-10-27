@@ -148,11 +148,22 @@ async def mutual_records(
     actor_id: int | None = Query(None, ge=1),
     keyword: str | None = Query(None, max_length=64),
     result: str | None = Query(None, pattern="^(success|fail|none)$"),
+    age_min: int | None = Query(None, ge=0, le=120, description="发起方年龄下限（含），按 users.birthday 计算"),
+    age_max: int | None = Query(None, ge=0, le=120, description="发起方年龄上限（含）"),
+    income_min: float | None = Query(None, ge=0, description="发起方收入下限（元，含），按 user_profile.income；前端收入档位换算后传入"),
+    income_max: float | None = Query(None, ge=0, description="发起方收入上限（元，含）"),
+    income_secret: bool | None = Query(None, description="发起方收入「保密」：true 仅未填写(income 为 NULL)"),
+    education: str | None = Query(None, max_length=255, description="发起方学历多选，英文逗号分隔，按 user_auth.education"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> MutualRecordPage:
     current.require("community.activity.read")
-    return await service.list_records(db, page, page_size, activity_id, actor_id, keyword, result)
+    return await service.list_records(
+        db, page, page_size, activity_id, actor_id, keyword, result,
+        age_min=age_min, age_max=age_max,
+        income_min=income_min, income_max=income_max, income_secret=income_secret,
+        education=education,
+    )
 
 
 @record_router.get("/options", summary="互选记录筛选下拉字典")

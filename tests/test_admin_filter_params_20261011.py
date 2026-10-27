@@ -160,14 +160,13 @@ async def test_lead_filter_multi_value_uses_named_placeholders() -> None:
     ])
     await leads.list_leads(
         db, 1, 20, None, None, None, None,
-        marriage="1,2", education="本科", tags="A,B",
+        marriage="1,2", education="本科",
     )
     clause = db.clauses()
     assert "marriage IN (:marriage_0, :marriage_1)" in clause
     assert "education IN (:education_0)" in clause
-    assert "lt.name IN (:tag_0, :tag_1)" in clause
     params = db.statements[1][1]
-    assert params["marriage_0"] == "1" and params["tag_1"] == "B"
+    assert params["marriage_0"] == "1" and params["marriage_1"] == "2"
 
 
 # --------------------------------------------------------------------------- #
@@ -618,7 +617,7 @@ def test_member_route_exposes_new_filter_params() -> None:
 def test_lead_route_exposes_new_filter_params() -> None:
     names = _query_params(lead_routes.lead_list)
     for name in ("intention_level", "start_date", "end_date", "assign_start", "assign_end",
-                 "promoter_id", "xiangqin_status", "bind_mode", "wechat_added", "tags",
+                 "promoter_id", "xiangqin_status", "bind_mode", "wechat_added",
                  "age_min", "age_max", "height_min", "height_max", "marriage", "education",
                  "occupation", "residence", "hometown", "hide_followed_today",
                  "hide_called_today", "has_phone", "has_wechat", "order",

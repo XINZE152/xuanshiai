@@ -306,6 +306,17 @@
 
 参数：`activity_id` / `actor_id` / `keyword` / `result`（`success|fail|none`） / `page` / `page_size`。
 
+**会员资料筛选（2026-10-27 新增，均作用于发起方 `from_user`）**：
+
+| 参数 | 类型 | 校验 | 语义 | 落地列 |
+|---|---|---|---|---|
+| `age_min` / `age_max` | int | 0-120 | 发起方年龄区间（含），按生日换算 | `users.birthday`（`TIMESTAMPDIFF(YEAR, ...)`） |
+| `income_min` / `income_max` | float | ≥0 | 发起方收入区间（元，含），前端把「小于10w / 10-20w / 30-50w / 50-100w / 100w以上」档位换算成上下限传入 | `user_profile.income` |
+| `income_secret` | bool | — | `true` 仅看收入「保密」（未填写）的发起方 | `user_profile.income IS NULL` |
+| `education` | string | ≤255，英文逗号分隔多选 | 发起方学历多选 | `user_auth.education` |
+
+说明：与会员 CRM 列表同口径（年龄取生日、收入取 `user_profile.income` 数值区间、学历取 `user_auth.education`）；资料列以 `EXISTS` 子查询限定到 `from_user_id`，不影响被选方、不放大 `total`。不传资料参数时行为与旧版完全一致。
+
 | 字段 | 说明 |
 |---|---|
 | `id` | |

@@ -19,6 +19,7 @@ from app.schemas.mutual_selection_admin import (
     MutualRecordItem,
     MutualRecordPage,
 )
+from app.services.member_crm_filter import split_values
 
 _BASE_URL = "https://www.xuanshi.com/subpages/mutual/index"
 
@@ -314,6 +315,13 @@ async def list_records(
     actor_id: int | None,
     keyword: str | None,
     result_filter: str | None,
+    *,
+    age_min: int | None = None,
+    age_max: int | None = None,
+    income_min: float | None = None,
+    income_max: float | None = None,
+    income_secret: bool | None = None,
+    education: str | None = None,
 ) -> MutualRecordPage:
     where = ["p.action IN ('pick', 'cancel')"]
     params: dict = {"limit": page_size, "offset": (page - 1) * page_size}
@@ -332,6 +340,43 @@ async def list_records(
         where.append("p.is_success = 0 AND p.action = 'pick'")
     elif result_filter == "none":
         where.append("p.action = 'cancel'")
+    # 会员资料筛选（作用于发起方 from_user）：与会员 CRM 列表同口径——
+    # 年龄取 users.birthday、收入取 user_profile.income 区间、学历取 user_auth.education 多选。
+    # 用 EXISTS 子查询，不改主 FROM、不让 1:1 之外的关联放大 COUNT。
+    if age_min is not None:
+        where.append("fu.birthday IS NOT NULL AND TIMESTAMPDIFF(YEAR, fu.birthday, CURDATE()) >= :age_min")
+        params["age_min"] = age_min
+    if age_max is not None:
+        where.append("fu.birthday IS NOT NULL AND TIMESTAMPDIFF(YEAR, fu.birthday, CURDATE()) <= :age_max")
+        params["age_max"] = age_max
+    income_conds: list[str] = []
+    if income_min is not None:
+        income_conds.append("fp.income >= :income_min")
+        params["income_min"] = income_min
+    if income_max is not None:
+        income_conds.append("fp.income <= :income_max")
+        params["income_max"] = income_max
+    if income_conds:
+        where.append(
+            "EXISTS (SELECT 1 FROM user_profile fp WHERE fp.user_id = fu.id"
+            f" AND {' AND '.join(income_conds)})"
+        )
+    if income_secret:
+        # 前端「保密」档：无资料行或 income 未填写（NULL）均视为保密。
+        where.append(
+            "NOT EXISTS (SELECT 1 FROM user_profile fp WHERE fp.user_id = fu.id AND fp.income IS NOT NULL)"
+        )
+    education_values = split_values(education)
+    if education_values:
+        names = []
+        for index, value in enumerate(education_values):
+            key = f"edu_{index}"
+            params[key] = value
+            names.append(f":{key}")
+        where.append(
+            "EXISTS (SELECT 1 FROM user_auth fa WHERE fa.user_id = fu.id"
+            f" AND fa.education IN ({', '.join(names)}))"
+        )
     clause = " AND ".join(where)
     base = (
         "FROM mutual_selection_pick p "
