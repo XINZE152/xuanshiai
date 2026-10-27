@@ -1378,6 +1378,37 @@ class DatabaseManager:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户择偶要求'
             """,
             # ============================================
+            # 1.3b 客源线索择偶要求（未入库暂存，入库后搬运至 user_partner_preference）
+            # ============================================
+            "customer_lead_preference": """
+                CREATE TABLE IF NOT EXISTS `customer_lead_preference` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `lead_id` bigint unsigned NOT NULL COMMENT '客源线索 customer_lead.id（未入库暂存键，入库后搬运至账号）',
+                    `age_min` tinyint unsigned DEFAULT NULL,
+                    `age_max` tinyint unsigned DEFAULT NULL,
+                    `height_min` smallint unsigned DEFAULT NULL,
+                    `height_max` smallint unsigned DEFAULT NULL,
+                    `education_min` tinyint unsigned DEFAULT NULL,
+                    `income_min` decimal(10,2) DEFAULT NULL,
+                    `marriage_status` tinyint DEFAULT NULL COMMENT '婚姻状况要求',
+                    `preferred_province_code` varchar(32) DEFAULT NULL,
+                    `preferred_city_codes` json DEFAULT NULL COMMENT '期望城市编码列表',
+                    `accept_long_distance` tinyint NOT NULL DEFAULT '0',
+                    `accept_cross_province` tinyint NOT NULL DEFAULT '0',
+                    `housing_requirement` tinyint DEFAULT NULL COMMENT '0不限 1有房 2无房',
+                    `smoking_requirement` tinyint DEFAULT NULL COMMENT '0不限 1不抽烟 2可接受',
+                    `drinking_requirement` tinyint DEFAULT NULL COMMENT '0不限 1不饮酒 2可接受',
+                    `dating_goal` varchar(32) DEFAULT NULL COMMENT '交友目标：倾向恋爱/倾向结婚',
+                    `meeting_pace` varchar(64) DEFAULT NULL COMMENT '见面节奏',
+                    `children_intention` varchar(64) DEFAULT NULL COMMENT '生育意愿',
+                    `extra_requirement` varchar(1000) DEFAULT NULL,
+                    `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_lead_preference_lead` (`lead_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='客源线索择偶要求（未入库暂存，入库后搬运至 user_partner_preference）'
+            """,
+            # ============================================
             # 1.4 用户媒体明细
             # ============================================
             "user_media": """

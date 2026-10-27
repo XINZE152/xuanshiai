@@ -1,7 +1,11 @@
-"""客源线索「择偶要求」读写（方案①：复用 user_partner_preference）回归。
+"""客源线索「择偶要求」读写回归。
+
+口径（2026-10-27 更新）：已入库读写账号那份 user_partner_preference；未入库读写
+新建的暂存表 customer_lead_preference（以 lead_id 为唯一键），入库时搬运至账号。
 
 覆盖范围（无需 DB，纯 schema / 服务逻辑 / 路由注册）：
-- 未入库线索：GET 返回 editable=False、preference=None（不报错）；PUT 返回 409。
+- 未入库线索：GET 返回 editable=True、preference 为空默认值（user_id=0，不报错）；
+  PUT 写 customer_lead_preference（INSERT）+ 一份审计 + commit，不再 409。
 - 已入库线索：GET/PUT 以 converted_user_id 复用 profile 的择偶读写；PUT 追加一份审计并 commit。
 - 出参 schema：LeadPreferenceResponse 能把 profile 返回的 dict 归一化为 PreferenceResponse。
 - 路由注册：GET/PUT /admin/customer-leads/{lead_id}/preferences 均挂在客源后台域。
@@ -87,7 +91,8 @@ def _pref_dict(user_id: int) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_get_preferences_unconverted_is_not_editable(monkeypatch) -> None:
+async def test_get_preferences_unconverted_is_editable(monkeypatch) -> None:
+    """未入库线索现可维护：读 customer_lead_preference，无行返回空默认值（editable=True）。"""
     import app.services.customer_lead_admin as lead_service
 
     async def _fake_get_lead(db, lead_id, *args, **kwargs):
@@ -95,24 +100,36 @@ async def test_get_preferences_unconverted_is_not_editable(monkeypatch) -> None:
 
     monkeypatch.setattr(lead_service, "get_lead", _fake_get_lead)
     result = await lead_service.get_lead_preferences(_StubDB(), 1)
-    assert result.editable is False
+    assert result.editable is True
     assert result.converted_user_id is None
-    assert result.preference is None
+    # 空默认值：user_id 固定 0（未入库无账号），可选字段为 None
+    assert result.preference is not None
+    assert result.preference.user_id == 0
+    assert result.preference.age_min is None
 
 
 @pytest.mark.asyncio
-async def test_update_preferences_unconverted_raises_409(monkeypatch) -> None:
-    from fastapi import HTTPException
-
+async def test_update_preferences_unconverted_writes_staging_table(monkeypatch) -> None:
+    """未入库线索 PUT 不再 409，而是写 customer_lead_preference 暂存表 + 审计 + commit。"""
     import app.services.customer_lead_admin as lead_service
 
     async def _fake_get_lead(db, lead_id, *args, **kwargs):
         return _lead(converted_user_id=None)
 
     monkeypatch.setattr(lead_service, "get_lead", _fake_get_lead)
-    with pytest.raises(HTTPException) as exc:
-        await lead_service.update_lead_preferences(_StubDB(), 9, 1, PreferenceUpdateRequest(age_min=22))
-    assert exc.value.status_code == 409
+    db = _StubDB()
+    body = PreferenceUpdateRequest(age_min=25, age_max=35)
+    result = await lead_service.update_lead_preferences(db, 9, 1, body)
+    assert result.editable is True
+    assert result.converted_user_id is None
+    assert db.commits == 1
+    # 无已有行 → 走 INSERT 暂存表，带上 lead_id 与提交的字段
+    staging_insert = next((p for sql, p in db.writes if "INSERT INTO customer_lead_preference" in sql), None)
+    assert staging_insert is not None
+    assert staging_insert["lead_id"] == 1 and staging_insert["age_min"] == 25 and staging_insert["age_max"] == 35
+    # 追加一份择偶审计
+    audit_params = next(params for sql, params in db.writes if "business_audit_log" in sql)
+    assert audit_params["actor"] == 9 and audit_params["id"] == 1
 
 
 # --------------------------------------------------------------------------- #

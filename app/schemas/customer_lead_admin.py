@@ -306,11 +306,14 @@ class CustomerLeadPromoterStat(BaseModel):
 
 
 class LeadPreferenceResponse(BaseModel):
-    """客源线索「择偶要求」读写响应（方案①：复用 user_partner_preference）。
+    """客源线索「择偶要求」读写响应。
 
-    择偶要求挂在线索入库后生成的账号（converted_user_id）上，字段口径与 C 端
-    ``PreferenceResponse`` 完全一致。未入库线索没有可挂载的账号，``editable`` 为
-    False、``preference`` 为 None，前端据此置灰该 tab；GET 不报错，PUT 返回 409。
+    字段口径与 C 端 ``PreferenceResponse`` 完全一致。存储位置随入库状态不同一：
+    已入库（``converted_user_id`` 非空）读写账号那份 ``user_partner_preference``；
+    未入库读写 ``customer_lead_preference`` 暂存表（``converted_user_id`` 为 None、
+    内层 ``preference.user_id`` 为 0），入库时由服务搬运至账号。
+    两种情况 ``editable`` 均为 True（未入库现已可维护）；无暂存行时 ``preference``
+    返回空默认值（非 None）。前端用 ``converted_user_id`` 区分是否已入库。
     """
 
     lead_id: int

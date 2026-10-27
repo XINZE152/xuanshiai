@@ -404,7 +404,7 @@ async def follow_up_list(lead_id: int = Path(..., ge=1), page: int = Query(1, ge
 @declare_permission("customer_lead.manage")
 @router.get("/{lead_id}/preferences", response_model=LeadPreferenceResponse, summary="查询客源线索择偶要求")
 async def lead_preference_get(lead_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> LeadPreferenceResponse:
-    """读取线索入库账号的择偶要求；未入库时返回 editable=False（不报错）。"""
+    """读取线索的择偶要求；已入库读账号那份，未入库读 customer_lead_preference 暂存表（均不报错）。"""
     current.require("customer_lead.manage")
     scope, scope_params = _lead_scope(current)
     return await get_lead_preferences(db, lead_id, scope=scope, scope_params=scope_params)
@@ -413,7 +413,7 @@ async def lead_preference_get(lead_id: int = Path(..., ge=1), current: CurrentMa
 @declare_permission("customer_lead.manage")
 @router.put("/{lead_id}/preferences", response_model=LeadPreferenceResponse, summary="修改客源线索择偶要求")
 async def lead_preference_put(lead_id: int = Path(..., ge=1), body: PreferenceUpdateRequest = ..., current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> LeadPreferenceResponse:
-    """写入线索入库账号的择偶要求（复用 C 端 user_partner_preference）；未入库返回 409。"""
+    """写入线索的择偶要求（已入库复用 C 端 user_partner_preference，未入库写 customer_lead_preference 暂存表）。"""
     current.require("customer_lead.manage")
     scope, scope_params = _lead_scope(current)
     return await update_lead_preferences(db, current.account.id, lead_id, body, scope=scope, scope_params=scope_params)

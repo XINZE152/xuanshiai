@@ -226,6 +226,13 @@ async def convert_lead(
         await db.execute(text("""UPDATE customer_lead
             SET status = 'CONVERTED', converted_user_id = :user_id, updated_at = UTC_TIMESTAMP()
             WHERE id = :lead_id AND converted_user_id IS NULL"""), {"user_id": user_id, "lead_id": lead_id})
+        # 未入库期间在 customer_lead_preference 维护的择偶要求，入库时搬运至新账号的
+        # user_partner_preference（INSERT..SELECT：线索未填过偏好则无行、自然跳过）。
+        pref_cols = ", ".join(_LEAD_PREF_COLUMNS)
+        await db.execute(text(
+            f"INSERT INTO user_partner_preference (user_id, {pref_cols}) "
+            f"SELECT :user_id, {pref_cols} FROM customer_lead_preference WHERE lead_id = :lead_id"
+        ), {"user_id": user_id, "lead_id": lead_id})
         await db.execute(text("""INSERT INTO business_audit_log
             (actor_user_id, action, resource_type, resource_id, reason)
             VALUES (:actor, 'customer_lead.convert', 'customer_lead', :id, :reason)"""),
@@ -502,6 +509,70 @@ async def update_lead(
     return await get_lead(db, lead_id, redaction_level, scope=scope, scope_params=scope_params)
 
 
+# 未入库客源择偶要求可写列（与 C 端 PreferenceUpdateRequest 口径一致，主键为 lead_id）。
+_LEAD_PREF_COLUMNS = [
+    "age_min", "age_max", "height_min", "height_max", "education_min", "income_min",
+    "marriage_status", "preferred_province_code", "preferred_city_codes",
+    "accept_long_distance", "accept_cross_province", "housing_requirement",
+    "smoking_requirement", "drinking_requirement", "dating_goal", "meeting_pace",
+    "children_intention", "extra_requirement",
+]
+
+
+async def _get_lead_preference_dict(db: AsyncSession, lead_id: int) -> dict[str, Any]:
+    """读取未入库客源的择偶要求（customer_lead_preference），无行时返回空默认值。
+
+    输出形状对齐 PreferenceResponse：user_id 固定为 0（未入库无账号），
+    preferred_city_codes/布尔列按 C 端口径反解。多余键（id/lead_id/时间戳）由
+    PreferenceResponse 忽略。
+    """
+    from app.services.profile import _json_list  # 延迟导入避免模块级循环依赖
+
+    result = await db.execute(
+        text("SELECT * FROM customer_lead_preference WHERE lead_id = :lead_id"), {"lead_id": lead_id}
+    )
+    row = result.mappings().first()
+    if not row:
+        return {
+            "user_id": 0, "preferred_city_codes": [],
+            "accept_long_distance": False, "accept_cross_province": False,
+            **{c: None for c in _LEAD_PREF_COLUMNS
+               if c not in ("preferred_city_codes", "accept_long_distance", "accept_cross_province")},
+        }
+    data = dict(row)
+    data["user_id"] = 0
+    data["preferred_city_codes"] = _json_list(data["preferred_city_codes"])
+    data["accept_long_distance"] = bool(data["accept_long_distance"])
+    data["accept_cross_province"] = bool(data["accept_cross_province"])
+    return data
+
+
+async def _upsert_lead_preference(db: AsyncSession, lead_id: int, request: PreferenceUpdateRequest) -> None:
+    """部分更新未入库客源择偶要求（与 profile.update_preferences 同口径，但不涉及完整度/画像）。"""
+    from app.services.profile import _json_value  # 延迟导入避免模块级循环依赖
+
+    values = request.model_dump(exclude_unset=True)
+    if "preferred_city_codes" in values:
+        values["preferred_city_codes"] = _json_value(values["preferred_city_codes"])
+    values = {k: (int(v) if isinstance(v, bool) else v) for k, v in values.items()}
+    exists = (await db.execute(
+        text("SELECT id FROM customer_lead_preference WHERE lead_id = :lead_id"), {"lead_id": lead_id}
+    )).scalar()
+    if exists and values:
+        assignments = ", ".join(f"{k} = :{k}" for k in values)
+        await db.execute(
+            text(f"UPDATE customer_lead_preference SET {assignments}, updated_at = UTC_TIMESTAMP() WHERE lead_id = :lead_id"),
+            {**values, "lead_id": lead_id},
+        )
+    elif not exists:
+        columns = ["lead_id", *values]
+        placeholders = ", ".join(f":{c}" for c in columns)
+        await db.execute(
+            text(f"INSERT INTO customer_lead_preference ({', '.join(columns)}) VALUES ({placeholders})"),
+            {"lead_id": lead_id, **values},
+        )
+
+
 async def get_lead_preferences(
     db: AsyncSession,
     lead_id: int,
@@ -509,20 +580,24 @@ async def get_lead_preferences(
     scope: str | None = None,
     scope_params: dict[str, Any] | None = None,
 ) -> LeadPreferenceResponse:
-    """读取客源线索的择偶要求（方案①）。
+    """读取客源线索的择偶要求。
 
-    先走 get_lead 做作用域与存在校验（D-16），再按入库账号读 user_partner_preference。
-    未入库（converted_user_id 为空）时返回 editable=False，不报错，供前端置灰 tab。
+    先走 get_lead 做作用域与存在校验（D-16）。已入库（有 converted_user_id）读账号那份
+    user_partner_preference；未入库读 customer_lead_preference 暂存表（无行则返回空默认值）。
+    两种情况 editable 均为 True（未入库现已可维护）。
     """
     lead = await get_lead(db, lead_id, scope=scope, scope_params=scope_params)
-    if not lead.converted_user_id:
-        return LeadPreferenceResponse(lead_id=lead_id, converted_user_id=None, editable=False, preference=None)
-    # 延迟导入避免与 profile 服务形成模块级循环依赖。
-    from app.services.profile import get_preferences
+    if lead.converted_user_id:
+        # 延迟导入避免与 profile 服务形成模块级循环依赖。
+        from app.services.profile import get_preferences
 
-    data = await get_preferences(db, lead.converted_user_id)
+        data = await get_preferences(db, lead.converted_user_id)
+        return LeadPreferenceResponse(
+            lead_id=lead_id, converted_user_id=lead.converted_user_id, editable=True, preference=data
+        )
+    data = await _get_lead_preference_dict(db, lead_id)
     return LeadPreferenceResponse(
-        lead_id=lead_id, converted_user_id=lead.converted_user_id, editable=True, preference=data
+        lead_id=lead_id, converted_user_id=None, editable=True, preference=data
     )
 
 
@@ -535,17 +610,20 @@ async def update_lead_preferences(
     scope: str | None = None,
     scope_params: dict[str, Any] | None = None,
 ) -> LeadPreferenceResponse:
-    """写入客源线索的择偶要求（方案①）。
+    """写入客源线索的择偶要求。
 
-    择偶要求只能挂在线索入库后生成的账号上，故未入库线索直接 409；已入库则复用
-    C 端 update_preferences（含完整度重算与画像 revision 入队），与会员自助编辑同口径。
+    已入库则复用 C 端 update_preferences（含完整度重算与画像 revision 入队），与会员
+    自助编辑同口径；未入库写 customer_lead_preference 暂存表，入库时再搬运至账号。
+    两种情况均追加审计 action='customer_lead.preference_update'。
     """
     lead = await get_lead(db, lead_id, scope=scope, scope_params=scope_params)
-    if not lead.converted_user_id:
-        raise HTTPException(409, detail="该客源尚未入库，无法维护择偶要求")
-    from app.services.profile import update_preferences
+    if lead.converted_user_id:
+        from app.services.profile import update_preferences
 
-    data = await update_preferences(db, lead.converted_user_id, request)
+        data = await update_preferences(db, lead.converted_user_id, request)
+    else:
+        await _upsert_lead_preference(db, lead_id, request)
+        data = await _get_lead_preference_dict(db, lead_id)
     await db.execute(
         text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) "
              "VALUES (:actor, 'customer_lead.preference_update', 'customer_lead', :id)"),
