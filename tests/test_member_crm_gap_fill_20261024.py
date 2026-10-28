@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any
 
 import pytest
 
@@ -137,6 +136,9 @@ def test_member_detail_tags_accepts_dirty_nested_values() -> None:
     detail = MemberDetail(
         id=1, nickname=None, phone=None, gender=1, status=1, is_vip=False,
         vip_end_at=None, matchmaker_id=None, created_at="2026-01-01T00:00:00", tags=dirty,
+        # MemberDetail 的 avatar/birthday/is_married/residence_city_code 为无默认必填（响应模型），
+        # 手工构造需显式传入（与 tags 容错断言无关）。
+        avatar=None, birthday=None, is_married=None, residence_city_code=None,
     )
     assert detail.tags == dirty
 

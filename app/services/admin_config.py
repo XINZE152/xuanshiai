@@ -173,6 +173,11 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
          "abandon": {"member_crm": {"days": 0, "daily_pickup_limit": 0}, "customer_lead": {"days": 0, "daily_pickup_limit": 0}},
          "commission_rules": []}, [],
     ),
+    "tools_match_timeout": (
+        "牵线超时自动失败", "待处理牵线超过设定时长后由定时任务（每日 0 点）自动置为牵线失败。",
+        # hours：自发起时间起多少小时后判失败；enabled：总开关，关闭时定时任务不生效。
+        {"enabled": False, "hours": 48}, [],
+    ),
     "member_auth": (
         "会员认证配置", "会员认证（M3-1）模块的快捷设置、承诺书与婚姻查询授权协议配置。",
         {"realname_force_id_card": False, "realname_fee": "0",

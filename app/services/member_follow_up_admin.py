@@ -182,6 +182,30 @@ def _method_label(method: str | None) -> str:
     return _METHOD_LABELS.get(str(method or "").upper(), "其他")
 
 
+async def _table_columns(db: AsyncSession, table: str) -> frozenset[str]:
+    """探测表当前存在的列，供「先发版后迁移」读写缺列降级。"""
+    rows = await db.execute(
+        text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t"
+        ),
+        {"t": table},
+    )
+    return frozenset(row[0] for row in rows.all())
+
+
+def _normalize_call_images(raw: Any) -> list[str] | None:
+    """images 为 JSON 列，raw SQL 取回常为文本/字节；归一化为列表（缺列/NULL 返回 None）。"""
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = []
+    return raw if isinstance(raw, list) else None
+
+
 def _call_row(payload: dict[str, Any]) -> MemberCallRecordRow:
     """数据库行 -> 通话记录列表行。"""
     direction = str(payload.get("direction") or "OUTBOUND").upper()
@@ -199,6 +223,8 @@ def _call_row(payload: dict[str, Any]) -> MemberCallRecordRow:
         status_label=_CALL_STATUS_LABELS.get(status, "已完成"),
         duration_seconds=int(duration) if duration is not None else None,
         remark=payload.get("remark"),
+        images=_normalize_call_images(payload["images"]) if "images" in payload else None,
+        audio_url=payload.get("audio_url"),
         created_at=payload.get("created_at"),
     )
 
@@ -283,7 +309,7 @@ async def list_follow_ups(
 
 
 _CALL_LIST_BODY = """
-SELECT c.id, c.user_id, c.direction, c.status, c.duration_seconds, c.remark, c.created_at,
+SELECT c.id, c.user_id, c.direction, c.status, c.duration_seconds, c.remark, c.created_at,{media}
        u.nickname,
        CONCAT('G', LPAD(u.id, 6, '0')) AS member_code,
        COALESCE(acc.display_name, mk.nickname, 'admin') AS matchmaker_name
@@ -328,9 +354,12 @@ async def list_call_records(
         conditions.append("c.created_at < DATE_ADD(:end_date, INTERVAL 1 DAY)")
         params["end_date"] = end_date
     where = " AND ".join(conditions)
+    # 先发版后迁移：探测附件列，存在才 SELECT（否则旧库报未知列）。c.images 为 JSON，c.audio_url 为文本。
+    call_cols = await _table_columns(db, "member_call_record")
+    media = "".join(f" c.{col}," for col in ("images", "audio_url") if col in call_cols)
     rows = await db.execute(
         text(
-            f"{_CALL_LIST_BODY} WHERE {where}"
+            f"{_CALL_LIST_BODY.format(media=media)} WHERE {where}"
             " ORDER BY c.created_at DESC, c.id DESC LIMIT :limit OFFSET :offset"
         ),
         params,

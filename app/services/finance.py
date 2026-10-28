@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
@@ -37,6 +38,9 @@ from app.schemas.finance import (
     FinanceRefundRequest,
     FinanceDailyRow,
     MatchmakerOption,
+    MatchmakerCommissionEntryCreate,
+    MatchmakerCommissionEntryItem,
+    MatchmakerCommissionEntryCreateResult,
     PaymentOrderResponse,
     ProductCommissionConfigCreate,
     ProductCommissionConfigResponse,
@@ -1054,7 +1058,7 @@ def _detail_item(row: dict) -> CommissionEntryDetailItem:
     payload["consumer_phone"] = row.get("consumer_phone")
     payload["consumer_avatar"] = row.get("consumer_avatar")
     payload["event_name"] = row.get("event_name") or row.get("product_name") or "其他事件"
-    payload["order_id"] = int(row["order_id"])
+    payload["order_id"] = int(row["order_id"]) if row.get("order_id") else 0
     payload["order_no"] = row.get("order_no")
     payload["consumer_amount"] = Decimal(str(row["base_amount"]))
     payload["commission_amount"] = Decimal(str(row["amount"]))
@@ -1129,6 +1133,114 @@ async def admin_list_commission_entries(
     )
 
 
+async def admin_create_commission_entry(
+    db: AsyncSession,
+    actor: CurrentUser,
+    body: MatchmakerCommissionEntryCreate,
+) -> MatchmakerCommissionEntryCreateResult:
+    """后台手工录入一笔服务红娘分成：只写 commission_entry（PENDING）+ 审计日志，不动余额账本。
+
+    与合伙人手工录入同源，但按 2026-10-28 决策不写 account_ledger（不凭空增加可提现余额）；
+    记录落入「红娘线上分成明细」页供展示与事后核对。
+    """
+    matchmaker = await db.scalar(
+        text("SELECT id FROM users WHERE id = :id"), {"id": body.matchmaker_user_id}
+    )
+    if matchmaker is None:
+        raise HTTPException(400, detail="服务红娘账号不存在")
+
+    rule_name: str | None = None
+    rule_version: int | None = None
+    if body.rule_id is not None:
+        rule = (
+            await db.execute(
+                text("""SELECT id, name, version FROM commission_rule
+                    WHERE id = :id AND beneficiary_type = 'service_matchmaker' AND status = 1"""),
+                {"id": body.rule_id},
+            )
+        ).mappings().first()
+        if not rule:
+            raise HTTPException(400, detail="分成事件不存在或已停用")
+        rule_name = str(rule["name"])
+        rule_version = int(rule["version"]) if rule["version"] is not None else None
+
+    if body.consumer_user_id is not None:
+        consumer = await db.scalar(
+            text("SELECT id FROM users WHERE id = :id"), {"id": body.consumer_user_id}
+        )
+        if consumer is None:
+            raise HTTPException(400, detail="购买账号不存在")
+
+    amount = Decimal(str(body.amount)).quantize(CENT)
+    base_amount = (Decimal(str(body.base_amount)) if body.base_amount is not None else amount).quantize(CENT)
+    key = f"matchmaker-manual-{uuid.uuid4().hex}"
+    result = await db.execute(
+        text("""INSERT INTO commission_entry
+            (order_id, beneficiary_type, beneficiary_id, rule_id, rule_version,
+             base_amount, amount, status, source, remark, idempotency_key)
+            VALUES (NULL, 'service_matchmaker', :beneficiary_id, :rule_id, :rule_version,
+             :base_amount, :amount, 'PENDING', 'manual', :remark, :key)"""),
+        {
+            "beneficiary_id": body.matchmaker_user_id,
+            "rule_id": body.rule_id,
+            "rule_version": rule_version,
+            "base_amount": f"{base_amount:.2f}",
+            "amount": f"{amount:.2f}",
+            "remark": body.remark,
+            "key": key,
+        },
+    )
+    entry_id = int(result.lastrowid)
+
+    await db.execute(
+        text("""INSERT INTO business_audit_log
+            (actor_user_id, action, resource_type, resource_id, after_json)
+            VALUES (:actor, 'finance.matchmaker_commission.create', 'commission_entry', :entry_id, :after_json)"""),
+        {
+            "actor": actor.id,
+            "entry_id": entry_id,
+            "after_json": json.dumps(
+                {
+                    "matchmaker_user_id": body.matchmaker_user_id,
+                    "consumer_user_id": body.consumer_user_id,
+                    "rule_id": body.rule_id,
+                    "rule_name": rule_name,
+                    "amount": f"{amount:.2f}",
+                    "remark": body.remark,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    )
+    await db.commit()
+
+    row = (
+        await db.execute(
+            text("""SELECT ce.id, ce.created_at, ce.beneficiary_id, ce.rule_id, ce.base_amount,
+                ce.amount, ce.status, ce.source, ce.remark, u.nickname AS matchmaker_name
+                FROM commission_entry ce LEFT JOIN users u ON u.id = ce.beneficiary_id
+                WHERE ce.id = :id"""),
+            {"id": entry_id},
+        )
+    ).mappings().first()
+    if not row:
+        raise HTTPException(500, detail="分成录入回读失败")
+    entry = MatchmakerCommissionEntryItem(
+        id=int(row["id"]),
+        created_at=_dt(row["created_at"]),
+        matchmaker_id=int(row["beneficiary_id"]),
+        matchmaker_name=row.get("matchmaker_name"),
+        rule_id=int(row["rule_id"]) if row.get("rule_id") is not None else None,
+        rule_name=rule_name,
+        base_amount=f"{Decimal(str(row['base_amount'])):.2f}",
+        amount=f"{Decimal(str(row['amount'])):.2f}",
+        status=str(row["status"]),
+        source=str(row["source"]),
+        remark=row.get("remark"),
+    )
+    return MatchmakerCommissionEntryCreateResult(entry=entry)
+
+
 async def admin_list_commission_options(db: AsyncSession, *, admin: CurrentMatchmakerAdmin) -> CommissionEntryDetailOptions:
     """一次性返回筛选下拉：当前产生过分成的总店红娘列表 + 启用的分成规则列表"""
     params: dict[str, object] = {"kind": _DETAIL_BENEFICIARY_TYPE}
@@ -1176,7 +1288,7 @@ def _store_entry_item(row: dict) -> StoreCommissionEntryItem:
     payload["consumer_id"] = int(row["consumer_id"]) if row.get("consumer_id") else None
     payload["consumer_name"] = row.get("consumer_name")
     payload["event_name"] = row.get("event_name") or row.get("product_name") or "其他事件"
-    payload["order_id"] = int(row["order_id"])
+    payload["order_id"] = int(row["order_id"]) if row.get("order_id") else 0
     payload["order_no"] = row.get("order_no")
     payload["consumer_amount"] = Decimal(str(row["base_amount"]))
     payload["commission_amount"] = Decimal(str(row["amount"]))
