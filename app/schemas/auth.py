@@ -457,7 +457,9 @@ class PreferenceUpdateRequest(BaseModel):
     age_max: int | None = Field(default=None, ge=18, le=100)
     height_min: int | None = Field(default=None, ge=100, le=250)
     height_max: int | None = Field(default=None, ge=100, le=250)
-    education_min: int | None = Field(default=None, ge=1, le=8)
+    # 与 discovery._EDUCATION_LABELS / filter-options 同域：1=高中及以下 … 5=博士。
+    # 旧 6-8 是已废弃档位，C 端读取时归零，不再接受新写入。
+    education_min: int | None = Field(default=None, ge=1, le=5)
     income_min: float | None = Field(default=None, ge=0, le=1_000_000)
     marriage_status: Literal[0, 1, 2, 3] | None = None
     preferred_province_code: str | None = Field(default=None, max_length=32)
