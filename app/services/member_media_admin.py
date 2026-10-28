@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.media_access import MEDIA_CATEGORY_ADMIN, sign_media_url, strip_media_signature
 from app.schemas.member_media_admin import (
     MemberIntroItem,
     MemberIntroPage,
@@ -768,8 +769,10 @@ async def list_media(
     keyword: str | None,
     gender: int | None,
     search_type: str | None = None,
+    *,
+    viewer: int | None = None,
 ) -> MemberMediaPage:
-    """分页查询指定类型的媒体（头像/照片/视频），仅取未软删记录。
+    """分页查询指定类型的媒体（头像/照片/视频/证件），仅取未软删记录。
 
     age 由 ``TIMESTAMPDIFF(YEAR, u.birthday, CURDATE())`` 推算；
     meta_text 由 ``生日年份 + 身高 + 学历`` 经 CONCAT_WS 拼接（NULL 自动跳过）。
@@ -809,6 +812,13 @@ async def list_media(
     count = await db.execute(text(f"SELECT COUNT(*) {base} WHERE {clause}"), params)
     total = int(count.scalar() or 0)
     items = [_build_media(r) for r in rows.mappings().all()]
+    # 证件留档属后台私有资源（admin/* 前缀）：返回前按当前管理员重签，只给短时效可访问 URL。
+    if media_type == "certificate" and viewer is not None:
+        for item in items:
+            if item.file_url:
+                item.file_url = sign_media_url(item.file_url, category=MEDIA_CATEGORY_ADMIN, viewer=viewer)
+            if item.thumbnail_url:
+                item.thumbnail_url = sign_media_url(item.thumbnail_url, category=MEDIA_CATEGORY_ADMIN, viewer=viewer)
     return MemberMediaPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
@@ -863,6 +873,12 @@ async def create_media(
     thumbnail = body.thumbnail_url
     if body.media_type == "avatar":
         thumbnail = thumbnail or None
+    # 证件留档（certificate）走后台私有存储：提交边界剥离签名参数，DB 永远存原始 URL，
+    # 读取端按当前管理员重签（避免把带 TTL 的签名 URL 落库导致过期失效/泄露他人签名）。
+    file_url = body.file_url
+    if body.media_type == "certificate":
+        file_url = strip_media_signature(file_url)
+        thumbnail = strip_media_signature(thumbnail) if thumbnail else thumbnail
     result = await db.execute(
         text(
             "INSERT INTO user_media (user_id, media_type, file_url, thumbnail_url, mime_type, "
@@ -872,7 +888,7 @@ async def create_media(
         {
             "user_id": user_id,
             "media_type": body.media_type,
-            "file_url": body.file_url,
+            "file_url": file_url,
             "thumbnail": thumbnail,
             "mime": body.mime_type,
             "size": body.file_size,
@@ -902,14 +918,14 @@ async def create_media(
             "actor": actor_id,
             "rid": media_id,
             "after": json.dumps(
-                {"user_id": user_id, "media_type": body.media_type, "file_url": body.file_url},
+                {"user_id": user_id, "media_type": body.media_type, "file_url": file_url},
                 ensure_ascii=False,
             ),
         },
     )
     await db.commit()
     return {"id": media_id, "user_id": user_id, "media_type": body.media_type,
-            "file_url": body.file_url, "review_status": 0}
+            "file_url": file_url, "review_status": 0}
 
 
 async def replace_media(db: AsyncSession, media_id: int, body: MemberMediaReplace, actor_id: int) -> dict[str, Any]:

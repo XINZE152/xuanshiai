@@ -95,6 +95,9 @@ class MemberCallRecordRow(BaseModel):
     status_label: str = Field(description="通话状态中文：已完成/未接听/失败")
     duration_seconds: int | None = Field(default=None, description="通话时长（秒）")
     remark: str | None = Field(default=None, description="通话备注")
+    # 2026-10-28 新增附件（旧库未迁移时缺列降级为 None/空）。
+    images: list[str] | None = Field(default=None, description="通话附件图片 URL 列表")
+    audio_url: str | None = Field(default=None, description="通话录音 URL")
     created_at: datetime | None = None
 
 

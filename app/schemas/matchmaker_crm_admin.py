@@ -229,6 +229,25 @@ class MatchRecordItem(MatchRecordResponse):
     from_nickname: str | None = None
     to_nickname: str | None = None
     matchmaker_id: int | None = None
+    # 2026-10-28 补（对标站牵线记录列）：均为真值派生，不新建表。
+    # gender 取 users.gender（1男2女，0/null 未知）；age 用 TIMESTAMPDIFF 由 birthday 算，birthday 空则 null；
+    # is_verified = user_auth.realname_status==2；has_promise = users.is_single_pledge==1（单身承诺书）；
+    # matchmaker_name = 归属服务红娘昵称。旧库缺列/无关联时 SQL 侧降级为 null，不拖垮整页。
+    from_gender: int | None = None
+    to_gender: int | None = None
+    from_age: int | None = None
+    to_age: int | None = None
+    from_is_verified: bool = False
+    to_is_verified: bool = False
+    from_has_promise: bool = False
+    to_has_promise: bool = False
+    matchmaker_name: str | None = None
+    # 2026-10-28 补（头像/会员编号）：均为真值派生，不新建列。
+    # avatar 取 COALESCE(users.avatar, user_profile.photos[0])；member_code = CONCAT('G', LPAD(id,6,'0'))（与会员列表同口径）。
+    from_avatar: str | None = None
+    to_avatar: str | None = None
+    from_member_code: str | None = None
+    to_member_code: str | None = None
 
 
 class MatchRecordPage(BaseModel):

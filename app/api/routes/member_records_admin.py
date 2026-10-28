@@ -151,6 +151,29 @@ class MemberCallRecordCreate(BaseModel):
     status: str = Field(default="COMPLETED", pattern="^(COMPLETED|MISSED|FAILED)$")
     duration_seconds: int = Field(default=0, ge=0, le=86400)
     remark: str | None = Field(default=None, max_length=2000)
+    # 2026-10-28 新增附件（向后兼容：旧库未迁移时服务层缺列降级，不写不报错）。
+    images: list[str] | None = Field(default=None, description="通话附件图片 URL 列表")
+    audio_url: str | None = Field(default=None, max_length=512, description="通话录音 URL")
+
+
+async def _table_columns(db: AsyncSession, table: str) -> frozenset[str]:
+    """探测表当前存在的列，供「先发版后迁移」读写缺列降级。"""
+    rows = await db.execute(text("""SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t"""), {"t": table})
+    return frozenset(row[0] for row in rows.all())
+
+
+def _normalize_call_media(item: dict) -> dict:
+    """images 为 JSON 列，raw SQL 取回为文本，归一化为列表（缺列/NULL 保持不动）。"""
+    raw = item.get("images")
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        try:
+            item["images"] = json.loads(raw)
+        except json.JSONDecodeError:
+            item["images"] = []
+    return item
 
 
 async def _page(db: AsyncSession, query: str, count_query: str, member_id: int, page: int, page_size: int) -> dict:
@@ -485,24 +508,39 @@ async def super_info(member_id: int = Path(..., ge=1), current: CurrentMatchmake
 @router.get("/{member_id}/call-records")
 async def call_records(member_id: int = Path(..., ge=1), page: int = _paging()[0], page_size: int = _paging()[1], current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
     await _ensure_member(db, member_id, current)
-    return await _page(db, """SELECT id, user_id, direction, status, duration_seconds, remark, created_by, created_at
+    media = ", ".join(c for c in ("images", "audio_url") if c in await _table_columns(db, "member_call_record"))
+    data = await _page(db, f"""SELECT id, user_id, direction, status, duration_seconds, remark, created_by, created_at{', ' + media if media else ''}
         FROM member_call_record WHERE user_id = :id ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset""",
         "SELECT COUNT(*) FROM member_call_record WHERE user_id = :id", member_id, page, page_size)
+    data["items"] = [_normalize_call_media(item) for item in data["items"]]
+    return data
 
 
 @router.post("/{member_id}/call-records", status_code=201)
 async def create_call_record(member_id: int = Path(..., ge=1), body: MemberCallRecordCreate = ..., current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> dict:
     await _ensure_member(db, member_id, current)
-    result = await db.execute(text("""INSERT INTO member_call_record
-        (user_id, direction, status, duration_seconds, remark, created_by)
-        VALUES (:user_id, :direction, :status, :duration_seconds, :remark, :created_by)"""), {
-        **body.model_dump(), "user_id": member_id, "created_by": current.account.id,
-    })
+    cols = await _table_columns(db, "member_call_record")
+    payload = body.model_dump()
+    images = payload.pop("images", None)
+    audio_url = payload.pop("audio_url", None)
+    columns = ["user_id", "direction", "status", "duration_seconds", "remark", "created_by"]
+    params: dict = {**payload, "user_id": member_id, "created_by": current.account.id}
+    # 附件列存在才写（先发版后迁移缺列降级）；images 存 JSON。
+    if "images" in cols:
+        columns.append("images")
+        params["images"] = json.dumps(images, ensure_ascii=False) if images else None
+    if "audio_url" in cols:
+        columns.append("audio_url")
+        params["audio_url"] = audio_url
+    col_sql = ", ".join(columns)
+    val_sql = ", ".join(f":{c}" for c in columns)
+    result = await db.execute(text(f"""INSERT INTO member_call_record ({col_sql}) VALUES ({val_sql})"""), params)
     record_id = int(result.lastrowid)
     await db.commit()
-    row = (await db.execute(text("""SELECT id, user_id, direction, status, duration_seconds, remark, created_by, created_at
+    media = ", ".join(c for c in ("images", "audio_url") if c in cols)
+    row = (await db.execute(text(f"""SELECT id, user_id, direction, status, duration_seconds, remark, created_by, created_at{', ' + media if media else ''}
         FROM member_call_record WHERE id = :id"""), {"id": record_id})).mappings().one()
-    return dict(row)
+    return _normalize_call_media(dict(row))
 
 
 @router.get("/{member_id}/source-records")

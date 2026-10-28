@@ -194,6 +194,17 @@ def _mock_response(messages: list[dict[str, str]], *, json_mode: bool) -> str:
         return json.dumps({"polished": user.split("\n", 1)[-1][:300], "changed_points": ["保留原意并调整表达"]}, ensure_ascii=False)
     if "SEARCH_PARSE" in user:
         return json.dumps({"normalized_query": user.split("\n", 1)[-1][:500], "filters": {}, "unresolved": []}, ensure_ascii=False)
+    if "LEAD_EXTRACT" in user:
+        # 本地 mock 不做真实抽取，返回空字段 + 明确提示，保证 dev 回退可预期。
+        return json.dumps(
+            {
+                "name": None, "phone": None, "wechat": None, "source": None,
+                "intention_level": None, "gender": None, "remark": None,
+                "confidence": {}, "snippets": {},
+                "notes": ["当前为本地 mock 回复，未接入真实模型，无法抽取字段"],
+            },
+            ensure_ascii=False,
+        )
     if "THOUGHTFULNESS_REVIEW" in user:
         return json.dumps({
             "score": 70,

@@ -93,6 +93,40 @@ class CommissionEntryResponse(BaseModel):
     created_at: datetime
 
 
+class MatchmakerCommissionEntryCreate(BaseModel):
+    """后台手工录入一笔服务红娘分成。
+
+    口径（与合伙人人手工录入同源，2026-10-28 决策）：只写 commission_entry + 审计日志，
+    **不动余额账本**（不写 account_ledger，不凭空增加可提现余额）；默认 PENDING，
+    供红娘线上分成明细页展示与事后核对。
+    """
+
+    matchmaker_user_id: int = Field(ge=1, description="服务红娘 user id")
+    consumer_user_id: int | None = Field(default=None, ge=1, description="关联消费会员 user id（可选，仅留档）")
+    rule_id: int | None = Field(default=None, ge=1, description="分成事件（commission_rule.id，beneficiary_type=service_matchmaker）")
+    amount: Decimal = Field(gt=0, le=1000000, decimal_places=2, description="分成金额(元)")
+    base_amount: Decimal | None = Field(default=None, ge=0, le=100000000, decimal_places=2, description="计费基数，缺省同 amount")
+    remark: str | None = Field(default=None, max_length=255)
+
+
+class MatchmakerCommissionEntryItem(BaseModel):
+    id: int
+    created_at: datetime | None = None
+    matchmaker_id: int
+    matchmaker_name: str | None = None
+    rule_id: int | None = None
+    rule_name: str | None = None
+    base_amount: str = "0.00"
+    amount: str = "0.00"
+    status: str = "PENDING"
+    source: str = "manual"
+    remark: str | None = None
+
+
+class MatchmakerCommissionEntryCreateResult(BaseModel):
+    entry: MatchmakerCommissionEntryItem
+
+
 class FinanceReportRow(BaseModel):
     beneficiary_type: str
     beneficiary_id: int

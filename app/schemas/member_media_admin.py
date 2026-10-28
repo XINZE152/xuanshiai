@@ -97,7 +97,7 @@ class MemberMediaCreate(BaseModel):
     待审，与 App 侧上传口径一致。
     """
 
-    media_type: Literal["avatar", "photo", "video"] = "photo"
+    media_type: Literal["avatar", "photo", "video", "certificate"] = "photo"
     file_url: str = Field(..., min_length=1, max_length=512)
     thumbnail_url: str | None = Field(None, max_length=512)
     mime_type: str | None = Field(None, max_length=128)

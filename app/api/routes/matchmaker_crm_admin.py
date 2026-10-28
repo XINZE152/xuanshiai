@@ -89,6 +89,17 @@ _MATCH_RECORD_BASE = (
     " WHERE status = 1 GROUP BY user_id) ra ON ra.user_id = a.from_user_id"
 )
 
+# 列表专用：在共用 base 上再补 1:1 LEFT JOIN（双方实名认证、归属红娘昵称）。
+# 均为 1:1，不放大行数；统计/COUNT 仍走不带这些 JOIN 的 base，保持口径与性能。
+_MATCH_RECORD_LIST_FROM = (
+    _MATCH_RECORD_BASE
+    + " LEFT JOIN user_auth uaf ON uaf.user_id = a.from_user_id"
+    " LEFT JOIN user_auth uat ON uat.user_id = a.to_user_id"
+    " LEFT JOIN users mm ON mm.id = ra.matchmaker_id"
+    " LEFT JOIN user_profile fp ON fp.user_id = a.from_user_id"
+    " LEFT JOIN user_profile tp ON tp.user_id = a.to_user_id"
+)
+
 # 顶部统计卡的筛选口径。status: 0 待处理 / 1 成功 / 2 失败 / 3 已关闭。
 # 「待牵线」与「牵线中」按是否已归属服务红娘拆分。
 _STATUS_GROUP_SQL: dict[str, str] = {
@@ -137,12 +148,24 @@ async def match_records(
     # 牵线记录会把双方昵称与手机号一并下发，按「发起方（from）会员归属」收口。
     where.append(current.scope_exists_clause(params, correlation="scope_assignment.user_id = a.from_user_id"))
     clause = " AND ".join(where)
-    base = _MATCH_RECORD_BASE
+    # 列表在共用 base 上补 1:1 LEFT JOIN（双方实名认证 uaf/uat、归属红娘昵称 mm），
+    # 派生列全部真值、无新建表；旧库缺关联时 LEFT JOIN 自然降级为 NULL，不拖垮整页。
+    # COUNT/统计仍走不带这些 JOIN 的 base，保持口径与性能。
     rows = await db.execute(text(f"""SELECT a.id, a.from_user_id, a.to_user_id, a.status, a.created_at, a.responded_at,
         fu.nickname AS from_nickname, tu.nickname AS to_nickname,
-        ra.matchmaker_id
-        {base} WHERE {clause} ORDER BY a.created_at DESC, a.id DESC LIMIT :limit OFFSET :offset"""), params)
-    total = int((await db.execute(text(f"SELECT COUNT(*) {base} WHERE {clause}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})).scalar() or 0)
+        ra.matchmaker_id,
+        fu.gender AS from_gender, tu.gender AS to_gender,
+        TIMESTAMPDIFF(YEAR, fu.birthday, UTC_DATE()) AS from_age,
+        TIMESTAMPDIFF(YEAR, tu.birthday, UTC_DATE()) AS to_age,
+        (uaf.realname_status = 2) AS from_is_verified, (uat.realname_status = 2) AS to_is_verified,
+        (fu.is_single_pledge = 1) AS from_has_promise, (tu.is_single_pledge = 1) AS to_has_promise,
+        mm.nickname AS matchmaker_name,
+        COALESCE(fu.avatar, JSON_UNQUOTE(JSON_EXTRACT(fp.photos, '$[0]'))) AS from_avatar,
+        COALESCE(tu.avatar, JSON_UNQUOTE(JSON_EXTRACT(tp.photos, '$[0]'))) AS to_avatar,
+        CONCAT('G', LPAD(fu.id, 6, '0')) AS from_member_code,
+        CONCAT('G', LPAD(tu.id, 6, '0')) AS to_member_code
+        {_MATCH_RECORD_LIST_FROM} WHERE {clause} ORDER BY a.created_at DESC, a.id DESC LIMIT :limit OFFSET :offset"""), params)
+    total = int((await db.execute(text(f"SELECT COUNT(*) {_MATCH_RECORD_BASE} WHERE {clause}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})).scalar() or 0)
     return MatchRecordPage(items=[MatchRecordItem(**dict(row)) for row in rows.mappings().all()], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
@@ -256,6 +279,59 @@ async def create_match_record(
             ON DUPLICATE KEY UPDATE status = 1, updated_at = UTC_TIMESTAMP()"""), {"left": body.from_love_user_id, "right": body.to_love_user_id})
     await db.commit()
     return MatchRecordResponse(id=int(result.lastrowid), from_user_id=body.from_love_user_id, to_user_id=body.to_love_user_id, status=body.line_status, created_at=body.create_time, responded_at=body.complete_time)
+
+
+@router.delete(
+    "/match-records/{record_id}",
+    response_model=MemberDeleteResult,
+    summary="删除单条牵线记录（物理删除，幂等 + 二次确认）",
+)
+async def match_record_delete(
+    record_id: int = Path(..., ge=1),
+    reason: str = Query("后台删除", min_length=1, max_length=255, description="删除理由（记入审计）"),
+    idempotency_key: str = Depends(require_sensitive_operation),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MemberDeleteResult:
+    """对标站牵线记录行「删除」按钮。
+
+    match_apply 无 deleted_at 列，故为物理删除（仅删该牵线行，不动 user_match 关注关系，
+    与 PATCH 标记失败/关闭互不干涉）。敏感写范式：Idempotency-Key 头 + confirm=true 查询参 + 作用域收口。
+    """
+    current.require("matchmaker.member.manage")
+    reservation, replayed = await begin_sensitive_operation(
+        db,
+        actor_id=current.account.id,
+        operation="matchmaker.match_record.delete",
+        idempotency_key=idempotency_key,
+        payload={"record_id": record_id, "reason": reason},
+    )
+    if replayed is not None:
+        return MemberDeleteResult(**replayed)
+    params: dict[str, object] = {"record_id": record_id}
+    scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = a.from_user_id")
+    try:
+        row = (await db.execute(text(
+            f"SELECT a.id FROM match_apply a WHERE a.id = :record_id AND ({scope}) FOR UPDATE"
+        ), params)).mappings().first()
+        if row is None:
+            await abort_sensitive_operation(db, reservation)
+            raise HTTPException(404, detail="牵线记录不存在或无权限")
+        await db.execute(text("DELETE FROM match_apply WHERE id = :record_id"), {"record_id": record_id})
+        await db.execute(text(
+            "INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id, reason)"
+            " VALUES (:actor, 'match_record.delete', 'match_apply', :id, :reason)"),
+            {"actor": current.account.id, "id": record_id, "reason": reason[:255]},
+        )
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        await abort_sensitive_operation(db, reservation)
+        raise
+    result = MemberDeleteResult(deleted=[record_id])
+    await finish_sensitive_operation(db, reservation, result.model_dump(mode="json"))
+    return result
 
 
 def _normalize_tags(raw: object) -> object:

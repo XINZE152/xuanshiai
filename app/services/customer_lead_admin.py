@@ -18,7 +18,7 @@ from app.services.auth import ensure_default_user_role
 from app.schemas.auth import PreferenceUpdateRequest
 
 from app.schemas.customer_lead_admin import (
-    CustomerLead, CustomerLeadAbandonment, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadFollowUp,
+    CustomerLead, CustomerLeadAbandonment, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadCreateResult, CustomerLeadFollowUp,
     CustomerLeadBatchImportResult, CustomerLeadConvertRequest, CustomerLeadFollowUpCreate, CustomerLeadImportRow, CustomerLeadImportSummary,
     CustomerLeadOption, CustomerLeadOptions,
     CustomerLeadPage, CustomerLeadStatistics, CustomerLeadUpdate,
@@ -28,17 +28,41 @@ from app.schemas.customer_lead_admin import (
 from app.services.customer_lead_contact import (
     ensure_contact_available, normalize_contact, raise_duplicate_contact,
 )
+from app.services.lead_apportion import resolve_assigned_matchmaker
 
 LEAD_SELECT = """SELECT id, name, phone, wechat, source, intention_level, status, audit_status, matchmaker_id,
     organization_id, promoter_id, next_follow_at, converted_user_id, remark, created_by, created_at, updated_at
     FROM customer_lead"""
 
-_LEAD_GENDER_RE = re.compile(r"\bFROM customer_lead\b")
+_LEAD_FROM_RE = re.compile(r"\bFROM customer_lead\b")
+
+# 客源「本人资料」可读写列（与 _LeadProfileFields 一一对应）。gender/age 单列处理：
+# gender 沿用 CAST，age 由 birth_date 派生。列不存在时读写均静默降级（先发版后迁移）。
+_LEAD_PROFILE_COLUMNS: tuple[str, ...] = (
+    "real_name", "birth_date", "marriage", "occupation", "income", "height",
+    "weight", "education", "hometown", "residence", "house", "car",
+    "smoking", "drinking", "ethnicity", "school", "company", "photos",
+)
 
 
-def _apply_gender_column(select_sql: str) -> str:
-    """在客源主表外层 FROM 前补 gender 列。"""
-    return _LEAD_GENDER_RE.sub(", CAST(gender AS SIGNED) AS gender FROM customer_lead", select_sql)
+def _lead_select_for(columns: frozenset[str]) -> str:
+    """在客源主表外层 SELECT 补 gender 与已存在的本人资料列。
+
+    age 优先由 birth_date 派生（TIMESTAMPDIFF），无 birth_date 时回退到 filters 迁移
+    补的 raw age 列；两者都缺则不输出 age。缺列静默跳过，保证「先发版后迁移」
+    不报 Unknown column。只在外层 ``FROM customer_lead`` 词边界处注入一次。
+    """
+    extra: list[str] = []
+    if "gender" in columns:
+        extra.append("CAST(gender AS SIGNED) AS gender")
+    extra.extend(col for col in _LEAD_PROFILE_COLUMNS if col in columns)
+    if "birth_date" in columns:
+        extra.append("TIMESTAMPDIFF(YEAR, birth_date, UTC_DATE()) AS age")
+    elif "age" in columns:
+        extra.append("age")
+    if not extra:
+        return LEAD_SELECT
+    return _LEAD_FROM_RE.sub(", " + ", ".join(extra) + " FROM customer_lead", LEAD_SELECT)
 
 
 # 导入模板表头（顺序即模板列顺序）
@@ -70,10 +94,15 @@ def _lead(row: Any, redaction_level: str = REDACTION_LEVEL_STANDARD) -> Customer
     """客源线索序列化。
 
     `wechat` 按敏感等级掩码后返回（审计第 1 项：完整微信号不得返回）；默认标准级，
-    调用方忘记传等级时落到最严格一档，不会泄露完整值。
+    调用方忘记传等级时落到最严格一档，不会泄露完整值。`photos` 为 JSON 列，
+    raw SQL 取回的是文本，归一化为 URL 列表（NULL 保持 None）。
     """
+    from app.services.profile import _json_list  # 延迟导入避免模块级循环依赖
+
     payload = dict(row)
     payload["wechat"] = mask_contact(payload.get("wechat"), redaction_level)
+    if payload.get("photos") is not None:
+        payload["photos"] = _json_list(payload["photos"])
     return CustomerLead(**payload)
 
 
@@ -101,16 +130,31 @@ async def _ensure_user_in_scope(db: AsyncSession, user_id: int | None, scope: st
         raise HTTPException(404, detail="目标人员不在当前数据范围")
 
 
-async def create_lead(db: AsyncSession, account_id: int, request: CustomerLeadCreate, redaction_level: str = REDACTION_LEVEL_STANDARD, *, assignment_scope: str | None = None, assignment_scope_params: dict[str, Any] | None = None) -> CustomerLead:
+async def create_lead(db: AsyncSession, account_id: int, request: CustomerLeadCreate, redaction_level: str = REDACTION_LEVEL_STANDARD, *, assignment_scope: str | None = None, assignment_scope_params: dict[str, Any] | None = None) -> CustomerLeadCreateResult:
     phone = normalize_contact(request.phone)
     wechat = normalize_contact(request.wechat)
     await _ensure_user_in_scope(db, request.promoter_id, assignment_scope, assignment_scope_params)
     await ensure_contact_available(db, phone, wechat)
+    # auto_assign=true 时按分派配置在同一事务内选好归属红娘；选不到人（返回 None）则不写
+    # matchmaker_id，客源保持未分派。策略计算全部在服务端完成。
+    assigned_matchmaker_id = await resolve_assigned_matchmaker(db, auto_assign=request.auto_assign)
+    from app.services.profile import _calculate_age, _json_value  # 延迟导入避免循环依赖
     try:
+        columns = await _lead_columns(db)
         insert_columns = ["name", "phone", "wechat", "source", "intention_level", "remark", "promoter_id", "audit_status", "created_by"]
-        insert_payload = {**request.model_dump(), "phone": phone, "wechat": wechat, "created_by": account_id}
-        if "gender" in await _lead_columns(db):
-            insert_columns.append("gender")
+        insert_payload = {**request.model_dump(exclude={"auto_assign"}), "phone": phone, "wechat": wechat, "created_by": account_id}
+        # photos 存 JSON 字符串；birth_date 有值时同步派生 raw age 列（供列表筛选与旧口径使用）。
+        if insert_payload.get("photos") is not None:
+            insert_payload["photos"] = _json_value(insert_payload["photos"])
+        if insert_payload.get("birth_date") is not None:
+            insert_payload["age"] = _calculate_age(insert_payload["birth_date"])
+        # 基础列恒写；gender / 资料列 / age 仅写库中已存在且有值的列（缺列静默降级）。
+        for col in ("gender", *_LEAD_PROFILE_COLUMNS, "age"):
+            if col in columns and insert_payload.get(col) is not None:
+                insert_columns.append(col)
+        if assigned_matchmaker_id:
+            insert_columns.append("matchmaker_id")
+            insert_payload["matchmaker_id"] = assigned_matchmaker_id
         insert_sql = f"""INSERT INTO customer_lead
             ({', '.join(insert_columns)})
             VALUES (:{', '.join(insert_columns)})"""
@@ -122,7 +166,8 @@ async def create_lead(db: AsyncSession, account_id: int, request: CustomerLeadCr
     except IntegrityError:
         await db.rollback()
         raise_duplicate_contact()
-    return await get_lead(db, lead_id, redaction_level)
+    lead = await get_lead(db, lead_id, redaction_level)
+    return CustomerLeadCreateResult(**lead.model_dump(), assigned=bool(assigned_matchmaker_id))
 
 
 def _merge_scope(
@@ -153,13 +198,53 @@ async def get_lead(
     columns = await _lead_columns(db)
     if "deleted_at" in columns:
         where.append("deleted_at IS NULL")
-    select_sql = LEAD_SELECT
-    if "gender" in columns:
-        select_sql = _apply_gender_column(select_sql)
+    select_sql = _lead_select_for(columns)
     row = (await db.execute(text(f"{select_sql} WHERE {' AND '.join(where)}"), params)).mappings().first()
     if not row:
         raise HTTPException(404, detail="客源线索不存在")
     return _lead(row, redaction_level)
+
+
+# 客源婚况（varchar 档位）→ users.is_married（int）编码：0未知 1未婚 2离异 3丧偶。
+# 只搬运能干净映射的取值（数字码或中文标签），无法识别时不写回（保持账号默认）。
+_LEAD_MARRIAGE_TO_CODE = {"未婚": 1, "离异": 2, "丧偶": 3}
+
+
+def _map_lead_marriage(value: str | None) -> int | None:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    if text_value.isdigit():
+        code = int(text_value)
+        return code if code in (1, 2, 3) else None
+    return _LEAD_MARRIAGE_TO_CODE.get(text_value)
+
+
+async def _table_columns(db: AsyncSession, table: str) -> frozenset[str]:
+    rows = await db.execute(text("""SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t"""), {"t": table})
+    return frozenset(row[0] for row in rows.all())
+
+
+async def _upsert_profile_row(
+    db: AsyncSession, table: str, user_id: int, data: dict[str, Any], existing_cols: frozenset[str]
+) -> None:
+    """向 user_profile / user_auth 写一行资料（按 user_id 唯一键 upsert）。
+
+    只写非 None 且列真实存在的字段（缺列静默跳过，保证「先发版后迁移」不报错）。
+    表名为服务内部常量，不拼接用户输入。
+    """
+    cols = [c for c, v in data.items() if v is not None and c in existing_cols]
+    if not cols:
+        return
+    params: dict[str, Any] = {c: data[c] for c in cols}
+    params["user_id"] = user_id
+    col_sql = ", ".join(cols)
+    val_sql = ", ".join(f":{c}" for c in cols)
+    upd_sql = ", ".join(f"{c} = VALUES({c})" for c in cols)
+    await db.execute(text(
+        f"""INSERT INTO {table} (user_id, {col_sql}) VALUES (:user_id, {val_sql})
+            ON DUPLICATE KEY UPDATE {upd_sql}, updated_at = UTC_TIMESTAMP()"""), params)
 
 
 async def convert_lead(
@@ -202,6 +287,33 @@ async def convert_lead(
         })
         user_id = int(result.lastrowid)
         await ensure_default_user_role(db, user_id)
+        # 客源「本人资料」搬运到新账号（对标站建档即带资料）：user_profile / user_auth 走 upsert，
+        # users.birthday / is_married 属主表基础列直接补写。income（varchar 档位）与账号 decimal
+        # 口径不兼容、不搬运；缺列静默跳过。
+        from app.services.profile import _json_value  # 延迟导入避免循环依赖
+
+        profile_cols = await _table_columns(db, "user_profile")
+        auth_cols = await _table_columns(db, "user_auth")
+        await _upsert_profile_row(db, "user_profile", user_id, {
+            "height": lead.height, "weight": lead.weight, "hometown": lead.hometown,
+            "residence": lead.residence, "ethnicity": lead.ethnicity, "house": lead.house,
+            "car": lead.car, "smoking": lead.smoking, "drinking": lead.drinking,
+            "occupation": lead.occupation,
+            "photos": _json_value(lead.photos) if lead.photos else None,
+        }, profile_cols)
+        await _upsert_profile_row(db, "user_auth", user_id, {
+            "real_name": lead.real_name, "education": lead.education, "school": lead.school,
+            "company": lead.company, "job": lead.occupation,
+        }, auth_cols)
+        user_patch: dict[str, Any] = {}
+        if lead.birth_date is not None:
+            user_patch["birthday"] = lead.birth_date
+        mapped_marriage = _map_lead_marriage(lead.marriage)
+        if mapped_marriage is not None:
+            user_patch["is_married"] = mapped_marriage
+        if user_patch:
+            patch_assign = ", ".join(f"{k} = :{k}" for k in user_patch)
+            await db.execute(text(f"UPDATE users SET {patch_assign} WHERE id = :uid"), {**user_patch, "uid": user_id})
         await db.execute(text("""INSERT INTO matchmaker_member_review (user_id, status, reviewed_by)
             VALUES (:user_id, 'PENDING', NULL)
             ON DUPLICATE KEY UPDATE updated_at = UTC_TIMESTAMP()"""), {"user_id": user_id})
@@ -438,9 +550,7 @@ async def list_leads(
 
     clause = " AND ".join(where)
     order_sql = _LEAD_ORDER_SQL.get(order or "latest", _LEAD_ORDER_SQL["latest"])
-    select_sql = LEAD_SELECT
-    if "gender" in columns:
-        select_sql = _apply_gender_column(select_sql)
+    select_sql = _lead_select_for(columns)
     rows = await db.execute(text(f"{select_sql} WHERE {clause} ORDER BY {order_sql} LIMIT :limit OFFSET :offset"), params)
     count = await db.execute(text(f"SELECT COUNT(*) FROM customer_lead WHERE {clause}"), {k: v for k, v in params.items() if k not in ("limit", "offset")})
     total = int(count.scalar() or 0)
@@ -458,10 +568,18 @@ async def update_lead(
     scope_params: dict[str, Any] | None = None,
 ) -> CustomerLead:
     current = await get_lead(db, lead_id, redaction_level, scope=scope, scope_params=scope_params)
+    from app.services.profile import _calculate_age, _json_value  # 延迟导入避免循环依赖
+    columns = await _lead_columns(db)
     values = request.model_dump(exclude_unset=True)
-    # gender 列未迁移时从写入字段剔除，避免 Unknown column 500（先发版后迁移）。
-    if "gender" in values and "gender" not in await _lead_columns(db):
-        values.pop("gender")
+    # photos 存 JSON；birth_date 有值时同步派生 raw age 列。
+    if values.get("photos") is not None:
+        values["photos"] = _json_value(values["photos"])
+    if values.get("birth_date") is not None and "age" in columns:
+        values["age"] = _calculate_age(values["birth_date"])
+    # 缺列降级：库中不存在的 gender / 资料列 / age 从写入字段剔除，避免 Unknown column 500（先发版后迁移）。
+    for col in ("gender", *_LEAD_PROFILE_COLUMNS, "age"):
+        if col in values and col not in columns:
+            values.pop(col)
     # 掩码值不写回：表单预填的是脱敏后的展示值，原样落库会把真实微信号毁成 ***
     if is_masked_value(values.get("wechat")):
         values.pop("wechat")
@@ -636,6 +754,37 @@ async def assign_lead(
     await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) VALUES (:actor, 'customer_lead.assign', 'customer_lead', :id)"), {"actor": account_id, "id": lead_id})
     await db.commit()
     return await get_lead(db, lead_id, redaction_level, scope=scope, scope_params=scope_params)
+
+
+async def auto_assign_lead(
+    db: AsyncSession,
+    account_id: int,
+    lead_id: int,
+    *,
+    force: bool = False,
+    redaction_level: str = REDACTION_LEVEL_STANDARD,
+    scope: str | None = None,
+    scope_params: dict[str, Any] | None = None,
+) -> CustomerLeadCreateResult:
+    """对已存在的客源按分派策略重算归属红娘。
+
+    默认仅对当前未分派的客源生效；force=true 即使已有归属也重算并覆盖。
+    选不到人时不改动现有归属，返回 assigned=false，让前端可提示。
+    """
+    lead = await get_lead(db, lead_id, redaction_level, scope=scope, scope_params=scope_params)
+    if lead.matchmaker_id is not None and not force:
+        return CustomerLeadCreateResult(**lead.model_dump(), assigned=True)
+    matchmaker_id = await resolve_assigned_matchmaker(db, auto_assign=True)
+    if not matchmaker_id:
+        return CustomerLeadCreateResult(**lead.model_dump(), assigned=False)
+    assign_where = ["id = :id"]
+    assign_params: dict[str, Any] = {"id": lead_id, "matchmaker_id": matchmaker_id}
+    _merge_scope(assign_where, assign_params, scope, scope_params)
+    await db.execute(text(f"UPDATE customer_lead SET matchmaker_id = :matchmaker_id, updated_at = UTC_TIMESTAMP() WHERE {' AND '.join(assign_where)}"), assign_params)
+    await db.execute(text("INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) VALUES (:actor, 'customer_lead.auto_assign', 'customer_lead', :id)"), {"actor": account_id, "id": lead_id})
+    await db.commit()
+    updated = await get_lead(db, lead_id, redaction_level, scope=scope, scope_params=scope_params)
+    return CustomerLeadCreateResult(**updated.model_dump(), assigned=True)
 
 
 async def add_follow_up(

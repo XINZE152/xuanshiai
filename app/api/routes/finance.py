@@ -21,6 +21,8 @@ from app.schemas.finance import (
     CommissionEntryDetailPage,
     CommissionRuleCreate,
     CommissionRuleResponse,
+    MatchmakerCommissionEntryCreate,
+    MatchmakerCommissionEntryCreateResult,
     CreditGrantRequest,
     CreditGrantResult,
     CreditDeductRequest,
@@ -57,6 +59,7 @@ from app.services.finance import (
     list_user_commissions,
     admin_finance_report,
     admin_list_commission_entries,
+    admin_create_commission_entry,
     admin_list_commission_options,
     admin_list_store_commission_entries,
     admin_store_commission_options,
@@ -243,6 +246,22 @@ async def admin_commission_entries(
     return await admin_list_commission_entries(
         db, page, page_size, matchmaker_id, rule_id, start_date, end_date, admin=admin
     )
+
+
+@admin_router.post(
+    "/commission-entries",
+    response_model=MatchmakerCommissionEntryCreateResult,
+    status_code=201,
+    summary="后台手工录入一笔服务红娘分成（不动余额账本）",
+)
+async def admin_create_commission_entry_route(
+    body: MatchmakerCommissionEntryCreate = Body(...),
+    admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MatchmakerCommissionEntryCreateResult:
+    """录入一笔服务红娘分成：只写 commission_entry（PENDING）+ 审计，不写 account_ledger、不动余额。"""
+    admin.require("finance.write")
+    return await admin_create_commission_entry(db, _finance_actor(admin), body)
 
 
 @admin_router.get("/commission-entries/options", response_model=CommissionEntryDetailOptions, summary="获取红娘线上分成明细筛选下拉选项")

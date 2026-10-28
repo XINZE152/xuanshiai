@@ -234,9 +234,9 @@ async def media_create(
     )
 
 
-@router.get("/media", response_model=MemberMediaPage, summary="媒体审核列表（头像/照片/视频）")
+@router.get("/media", response_model=MemberMediaPage, summary="媒体审核列表（头像/照片/视频/证件）")
 async def media_list(
-    media_type: str = Query(..., pattern="^(avatar|photo|video)$"),
+    media_type: str = Query(..., pattern="^(avatar|photo|video|certificate)$"),
     page: int = Query(1, ge=1, le=1000),
     page_size: int = Query(20, ge=1, le=100),
     review_status: int | None = Query(None, ge=0, le=3),
@@ -247,7 +247,10 @@ async def media_list(
     db: AsyncSession = Depends(get_db),
 ) -> MemberMediaPage:
     current.require("matchmaker.member.read")
-    return await service.list_media(db, page, page_size, media_type, review_status, keyword, gender, search_type)
+    return await service.list_media(
+        db, page, page_size, media_type, review_status, keyword, gender, search_type,
+        viewer=current.account.id,
+    )
 
 
 @router.get("/media/{user_id}/history", response_model=MemberMediaPage, summary="会员头像历史记录（含已删）")
