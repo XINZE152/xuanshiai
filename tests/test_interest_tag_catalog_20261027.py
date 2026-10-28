@@ -198,6 +198,20 @@ async def test_create_category_success_and_reloads(_no_reload) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_category_quotes_reserved_key_column(_no_reload) -> None:
+    """回归：key 是 MySQL 8.0 保留字，INSERT 列名必须反引号包裹，否则 1064 语法错误→500。"""
+    db = _StubDB([
+        _Result(rows=[]),                       # key 不存在
+        _Result(lastrowid=9),                   # INSERT
+        _Result(mappings_rows=[{"id": 9, "key": "food", "label": "美食", "enabled": 1, "sort": 0}]),
+    ])
+    await service.create_category(db, TagCategoryCreate(key="food", label="美食"))
+    insert_sql = next(sql for sql, _ in db.writes if sql.lstrip().upper().startswith("INSERT"))
+    assert "(`key`" in insert_sql, insert_sql  # 列名带反引号
+    assert "(key," not in insert_sql and "(key " not in insert_sql  # 不得出现裸 key
+
+
+@pytest.mark.asyncio
 async def test_create_tag_rejects_unknown_category(_no_reload) -> None:
     from fastapi import HTTPException
 

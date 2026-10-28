@@ -99,7 +99,8 @@ async def create_category(db: AsyncSession, body: TagCategoryCreate) -> TagCateg
     values = {k: v for k, v in body.model_dump().items() if k in _CATEGORY_COLUMNS | {"key"}}
     try:
         result = await db.execute(
-            text(f"INSERT INTO interest_tag_category ({', '.join(values)}) VALUES ({', '.join(f':{k}' for k in values)})"),
+            # 列名统一加反引号：key 是 MySQL 8.0 保留字，裸列名会触发 1064 语法错误。
+            text(f"INSERT INTO interest_tag_category ({', '.join(f'`{k}`' for k in values)}) VALUES ({', '.join(f':{k}' for k in values)})"),
             values,
         )
         await db.commit()
