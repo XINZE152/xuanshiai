@@ -707,7 +707,9 @@ async def get_profile_overview(db: AsyncSession, user_id: int) -> ProfileOvervie
         (SELECT COUNT(*) FROM match_apply a WHERE a.from_user_id = u.id AND a.status = 0) AS outgoing_count,
         (SELECT COUNT(*) FROM user_match m WHERE m.user_id = u.id AND m.status IN (1, 2)) AS match_count,
         (SELECT COUNT(DISTINCT bh.user_id) FROM user_browse_history bh WHERE bh.target_user_id = u.id) AS visitor_count,
-        (SELECT COUNT(*) FROM user_favorite f WHERE f.user_id = u.id AND f.type = 2) AS favorite_count,
+        -- C 端「我的收藏」与红心/列表同源：type=1（喜欢）。type=2 是旧收藏，不再计数。
+        (SELECT COUNT(*) FROM user_favorite f WHERE f.user_id = u.id AND f.type = 1) AS favorite_count,
+        -- 旧「谁收藏我」字段（type=2），C 端已无消费方，保留仅为兼容/审计。
         (SELECT COUNT(*) FROM user_favorite f WHERE f.target_user_id = u.id AND f.type = 2) AS favorite_received_count,
         -- user_boost 复用承载「置顶助推」（user_id = target_user_id = 自己），
         -- 爆灯统计必须排除自指记录，否则自己买的置顶会被算成一次爆灯。
@@ -883,8 +885,8 @@ async def upload_photo(db: AsyncSession, user_id: int, file: UploadFile) -> dict
                    'image/webp', :file_size, :sort_order, :is_primary, 0)"""),
         {"user_id": user_id, "url": url, "storage_key": str(image_path), "thumbnail_url": thumbnail_url, "file_size": len(image_data), "sort_order": sort_order, "is_primary": int(is_primary)},
     )
-    if is_primary:
-        await db.execute(text("UPDATE users SET avatar = :avatar, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"avatar": url, "id": user_id})
+    # 相册第一张不再自动覆盖头像：is_primary 只表示相册内排序/封面。
+    # 头像只能由 upload_avatar 或显式「设为主图/设为头像」修改，避免用户上传相册时被动换头像。
     await recalculate_completion(db, user_id)
     await db.commit()
     media = await db.execute(text("SELECT id, media_type, file_url, thumbnail_url, sort_order, is_primary, duration_seconds FROM user_media WHERE id = :id"), {"id": result.lastrowid})

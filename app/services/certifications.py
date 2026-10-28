@@ -122,10 +122,20 @@ async def list_certification_reviews(db: AsyncSession, *, page: int, page_size: 
     )
 def _item(kind: str, row: dict, material: str | None) -> dict:
     status = int(row.get("status") or 0)
-    return {"kind": kind, "status": status, "material_submitted": bool(material), "material": material,
+    # 历史数据可能存在 status=1 但 material 为空（旧入口直接置 1）。
+    # 只有「审核中 + 有材料」才显示等待审核，否则回到「提交认证材料」。
+    submitted = bool(material)
+    if status == 1:
+        next_action = "等待平台审核" if submitted else "提交认证材料"
+    elif status == 2:
+        next_action = "无需操作"
+    elif status == 3:
+        next_action = "重新提交材料"
+    else:
+        next_action = "提交认证材料"
+    return {"kind": kind, "status": status, "material_submitted": submitted, "material": material,
             "submitted_at": row.get("submitted_at"), "reviewed_at": row.get("reviewed_at"),
-            "fail_reason": row.get("fail_reason"),
-            "next_action": "等待平台审核" if status == 1 else ("无需操作" if status == 2 else ("重新提交材料" if status == 3 else "提交认证材料"))}
+            "fail_reason": row.get("fail_reason"), "next_action": next_action}
 
 
 def _single_pledge_item(row: dict, viewer: int | None = None, kind: str = VIEWER_KIND_USER) -> dict:

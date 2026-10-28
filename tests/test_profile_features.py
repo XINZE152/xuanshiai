@@ -106,3 +106,9 @@ def test_image_outputs_use_fast_webp_encoding() -> None:
 
 def test_image_pixel_limit_is_explicit() -> None:
     assert IMAGE_MAX_PIXELS == 25_000_000
+
+
+def test_preference_education_min_is_limited_to_five() -> None:
+    assert PreferenceUpdateRequest(education_min=5).education_min == 5
+    with pytest.raises(ValidationError):
+        PreferenceUpdateRequest(education_min=6)

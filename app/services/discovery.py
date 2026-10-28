@@ -94,6 +94,7 @@ CARD_SELECT = """
            (p.residence_city_code IS NOT NULL AND p.residence_city_code =
              (SELECT vp2.residence_city_code FROM user_profile vp2 WHERE vp2.user_id = :viewer_id)) AS same_city,
            p.mbti, p.interest_tags, p.personality_tags, p.tags,
+           p.self_intro, p.qa_answers,
            cp.age_min AS candidate_age_min, cp.age_max AS candidate_age_max,
            cp.height_min AS candidate_height_min, cp.height_max AS candidate_height_max,
            cp.education_min AS candidate_education_min, cp.income_min AS candidate_income_min,
@@ -292,6 +293,31 @@ def _candidate_score(viewer: dict[str, Any], candidate: dict[str, Any]) -> tuple
     return round(min(100.0, points), 2), "、".join(reasons[:3]) or "资料匹配"
 
 
+def _card_qa_answers(value: Any) -> list[dict[str, str]]:
+    """卡片只下发已作答的公开问答，最多 3 条；格式与详情页 qa_answers 一致。"""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        answer = str(item.get("answer") or "").strip()
+        if answer == "":
+            continue
+        question = str(item.get("question") or "").strip()
+        result.append({"question": question or "关于我", "answer": answer})
+        if len(result) >= 3:
+            break
+    return result
+
+
 def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = False) -> DiscoveryCard:
     certification_tags: list[str] = []
     if row.get("realname_status") == 2:
@@ -312,6 +338,8 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         is_married=row.get("is_married") if not detail_locked else None,
         online_status=0 if row.get("hide_online_status") else int(row.get("online_status") or 0),
         mbti=row.get("mbti") if not detail_locked else None,
+        self_intro=(row.get("self_intro") or None) if not detail_locked else None,
+        qa_answers=_card_qa_answers(row.get("qa_answers")) if not detail_locked else [],
         personal_tags=display_personal_tags(_json_list(row.get("interest_tags")) + _json_list(row.get("personality_tags")), _stored_custom_tags(row)) if not detail_locked else [],
         interest_tags=personal_tags(_json_list(row.get("interest_tags")), _stored_custom_tags(row))[:5] if not detail_locked else [],
         certification_tags=certification_tags,
@@ -792,12 +820,15 @@ async def _public_preference(db: AsyncSession, user_id: int) -> dict[str, Any] |
         except json.JSONDecodeError:
             codes = []
     data["preferred_city_codes"] = codes if isinstance(codes, list) else []
+    province_name = ""
     try:
         from app.services.regions import region_name
 
         data["preferred_region_text"] = "、".join(
             name for name in (region_name(str(code)) for code in data["preferred_city_codes"]) if name
         )
+        province_code = data.get("preferred_province_code")
+        province_name = region_name(str(province_code)) if province_code else ""
     except Exception:  # pragma: no cover - 区划数据异常不应影响详情页
         logger.exception("Failed to resolve preference region names")
         data["preferred_region_text"] = ""
@@ -819,7 +850,12 @@ async def _public_preference(db: AsyncSession, user_id: int) -> dict[str, Any] |
     data["drinking_text"] = data.get("drinking_expectation") or _ENUM_TEXT["drinking"].get(
         _as_int(data.get("drinking_requirement")), ""
     )
-    data["expected_area"] = data.get("preferred_region_text", "")
+    # 结婚时间/期望职业：C 端存中文文本，服务端同时给 *_text 便于前端不维护映射。
+    data["marriage_timeline_text"] = data.get("marriage_timeline") or ""
+    data["preferred_occupation_text"] = data.get("preferred_occupation") or ""
+    # 期望地区：省名 + 城市名；只选省时也有值（此前只拼城市，导致整行不显示）。
+    area_parts = [part for part in (province_name, data.get("preferred_region_text", "")) if part]
+    data["expected_area"] = " ".join(area_parts)
     # 期待标签（relationship_expectation）不在 user_partner_preference 里，
     # 详情页已由 tag_selections 单独渲染，这里给空数组保证前端契约稳定。
     data["extras"] = []
