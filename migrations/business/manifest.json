@@ -66,6 +66,58 @@
         "verify": "de18c09d5a3ba38b7237e83bd7405e61b1415e403a3e98a3fc0c3c9706cb68cc",
         "verify_previous": "7a96388de7cac7948590d5bc898752b99e76f5f1b52959c88a71292646925113"
       }
+    },
+    {
+      "version": "20261030_01_payment_v3_core",
+      "up": "20261030_01_payment_v3_core_up.sql",
+      "down": "20261030_01_payment_v3_core_down.sql",
+      "verify": "20261030_01_payment_v3_core_verify.sql",
+      "verify_previous": "20261030_01_payment_v3_core_verify_previous.sql",
+      "sha256": {
+        "up": "98a8e798ff208a011fcb9cf53d1b51dbc11e521bc20e321e013f6ae6053ae1a3",
+        "down": "07ff8770d7a100ec5808a87d5d4a108a179afad71b1a3451074d1857255938f9",
+        "verify": "8c720801b6d6e69c24061678ccbee112b4e0ed5f5874d91fb54cf03af95de614",
+        "verify_previous": "1baa26635173ed2c5fe4d398f8174f3c0629e09ee65f6b7023b1e7ab3b40159b"
+      }
+    },
+    {
+      "version": "20261030_02_payment_reconcile",
+      "up": "20261030_02_payment_reconcile_up.sql",
+      "down": "20261030_02_payment_reconcile_down.sql",
+      "verify": "20261030_02_payment_reconcile_verify.sql",
+      "verify_previous": "20261030_02_payment_reconcile_verify_previous.sql",
+      "sha256": {
+        "up": "515694bded97b09f403bb508a4e2393709b1a359398fafd1cbc5adf63875e75c",
+        "down": "177e5099fab224b844a90709cb51bc6a0467c306cb89fb8524d3628d0ba17615",
+        "verify": "ced3aec04c5eab8a78e3086b8f9665878236bf14772888fe70afd7ade62f0c91",
+        "verify_previous": "5fd155adc9cbbb43ef8ef7eec1086b52ca2025a2383fd412dad96f7212623705"
+      }
+    },
+    {
+      "version": "20261030_03_payment_entitlement_keys",
+      "up": "20261030_03_payment_entitlement_keys_up.sql",
+      "down": "20261030_03_payment_entitlement_keys_down.sql",
+      "verify": "20261030_03_payment_entitlement_keys_verify.sql",
+      "verify_previous": "20261030_03_payment_entitlement_keys_verify_previous.sql",
+      "sha256": {
+        "up": "4f9fe2d40ee345159542a5c76409ba4601c2649ef736a95542249f798f1d223e",
+        "down": "7ec21fb6b1f9dc4604e3c15eb11ce7c6093f26cf973c69266a2855ca6f616353",
+        "verify": "04c838bf800b82117bdb99303eb95dcb44a954f74770e03f25eb30995c7a861b",
+        "verify_previous": "76e50ebe1ceb4073a3ee537c04c78a147c667de74639b6514327c7932c8353ee"
+      }
+    },
+    {
+      "version": "20261030_04_user_points_biz_key",
+      "up": "20261030_04_user_points_biz_key_up.sql",
+      "down": "20261030_04_user_points_biz_key_down.sql",
+      "verify": "20261030_04_user_points_biz_key_verify.sql",
+      "verify_previous": "20261030_04_user_points_biz_key_verify_previous.sql",
+      "sha256": {
+        "up": "ac7496b811f435b3a0ecbd62528521d4c538c270221078d685816b5171272b68",
+        "down": "a3fd40aceacee09a065eed7c577e9d0d31f88ca8b39aac47f59eebac71fb9885",
+        "verify": "cc4e65efb2bfde604b3d1f5e19052ebf7f7073d5bf84125a7cfe0237e3e663ea",
+        "verify_previous": "3f49147eda0555f65ede310ea74fc20df58af2bf4b8928043cef0da664f78f2d"
+      }
     }
   ]
 }

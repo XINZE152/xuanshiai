@@ -89,7 +89,11 @@ LEGACY_MATCH_ALGORITHM_VERSION = "legacy-rule-v1"
 
 
 CARD_SELECT = """
-    SELECT u.id AS user_id, u.nickname, u.avatar, u.gender, u.birthday, u.is_married,
+    SELECT u.id AS user_id, u.nickname, u.avatar, u.gender,
+           COALESCE((SELECT um.thumbnail_url FROM user_media um
+                     WHERE um.user_id = u.id AND um.media_type = 'avatar' AND um.deleted_at IS NULL
+                     ORDER BY um.id DESC LIMIT 1), u.avatar) AS avatar_thumb,
+           u.birthday, u.is_married,
            u.is_single_pledge, p.height, p.education_level, p.occupation, p.income,
            p.weight, p.zodiac,
            p.hometown_province_code, p.hometown_city_code, p.hometown_district_code,
@@ -1184,6 +1188,9 @@ async def list_received_favorites(db: AsyncSession, viewer_id: int, page: int, p
         LEFT JOIN user_profile_completion c ON c.user_id = u.id
         WHERE f.target_user_id = :user_id AND f.type = 2{visible}"""), params)).scalar() or 0)
     result = await db.execute(text(f"""SELECT f.id, f.user_id, u.nickname, u.avatar, u.birthday,
+        COALESCE((SELECT um.thumbnail_url FROM user_media um
+                  WHERE um.user_id = u.id AND um.media_type = 'avatar' AND um.deleted_at IS NULL
+                  ORDER BY um.id DESC LIMIT 1), u.avatar) AS avatar_thumb,
         p.residence_city_code, f.created_at
         FROM user_favorite f JOIN users u ON u.id = f.user_id
         LEFT JOIN user_profile p ON p.user_id = u.id
@@ -1194,7 +1201,7 @@ async def list_received_favorites(db: AsyncSession, viewer_id: int, page: int, p
     items = [
         FavoriteReceivedItem(
             id=int(row["id"]),
-            user=RelationUserSummary(user_id=int(row["user_id"]), nickname=row["nickname"], avatar=row["avatar"], age=_calculate_age(row["birthday"]) if row["birthday"] else None, city_code=row["residence_city_code"]),
+            user=RelationUserSummary(user_id=int(row["user_id"]), nickname=row["nickname"], avatar=row["avatar"], avatar_thumb=row["avatar_thumb"], age=_calculate_age(row["birthday"]) if row["birthday"] else None, city_code=row["residence_city_code"]),
             relation="received",
             created_at=row["created_at"],
         )
@@ -1326,8 +1333,16 @@ async def list_applications(db: AsyncSession, viewer_id: int, incoming: bool, pa
         LEFT JOIN user_profile_completion tc ON tc.user_id = tu.id
         WHERE a.{field} = :user_id{visible}"""), params)).scalar() or 0)
     result = await db.execute(text(f"""SELECT a.id, a.from_user_id, a.to_user_id, a.message, a.status, a.expire_at, a.created_at,
-        fu.nickname AS from_nickname, fu.avatar AS from_avatar, fu.birthday AS from_birthday, fp.residence_city_code AS from_city_code,
-        tu.nickname AS to_nickname, tu.avatar AS to_avatar, tu.birthday AS to_birthday, tp.residence_city_code AS to_city_code
+        fu.nickname AS from_nickname, fu.avatar AS from_avatar,
+        COALESCE((SELECT um.thumbnail_url FROM user_media um
+                  WHERE um.user_id = fu.id AND um.media_type = 'avatar' AND um.deleted_at IS NULL
+                  ORDER BY um.id DESC LIMIT 1), fu.avatar) AS from_avatar_thumb,
+        fu.birthday AS from_birthday, fp.residence_city_code AS from_city_code,
+        tu.nickname AS to_nickname, tu.avatar AS to_avatar,
+        COALESCE((SELECT um.thumbnail_url FROM user_media um
+                  WHERE um.user_id = tu.id AND um.media_type = 'avatar' AND um.deleted_at IS NULL
+                  ORDER BY um.id DESC LIMIT 1), tu.avatar) AS to_avatar_thumb,
+        tu.birthday AS to_birthday, tp.residence_city_code AS to_city_code
         FROM match_apply a
         JOIN users fu ON fu.id = a.from_user_id
         LEFT JOIN user_profile fp ON fp.user_id = fu.id
@@ -1346,8 +1361,10 @@ async def list_applications(db: AsyncSession, viewer_id: int, incoming: bool, pa
         # 因此先取出 ID 再构造嵌套对象，避免 pop 之后顶层字段缺失导致校验失败。
         from_user_id = data.pop("from_user_id")
         to_user_id = data.pop("to_user_id")
-        data["from_user"] = RelationUserSummary(user_id=from_user_id, nickname=data.pop("from_nickname"), avatar=data.pop("from_avatar"), age=_calculate_age(data.pop("from_birthday")) if data.get("from_birthday") else None, city_code=data.pop("from_city_code"))
-        data["to_user"] = RelationUserSummary(user_id=to_user_id, nickname=data.pop("to_nickname"), avatar=data.pop("to_avatar"), age=_calculate_age(data.pop("to_birthday")) if data.get("to_birthday") else None, city_code=data.pop("to_city_code"))
+        # avatar_thumb 用 pop(..., None) 而非直接取键：它是纯展示字段，缺列时按
+        # 「无缩略图」处理（客户端回退 avatar）比整页 500 更合理。
+        data["from_user"] = RelationUserSummary(user_id=from_user_id, nickname=data.pop("from_nickname"), avatar=data.pop("from_avatar"), avatar_thumb=data.pop("from_avatar_thumb", None), age=_calculate_age(data.pop("from_birthday")) if data.get("from_birthday") else None, city_code=data.pop("from_city_code"))
+        data["to_user"] = RelationUserSummary(user_id=to_user_id, nickname=data.pop("to_nickname"), avatar=data.pop("to_avatar"), avatar_thumb=data.pop("to_avatar_thumb", None), age=_calculate_age(data.pop("to_birthday")) if data.get("to_birthday") else None, city_code=data.pop("to_city_code"))
         data["from_user_id"] = from_user_id
         data["to_user_id"] = to_user_id
         items.append(ApplicationResponse(**data))
@@ -1523,7 +1540,11 @@ async def list_superlikes(db: AsyncSession, viewer_id: int, direction: str, page
         LEFT JOIN user_profile_completion c ON c.user_id = u.id
         WHERE {where}"""), params)).scalar() or 0)
     result = await db.execute(text(f"""SELECT b.id, b.order_no, b.created_at, b.status,
-        u.id AS other_id, u.nickname, u.avatar, u.birthday, p.residence_city_code,
+        u.id AS other_id, u.nickname, u.avatar,
+        COALESCE((SELECT um.thumbnail_url FROM user_media um
+                  WHERE um.user_id = u.id AND um.media_type = 'avatar' AND um.deleted_at IS NULL
+                  ORDER BY um.id DESC LIMIT 1), u.avatar) AS avatar_thumb,
+        u.birthday, p.residence_city_code,
         EXISTS (SELECT 1 FROM user_match m WHERE m.user_id = :user_id AND m.target_user_id = u.id AND m.status IN (1, 2)) AS matched
         FROM user_boost b JOIN users u ON u.id = {other_field}
         LEFT JOIN user_profile p ON p.user_id = u.id
@@ -1533,7 +1554,7 @@ async def list_superlikes(db: AsyncSession, viewer_id: int, direction: str, page
     items = [
         SuperLikeItem(
             id=int(row["id"]),
-            user=RelationUserSummary(user_id=int(row["other_id"]), nickname=row["nickname"], avatar=row["avatar"], age=_calculate_age(row["birthday"]) if row["birthday"] else None, city_code=row["residence_city_code"]),
+            user=RelationUserSummary(user_id=int(row["other_id"]), nickname=row["nickname"], avatar=row["avatar"], avatar_thumb=row["avatar_thumb"], age=_calculate_age(row["birthday"]) if row["birthday"] else None, city_code=row["residence_city_code"]),
             direction=direction,
             status=int(row["status"] or 1),
             created_at=row["created_at"],

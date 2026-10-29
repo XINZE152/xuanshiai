@@ -593,11 +593,13 @@ async def test_application_list_keeps_ids_alongside_nested_users(
         "expire_at": None,
         "created_at": datetime(2026, 9, 1, 10, 0, 0),
         "from_nickname": "甲",
-        "from_avatar": None,
+        "from_avatar": "/storage/uploads/11/photo-a.webp",
+        "from_avatar_thumb": "/storage/uploads/11/avatar-photo-a-thumb.webp",
         "from_birthday": None,
         "from_city_code": "110100",
         "to_nickname": "乙",
         "to_avatar": None,
+        "to_avatar_thumb": None,
         "to_birthday": None,
         "to_city_code": "320100",
     }
@@ -648,6 +650,28 @@ async def test_application_list_keeps_ids_alongside_nested_users(
     assert item.to_user_id == 22
     assert item.from_user is not None and item.from_user.user_id == 11
     assert item.to_user is not None and item.to_user.user_id == 22
+    assert item.from_user is not None
+    assert item.from_user.avatar_thumb == "/storage/uploads/11/avatar-photo-a-thumb.webp"
+    assert item.to_user is not None
+    assert item.to_user.avatar_thumb is None
+
+    # 缩略图列缺失时不得整页失败：它是纯展示字段，按「无缩略图」降级即可，
+    # 客户端回退 avatar。直接取键会让一次漏改 SQL 变成申请列表 500。
+    legacy_row = {key: value for key, value in row.items() if not key.endswith("_avatar_thumb")}
+
+    class LegacyDb:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, statement: object, params: dict[str, object] | None = None) -> Rows:
+            self.calls += 1
+            if self.calls == 1:
+                return Rows(scalar_value=1, rows=[])
+            return Rows(scalar_value=1, rows=[dict(legacy_row)])
+
+    legacy_page = await discovery.list_applications(LegacyDb(), 1, True, page=1, page_size=20)
+    assert legacy_page.items[0].from_user is not None
+    assert legacy_page.items[0].from_user.avatar_thumb is None
 
 
 @pytest.mark.asyncio

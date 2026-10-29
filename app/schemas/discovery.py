@@ -201,6 +201,7 @@ class RelationUserSummary(BaseModel):
     user_id: int
     nickname: str | None
     avatar: str | None
+    avatar_thumb: str | None = None
     age: int | None
     city_code: str | None
 

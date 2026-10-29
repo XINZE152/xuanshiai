@@ -65,9 +65,18 @@ class ProductCommissionConfigResponse(BaseModel):
 
 
 class FinanceOrderCreate(BaseModel):
-    product_type: int = Field(ge=1, le=32)
-    product_name: str = Field(min_length=1, max_length=128)
-    amount: Decimal = Field(gt=0, le=1000000, decimal_places=2)
+    """后台代用户创建会员订单。
+
+    价格/商品名不再接受客户端输入，只接受套餐编码，由服务端从
+    ``config_membership_package`` 读取。
+    """
+
+    user_id: int = Field(ge=1, description="下单用户 ID")
+    package_code: str = Field(
+        min_length=1,
+        max_length=64,
+        description="config_membership_package.code，服务端据此取价",
+    )
 
 
 class PaymentOrderResponse(BaseModel):

@@ -1556,6 +1556,26 @@ async def _point_product_cost(db: AsyncSession, code: str, fallback: int | None)
     return fallback
 
 
+async def _point_product_sellable(db: AsyncSession, code: str) -> bool:
+    """积分商品是否在架，决定额度接口可否对外宣称「可兑换」。
+
+    与 ``_point_product_cost`` 的容错方向**相反**：价格读不到可以回退旧常量（有合理
+    默认值），在架状态没有安全默认——猜 ``True`` 会让用户点进一个不存在的商品，
+    所以配置表不可用时一律 fail-closed 返回 ``False``。
+    """
+    try:
+        row = (
+            await db.execute(
+                text("SELECT 1 FROM config_point_product WHERE code = :code AND is_active = 1 LIMIT 1"),
+                {"code": code},
+            )
+        ).scalar()
+    except Exception:
+        logger.debug("读取积分商品在架状态失败，按不可兑换处理: %s", code)
+        return False
+    return row is not None
+
+
 async def get_community_quotas(db: AsyncSession, user_id: int) -> CommunityQuotasResponse:
     """社区相关日额度。
 
@@ -1576,22 +1596,24 @@ async def get_community_quotas(db: AsyncSession, user_id: int) -> CommunityQuota
     # 而商品表真实是 20 / 30 —— 展示价与货架价不一致）。
     apply_cost = await _point_product_cost(db, "extra_apply", 20)
     paper_cost = await _point_product_cost(db, "paper_plane_unlock", settings.point_cost_paper_plane_unlock or 10)
+    # 加次写路径已上线（申请走 POST /users/me/points/redeem(extra_apply)，纸飞机走
+    # paper_plane_unlock），因此不再虚报恒 false，改为按商品表在架状态派生：
+    # 商品下架或配置表不可读时为 False，避免前端点开一个买不到的商品。
+    apply_sellable = await _point_product_sellable(db, "extra_apply")
+    paper_sellable = await _point_product_sellable(db, "paper_plane_unlock")
     return CommunityQuotasResponse(
         apply_daily=CommunityQuotaItem(
             total=apply_total,
             used=min(apply_used, apply_total),
             remain=max(apply_total - apply_used, 0),
-            # 加次写路径：申请走 POST /users/me/points/redeem(extra_apply)，
-            # 纸飞机走同一接口(paper_plane_unlock)；前端"立即兑换"入口尚未接真接口前，
-            # 这里保持 false，避免出现"按钮可点但兑换不生效"。
-            points_available=False,
+            points_available=apply_sellable,
             points_cost=apply_cost,
         ),
         paper_plane_daily=CommunityQuotaItem(
             total=paper_total,
             used=min(paper_used, paper_total),
             remain=max(paper_total - paper_used, 0),
-            points_available=False,
+            points_available=paper_sellable,
             points_cost=paper_cost,
         ),
     )

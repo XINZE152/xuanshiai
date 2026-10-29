@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
@@ -131,20 +131,86 @@ async def create_rule(db: AsyncSession, admin: CurrentUser, request: CommissionR
     return _rule(result.mappings().one())
 
 
-async def create_order(db: AsyncSession, current: CurrentUser, request: FinanceOrderCreate) -> PaymentOrderResponse:
+async def create_order(
+    db: AsyncSession,
+    request: FinanceOrderCreate,
+    idempotency_key: str,
+) -> PaymentOrderResponse:
+    """后台代用户创建会员订单；价格只从套餐配置读取。
+
+    旧实现接受客户端 ``amount/product_name``，属于价格篡改面；本实现只接受
+    ``package_code``，金额/名称均由服务端查询 ``config_membership_package``。
+    """
     import secrets
 
-    order_no = f"XS{datetime.utcnow():%Y%m%d%H%M%S}{current.id:08d}{secrets.token_hex(4)}"
-    result = await db.execute(text("""INSERT INTO payment_order
-        (user_id, order_no, type, product_type, product_name, amount, status, expire_at)
-        VALUES (:user_id, :order_no, :type, :product_type, :name, :amount, 0, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 30 MINUTE))"""), {
-        "user_id": current.id, "order_no": order_no, "type": request.product_type,
-        "product_type": request.product_type, "name": request.product_name, "amount": request.amount,
-    })
+    if not idempotency_key or not 8 <= len(idempotency_key) <= 128:
+        raise HTTPException(422, detail="Idempotency-Key 长度必须为 8-128")
+    user_exists = await db.scalar(
+        text("SELECT id FROM users WHERE id = :id AND status = 1"),
+        {"id": request.user_id},
+    )
+    if not user_exists:
+        raise HTTPException(404, detail="用户不存在或不可用")
+
+    existing = (
+        await db.execute(
+            text(
+                """SELECT id, order_no, user_id, product_type, product_name,
+                          amount, status, pay_time, created_at
+                   FROM payment_order
+                   WHERE user_id = :user_id AND type = 1
+                     AND idempotency_key = :idempotency_key
+                   LIMIT 1"""
+            ),
+            {"user_id": request.user_id, "idempotency_key": idempotency_key},
+        )
+    ).mappings().first()
+    if existing:
+        return _order(existing)
+
+    package = (
+        await db.execute(
+            text(
+                """SELECT id, code, name, price
+                   FROM config_membership_package
+                   WHERE code = :code AND is_active = 1
+                   LIMIT 1"""
+            ),
+            {"code": request.package_code},
+        )
+    ).mappings().first()
+    if not package:
+        raise HTTPException(404, detail="会员套餐不存在或已下架")
+
+    order_no = f"XS{datetime.now(UTC):%Y%m%d%H%M%S}{request.user_id:08d}{secrets.token_hex(4)}"
+    result = await db.execute(
+        text(
+            """INSERT INTO payment_order
+               (user_id, order_no, type, product_id, product_type, product_name,
+                amount, pay_type, status, expire_at, idempotency_key)
+               VALUES (:user_id, :order_no, 1, :product_id, 1, :name,
+                       :amount, 1, 0, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 30 MINUTE),
+                       :idempotency_key)"""
+        ),
+        {
+            "user_id": request.user_id,
+            "order_no": order_no,
+            "product_id": package["id"],
+            "name": package["name"],
+            "amount": package["price"],
+            "idempotency_key": idempotency_key,
+        },
+    )
     order_id = int(result.lastrowid)
     await db.commit()
-    result = await db.execute(text("""SELECT id, order_no, user_id, product_type, product_name,
-        amount, status, pay_time, created_at FROM payment_order WHERE id = :id"""), {"id": order_id})
+    result = await db.execute(
+        text(
+            """SELECT id, order_no, user_id, product_type, product_name,
+                      amount, status, pay_time, created_at
+               FROM payment_order WHERE id = :id"""
+        ),
+        {"id": order_id},
+    )
     return _order(result.mappings().one())
 
 
