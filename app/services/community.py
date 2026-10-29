@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.redis import consume_daily, refund_daily
-from app.services.quotas import resolve_paper_plane_limit, summary as quota_summary
+from app.services.quotas import consume_extra, resolve_paper_plane_limit, summary as quota_summary
 from app.schemas.community import (
     ActivityPage,
     ActivityResponse,
@@ -1535,6 +1535,27 @@ async def list_banners(db: AsyncSession, position: str = "community") -> list[Co
     ]
 
 
+async def _point_product_cost(db: AsyncSession, code: str, fallback: int | None) -> int | None:
+    """积分商品单价：``config_point_product`` 为唯一价格源，读不到回退旧常量。
+
+    这是纯展示字段，配置表不可用时不应让额度接口整体失败（与 ``runtime_config``
+    的 fail-open 口径一致）。
+    """
+    try:
+        row = (
+            await db.execute(
+                text("SELECT points_cost FROM config_point_product WHERE code = :code AND is_active = 1"),
+                {"code": code},
+            )
+        ).mappings().first()
+    except Exception:
+        logger.debug("读取积分商品价格失败，回退默认值: %s", code)
+        return fallback
+    if row and row.get("points_cost") is not None:
+        return int(row["points_cost"])
+    return fallback
+
+
 async def get_community_quotas(db: AsyncSession, user_id: int) -> CommunityQuotasResponse:
     """社区相关日额度。
 
@@ -1551,22 +1572,27 @@ async def get_community_quotas(db: AsyncSession, user_id: int) -> CommunityQuota
     apply_used = apply_item.daily_used if apply_item else 0
     paper_total = paper_item.daily_limit if paper_item else 0
     paper_used = paper_item.daily_used if paper_item else 0
+    # 单价以 config_point_product 为唯一来源（此前 apply 写死 20、纸飞机 `or 10`，
+    # 而商品表真实是 20 / 30 —— 展示价与货架价不一致）。
+    apply_cost = await _point_product_cost(db, "extra_apply", 20)
+    paper_cost = await _point_product_cost(db, "paper_plane_unlock", settings.point_cost_paper_plane_unlock or 10)
     return CommunityQuotasResponse(
         apply_daily=CommunityQuotaItem(
             total=apply_total,
             used=min(apply_used, apply_total),
             remain=max(apply_total - apply_used, 0),
-            # 积分加次写路径（POST /community/paper-planes/chances 同类接口）未上线前
-            # 不虚标可加次；extra_remaining 已由 /users/me/quotas 提供，前端优先读它。
+            # 加次写路径：申请走 POST /users/me/points/redeem(extra_apply)，
+            # 纸飞机走同一接口(paper_plane_unlock)；前端"立即兑换"入口尚未接真接口前，
+            # 这里保持 false，避免出现"按钮可点但兑换不生效"。
             points_available=False,
-            points_cost=20,
+            points_cost=apply_cost,
         ),
         paper_plane_daily=CommunityQuotaItem(
             total=paper_total,
             used=min(paper_used, paper_total),
             remain=max(paper_total - paper_used, 0),
             points_available=False,
-            points_cost=settings.point_cost_paper_plane_unlock or 10,
+            points_cost=paper_cost,
         ),
     )
 
@@ -1723,20 +1749,21 @@ async def create_paper_plane(
     await ensure_user_allowed(db, user_id, "POST_RESTRICTED")
     key = quota_key or daily_quota_key("paper-plane", user_id)
     # 上限与展示同源：此前写死 3，后台改 paper_plane_daily_limit 只影响展示、不影响扣次。
-    if not await consume_daily(key, await resolve_paper_plane_limit(db)):
-        raise HTTPException(429, detail="今日纸飞机次数已用完")
+    used_daily = await consume_daily(key, await resolve_paper_plane_limit(db))
 
     content = (request.content or "").strip()
     try:
         decision = await moderate_text(db, content, field="纸飞机内容")
     except Exception:
-        await _refund_quota_after_failure(key)
+        if used_daily:
+            await _refund_quota_after_failure(key)
         raise
     if decision.action == "reject":
         await _notify_moderation_rejected(db, user_id, "paper_plane")
         if commit:
             await db.commit()
-        await _refund_quota_after_failure(key)
+        if used_daily:
+            await _refund_quota_after_failure(key)
         raise HTTPException(422, detail="纸飞机内容含高风险违规词，请修改后重试")
     content = decision.display_content
 
@@ -1764,6 +1791,12 @@ async def create_paper_plane(
         bind_ids = [
             int(r["id"]) for r in image_rows if str(r.get("status") or "") == "ready"
         ]
+
+    # 日额度用尽后，改扣「积分兑换的纸飞机次数」（user_quota_grant, quota_code=paper_plane）。
+    # 刻意放在内容审核通过之后：内容被拒时还没扣加次，不会白扣用户花积分买来的次数。
+    # 与 browse/apply/superlike 的 consume_extra 兜底保持同一套语义。
+    if not used_daily and not await consume_extra(db, user_id, "paper_plane", "积分兑换纸飞机次数"):
+        raise HTTPException(429, detail="今日纸飞机次数已用完")
 
     committed = False
     try:
@@ -1816,7 +1849,9 @@ async def create_paper_plane(
             await db.rollback()
         except Exception:
             logger.exception("Failed to roll back paper-plane create transaction")
-        if not committed:
+        # 只退还"实际扣掉的那一类"：走积分加次时回滚已同时撤销加次扣减，
+        # 再退日额度会凭空多给一次。
+        if not committed and used_daily:
             await _refund_quota_after_failure(key)
         raise
 

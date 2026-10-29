@@ -36,6 +36,7 @@ from app.api.routes import (
     interest_tags_admin,
     promotion_order_admin,
     discovery,
+    emotion_lab,
     finance,
     health,
     identity,
@@ -121,6 +122,7 @@ api_router.include_router(certifications.router, tags=["认证审核"])
 api_router.include_router(membership.router, tags=["会员"])
 api_router.include_router(payments.router, tags=["支付"])
 api_router.include_router(points.router, tags=["积分"])
+api_router.include_router(emotion_lab.router, tags=["情感实验室"])
 api_router.include_router(paper_plane_unlock.router, tags=["社区"])
 api_router.include_router(paper_plane_contact_exchange.router, tags=["社区"])
 api_router.include_router(regions.router, tags=["地区"])
