@@ -157,6 +157,26 @@ def test_match_record_item_has_derived_fields() -> None:
     assert bare.from_avatar is None and bare.to_member_code is None
 
 
+def test_match_record_item_bool_fields_tolerate_none() -> None:
+    # 回归：LEFT JOIN 无实名/无承诺书关联时布尔派生列取到 NULL，
+    # 旧版 bool 字段收到 None 直接 ValidationError 拖垮整页 500。现必须归一为 False。
+    now = datetime(2026, 10, 28)
+    item = MatchRecordItem(
+        id=1, from_user_id=2, to_user_id=3, status=0, created_at=now, responded_at=None,
+        from_is_verified=None, to_is_verified=None,
+        from_has_promise=None, to_has_promise=None,
+    )
+    assert item.from_is_verified is False and item.to_is_verified is False
+    assert item.from_has_promise is False and item.to_has_promise is False
+    # 真值不被误吞：0/1/int 仍能正确转布尔。
+    truthy = MatchRecordItem(
+        id=1, from_user_id=2, to_user_id=3, status=0, created_at=now, responded_at=None,
+        from_is_verified=1, to_is_verified=0, from_has_promise=0, to_has_promise=1,
+    )
+    assert truthy.from_is_verified is True and truthy.to_is_verified is False
+    assert truthy.from_has_promise is False and truthy.to_has_promise is True
+
+
 def test_delete_route_registered_and_openapi_fields() -> None:
     from app.api.routes import matchmaker_crm_admin as crm_routes
     from app.main import app

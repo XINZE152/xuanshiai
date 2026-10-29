@@ -1,11 +1,15 @@
 """Customer lead management for the independent back office."""
 
+import asyncio
+import json
 import re
+import uuid
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from sqlalchemy import text
@@ -29,6 +33,20 @@ from app.services.customer_lead_contact import (
     ensure_contact_available, normalize_contact, raise_duplicate_contact,
 )
 from app.services.lead_apportion import resolve_assigned_matchmaker
+from app.core.config import settings
+from app.services.media_access import MEDIA_CATEGORY_FOLLOW_UP, sign_media_url
+# 客源跟进附件与会员侧完全同构：直接复用会员跟进的落盘/webp/录音校验/JSON 解析助手，
+# 避免两套实现漂移（图片转 webp、录音白名单、限流读取等均单一真相源）。
+from app.services.member_follow_up_admin import (
+    FOLLOW_UP_IMAGE_MAX_BYTES,
+    FOLLOW_UP_MAX_IMAGES,
+    FOLLOW_UP_VOICE_MAX_BYTES,
+    _fu_image_outputs,
+    _fu_read_limited,
+    _fu_write_bytes,
+    _parse_follow_up_images,
+    _voice_suffix,
+)
 
 LEAD_SELECT = """SELECT id, name, phone, wechat, source, intention_level, status, audit_status, matchmaker_id,
     organization_id, promoter_id, next_follow_at, converted_user_id, remark, created_by, created_at, updated_at
@@ -807,19 +825,130 @@ async def add_follow_up(
     return CustomerLeadFollowUp(**dict(row))
 
 
+_LEAD_FU_BASE_COLS = "id, lead_id, method, content, intention_level, next_follow_at, created_by, created_at"
+_LEAD_FU_MEDIA_COLS = ("images", "voice_url", "voice_duration_sec")
+
+
+def _lead_fu_media_select(cols: frozenset[str]) -> str:
+    """根据实际存在的附件列拼接 SELECT 片段（缺列降级，支持先发版后迁移）。"""
+    return "".join(f", {col}" for col in _LEAD_FU_MEDIA_COLS if col in cols)
+
+
+def _build_lead_follow_up(row: dict[str, Any]) -> CustomerLeadFollowUp:
+    """行 -> 响应模型。images 反序列化为 list，voice_duration_sec 转 int，缺列时走默认。"""
+    payload = dict(row)
+    if "images" in payload:
+        payload["images"] = _parse_follow_up_images(payload["images"])
+    if payload.get("voice_duration_sec") is not None:
+        payload["voice_duration_sec"] = int(payload["voice_duration_sec"])
+    return CustomerLeadFollowUp(**payload)
+
+
+def _sign_lead_follow_up(item: CustomerLeadFollowUp, viewer: int) -> CustomerLeadFollowUp:
+    """响应层重签：DB 存原始 URL，返回给当前管理员的附件 URL 附短期签名（TTL 300s）。"""
+    item.images = [
+        sign_media_url(url, category=MEDIA_CATEGORY_FOLLOW_UP, viewer=viewer) for url in item.images
+    ]
+    if item.voice_url:
+        item.voice_url = sign_media_url(item.voice_url, category=MEDIA_CATEGORY_FOLLOW_UP, viewer=viewer)
+    return item
+
+
+async def create_follow_up_with_media(
+    db: AsyncSession,
+    account_id: int,
+    lead_id: int,
+    method: str,
+    content: str,
+    intention_level: int | None,
+    next_follow_at: datetime | None,
+    images: list[UploadFile] | None,
+    voice: UploadFile | None,
+    voice_duration_sec: int | None,
+    *,
+    scope: str | None = None,
+    scope_params: dict[str, Any] | None = None,
+) -> CustomerLeadFollowUp:
+    """新增客源跟进记录，支持文字 + 图片（转 webp，最多 9 张）+ 录音。
+
+    与会员侧 create_follow_up_with_media 完全同构：图片存
+    ``{upload_dir}/{lead_id}/follow-up-img-{uuid}.webp``，录音存
+    ``follow-up-voice-{uuid}.{ext}``；URL 形如 ``/storage/uploads/{lead_id}/...``
+    （命中 MEDIA_CATEGORY_FOLLOW_UP 的私有签名路径）。越权（线索不在数据范围内）
+    由 get_lead 抛 404，不落库。附件列缺失时静默降级为仅存文字（先发版后迁移）。
+    """
+    await get_lead(db, lead_id, scope=scope, scope_params=scope_params)
+    if method not in {"PHONE", "WECHAT", "VISIT", "OTHER"}:
+        raise HTTPException(422, detail="跟进方式必须为 PHONE/WECHAT/VISIT/OTHER")
+    normalized_content = (content or "").strip()
+    image_files = [item for item in (images or []) if item is not None and (item.filename or "").strip()]
+    has_voice = voice is not None and bool((voice.filename or "").strip()) and voice.size != 0
+    if not normalized_content and not image_files and not has_voice:
+        raise HTTPException(422, detail="跟进文字与图片/录音至少提供一项")
+    if len(image_files) > FOLLOW_UP_MAX_IMAGES:
+        raise HTTPException(422, detail=f"图片最多{FOLLOW_UP_MAX_IMAGES}张")
+
+    directory = Path(settings.upload_dir) / str(lead_id)
+    image_urls: list[str] = []
+    for image in image_files:
+        data = await _fu_read_limited(image, FOLLOW_UP_IMAGE_MAX_BYTES)
+        webp_data, _thumb = await asyncio.to_thread(_fu_image_outputs, data)
+        name = uuid.uuid4().hex
+        target = directory / f"follow-up-img-{name}.webp"
+        await _fu_write_bytes(target, webp_data)
+        image_urls.append(f"/storage/uploads/{lead_id}/{target.name}")
+
+    voice_url: str | None = None
+    if has_voice:
+        voice_data = await _fu_read_limited(voice, FOLLOW_UP_VOICE_MAX_BYTES)
+        suffix = _voice_suffix(voice)
+        name = uuid.uuid4().hex
+        target = directory / f"follow-up-voice-{name}.{suffix}"
+        await _fu_write_bytes(target, voice_data)
+        voice_url = f"/storage/uploads/{lead_id}/{target.name}"
+
+    cols = await _table_columns(db, "customer_lead_follow_up")
+    insert_cols = ["lead_id", "method", "content", "intention_level", "next_follow_at", "created_by"]
+    params: dict[str, Any] = {
+        "lead_id": lead_id, "method": method, "content": normalized_content,
+        "intention_level": intention_level, "next_follow_at": next_follow_at, "created_by": account_id,
+    }
+    if set(_LEAD_FU_MEDIA_COLS) <= cols:
+        insert_cols += list(_LEAD_FU_MEDIA_COLS)
+        params["images"] = json.dumps(image_urls, ensure_ascii=False) if image_urls else None
+        params["voice_url"] = voice_url
+        params["voice_duration_sec"] = voice_duration_sec if (voice_url and voice_duration_sec) else None
+    col_sql = ", ".join(f"`{c}`" for c in insert_cols)
+    val_sql = ", ".join(f":{c}" for c in insert_cols)
+    result = await db.execute(text(f"INSERT INTO customer_lead_follow_up ({col_sql}) VALUES ({val_sql})"), params)
+    follow_id = int(result.lastrowid)
+    await db.execute(text("UPDATE customer_lead SET status = CASE WHEN status = 'NEW' THEN 'CONTACTED' ELSE status END, next_follow_at = :next_follow_at, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"next_follow_at": next_follow_at, "id": lead_id})
+    await db.execute(text("""INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id, after_json)
+        VALUES (:actor, 'customer_lead.follow_up.create_media', 'customer_lead_follow_up', :rid, :after)"""),
+        {"actor": account_id, "rid": follow_id, "after": json.dumps({"images": image_urls, "voice_url": voice_url}, ensure_ascii=False)})
+    await db.commit()
+    row = (await db.execute(text(f"SELECT {_LEAD_FU_BASE_COLS}{_lead_fu_media_select(cols)} FROM customer_lead_follow_up WHERE id = :id"), {"id": follow_id})).mappings().one()
+    return _sign_lead_follow_up(_build_lead_follow_up(dict(row)), account_id)
+
+
 async def list_follow_ups(
     db: AsyncSession,
     lead_id: int,
     page: int,
     page_size: int,
     *,
+    viewer: int | None = None,
     scope: str | None = None,
     scope_params: dict[str, Any] | None = None,
 ) -> list[CustomerLeadFollowUp]:
     await get_lead(db, lead_id, scope=scope, scope_params=scope_params)
-    rows = await db.execute(text("""SELECT id, lead_id, method, content, intention_level, next_follow_at, created_by, created_at
+    cols = await _table_columns(db, "customer_lead_follow_up")
+    rows = await db.execute(text(f"""SELECT {_LEAD_FU_BASE_COLS}{_lead_fu_media_select(cols)}
         FROM customer_lead_follow_up WHERE lead_id = :lead_id ORDER BY id DESC LIMIT :limit OFFSET :offset"""), {"lead_id": lead_id, "limit": page_size, "offset": (page - 1) * page_size})
-    return [CustomerLeadFollowUp(**dict(row)) for row in rows.mappings().all()]
+    items = [_build_lead_follow_up(dict(row)) for row in rows.mappings().all()]
+    if viewer is not None:
+        items = [_sign_lead_follow_up(item, viewer) for item in items]
+    return items
 
 
 async def lead_statistics(

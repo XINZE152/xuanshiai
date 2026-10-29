@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class MemberListItem(BaseModel):
@@ -232,7 +232,8 @@ class MatchRecordItem(MatchRecordResponse):
     # 2026-10-28 补（对标站牵线记录列）：均为真值派生，不新建表。
     # gender 取 users.gender（1男2女，0/null 未知）；age 用 TIMESTAMPDIFF 由 birthday 算，birthday 空则 null；
     # is_verified = user_auth.realname_status==2；has_promise = users.is_single_pledge==1（单身承诺书）；
-    # matchmaker_name = 归属服务红娘昵称。旧库缺列/无关联时 SQL 侧降级为 null，不拖垮整页。
+    # matchmaker_name = 归属服务红娘昵称。无实名/无承诺书关联时 SQL COALESCE 为 0（false），
+    # 且下方校验器兜底把任何漏进的 None 归一为 False，杜绝 bool 字段收到 NULL 触发整页 500。
     from_gender: int | None = None
     to_gender: int | None = None
     from_age: int | None = None
@@ -248,6 +249,14 @@ class MatchRecordItem(MatchRecordResponse):
     to_avatar: str | None = None
     from_member_code: str | None = None
     to_member_code: str | None = None
+
+    @field_validator(
+        "from_is_verified", "to_is_verified", "from_has_promise", "to_has_promise", mode="before",
+    )
+    @classmethod
+    def _bool_from_none(cls, v: Any) -> Any:
+        # LEFT JOIN 无关联时布尔派生列可能为 NULL；None 视为 false，避免 bool 字段校验失败 500。
+        return False if v is None else v
 
 
 class MatchRecordPage(BaseModel):

@@ -132,6 +132,11 @@ class CustomerLeadFollowUp(BaseModel):
     next_follow_at: datetime | None
     created_by: int
     created_at: datetime
+    # 2026-10-29 补（客源跟进附件，对齐会员侧 member_follow_up）：
+    # 图片 URL 列表 + 录音地址 + 录音时长；旧库未迁移/无附件时缺列降级为空。
+    images: list[str] = []
+    voice_url: str | None = None
+    voice_duration_sec: int | None = None
 
 
 class CustomerLead(_LeadProfileFields):
