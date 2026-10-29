@@ -27,12 +27,14 @@ jobs:
         run: uv run --no-sync ruff check app/api/routes/social.py app/api/routes/discovery.py app/services/social.py app/services/media.py app/services/member_follow_up_admin.py scripts/reproduce_upload_exposure.py tests/test_social_features.py tests/test_social_message_idempotency.py tests/test_discovery_features.py tests/test_member_follow_up_media.py
       # 2026-10-26「优先解决」三项需求改动域：可见性口径统一、同意后会话与系统问候、爆灯统计排除自置顶。
       # 这些文件此前不在任何 Ruff 列表内，新增/改动后必须纳入，否则 F821 之类的运行期错误逃过 CI。
+      # 2026-10-29 追加：卡片 is_liked/公开字段、首页卡片预览、额度上限单一来源（quotas 抽出
+      # resolve_apply_limit / resolve_superlike_limit / resolve_paper_plane_limit）。
       - name: Ruff (discovery, profile and superlike scope)
-        run: uv run --no-sync ruff check app/services/discovery.py app/services/profile.py app/services/member_behavior_admin.py app/services/member_crm_filter.py app/api/routes/member_follow_up_admin.py tests/test_apply_chat_greeting_and_superlike_scope.py
+        run: uv run --no-sync ruff check app/services/discovery.py app/services/profile.py app/services/quotas.py app/services/community.py app/schemas/discovery.py app/services/member_behavior_admin.py app/services/member_crm_filter.py app/api/routes/member_follow_up_admin.py tests/test_apply_chat_greeting_and_superlike_scope.py tests/test_discovery_is_liked.py tests/test_discovery_card_public_fields.py tests/test_discovery_card_preview.py tests/test_quota_limit_single_source.py tests/test_vip_authorization_consistency.py
       - name: Message and media unit contracts (no integration/live/manual)
         env:
           UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-uploads
-        run: uv run --no-sync pytest tests/test_social_features.py tests/test_social_message_idempotency.py tests/test_discovery_features.py tests/test_member_follow_up_media.py tests/test_apply_chat_greeting_and_superlike_scope.py -q
+        run: uv run --no-sync pytest tests/test_social_features.py tests/test_social_message_idempotency.py tests/test_discovery_features.py tests/test_member_follow_up_media.py tests/test_apply_chat_greeting_and_superlike_scope.py tests/test_discovery_is_liked.py tests/test_discovery_card_public_fields.py tests/test_discovery_card_preview.py tests/test_quota_limit_single_source.py tests/test_vip_authorization_consistency.py -q
 
   ai-unit:
     runs-on: ubuntu-24.04

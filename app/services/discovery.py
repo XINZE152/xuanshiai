@@ -25,7 +25,6 @@ from app.core.profile_tags import (
 from app.core.redis import consume_daily, consume_daily_unique, get_daily_used, mark_daily_member, refund_daily
 from app.services.membership import (
     active_membership_exists_for_column_sql,
-    get_active_membership_row,
     has_active_membership,
 )
 from app.schemas.discovery import (
@@ -44,6 +43,7 @@ from app.schemas.discovery import (
     FavoriteReceivedPage,
     FavoriteResponse,
     FilterOptionsResponse,
+    DiscoveryCardPreviewResponse,
     PublicProfileResponse,
     RelationUserSummary,
     SavedFilterResponse,
@@ -67,8 +67,9 @@ from app.services.candidate_visibility import (
     VisibilityScene,
 )
 from app.services.notifications import emit_notification
-from app.services.profile import _calculate_age, _json_dict, _json_list, _json_object, get_profile
-from app.services.quotas import consume_extra, resolve_browse_limit
+from app.services.profile import _calculate_age, _get_media, _json_dict, _json_list, _json_object, get_profile
+from app.services.quotas import consume_extra, resolve_apply_limit, resolve_browse_limit, resolve_superlike_limit
+from app.services.regions import region_display
 from app.services.admin_config import get_runtime_value
 from app.services.restrictions import ensure_user_allowed
 from app.services.runtime_config import (
@@ -90,6 +91,8 @@ LEGACY_MATCH_ALGORITHM_VERSION = "legacy-rule-v1"
 CARD_SELECT = """
     SELECT u.id AS user_id, u.nickname, u.avatar, u.gender, u.birthday, u.is_married,
            u.is_single_pledge, p.height, p.education_level, p.occupation, p.income,
+           p.weight, p.zodiac,
+           p.hometown_province_code, p.hometown_city_code, p.hometown_district_code,
            p.residence_province_code, p.residence_city_code, p.residence_district_code,
            (p.residence_city_code IS NOT NULL AND p.residence_city_code =
              (SELECT vp2.residence_city_code FROM user_profile vp2 WHERE vp2.user_id = :viewer_id)) AS same_city,
@@ -120,7 +123,11 @@ CARD_SELECT = """
                      AND (b.start_at IS NULL OR b.start_at <= UTC_TIMESTAMP())
                      AND (b.end_at IS NULL OR b.end_at > UTC_TIMESTAMP())) AS is_boosted,
            EXISTS (SELECT 1 FROM user_favorite f
-                   WHERE f.user_id = :viewer_id AND f.target_user_id = u.id AND f.type = 2) AS is_favorite
+                   WHERE f.user_id = :viewer_id AND f.target_user_id = u.id AND f.type = 2) AS is_favorite,
+           -- 「喜欢」与「收藏」分表语义：type=1 是红心/喜欢（与 /relations/likes 同源），
+           -- type=2 是旧收藏，仅保留兼容。走 uk_pair_type(user_id,target_user_id,type) 索引。
+           EXISTS (SELECT 1 FROM user_favorite f
+                   WHERE f.user_id = :viewer_id AND f.target_user_id = u.id AND f.type = 1) AS is_liked
 """
 
 
@@ -338,6 +345,22 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         is_married=row.get("is_married") if not detail_locked else None,
         online_status=0 if row.get("hide_online_status") else int(row.get("online_status") or 0),
         mbti=row.get("mbti") if not detail_locked else None,
+        weight=row.get("weight") if not detail_locked else None,
+        hometown_display=region_display(
+            row.get("hometown_province_code"),
+            row.get("hometown_city_code"),
+            row.get("hometown_district_code"),
+        )
+        if not detail_locked
+        else None,
+        residence_display=region_display(
+            row.get("residence_province_code"),
+            row.get("residence_city_code"),
+            row.get("residence_district_code"),
+        )
+        if not detail_locked
+        else None,
+        zodiac=(row.get("zodiac") or None) if not detail_locked else None,
         self_intro=(row.get("self_intro") or None) if not detail_locked else None,
         qa_answers=_card_qa_answers(row.get("qa_answers")) if not detail_locked else [],
         personal_tags=display_personal_tags(_json_list(row.get("interest_tags")) + _json_list(row.get("personality_tags")), _stored_custom_tags(row)) if not detail_locked else [],
@@ -348,6 +371,7 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         algorithm_version=LEGACY_MATCH_ALGORITHM_VERSION,
         match_score_source=LEGACY_MATCH_ALGORITHM_VERSION,
         is_favorite=bool(row.get("is_favorite")),
+        is_liked=bool(row.get("is_liked")),
         is_vip=bool(row.get("is_vip")),
         is_pure_free=not bool(row.get("is_vip")) and not bool(row.get("is_boosted")),
         is_boosted=bool(row.get("is_boosted")),
@@ -916,6 +940,49 @@ async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> Publ
     return PublicProfileResponse(user_id=target_id, card=card, profile=profile, is_vip_viewer=vip, browse_quota_remaining=quota, can_apply=viewer["completion_score"] >= 100, preference=preference)
 
 
+async def preview_card(db: AsyncSession, viewer_id: int, target_id: int) -> DiscoveryCardPreviewResponse:
+    """首页卡片预览（``GET /users/{user_id}/card-preview``）。
+
+    只服务首页的背景/相册/9 格补字段。可见性口径与 ``view_profile`` 完全一致
+    （同一个 ``_ensure_target`` + ``_target_rows`` 谓词），差异只有三点：
+
+    1. **不扣浏览额度**：不调用 ``_consume_browse``（否则打开首页就可能 429）；
+    2. **不留痕**：不调用 ``_record_browse``（否则对方「谁看过我」会出现首页预取）；
+    3. **不返回 profile**：只给公开卡字段 + 背景 + 首图，不是绕过计费看资料的通道。
+    """
+    if not await platform_browse_open(db):
+        raise HTTPException(403, detail=await platform_maintenance_message(db))
+    if viewer_id == target_id:
+        raise HTTPException(422, detail="不能浏览自己的名片")
+    skip = _skip_discovery_gates()
+    await _ensure_target(db, viewer_id, target_id, skip_completion_gate=skip)
+    rows = await _target_rows(db, viewer_id, [target_id], skip_completion_gate=skip)
+    row = rows.get(target_id)
+    if not row:
+        raise HTTPException(404, detail="用户不存在或当前不可见")
+    viewer = await _viewer_context(db, viewer_id)
+    score, reason = _candidate_score(viewer, row)
+    vip = await _is_vip(db, viewer_id)
+    detail_locked = bool(row.get("only_vip_can_see_detail")) and not vip
+    media = await _get_media(db, target_id, approved_only=True)
+    backgrounds = [
+        item["file_url"] for item in media if item.get("media_type") == "background" and item.get("file_url")
+    ]
+    photos = [item["file_url"] for item in media if item.get("media_type") == "photo" and item.get("file_url")][:1]
+    income = row.get("income")
+    # 口径与 profile.get_profile 一致（"1.5w"）；锁定态不下发，避免与卡片 income=None 矛盾。
+    income_display = (
+        f"{float(income) / 10000:.1f}".rstrip("0").rstrip(".") + "w" if income is not None and not detail_locked else None
+    )
+    return DiscoveryCardPreviewResponse(
+        user_id=target_id,
+        card=_card(row, score, reason, detail_locked=detail_locked),
+        background_wall=backgrounds[0] if backgrounds else None,
+        photos=photos,
+        income_display=income_display,
+    )
+
+
 async def _target_rows(
     db: AsyncSession, viewer_id: int, target_ids: list[int], *, skip_completion_gate: bool = False
 ) -> dict[int, dict[str, Any]]:
@@ -1151,34 +1218,13 @@ async def _notify(db: AsyncSession, user_id: int, notification_type: str, title:
 
 
 async def _consume_apply_quota(db: AsyncSession, viewer_id: int, vip: bool) -> bool:
-    key = await _quota_key("apply", viewer_id)
-    # 权限配置(卡片4) line.times > 0 时为全局统一每日上限，覆盖 VIP/免费两套旧限额
-    line_perm = await match_line_permissions(db)
-    unified = line_perm.get("apply_daily")
-    if unified and int(unified) > 0:
-        if not await consume_daily(key, int(unified)):
-            if await consume_extra(db, viewer_id, "apply", "积分兑换申请次数"):
-                return False
-            raise HTTPException(429, detail="今日认识申请次数已用完")
-        return True
-    free_limit = int(await get_runtime_value(db, "platform_permissions", "free_apply_daily_limit", settings.apply_daily_free_limit))
-    vip_limit = int(await get_runtime_value(db, "platform_permissions", "vip_apply_daily_limit", settings.apply_daily_vip_limit))
-    limit = vip_limit if vip else free_limit
-    if vip:
-        membership = await get_active_membership_row(db, viewer_id)
-        if membership is None:
-            limit = free_limit
-            rights = None
-        else:
-            rights = membership["rights"]
-        if isinstance(rights, str):
-            try:
-                rights = json.loads(rights)
-            except json.JSONDecodeError:
-                rights = {}
-        if isinstance(rights, dict):
-            limit = free_limit + int(rights.get("apply_bonus") or 0)
+    """扣一次申请额度。
 
+    上限统一由 ``quotas.resolve_apply_limit`` 给出（与 ``/users/me/quotas`` 同源），
+    本函数只负责扣减与积分加次兜底，不再自己解析配置。
+    """
+    key = await _quota_key("apply", viewer_id)
+    limit = await resolve_apply_limit(db, viewer_id, is_vip=vip)
     if not await consume_daily(key, limit):
         if await consume_extra(db, viewer_id, "apply", "积分兑换申请次数"):
             return False
@@ -1422,11 +1468,11 @@ async def create_superlike(db: AsyncSession, viewer_id: int, target_id: int, ide
     existing_row = existing.mappings().first()
     if existing_row:
         vip = await _is_vip(db, viewer_id)
-        limit = int(await get_runtime_value(db, "platform_permissions", "vip_superlike_daily_limit" if vip else "free_superlike_daily_limit", settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit))
+        limit = await resolve_superlike_limit(db, viewer_id, is_vip=vip)
         used = await get_daily_used(await _quota_key("superlike", viewer_id))
         return SuperLikeResponse(target_user_id=target_id, remaining_today=max(0, limit - used), created_at=existing_row["created_at"])
     vip = await _is_vip(db, viewer_id)
-    limit = int(await get_runtime_value(db, "platform_permissions", "vip_superlike_daily_limit" if vip else "free_superlike_daily_limit", settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit))
+    limit = await resolve_superlike_limit(db, viewer_id, is_vip=vip)
     key = await _quota_key("superlike", viewer_id)
     if not await consume_daily(key, limit):
         if await consume_extra(db, viewer_id, "superlike", "积分兑换爆灯次数", target_id):

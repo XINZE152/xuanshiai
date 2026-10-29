@@ -122,7 +122,9 @@ async def test_effective_membership_row_is_shared_by_status_and_rights_consumers
 
     monkeypatch.setattr(membership, "get_active_membership_row", active_row)
     monkeypatch.setattr(quotas, "get_active_membership_row", active_row)
-    monkeypatch.setattr(discovery, "get_active_membership_row", active_row)
+    # 2026-10-29：``discovery._quota_limit`` 已改为委托 ``quotas.resolve_browse_limit``，
+    # 不再直接持有 ``get_active_membership_row``（单一来源收敛）。
+    # 因此只 patch 会员源与 quotas 引用即可，会员态仍由同一个 row 驱动。
 
     class _RowResult:
         def first(self):
@@ -147,29 +149,54 @@ async def test_effective_membership_row_is_shared_by_status_and_rights_consumers
 async def test_community_quota_delegates_vip_state_to_membership_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """社区额度必须与 ``/users/me/quotas`` 同源（2026-10-29 单一来源收敛）。
+
+    变更前断言的是"社区自己调 ``has_active_membership`` 判会员"；现在社区不再自行
+    解析上限，而是直接复用 ``quotas.summary``（其中会员态仍来自 ``get_active_membership_row``
+    这一个会员源），因此这里断言"委托给了统一 summary"。
+    """
     calls: list[int] = []
 
-    async def active(_db: object, user_id: int) -> bool:
+    async def summary(_db: object, user_id: int) -> quotas.QuotaSummary:
         calls.append(user_id)
-        return False
+        return quotas.QuotaSummary(
+            items=[
+                quotas.QuotaItem(
+                    quota_code="apply",
+                    daily_limit=2,
+                    daily_used=1,
+                    daily_remaining=1,
+                    extra_remaining=0,
+                    total_remaining=1,
+                ),
+                quotas.QuotaItem(
+                    quota_code="paper_plane",
+                    daily_limit=5,
+                    daily_used=0,
+                    daily_remaining=5,
+                    extra_remaining=0,
+                    total_remaining=5,
+                ),
+            ]
+        )
 
-    async def runtime_value(*_args: object) -> int:
-        return 1
+    async def active_row(_db: object, user_id: int):
+        return None
 
-    async def daily_used(*_args: object) -> int:
-        return 0
-
-    monkeypatch.setattr(community, "has_active_membership", active)
-    monkeypatch.setattr(community, "get_runtime_value", runtime_value)
-    monkeypatch.setattr(community, "get_daily_used", daily_used)
+    monkeypatch.setattr(community, "quota_summary", summary)
+    monkeypatch.setattr(quotas, "get_active_membership_row", active_row)
 
     class _Db:
         pass
 
-    result = await community.get_community_quotas(_Db(), 7)
+    result = await community.get_community_quotas(_Db(), 7)  # type: ignore[arg-type]
 
-    assert result.apply_daily.total == 1
-    assert calls == [7]
+    assert calls == [7], "必须走统一的 quotas.summary，不得自己解析平台权限快照"
+    assert result.apply_daily.total == 2
+    assert result.apply_daily.remain == 1
+    assert result.paper_plane_daily.total == 5
+    # 积分加次写路径未上线前不得虚标可加次
+    assert result.apply_daily.points_available is False
 
 
 @pytest.mark.asyncio
