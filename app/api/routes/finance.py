@@ -1,6 +1,6 @@
 """一期订单、分成、余额和提现接口。"""
 
-from fastapi import APIRouter, Body, Depends, Path, Query
+from fastapi import APIRouter, Body, Depends, Header, Path, Query
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -92,9 +92,21 @@ def _finance_actor(current: CurrentMatchmakerAdmin) -> CurrentUser:
     return CurrentUser(id=current.account.id, session_id=current.session_id, phone=None, status=1, realname_status=2)
 
 
-@router.post("/orders", response_model=PaymentOrderResponse, status_code=201, summary="创建待支付订单")
-async def order(body: FinanceOrderCreate = Body(...), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> PaymentOrderResponse:
-    return await create_order(db, current, body)
+@router.post("/orders", response_model=PaymentOrderResponse, status_code=201, summary="后台代用户创建会员订单")
+async def order(
+    body: FinanceOrderCreate = Body(...),
+    idempotency_key: str = Header(
+        ...,
+        alias="Idempotency-Key",
+        min_length=8,
+        max_length=128,
+    ),
+    admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> PaymentOrderResponse:
+    """仅后台可调用；只接受套餐编码，金额从套餐配置读取。"""
+    admin.require("finance.write")
+    return await create_order(db, body, idempotency_key)
 
 
 @router.get("/balance", response_model=AccountBalanceResponse, summary="查询我的余额")

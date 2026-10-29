@@ -47,6 +47,30 @@ class Settings(BaseSettings):
     # wechat_payment_mock_secret（仅开发/测试，生产禁止 mock）。
     wechat_payment_sign_key: SecretStr | None = None
     wechat_payment_mock_secret: str = "mock-payment-secret"
+
+    # ── 微信支付 APIv3 网关（新链路）────────────────────────────────
+    # 与 legacy ``wechat_payment_mode`` 并存：legacy 只服务旧 mock 回调，
+    # 新网关使用 ``wechat_pay_mode``，便于灰度切换与回滚。
+    # disabled=不启用（默认）；mock=本地联调；real=真实微信支付，启动时强校验。
+    wechat_pay_mode: Literal["disabled", "mock", "real"] = "disabled"
+    wechat_pay_base_url: str = "https://api.mch.weixin.qq.com"
+    wechat_pay_mch_id: str | None = None
+    wechat_pay_app_id: str | None = None
+    wechat_pay_serial_no: str | None = None
+    # 商户 API 私钥：可直接放环境变量，也可只配置只读文件路径。
+    # 两者同时配置时以 ``wechat_pay_private_key`` 为准。
+    wechat_pay_private_key: SecretStr | None = None
+    wechat_pay_private_key_path: str | None = None
+    # APIv3 密钥固定 32 字节，用于 AES-256-GCM 解密回调 resource。
+    wechat_pay_api_v3_key: SecretStr | None = None
+    wechat_pay_notify_url: str | None = None
+    wechat_pay_refund_notify_url: str | None = None
+    # 公钥模式（与平台证书模式二选一）：配置后不再下载平台证书。
+    wechat_pay_public_key_id: str | None = None
+    wechat_pay_public_key: SecretStr | None = None
+    wechat_pay_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    wechat_pay_max_clock_skew_seconds: int = Field(default=300, ge=0, le=3600)
+
     # D-14：人脸认证供应商。disabled 时门禁 fail-closed（不可发帖），
     # mock 仅允许 development/testing。
     face_provider: str = "disabled"
@@ -475,6 +499,79 @@ class Settings(BaseSettings):
         value = getattr(self, f"point_cost_{code}", None)
         return value if value is not None else fallback
 
+    def wechat_pay_private_key_pem(self) -> str | None:
+        """读取商户 API 私钥 PEM。
+
+        优先使用 ``WECHAT_PAY_PRIVATE_KEY``；未配置时读取只读文件
+        ``WECHAT_PAY_PRIVATE_KEY_PATH``。读取失败直接抛 ValueError，
+        由启动校验 fail-closed。
+        """
+        if self.wechat_pay_private_key is not None:
+            value = self.wechat_pay_private_key.get_secret_value().strip()
+            return value or None
+        path = (self.wechat_pay_private_key_path or "").strip()
+        if not path:
+            return None
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return handle.read().strip() or None
+        except OSError as exc:
+            raise ValueError(f"无法读取 WECHAT_PAY_PRIVATE_KEY_PATH：{path}") from exc
+
+    def wechat_pay_public_key_pem(self) -> str | None:
+        """读取微信支付公钥 PEM（公钥模式）。"""
+        if self.wechat_pay_public_key is None:
+            return None
+        value = self.wechat_pay_public_key.get_secret_value().strip()
+        return value or None
+
+    def _validate_wechat_pay_gateway(self) -> None:
+        """校验微信支付 APIv3 网关配置。
+
+        - ``mock`` 只允许 development/testing；
+        - ``real`` 必须一次性配齐商户号、AppID、证书序列号、私钥、APIv3 密钥
+          和回调地址，缺少任一项启动失败；
+        - staging/production 的回调地址必须是 HTTPS。
+        """
+        mode = self.wechat_pay_mode
+        if mode == "mock" and not self.is_test_mode:
+            raise ValueError("staging/production 环境禁止启用微信支付网关 Mock 模式")
+        if mode != "real":
+            return
+
+        required = {
+            "WECHAT_PAY_MCH_ID": self.wechat_pay_mch_id,
+            "WECHAT_PAY_APP_ID": self.wechat_pay_app_id,
+            "WECHAT_PAY_SERIAL_NO": self.wechat_pay_serial_no,
+            "WECHAT_PAY_NOTIFY_URL": self.wechat_pay_notify_url,
+        }
+        missing = [name for name, value in required.items() if not (value or "").strip()]
+        if missing:
+            raise ValueError(f"微信支付 real 模式缺少配置：{', '.join(missing)}")
+
+        api_v3_key = (
+            self.wechat_pay_api_v3_key.get_secret_value().strip()
+            if self.wechat_pay_api_v3_key
+            else ""
+        )
+        if len(api_v3_key.encode("utf-8")) != 32:
+            raise ValueError("WECHAT_PAY_API_V3_KEY 必须是 32 字节")
+        if not self.wechat_pay_private_key_pem():
+            raise ValueError(
+                "微信支付 real 模式必须配置 WECHAT_PAY_PRIVATE_KEY 或 WECHAT_PAY_PRIVATE_KEY_PATH"
+            )
+        if self.wechat_pay_public_key_id and not self.wechat_pay_public_key_pem():
+            raise ValueError(
+                "配置 WECHAT_PAY_PUBLIC_KEY_ID 时必须同时配置 WECHAT_PAY_PUBLIC_KEY"
+            )
+        if self.environment in {"staging", "production"}:
+            for name, value in (
+                ("WECHAT_PAY_NOTIFY_URL", self.wechat_pay_notify_url),
+                ("WECHAT_PAY_REFUND_NOTIFY_URL", self.wechat_pay_refund_notify_url),
+            ):
+                if value and not value.startswith("https://"):
+                    raise ValueError(f"{name} 在 staging/production 必须使用 HTTPS")
+
     @model_validator(mode="after")
     def validate_test_providers(self) -> "Settings":
         """Prevent Mock providers from being enabled in production."""
@@ -544,6 +641,7 @@ class Settings(BaseSettings):
                 "https://"
             ):
                 raise ValueError("staging/production 的 AI_AVATAR_BASE_URL 必须使用 HTTPS")
+        self._validate_wechat_pay_gateway()
         return self
 
     def ai_approvals_complete(self) -> bool:

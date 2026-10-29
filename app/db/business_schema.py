@@ -2110,4 +2110,138 @@ BUSINESS_TABLES = {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
           COMMENT='纸飞机目标用户资料解锁（不存联系方式）'
     """,
+    # ============================================================
+    # 微信支付 APIv3 改造（2026-10-30）
+    # 迁移镜像：migrations/business/20261030_01_payment_v3_core_*.sql
+    # ============================================================
+    "payment_refund": """
+        CREATE TABLE IF NOT EXISTS `payment_refund` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `refund_no` varchar(64) NOT NULL COMMENT '商户退款单号 out_refund_no',
+            `order_id` bigint unsigned NOT NULL COMMENT 'payment_order.id',
+            `order_no` varchar(64) NOT NULL COMMENT '原支付订单号快照',
+            `user_id` bigint unsigned NOT NULL COMMENT '付款用户',
+            `channel` varchar(16) NOT NULL DEFAULT 'wechat' COMMENT 'wechat/alipay/legacy',
+            `transaction_id` varchar(64) DEFAULT NULL COMMENT '微信支付交易号',
+            `wechat_refund_id` varchar(64) DEFAULT NULL COMMENT '微信退款单号 refund_id',
+            `order_amount` decimal(12,2) NOT NULL COMMENT '原订单金额快照',
+            `refund_amount` decimal(12,2) NOT NULL COMMENT '本次退款金额',
+            `currency` char(3) NOT NULL DEFAULT 'CNY',
+            `refund_type` varchar(16) NOT NULL DEFAULT 'FULL' COMMENT 'FULL/PARTIAL',
+            `status` varchar(24) NOT NULL DEFAULT 'CREATED' COMMENT 'CREATED/PROCESSING/SUCCESS/FAILED/CLOSED',
+            `reason` varchar(255) NOT NULL COMMENT '退款原因',
+            `operator_id` bigint unsigned DEFAULT NULL COMMENT '后台操作人 matchmaker_admin_account.id',
+            `idempotency_key` varchar(128) NOT NULL COMMENT '后台幂等键',
+            `notify_id` varchar(64) DEFAULT NULL COMMENT '微信退款通知 id，去重',
+            `success_time` datetime DEFAULT NULL,
+            `fail_reason` varchar(255) DEFAULT NULL,
+            `attempt_count` int unsigned NOT NULL DEFAULT 0,
+            `next_retry_at` datetime DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_payment_refund_no` (`refund_no`),
+            UNIQUE KEY `uk_payment_refund_idem` (`order_id`, `idempotency_key`),
+            UNIQUE KEY `uk_payment_refund_notify` (`notify_id`),
+            KEY `idx_payment_refund_order` (`order_id`),
+            KEY `idx_payment_refund_status` (`status`, `next_retry_at`),
+            KEY `idx_payment_refund_tx` (`channel`, `transaction_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+          COMMENT='支付退款单'
+    """,
+    "payment_fulfillment_job": """
+        CREATE TABLE IF NOT EXISTS `payment_fulfillment_job` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `biz_key` varchar(128) NOT NULL COMMENT '幂等业务键：FULFILL:{order_id} / REVOKE:{refund_no}',
+            `order_id` bigint unsigned NOT NULL,
+            `order_no` varchar(64) NOT NULL,
+            `order_type` tinyint NOT NULL COMMENT '1会员 2爆灯 3服务单 4置顶 5活动 6虚拟商品',
+            `job_type` varchar(16) NOT NULL DEFAULT 'FULFILL' COMMENT 'FULFILL/REVOKE',
+            `status` varchar(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/PROCESSING/SUCCESS/FAILED/DEAD',
+            `attempt_count` int unsigned NOT NULL DEFAULT 0,
+            `next_retry_at` datetime DEFAULT NULL,
+            `lease_owner` varchar(64) DEFAULT NULL,
+            `lease_expire_at` datetime DEFAULT NULL,
+            `last_error` varchar(500) DEFAULT NULL,
+            `payload_json` json DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_payment_fulfillment_biz_key` (`biz_key`),
+            KEY `idx_payment_fulfillment_claim` (`status`, `next_retry_at`, `id`),
+            KEY `idx_payment_fulfillment_order` (`order_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+          COMMENT='支付履约/退款回收任务（事务性 Outbox）'
+    """,
+    "payment_notify_log": """
+        CREATE TABLE IF NOT EXISTS `payment_notify_log` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `notify_id` varchar(64) NOT NULL COMMENT '微信通知 id',
+            `event_type` varchar(64) NOT NULL COMMENT 'TRANSACTION.SUCCESS / REFUND.SUCCESS ...',
+            `channel` varchar(16) NOT NULL DEFAULT 'wechat',
+            `out_trade_no` varchar(64) DEFAULT NULL,
+            `transaction_id` varchar(64) DEFAULT NULL,
+            `refund_no` varchar(64) DEFAULT NULL,
+            `signature_serial` varchar(64) DEFAULT NULL COMMENT 'Wechatpay-Serial',
+            `body_sha256` char(64) NOT NULL COMMENT '原始请求体 SHA256',
+            `payload_json` json DEFAULT NULL COMMENT '解密后的 resource 明文（仅内部排障，按保留策略清理）',
+            `verified` tinyint(1) NOT NULL DEFAULT 0,
+            `processed` tinyint(1) NOT NULL DEFAULT 0,
+            `error` varchar(500) DEFAULT NULL,
+            `received_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `processed_at` datetime DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_payment_notify_id` (`notify_id`),
+            KEY `idx_payment_notify_order` (`out_trade_no`),
+            KEY `idx_payment_notify_status` (`processed`, `received_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+          COMMENT='微信支付/退款回调日志'
+    """,
+    # 迁移镜像：migrations/business/20261030_02_payment_reconcile_*.sql
+    "payment_reconcile_batch": """
+        CREATE TABLE IF NOT EXISTS `payment_reconcile_batch` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `bill_date` date NOT NULL COMMENT '账单日期',
+            `bill_type` varchar(16) NOT NULL COMMENT 'TRADE交易 / REFUND退款',
+            `channel` varchar(16) NOT NULL DEFAULT 'wechat',
+            `file_name` varchar(255) DEFAULT NULL,
+            `file_sha256` char(64) DEFAULT NULL,
+            `record_count` int unsigned NOT NULL DEFAULT 0,
+            `total_amount` decimal(14,2) NOT NULL DEFAULT 0.00,
+            `status` varchar(16) NOT NULL DEFAULT 'DOWNLOADED' COMMENT 'DOWNLOADED/PARSED/RECONCILED/FAILED',
+            `diff_count` int unsigned NOT NULL DEFAULT 0,
+            `error` varchar(500) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_payment_reconcile_batch` (`bill_date`, `bill_type`, `channel`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+          COMMENT='支付对账批次'
+    """,
+    "payment_reconcile_diff": """
+        CREATE TABLE IF NOT EXISTS `payment_reconcile_diff` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `batch_id` bigint unsigned NOT NULL,
+            `bill_date` date NOT NULL,
+            `diff_type` varchar(32) NOT NULL COMMENT 'LOCAL_ONLY/REMOTE_ONLY/AMOUNT_MISMATCH/STATUS_MISMATCH/REFUND_MISMATCH',
+            `order_no` varchar(64) DEFAULT NULL,
+            `refund_no` varchar(64) DEFAULT NULL,
+            `transaction_id` varchar(64) DEFAULT NULL,
+            `local_amount` decimal(12,2) DEFAULT NULL,
+            `remote_amount` decimal(12,2) DEFAULT NULL,
+            `local_status` varchar(24) DEFAULT NULL,
+            `remote_status` varchar(24) DEFAULT NULL,
+            `resolution` varchar(16) NOT NULL DEFAULT 'OPEN' COMMENT 'OPEN/IGNORED/RESOLVED',
+            `resolved_by` bigint unsigned DEFAULT NULL,
+            `resolved_at` datetime DEFAULT NULL,
+            `remark` varchar(255) DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_payment_diff_batch` (`batch_id`),
+            KEY `idx_payment_diff_status` (`resolution`, `bill_date`),
+            KEY `idx_payment_diff_order` (`order_no`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+          COMMENT='支付对账差异'
+    """,
 }
