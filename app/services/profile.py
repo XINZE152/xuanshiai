@@ -257,7 +257,9 @@ def _image_outputs(data: bytes) -> tuple[bytes, bytes]:
             return output.getvalue(), thumb_output.getvalue()
     except DecompressionBombError as exc:
         raise HTTPException(413, detail="图片像素过大") from exc
-    except (UnidentifiedImageError, OSError) as exc:
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        # 损坏/截断图片：PIL 的 verify() 对坏 CRC、异常 chunk 会抛 SyntaxError/ValueError（非 OSError 子类），
+        # 统一归一为「无法识别」415，避免退化小图/坏图上传穿透成 500。
         raise HTTPException(415, detail="图片内容无法识别") from exc
 
 

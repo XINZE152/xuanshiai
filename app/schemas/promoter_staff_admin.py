@@ -7,6 +7,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -152,6 +153,25 @@ class PromoterCommissionEntryOptions(BaseModel):
 
     promoters: list[PromoterCommissionPromoterOption] = Field(default_factory=list)
     events: list[PromoterCommissionEventOption] = Field(default_factory=list)
+
+
+class PromoterCommissionEntryCreate(BaseModel):
+    """后台手工录入一笔推广红娘分成。
+
+    口径（与服务红娘/合伙人手工录入同源，2026-10-29）：只写 commission_entry（PENDING/manual）
+    + 审计日志，**不动余额账本**（不写 account_ledger，不凭空增加可提现余额）。
+    """
+
+    promoter_user_id: int = Field(ge=1, description="推广红娘 user id")
+    consumer_user_id: int | None = Field(default=None, ge=1, description="关联消费会员 user id（可选，仅留档）")
+    rule_id: int | None = Field(default=None, ge=1, description="分成事件（commission_rule.id，beneficiary_type=promoter）")
+    amount: Decimal = Field(gt=0, le=1000000, decimal_places=2, description="分成金额(元)")
+    base_amount: Decimal | None = Field(default=None, ge=0, le=100000000, decimal_places=2, description="计费基数，缺省同 amount")
+    remark: str | None = Field(default=None, max_length=255)
+
+
+class PromoterCommissionEntryCreateResult(BaseModel):
+    entry: PromoterCommissionEntryItem
 
 
 class PromoterPosterResponse(BaseModel):

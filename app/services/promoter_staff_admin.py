@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -19,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.matchmaker_admin import MatchmakerAdminAccount
 from app.schemas.promoter_staff_admin import (
+    PromoterCommissionEntryCreate,
+    PromoterCommissionEntryCreateResult,
     PromoterCommissionEntryItem,
     PromoterCommissionEntryOptions,
     PromoterCommissionEntryPage,
@@ -668,6 +671,122 @@ async def promoter_commission_entry_options(
             for row in rule_rows.mappings().all()
         ],
     )
+
+
+async def create_commission_entry(
+    db: AsyncSession,
+    actor_account_id: int,
+    body: PromoterCommissionEntryCreate,
+) -> PromoterCommissionEntryCreateResult:
+    """后台手工录入一笔推广红娘分成：只写 commission_entry（PENDING/manual）+ 审计日志，不动余额账本。
+
+    与「服务红娘线上分成明细」手工录入同源，不写 account_ledger（不凭空增加可提现余额）；
+    记录落入本页 promoter 分成流水（beneficiary_type='promoter'）供展示与事后核对。
+    """
+    promoter = (
+        await db.execute(
+            text("""SELECT ma.user_id FROM user_matchmaker_apply ma
+                JOIN users u ON u.id = ma.user_id
+                WHERE ma.user_id = :id AND ma.application_type = 'promoter'"""),
+            {"id": body.promoter_user_id},
+        )
+    ).mappings().first()
+    if promoter is None:
+        raise HTTPException(400, detail="推广红娘账号不存在")
+
+    rule_name: str | None = None
+    rule_version: int | None = None
+    if body.rule_id is not None:
+        rule = (
+            await db.execute(
+                text("""SELECT id, name, version FROM commission_rule
+                    WHERE id = :id AND beneficiary_type = 'promoter' AND status = 1"""),
+                {"id": body.rule_id},
+            )
+        ).mappings().first()
+        if not rule:
+            raise HTTPException(400, detail="分成事件不存在或已停用")
+        rule_name = str(rule["name"])
+        rule_version = int(rule["version"]) if rule["version"] is not None else None
+
+    if body.consumer_user_id is not None:
+        consumer = await db.scalar(
+            text("SELECT id FROM users WHERE id = :id"), {"id": body.consumer_user_id}
+        )
+        if consumer is None:
+            raise HTTPException(400, detail="购买账号不存在")
+
+    amount = Decimal(str(body.amount)).quantize(Decimal("0.01"))
+    base_amount = (
+        Decimal(str(body.base_amount)) if body.base_amount is not None else amount
+    ).quantize(Decimal("0.01"))
+    key = f"promoter-manual-{uuid.uuid4().hex}"
+    result = await db.execute(
+        text("""INSERT INTO commission_entry
+            (order_id, beneficiary_type, beneficiary_id, rule_id, rule_version,
+             base_amount, amount, status, source, remark, idempotency_key)
+            VALUES (NULL, 'promoter', :beneficiary_id, :rule_id, :rule_version,
+             :base_amount, :amount, 'PENDING', 'manual', :remark, :key)"""),
+        {
+            "beneficiary_id": body.promoter_user_id,
+            "rule_id": body.rule_id,
+            "rule_version": rule_version,
+            "base_amount": f"{base_amount:.2f}",
+            "amount": f"{amount:.2f}",
+            "remark": body.remark,
+            "key": key,
+        },
+    )
+    entry_id = int(result.lastrowid)
+
+    await db.execute(
+        text("""INSERT INTO business_audit_log
+            (actor_user_id, action, resource_type, resource_id, after_json)
+            VALUES (:actor, 'finance.promoter_commission.create', 'commission_entry', :entry_id, :after_json)"""),
+        {
+            "actor": actor_account_id,
+            "entry_id": entry_id,
+            "after_json": json.dumps(
+                {
+                    "promoter_user_id": body.promoter_user_id,
+                    "consumer_user_id": body.consumer_user_id,
+                    "rule_id": body.rule_id,
+                    "rule_name": rule_name,
+                    "amount": f"{amount:.2f}",
+                    "remark": body.remark,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    )
+    await db.commit()
+
+    row = (
+        await db.execute(
+            text("""SELECT ce.id, ce.created_at, ce.beneficiary_id, ce.rule_id, ce.base_amount,
+                ce.amount, ce.status, rule.name AS event_name,
+                u.nickname AS promoter_name, u.avatar AS promoter_avatar
+                FROM commission_entry ce
+                LEFT JOIN users u ON u.id = ce.beneficiary_id
+                LEFT JOIN commission_rule rule ON rule.id = ce.rule_id
+                WHERE ce.id = :id"""),
+            {"id": entry_id},
+        )
+    ).mappings().first()
+    if not row:
+        raise HTTPException(500, detail="分成录入回读失败")
+    entry = PromoterCommissionEntryItem(
+        id=int(row["id"]),
+        created_at=_dt(row["created_at"]),
+        promoter_id=int(row["beneficiary_id"]),
+        promoter_name=row.get("promoter_name"),
+        promoter_avatar=row.get("promoter_avatar"),
+        event_name=row.get("event_name"),
+        base_amount=_money(row.get("base_amount")),
+        amount=_money(row.get("amount")),
+        status=str(row.get("status") or "PENDING"),
+    )
+    return PromoterCommissionEntryCreateResult(entry=entry)
 
 
 # ─── 海报 / 免登 / 删除 ─────────────────────────────────────────

@@ -11,6 +11,8 @@ from app.api.dependencies import (
 )
 from app.db.session import get_db
 from app.schemas.promoter_staff_admin import (
+    PromoterCommissionEntryCreate,
+    PromoterCommissionEntryCreateResult,
     PromoterCommissionEntryOptions,
     PromoterCommissionEntryPage,
     PromoterDeleteResponse,
@@ -112,6 +114,22 @@ async def promoter_commission_entry_options(
 ) -> PromoterCommissionEntryOptions:
     current.require("matchmaker.read")
     return await service.promoter_commission_entry_options(db)
+
+
+@router.post(
+    "/commission-entries",
+    response_model=PromoterCommissionEntryCreateResult,
+    status_code=201,
+    summary="录入一笔推广红娘分成（不动余额账本）",
+)
+async def create_promoter_commission_entry(
+    body: PromoterCommissionEntryCreate = Body(...),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> PromoterCommissionEntryCreateResult:
+    """录入一笔推广红娘分成：只写 commission_entry（PENDING）+ 审计，不写 account_ledger、不动余额。"""
+    current.require("finance.write")
+    return await service.create_commission_entry(db, current.account.id, body)
 
 
 @router.post("", response_model=PromoterStaffDetail, status_code=201, summary="添加推广红娘")
