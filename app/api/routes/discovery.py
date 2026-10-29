@@ -24,6 +24,7 @@ from app.schemas.discovery import (
     FavoritePage,
     FavoriteReceivedPage,
     FilterOptionsResponse,
+    DiscoveryCardPreviewResponse,
     PublicProfileResponse,
     SavedFilterResponse,
     SuperLikeResponse,
@@ -44,6 +45,7 @@ from app.services.discovery import (
     list_favorites,
     list_received_favorites,
     list_superlikes,
+    preview_card,
     public_preference,
     respond_application,
     set_favorite,
@@ -97,22 +99,44 @@ async def visitor_list(page: int = Query(1, ge=1, le=1000), page_size: int = Que
     return await visitors(db, current.id, page, page_size)
 
 
-@router.get("/favorites", response_model=FavoritePage, summary="查询我的收藏")
+@router.get(
+    "/favorites",
+    response_model=FavoritePage,
+    summary="查询我的收藏（已弃用，改用 GET /relations/likes）",
+    deprecated=True,
+)
 async def favorites(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=50), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> FavoritePage:
+    # 本接口读 user_favorite.type=2（旧收藏）；C 端收藏页已改读 /relations/likes（type=1）。
+    # 保留仅为兼容，禁止用它的 is_favorite 回填红心（红心只认 type=1 / is_liked）。
     return await list_favorites(db, current.id, page, page_size)
 
 
-@router.get("/favorites/received", response_model=FavoriteReceivedPage, summary="查询收到的收藏")
+@router.get(
+    "/favorites/received",
+    response_model=FavoriteReceivedPage,
+    summary="查询收到的收藏（已弃用，无消费方）",
+    deprecated=True,
+)
 async def received_favorites(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=50), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> FavoriteReceivedPage:
     return await list_received_favorites(db, current.id, page, page_size)
 
 
-@router.put("/favorites/{target_id}", response_model=FavoriteResponse, summary="收藏名片")
+@router.put(
+    "/favorites/{target_id}",
+    response_model=FavoriteResponse,
+    summary="收藏名片（已弃用，改用 PUT /users/{id}/like）",
+    deprecated=True,
+)
 async def add_favorite(target_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> FavoriteResponse:
     return await set_favorite(db, current.id, target_id, True)
 
 
-@router.delete("/favorites/{target_id}", response_model=FavoriteResponse, summary="取消收藏")
+@router.delete(
+    "/favorites/{target_id}",
+    response_model=FavoriteResponse,
+    summary="取消收藏（已弃用，改用 DELETE /users/{id}/like）",
+    deprecated=True,
+)
 async def remove_favorite(target_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> FavoriteResponse:
     return await set_favorite(db, current.id, target_id, False)
 
@@ -160,6 +184,25 @@ async def received_superlikes(page: int = Query(1, ge=1, le=1000), page_size: in
 @users_router.get("/{user_id}/profile", response_model=PublicProfileResponse, summary="查看他人主页")
 async def public_profile(user_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> PublicProfileResponse:
     return await view_profile(db, current.id, user_id)
+
+
+@users_router.get(
+    "/{user_id}/card-preview",
+    response_model=DiscoveryCardPreviewResponse,
+    summary="首页卡片预览（不扣浏览额度、不写浏览记录）",
+)
+async def card_preview(
+    user_id: int = Path(..., ge=1),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DiscoveryCardPreviewResponse:
+    """首页背景/相册/9 格补字段专用。
+
+    与 ``GET /users/{user_id}/profile`` 的区别：不消耗资料查看额度、不写
+    ``user_browse_history``（对方「谁看过我」不出现首页预取）、不返回 profile 对象。
+    可见性/维护态/自看拦截与详情页完全一致（404/403/422 同码）。
+    """
+    return await preview_card(db, current.id, user_id)
 
 
 @users_router.get("/{user_id}/preference-public", summary="查看他人择偶偏好")

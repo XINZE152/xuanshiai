@@ -9,6 +9,7 @@ from app.core.redis import daily_quota_key, get_daily_used
 from app.schemas.quotas import QuotaItem, QuotaSummary
 from app.services.admin_config import get_runtime_value
 from app.services.membership import get_active_membership_row
+from app.services.runtime_config import match_line_permissions
 
 
 async def _membership_rights(db: AsyncSession, user_id: int) -> tuple[bool, dict]:
@@ -68,13 +69,83 @@ async def resolve_browse_limit(
     )
 
 
+async def resolve_apply_limit(db: AsyncSession, user_id: int, is_vip: bool | None = None) -> int:
+    """每日「申请认识」上限（唯一实现）。
+
+    来源优先级（与原 ``discovery._consume_apply_quota`` 逐字一致）：
+
+    1. 后台卡片4「牵线次数」统一值 ``apply_daily > 0`` —— 覆盖 VIP/免费两套旧限额；
+    2. 平台权限快照 ``free_apply_daily_limit``；
+    3. VIP 且存在有效会员：``free_apply_daily_limit + rights.apply_bonus``。
+
+    说明：``vip_apply_daily_limit``（默认 10）在当前口径下**不参与计算** —— VIP 走的是
+    "免费额度 + 套餐加次"，这是历史行为，本次只做"单一来源"收敛，不改变数值。
+    """
+    vip = is_vip
+    rights: dict = {}
+    # 只在"未知是否会员"或"已确认是会员"时才查会员行（非会员不需要 apply_bonus）；
+    # 显式传入 is_vip=False 时省掉一次查询，扣次链路少一次往返。
+    if vip is None or vip:
+        member_vip, member_rights = await _membership_rights(db, user_id)
+        if vip is None:
+            vip = member_vip
+        rights = member_rights if member_vip else {}
+    line_perm = await match_line_permissions(db)
+    unified = line_perm.get("apply_daily")
+    if unified and int(unified) > 0:
+        return int(unified)
+    free_limit = int(
+        await get_runtime_value(
+            db,
+            "platform_permissions",
+            "free_apply_daily_limit",
+            settings.apply_daily_free_limit,
+        )
+    )
+    if not vip:
+        return free_limit
+    return free_limit + int(rights.get("apply_bonus") or 0)
+
+
+async def resolve_superlike_limit(db: AsyncSession, user_id: int, is_vip: bool | None = None) -> int:
+    """每日「爆灯」上限（唯一实现）：平台权限快照 > settings 默认。"""
+    if is_vip is None:
+        vip, _ = await _membership_rights(db, user_id)
+    else:
+        vip = is_vip
+    return int(
+        await get_runtime_value(
+            db,
+            "platform_permissions",
+            "vip_superlike_daily_limit" if vip else "free_superlike_daily_limit",
+            settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit,
+        )
+    )
+
+
+async def resolve_paper_plane_limit(db: AsyncSession) -> int:
+    """每日「纸飞机」上限（唯一实现）：平台权限快照 > settings 默认。
+
+    此前 ``community.create_paper_plane`` 写死 ``consume_daily(key, 3)``，
+    后台改 ``paper_plane_daily_limit`` 只影响展示、不影响扣次 —— 本函数把两者统一。
+    """
+    return int(
+        await get_runtime_value(
+            db,
+            "platform_permissions",
+            "paper_plane_daily_limit",
+            settings.paper_plane_daily_limit,
+        )
+    )
+
+
 async def summary(db: AsyncSession, user_id: int) -> QuotaSummary:
-    vip, rights = await _membership_rights(db, user_id)
+    vip, _ = await _membership_rights(db, user_id)
     definitions = (
-        ("apply", settings.apply_daily_free_limit + (int(rights.get("apply_bonus") or 0) if vip else 0), "apply"),
+        ("apply", await resolve_apply_limit(db, user_id, is_vip=vip), "apply"),
         ("browse", await resolve_browse_limit(db, user_id, is_vip=vip), "browse"),
-        ("superlike", settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit, "superlike"),
-        ("paper_plane", settings.paper_plane_daily_limit, "paper_plane"),
+        ("superlike", await resolve_superlike_limit(db, user_id, is_vip=vip), "superlike"),
+        ("paper_plane", await resolve_paper_plane_limit(db), "paper_plane"),
     )
     items: list[QuotaItem] = []
     for quota_code, daily_limit, redis_code in definitions:

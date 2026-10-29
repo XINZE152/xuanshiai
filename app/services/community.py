@@ -14,9 +14,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.redis import consume_daily, get_daily_used, refund_daily
-from app.services.admin_config import get_runtime_value
-from app.services.runtime_config import match_line_permissions
+from app.core.redis import consume_daily, refund_daily
+from app.services.quotas import resolve_paper_plane_limit, summary as quota_summary
 from app.schemas.community import (
     ActivityPage,
     ActivityResponse,
@@ -56,7 +55,6 @@ from app.services.community_media import (
     bind_media,
     resolve_owned_ready_media,
 )
-from app.services.membership import has_active_membership
 from app.services.profile import _calculate_age, _json_list
 from app.services.notifications import emit_notification, ensure_interaction_allowed
 from app.services.restrictions import ensure_user_allowed
@@ -1538,34 +1536,28 @@ async def list_banners(db: AsyncSession, position: str = "community") -> list[Co
 
 
 async def get_community_quotas(db: AsyncSession, user_id: int) -> CommunityQuotasResponse:
-    vip = await has_active_membership(db, user_id)
-    line_perm = await match_line_permissions(db)
-    unified = line_perm.get("apply_daily")
-    if unified and int(unified) > 0:
-        apply_total = int(unified)
-    else:
-        apply_total = int(await get_runtime_value(
-            db,
-            "platform_permissions",
-            "vip_apply_daily_limit" if vip else "free_apply_daily_limit",
-            settings.apply_daily_vip_limit if vip else settings.apply_daily_free_limit,
-        ))
-    paper_total = int(await get_runtime_value(
-        db, "platform_permissions", "paper_plane_daily_limit", settings.paper_plane_daily_limit
-    ))
-    # UTC 日键，与 discovery 申请扣次 / consume_daily 重置对齐
-    from app.core.redis import daily_quota_key
+    """社区相关日额度。
 
-    apply_key = daily_quota_key("discovery:apply", user_id)
-    paper_key = daily_quota_key("paper-plane", user_id)
-    apply_used = await get_daily_used(apply_key)
-    paper_used = await get_daily_used(paper_key)
+    数值不再自行解析平台权限快照，而是**直接复用** ``quotas.summary``
+    （与 ``GET /users/me/quotas`` 同源），本函数只做字段改名与积分单价填充。
+    历史问题：这里曾用 ``vip_apply_daily_limit`` 而扣次侧用"免费额度+套餐加次"，
+    导致接口报 10、实际只能申请 3。统一后两边必然一致。
+    """
+    quota_summary_data = await quota_summary(db, user_id)
+    items = {item.quota_code: item for item in quota_summary_data.items}
+    apply_item = items.get("apply")
+    paper_item = items.get("paper_plane")
+    apply_total = apply_item.daily_limit if apply_item else 0
+    apply_used = apply_item.daily_used if apply_item else 0
+    paper_total = paper_item.daily_limit if paper_item else 0
+    paper_used = paper_item.daily_used if paper_item else 0
     return CommunityQuotasResponse(
         apply_daily=CommunityQuotaItem(
             total=apply_total,
             used=min(apply_used, apply_total),
             remain=max(apply_total - apply_used, 0),
-            # 积分加次写路径未接前不虚标可加次
+            # 积分加次写路径（POST /community/paper-planes/chances 同类接口）未上线前
+            # 不虚标可加次；extra_remaining 已由 /users/me/quotas 提供，前端优先读它。
             points_available=False,
             points_cost=20,
         ),
@@ -1730,7 +1722,8 @@ async def create_paper_plane(
 
     await ensure_user_allowed(db, user_id, "POST_RESTRICTED")
     key = quota_key or daily_quota_key("paper-plane", user_id)
-    if not await consume_daily(key, 3):
+    # 上限与展示同源：此前写死 3，后台改 paper_plane_daily_limit 只影响展示、不影响扣次。
+    if not await consume_daily(key, await resolve_paper_plane_limit(db)):
         raise HTTPException(429, detail="今日纸飞机次数已用完")
 
     content = (request.content or "").strip()

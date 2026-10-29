@@ -79,6 +79,13 @@ class DiscoveryCard(BaseModel):
     is_married: int | None
     online_status: int
     mbti: str | None
+    # 首页 9 格需要的公开展示字段（2026-10-29）：与 ProfileResponse 同名字段同口径，
+    # weight=体重kg，*_display 由服务端按省市区码合成，zodiac=属相。
+    # 与 height/income 一致，detail_locked 时统一置 None。
+    weight: int | None = None
+    hometown_display: str | None = None
+    residence_display: str | None = None
+    zodiac: str | None = None
     self_intro: str | None = None
     qa_answers: list[dict[str, str]] = Field(default_factory=list, description="首页卡片展示的公开问答，最多 3 条")
     personal_tags: list[str] = Field(default_factory=list, description="合并后的兴趣标签，受资料可见性约束")
@@ -89,6 +96,9 @@ class DiscoveryCard(BaseModel):
     algorithm_version: str = "legacy-rule-v1"
     match_score_source: str = "legacy-rule-v1"
     is_favorite: bool
+    # 当前登录用户是否「喜欢」该用户（user_favorite.type=1），与 GET /relations/likes 同源。
+    # 关系字段：锁定/隐私不影响本字段；is_favorite 是 type=2 旧收藏，两者不混用。
+    is_liked: bool = False
     is_vip: bool = False
     is_pure_free: bool
     is_boosted: bool
@@ -154,6 +164,24 @@ class PublicProfileResponse(BaseModel):
     # 值为 user_partner_preference 的展示归一结果（含 *_text 文案），见
     # discovery._public_preference；未解锁或对方未填写时为 None。
     preference: dict[str, Any] | None = None
+
+
+class DiscoveryCardPreviewResponse(BaseModel):
+    """首页卡片预览（``GET /users/{user_id}/card-preview``）。
+
+    只服务「首页背景/相册/9 格补字段」：**不扣浏览额度、不写 user_browse_history、
+    不返回 profile 对象**。字段范围刻意小于 ``PublicProfileResponse``，
+    避免变成绕过计费看完整资料的通道。
+
+    命名带 ``Discovery`` 前缀：``auth``/``ai_profile`` 已有同名 ``ProfilePreviewResponse``，
+    否则 OpenAPI 会退化成 ``app__schemas__discovery__ProfilePreviewResponse`` 这种带模块路径的名字。
+    """
+
+    user_id: int
+    card: DiscoveryCard
+    background_wall: str | None = None
+    photos: list[str] = Field(default_factory=list, description="相册首图，最多 1 张")
+    income_display: str | None = None
 
 
 class FavoriteResponse(BaseModel):
