@@ -53,16 +53,16 @@ _HIGH_RISK_TERMS = (
 )
 _ABSOLUTE_TERMS = ("\u4e00\u5b9a\u559c\u6b22\u4f60", "\u4fdd\u8bc1\u590d\u5408", "\u767e\u5206\u4e4b\u767e", "\u80af\u5b9a\u4f1a\u7b54\u5e94", "\u7edd\u5bf9")
 _FALLBACK_KNOWLEDGE: dict[str, tuple[str, ...]] = {
-    "opening": ("Hello, nice to meet you. I hope we can chat casually.", "Your profile seems interesting, so I wanted to say hello."),
-    "reply": ("That sounds interesting. Would you like to tell me more?", "I see. Is that something you do often?"),
-    "topic_extension": ("Besides that, what else do you enjoy?", "I would like to try that sometime too."),
-    "rescue": ("Let us switch to something light. Do you prefer staying in or going out?", "Has anything small made you happy recently?"),
-    "care": ("Remember to eat and leave yourself some time to rest.", "You sound busy lately. Rest early when you finish."),
-    "compliment": ("You have your own ideas, and talking with you feels comfortable.", "You take things seriously, which is valuable."),
-    "values": ("What kind of compatibility matters most to you in a relationship?", "When two people disagree, do you prefer calming down first or talking immediately?"),
-    "intimacy": ("Talking with you feels relaxed, and time passes quickly.", "It is rare to meet someone easy to talk with, and I value that."),
-    "closing": ("I enjoyed talking today. Rest early and let us chat again.", "Take care of what you need to do, and we can continue later."),
-    "analyze": ("Acknowledge what they said, then observe whether they want to expand.", "If replies stay short, reduce the frequency and respect their space."),
+    "opening": ("你好，很高兴认识你，希望能轻松地聊一聊。", "看了你的资料挺感兴趣的，想先跟你打个招呼。"),
+    "reply": ("听起来很有意思，能多讲讲吗？", "这样啊，那你平时也常这样吗？"),
+    "topic_extension": ("除了这个，你还有什么喜欢做的事？", "这个我也挺想试试的，你呢？"),
+    "rescue": ("换个轻松点的话题吧，你平时更愿意出门还是在家待着？", "最近有没有什么小事让你心情不错？"),
+    "care": ("记得按时吃饭，也给自己留点休息的时间。", "听起来你最近挺忙的，忙完早点休息。"),
+    "compliment": ("你很有自己的想法，跟你聊天挺舒服的。", "你对事情很认真，这点挺难得的。"),
+    "values": ("在一段关系里，你最看重哪种契合？", "两个人有分歧的时候，你更倾向先冷静还是先沟通？"),
+    "intimacy": ("跟你聊天很放松，时间过得挺快。", "能遇到一个聊得来的人不容易，我挺珍惜的。"),
+    "closing": ("今天聊得很开心，早点休息，下次再聊。", "忙你自己的事去吧，我们回头接着聊。"),
+    "analyze": ("先接住对方说的，再看 ta 想不想往下展开。", "如果对方回复一直很短，就降低频率、给 ta 留点空间。"),
 }
 
 
@@ -195,11 +195,12 @@ Latest message: {request.incoming_message}
 Conversation context: {context or 'history access not authorized'}
 {memory_section}Reference guidance:
 {snippets}
-Return JSON only with analysis, suggestions, risk_level, risk_notice, and next_step. suggestions must contain at most {request.max_suggestions} items with content, style, and reason. Keep replies short and avoid repeated questioning."""
+Return JSON only with analysis, suggestions, risk_level, risk_notice, and next_step. suggestions must contain at most {request.max_suggestions} items with content, style, and reason. Keep replies short and avoid repeated questioning.
+Respond in Simplified Chinese only. All analysis, suggestions and reasons must be in Chinese."""
 
 
 def _normalize_result(data: dict[str, Any], request: AdvisorAdviceRequest) -> dict[str, Any]:
-    analysis = str(data.get("analysis") or "Acknowledge the current message, then decide whether to continue based on the response.").strip()[:500]
+    analysis = str(data.get("analysis") or "先确认对方的情绪，再决定要不要继续往下接。").strip()[:500]
     raw_suggestions = data.get("suggestions") if isinstance(data.get("suggestions"), list) else []
     suggestions: list[dict[str, str]] = []
     for item in raw_suggestions[: request.max_suggestions]:
@@ -211,11 +212,11 @@ def _normalize_result(data: dict[str, Any], request: AdvisorAdviceRequest) -> di
         style = str(item.get("style") or request.tone)
         if style not in {"natural", "warm", "humorous", "mature"}:
             style = request.tone
-        reason = str(item.get("reason") or "Naturally continue from the current topic").strip()[:300]
+        reason = str(item.get("reason") or "顺着当前话题自然接下去").strip()[:300]
         suggestions.append({"content": content, "style": style, "reason": reason})
     if not suggestions:
         for item in _FALLBACK_KNOWLEDGE.get(request.scenario, _FALLBACK_KNOWLEDGE["reply"])[: request.max_suggestions]:
-            suggestions.append({"content": item, "style": request.tone, "reason": "Conservative fallback for the selected scenario"})
+            suggestions.append({"content": item, "style": request.tone, "reason": "该场景下的保守兜底建议"})
     model_level = str(data.get("risk_level") or "none")
     if model_level not in {"none", "low", "medium", "high"}:
         model_level = "none"
@@ -228,7 +229,7 @@ def _normalize_result(data: dict[str, Any], request: AdvisorAdviceRequest) -> di
         "suggestions": suggestions,
         "risk_level": risk_level,
         "risk_notice": str(data.get("risk_notice") or risk_notice)[:500] if (data.get("risk_notice") or risk_notice) else None,
-        "next_step": str(data.get("next_step") or "Adjust the pace based on the reply and avoid repeated questions")[:500],
+        "next_step": str(data.get("next_step") or "根据对方的回复调整节奏，避免连续追问")[:500],
     }
 
 

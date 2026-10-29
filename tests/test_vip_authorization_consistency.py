@@ -195,7 +195,7 @@ async def test_community_quota_delegates_vip_state_to_membership_source(
     assert result.apply_daily.total == 2
     assert result.apply_daily.remain == 1
     assert result.paper_plane_daily.total == 5
-    # 积分加次写路径未上线前不得虚标可加次
+    # 该用例的 _Db 没有 execute，points_available 走 fail-closed 分支
     assert result.apply_daily.points_available is False
 
 

@@ -61,6 +61,8 @@ def _social_user(row: dict[str, Any]) -> SocialUser:
         user_id=int(row["user_id"]),
         nickname=row.get("nickname"),
         avatar=row.get("avatar"),
+        avatar_thumb=row.get("avatar_thumb"),
+        gender=row.get("gender"),
         age=_calculate_age(row["birthday"]) if row.get("birthday") else None,
     )
 
@@ -195,7 +197,10 @@ async def list_chat_sessions(db: AsyncSession, user_id: int, page: int, page_siz
                    OR (ub.target_user_id = :user_id
                       AND ub.user_id = CASE WHEN s.user1_id = :user_id THEN s.user2_id ELSE s.user1_id END))"""), {"user_id": user_id})
     total = int(count_result.scalar() or 0)
-    result = await db.execute(text("""SELECT s.*, u.id AS target_id, u.nickname, u.avatar, u.birthday,
+    result = await db.execute(text("""SELECT s.*, u.id AS target_id, u.nickname, u.avatar, u.gender, u.birthday,
+        COALESCE((SELECT um.thumbnail_url FROM user_media um
+                  WHERE um.user_id = u.id AND um.media_type = 'avatar' AND um.deleted_at IS NULL
+                  ORDER BY um.id DESC LIMIT 1), u.avatar) AS avatar_thumb,
         CASE WHEN s.user1_id = :user_id THEN s.unread_count_user1 ELSE s.unread_count_user2 END AS unread_count,
         CASE WHEN s.user1_id = :user_id THEN s.user1_pinned_at ELSE s.user2_pinned_at END AS pinned_at
         FROM chat_session s JOIN users u ON u.id = CASE WHEN s.user1_id = :user_id THEN s.user2_id ELSE s.user1_id END
@@ -215,7 +220,7 @@ async def list_chat_sessions(db: AsyncSession, user_id: int, page: int, page_siz
         ORDER BY (CASE WHEN s.user1_id = :user_id THEN s.user1_pinned_at ELSE s.user2_pinned_at END) IS NOT NULL DESC,
         COALESCE(CASE WHEN s.user1_id = :user_id THEN s.user1_pinned_at ELSE s.user2_pinned_at END, s.last_message_time, s.created_at) DESC
         LIMIT :limit OFFSET :offset"""), {"user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size})
-    items = [ChatSessionResponse(id=int(row["id"]), target=SocialUser(user_id=int(row["target_id"]), nickname=row["nickname"], avatar=row["avatar"], age=_calculate_age(row["birthday"]) if row["birthday"] else None), last_message=row["last_message"], last_message_time=row["last_message_time"], unread_count=int(row["unread_count"] or 0), pinned=row["pinned_at"] is not None) for row in result.mappings().all()]
+    items = [ChatSessionResponse(id=int(row["id"]), target=SocialUser(user_id=int(row["target_id"]), nickname=row["nickname"], avatar=row["avatar"], avatar_thumb=row["avatar_thumb"], gender=row["gender"], age=_calculate_age(row["birthday"]) if row["birthday"] else None), last_message=row["last_message"], last_message_time=row["last_message_time"], unread_count=int(row["unread_count"] or 0), pinned=row["pinned_at"] is not None) for row in result.mappings().all()]
     return ChatSessionPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
@@ -304,6 +309,29 @@ def _message(row: dict[str, Any], viewer: int | None = None) -> ChatMessageRespo
     )
 
 
+def _message_preview(type_: int, content: str | None) -> str:
+    """会话列表最后一条消息的摘要文案。
+
+    文本直接返回正文；媒体消息按类型给占位，避免列表全部塌缩成同一句。
+    与 ``_message`` 的撤回掩码（``content="消息已撤回"``）语义互补：这里只负责
+    「未撤回消息」的摘要，撤回态由 ``recall_message`` 回写 ``last_message`` 时覆盖。
+
+    type 6 必须与文本同样展示原文：申请通过时写入的自动问候就是 type 6，且
+    ``discovery.py`` 给 ``last_message`` 存的也是问候原文。若这里返回占位符，撤回
+    任意一条消息后的重算会把问候降级成 ``[系统消息]``，且覆盖不可逆。
+    """
+    if type_ == 1:
+        return content or ""
+    if type_ == 6:
+        return content or "[系统消息]"
+    return {
+        2: "[图片]",
+        3: "[语音]",
+        4: "[视频]",
+        5: "[小程序]",
+    }.get(type_, "[媒体消息]")
+
+
 async def list_messages(
     db: AsyncSession, user_id: int, session_id: int, page: int, page_size: int
 ) -> list[ChatMessageResponse]:
@@ -359,7 +387,7 @@ async def send_message(
             raise
         return _idempotent_message_response(existing, request, viewer=user_id)
 
-    preview = request.content if request.type == 1 else "[媒体消息]"
+    preview = _message_preview(request.type, request.content)
     unread_field = "unread_count_user1" if session["user1_id"] == target_id else "unread_count_user2"
     await db.execute(text(f"""UPDATE chat_session SET last_message = :last_message,
         last_message_time = UTC_TIMESTAMP(), {unread_field} = {unread_field} + 1,
@@ -401,6 +429,12 @@ async def recall_message(db: AsyncSession, user_id: int, message_id: int) -> Cha
         refreshed = await db.execute(text("SELECT revoked_at FROM chat_message WHERE id = :id"), {"id": message_id})
         row = dict(row)
         row["revoked_at"] = refreshed.scalar()
+        # 撤回后按会话内最新一条未撤回消息重算预览，避免列表"露原文"。
+        latest = (await db.execute(text("""SELECT type, content FROM chat_message
+            WHERE session_id = :sid AND revoked_at IS NULL
+            ORDER BY id DESC LIMIT 1"""), {"sid": int(row["session_id"])})).mappings().first()
+        preview = "消息已撤回" if latest is None else _message_preview(int(latest["type"]), latest.get("content"))
+        await db.execute(text("UPDATE chat_session SET last_message = :preview WHERE id = :sid"), {"preview": preview, "sid": int(row["session_id"])})
     await emit_notification(
         db, recipient_user_id=int(row["to_user_id"]), actor_user_id=user_id,
         event_type="message_recalled", title="消息已撤回", content="对方撤回了一条消息",

@@ -500,8 +500,10 @@ def test_primary_community_and_social_docs_match_current_contracts() -> None:
     assert "当前未提供：媒体内容流式审核、敏感词三态（替换*/进审）与词库管理 CRUD、评论点赞接口" not in community_docs
     assert '"posts":{"items":' in primary_topic_detail
     assert '"posts":[]' not in primary_topic_detail
-    assert '"points_available":false' in primary_quotas
-    assert '"points_available":true' not in primary_quotas
+    assert '"points_available":true' in primary_quotas
+    assert "按 `config_point_product` 的在架状态派生" in primary_quotas
+    # 该字段已不再恒为 false，文档不得回退到旧口径
+    assert "仍固定为 `false`" not in primary_quotas
 
     # Community media upload contracts (Task 4)
     assert "POST /api/v1/community/media/uploads" in primary_media

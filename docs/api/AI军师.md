@@ -185,7 +185,7 @@ Content-Type: application/json
 | `scenario` | string | 是 | 不为空 | 同请求场景枚举 | 实际场景 | `reply` |
 | `analysis` | string | 是 | 不为空 | 无 | 简短沟通分析 | `可以先承接再延展` |
 | `suggestions` | array | 是 | 至少一条安全降级建议 | 无 | 候选话术数组 | 见示例 |
-| `suggestions[].content` | string | 是 | 不为空 | 无 | 可复制话术，最多 500 字符 | `听起来挺有意思的...` |
+| `suggestions[].content` | string | 是 | 不为空 | 无 | 可复制话术，简体中文，最多 500 字符 | `听起来挺有意思的...` |
 | `suggestions[].style` | string | 是 | 不为空 | `natural/warm/humorous/mature` | 话术风格 | `natural` |
 | `suggestions[].reason` | string | 是 | 不为空 | 无 | 使用理由，最多 300 字符 | `先承接再提问` |
 | `risk_level` | string | 是 | 不为空 | `none/low/medium/high` | 输出风险等级 | `none` |
@@ -327,6 +327,7 @@ AI_ADVISOR_KNOWLEDGE_VERSION=seed-v2
 
 - 2026-08-23：新增 AI 情感军师后端框架、五个接口、数据库表、Mock、风险校验、额度退款和基础测试。
 - 2026-10-12：`POST /api/v1/ai/advisor/sessions` 新增必填 `Idempotency-Key`；相同请求回放首次会话，不同载荷返回 `409`。旧客户端必须在创建会话时生成 8-128 字符幂等键。
+- 2026-10-29：**建议输出统一为简体中文**。变更前内置回退话术、Prompt 与 `_normalize_result` 的默认 `analysis`/`reason`/`next_step` 均为英文，模型会把英文回退句当参考知识直接抄进结果，导致同一响应里 `analysis` 英文、`risk_notice` 中文混排。现三处均改为中文，并在 Prompt 末尾追加「Respond in Simplified Chinese only」。**VIP 门槛（非会员 `403`）与每日额度（`429`）未做任何调整。**
 
 ## 2026-08-27 契约补充
 

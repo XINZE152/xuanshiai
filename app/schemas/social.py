@@ -12,6 +12,8 @@ class SocialUser(BaseModel):
     user_id: int
     nickname: str | None
     avatar: str | None
+    avatar_thumb: str | None = None
+    gender: int | None = None
     age: int | None
 
 
@@ -41,6 +43,7 @@ class ChatSessionResponse(BaseModel):
     last_message: str | None
     last_message_time: datetime | None
     unread_count: int
+    pinned: bool = False
 
 
 class ChatSessionPage(BaseModel):
