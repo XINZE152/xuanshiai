@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException
@@ -266,6 +267,10 @@ async def list_videos(
 
 async def create_video(db: AsyncSession, body: ShortVideoCreate) -> ShortVideoItem:
     payload = _video_payload(body, partial=False)
+    # published_at 列为 NOT NULL，而后台「添加视频」抽屉不提交发布时间（自动占位），
+    # 缺省时以当前 UTC 时间兜底，避免插入 NULL 触发 1048。
+    if payload.get("published_at") is None:
+        payload["published_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     columns = ", ".join(payload.keys())
     placeholders = ", ".join(f":{k}" for k in payload)
     result = await db.execute(text(f"INSERT INTO short_video ({columns}) VALUES ({placeholders})"), payload)
