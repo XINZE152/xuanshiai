@@ -510,3 +510,37 @@ GET/PATCH /api/v1/admin/outbound-call-platform
 - 导出、文件上传、录音下载和异步任务状态尚未形成统一契约。
 
 因此，后端可以按本文件先实现契约，前端再按模块逐页移除 mock；不要一次性把所有页面都指向一个泛化的 `admin/*` 接口，否则筛选字段、权限和审计会失控。
+
+## 八、A12 一键更新会员属地（2026-11-04）
+
+后台「账号管理 → 更多操作 → 一键更新全部账号 IP 属地 / 手机属地」的对接契约。
+完整字段与错误码见 `docs/api/一键刷新属地接口-2026-10-24.md`，这里只列后台页面需要知道的部分。
+
+### 1. 页面初始化
+
+`GET /api/v1/admin/matchmaker/members/region-resolver`（权限 `matchmaker.member.read`）
+
+- 用 `ip_db_ready` / `phone_segment_ready` 分别控制两个按钮，**不要只看** `refresh_enabled`；
+- 用 `scope` / `affects_all` 决定文案：`affects_all=true` 才显示“全部账号”，否则显示“当前范围/本店”；
+- `provider=disabled` 时两个按钮置灰并提示“属地解析服务未配置”。
+
+### 2. 执行按钮
+
+- `POST /api/v1/admin/matchmaker/members/refresh-ip-region?confirm=true&overwrite=false`
+- `POST /api/v1/admin/matchmaker/members/refresh-phone-region?confirm=true&overwrite=false`
+
+- 必须携带 `Idempotency-Key`（8–128 字符），每次点击生成新值；
+- 缺 `confirm=true` 返回 `428`，缺/非法幂等键返回 `422`；
+- 默认 `overwrite=false` 只补齐空值，不修正已有值；
+- `overwrite=true` 会覆盖已有值（最多 5000 行），必须单独二次确认；
+- `updated_count=0` 是正常结果（重复刷新或值已正确），不要提示“失败”。
+
+### 3. 结果展示
+
+建议展示 `scanned_count`、`updated_count`、`skipped_count`、`unknown_count`、`scope`、`affects_all`、`elapsed_ms`。
+
+`skipped_count` 表示源值不可解析（空、内网/回环/CGNAT、IPv6 未启用等），`unknown_count` 表示解析库未收录；两者都不写库。
+
+### 4. 手机换绑联动
+
+用户换绑手机、后台编辑会员手机号、推广红娘改号后，`phone_region` 会置空；下一次手机属地刷新会按新号码补齐。页面不要把“属地暂时为空”当成异常。

@@ -177,10 +177,11 @@ async def write_audit(
 ) -> None:
     """把本次刷新写入 ``business_audit_log``。
 
-    - 有覆盖明细：按 500 行切片写 ``before_json`` / ``after_json``（保留旧值以便回溯）；
-    - 无覆盖明细（只填空、或覆盖但值未变）：写一条汇总。
+    - 有变化明细（覆盖或只填空）：按 500 行切片写 ``before_json`` / ``after_json``，
+      记录受影响 user_id 与新旧值，支持按 id 回滚；
+    - 无变化明细（没有行被改写）：写一条汇总。
 
-    旧值快照是 overwrite 唯一的可回溯保障，不能只落应用日志。
+    旧值/新值快照是批量刷新的可回溯保障，不能只落应用日志。
     """
     action = f"member.region.refresh_{kind.value}"
     label = "IP" if kind is RegionKind.IP else "手机"
@@ -189,8 +190,9 @@ async def write_audit(
         " (actor_user_id, action, resource_type, resource_id, before_json, after_json, reason)"
         " VALUES (:actor, :action, 'users', NULL, :before, :after, :reason)"
     )
-    if overwrite and stats.overwritten:
+    if stats.overwritten:
         size = 500
+        mode_label = "覆盖" if overwrite else "只填空"
         for offset in range(0, len(stats.overwritten), size):
             chunk = stats.overwritten[offset : offset + size]
             before = [{"user_id": row["user_id"], "old": row["old"]} for row in chunk]
@@ -202,7 +204,7 @@ async def write_audit(
                     "action": action,
                     "before": json.dumps(before, ensure_ascii=False),
                     "after": json.dumps(after, ensure_ascii=False),
-                    "reason": f"一键刷新{label}属地（覆盖模式，第 {offset // size + 1} 批）"[:255],
+                    "reason": f"一键刷新{label}属地（{mode_label}，第 {offset // size + 1} 批）"[:255],
                 },
             )
     else:

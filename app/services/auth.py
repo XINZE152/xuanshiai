@@ -34,6 +34,7 @@ from app.schemas.auth import (
     ExistingAccountLoginRequest,
 )
 from app.services.sms.providers import get_sms_provider
+from app.services.user_columns import should_reset_phone_region
 from app.services.wechat.providers import get_wechat_provider
 from app.services.presence import mark_session_online
 from app.services.points import auto_login_reward
@@ -483,7 +484,18 @@ async def bind_phone(db: AsyncSession, user_id: int, request: BindPhoneRequest, 
         result = await db.execute(text("SELECT id FROM users WHERE phone = :phone FOR UPDATE"), {"phone": request.phone})
         if result.first():
             raise HTTPException(409, detail="该手机号已绑定其他账号")
-        await db.execute(text("UPDATE users SET phone = :phone, phone_verified_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"phone": request.phone, "id": user_id})
+        set_parts = [
+            "phone = :phone",
+            "phone_verified_at = UTC_TIMESTAMP()",
+            "updated_at = UTC_TIMESTAMP()",
+        ]
+        # 换号后旧号码的归属地必须失效，否则列表会一直显示旧号属地。
+        if await should_reset_phone_region(db, phone_changed=True):
+            set_parts.append("phone_region = NULL")
+        await db.execute(
+            text(f"UPDATE users SET {', '.join(set_parts)} WHERE id = :id"),
+            {"phone": request.phone, "id": user_id},
+        )
 
 
 async def change_phone(
@@ -521,10 +533,16 @@ async def change_phone(
         )
         if occupied.first():
             raise HTTPException(409, detail="该手机号已绑定其他账号")
+        set_parts = [
+            "phone = :phone",
+            "phone_verified_at = UTC_TIMESTAMP()",
+            "updated_at = UTC_TIMESTAMP()",
+        ]
+        # 换绑后旧号码的归属地必须失效；不在此处同步解析新号，保持换绑热路径纯净。
+        if await should_reset_phone_region(db, phone_changed=True):
+            set_parts.append("phone_region = NULL")
         await db.execute(
-            text(
-                "UPDATE users SET phone = :phone, phone_verified_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() WHERE id = :id"
-            ),
+            text(f"UPDATE users SET {', '.join(set_parts)} WHERE id = :id"),
             {"phone": request.new_phone, "id": user_id},
         )
         # 换绑等同凭证变更：除当前设备外全部会话失效，防止旧号留存设备继续使用。
