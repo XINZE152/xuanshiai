@@ -1,7 +1,7 @@
 """A12 属地刷新上线预检（只读）。
 
-检查 IP 库、查询绑定、手机号段表、users 列与候选数量，不写任何数据。
-用于服务器发布前后确认「资源是否真的就绪」，避免接口只在运行时返回 503。
+检查 IP 库、查询绑定、手机号段表、阿里云 API 配置、users 列与候选数量，不写任何数据。
+**不发起第三方 API 请求**：`*_api_ready` 只代表配置字段完整，凭证有效性需通过 canary 验证。
 
 用法::
 
@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.services.region import ip_offline, phone_offline, registry  # noqa: E402
+from app.services.region.types import RegionKind  # noqa: E402
 
 
 def _sha256(path: Path) -> str | None:
@@ -128,35 +129,48 @@ async def _db_status() -> dict[str, Any]:
 
 
 def _readiness(payload: dict[str, Any]) -> dict[str, bool]:
-    provider = payload.get("provider")
-    ip = bool(
-        provider == "offline"
-        and payload["ip"]["exists"]
-        and payload["ip"]["size_bytes"] > 0
-        and payload["ip"]["binding_available"]
-    )
-    phone = bool(
-        provider == "offline"
-        and payload["phone"]["exists"]
-        and payload["phone"]["size_bytes"] > 0
-        and payload["phone"]["header_ok"]
-        and payload["phone"]["rows"] > 0
-    )
-    if payload.get("db_checked"):
+    def kind_ready(kind: str) -> bool:
+        provider = payload.get(f"{kind}_provider")
+        if provider == "api":
+            ready = bool(payload.get(f"{kind}_api_ready"))
+        elif provider == "offline":
+            if kind == "ip":
+                asset = payload["ip"]
+                ready = bool(
+                    asset["exists"] and asset["size_bytes"] > 0 and asset["binding_available"]
+                )
+            else:
+                asset = payload["phone"]
+                ready = bool(
+                    asset["exists"]
+                    and asset["size_bytes"] > 0
+                    and asset["header_ok"]
+                    and asset["rows"] > 0
+                )
+        else:
+            return False
+        if not payload.get("db_checked"):
+            return ready
         db = payload.get("db") or {}
         if not db.get("available"):
-            return {"ip": False, "phone": False}
+            return False
         columns = db.get("columns") or {}
-        ip = ip and columns.get("ip_region", False) and columns.get("register_ip", False)
-        phone = phone and columns.get("phone_region", False) and columns.get("phone", False)
-    return {"ip": ip, "phone": phone}
+        if kind == "ip":
+            return ready and columns.get("ip_region", False) and columns.get("register_ip", False)
+        return ready and columns.get("phone_region", False) and columns.get("phone", False)
+
+    return {"ip": kind_ready("ip"), "phone": kind_ready("phone")}
 
 
 def collect(*, skip_db: bool) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "provider": registry.provider(),
+        "ip_provider": registry.provider_for(RegionKind.IP),
+        "phone_provider": registry.provider_for(RegionKind.PHONE),
         "ip": _ip_status(),
         "phone": _phone_segment_status(phone_offline.resolve_segment_path()),
+        "ip_api_ready": registry.api_ready(RegionKind.IP),
+        "phone_api_ready": registry.api_ready(RegionKind.PHONE),
         "db_checked": not skip_db,
         "db": None,
     }
@@ -173,7 +187,12 @@ def _print_human(payload: dict[str, Any]) -> None:
     ip = payload["ip"]
     phone = payload["phone"]
     db = payload.get("db")
-    print(f"provider: {payload['provider']}")
+    print(
+        f"provider: legacy={payload['provider']} "
+        f"ip={payload['ip_provider']} phone={payload['phone_provider']}"
+    )
+    print(f"ip_api_ready: {payload['ip_api_ready']}")
+    print(f"phone_api_ready: {payload['phone_api_ready']}")
     print(
         f"ip_db: exists={ip['exists']} size={ip['size_bytes']} "
         f"binding={ip['binding_available']} sha256={ip['sha256']}"
@@ -195,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--expect-ready",
         action="store_true",
-        help="IP 与手机任一未就绪时以退出码 2 结束",
+        help="IP 与手机任一未就绪时以退出码 2 结束（只查配置，不调用 API）",
     )
     args = parser.parse_args(argv)
 

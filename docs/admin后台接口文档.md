@@ -520,9 +520,11 @@ GET/PATCH /api/v1/admin/outbound-call-platform
 
 `GET /api/v1/admin/matchmaker/members/region-resolver`（权限 `matchmaker.member.read`）
 
-- 用 `ip_db_ready` / `phone_segment_ready` 分别控制两个按钮，**不要只看** `refresh_enabled`；
-- 用 `scope` / `affects_all` 决定文案：`affects_all=true` 才显示“全部账号”，否则显示“当前范围/本店”；
-- `provider=disabled` 时两个按钮置灰并提示“属地解析服务未配置”。
+- 分别按 `ip_provider` / `phone_provider` 判断按钮：
+  - `offline`：看 `ip_db_ready` / `phone_segment_ready`；
+  - `api`：看 `ip_api_ready` / `phone_api_ready`；
+  - `disabled`：按钮置灰并提示“属地解析服务未配置”。
+- 用 `scope` / `affects_all` 决定文案：`affects_all=true` 才显示“全部账号”，否则显示“当前范围/本店”。
 
 ### 2. 执行按钮
 
@@ -533,13 +535,14 @@ GET/PATCH /api/v1/admin/outbound-call-platform
 - 缺 `confirm=true` 返回 `428`，缺/非法幂等键返回 `422`；
 - 默认 `overwrite=false` 只补齐空值，不修正已有值；
 - `overwrite=true` 会覆盖已有值（最多 5000 行），必须单独二次确认；
-- `updated_count=0` 是正常结果（重复刷新或值已正确），不要提示“失败”。
+- `updated_count=0` 是正常结果（重复刷新或值已正确），不要提示“失败”；
+- `failed_count` 表示第三方 API 超时/429/5xx/响应格式错误行数，不写库；部分失败仍返回 `200`，全部失败返回 `502`。
 
 ### 3. 结果展示
 
-建议展示 `scanned_count`、`updated_count`、`skipped_count`、`unknown_count`、`scope`、`affects_all`、`elapsed_ms`。
+建议展示 `provider`、`scanned_count`、`updated_count`、`skipped_count`、`unknown_count`、`failed_count`、`scope`、`affects_all`、`elapsed_ms`。
 
-`skipped_count` 表示源值不可解析（空、内网/回环/CGNAT、IPv6 未启用等），`unknown_count` 表示解析库未收录；两者都不写库。
+`skipped_count` 表示源值不可解析（空、内网/回环/CGNAT、IPv6 未启用等），`unknown_count` 表示解析库/API 无结果；`failed_count` 表示接口失败；三者都不写库。
 
 ### 4. 手机换绑联动
 

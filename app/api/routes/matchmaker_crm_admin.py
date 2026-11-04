@@ -13,7 +13,7 @@ from app.core.sensitive_fields import mask_contact, redaction_level_from_permiss
 from app.db.session import get_db
 from app.services.region import refresh as region_refresh
 from app.services.region import registry as region_registry
-from app.services.region.types import RegionDataNotReady, RegionKind
+from app.services.region.types import RegionDataNotReady, RegionKind, RegionUpstreamError
 from app.services.sensitive_operations import (
     abort_sensitive_operation,
     begin_sensitive_operation,
@@ -66,12 +66,16 @@ class MemberDeleteResult(BaseModel):
 
 class RegionResolverStatus(BaseModel):
     provider: str
+    ip_provider: str = ""
+    phone_provider: str = ""
     refresh_enabled: bool
     adapter_implemented: bool
     scope: str = ""
     affects_all: bool = False
     ip_db_ready: bool = False
     phone_segment_ready: bool = False
+    ip_api_ready: bool = False
+    phone_api_ready: bool = False
     db_version: str | None = None
 
 
@@ -84,6 +88,7 @@ class RegionRefreshResult(BaseModel):
     adapter_implemented: bool
     skipped_count: int = 0
     unknown_count: int = 0
+    failed_count: int = 0
     overwrite: bool = False
     scope: str = ""
     affects_all: bool = False
@@ -844,11 +849,15 @@ async def region_resolver_status(
     """A12-属地：回显 provider、资源就绪度与作用域（只读目录，不写库）。"""
     current.require("matchmaker.member.read")
     provider = settings.region_resolver_provider
+    ip_provider = region_registry.provider_for(RegionKind.IP)
+    phone_provider = region_registry.provider_for(RegionKind.PHONE)
     scope_params: dict[str, object] = {}
     scope = current.scope_exists_clause(scope_params, correlation="scope_assignment.user_id = users.id")
     return RegionResolverStatus(
         provider=provider,
-        refresh_enabled=provider != "disabled",
+        ip_provider=ip_provider,
+        phone_provider=phone_provider,
+        refresh_enabled=region_registry.refresh_enabled(),
         adapter_implemented=(
             region_registry.adapter_implemented(RegionKind.IP)
             or region_registry.adapter_implemented(RegionKind.PHONE)
@@ -857,6 +866,8 @@ async def region_resolver_status(
         affects_all=scope == "1 = 1",
         ip_db_ready=region_registry.is_ready(RegionKind.IP),
         phone_segment_ready=region_registry.is_ready(RegionKind.PHONE),
+        ip_api_ready=region_registry.api_ready(RegionKind.IP),
+        phone_api_ready=region_registry.api_ready(RegionKind.PHONE),
         db_version=region_registry.data_version(RegionKind.IP) or region_registry.data_version(RegionKind.PHONE),
     )
 
@@ -868,21 +879,23 @@ async def _refresh_region(
     idempotency_key: str,
     overwrite: bool = False,
 ) -> RegionRefreshResult:
-    """一键刷新属地：provider 门控 + 敏感操作幂等 + 数据作用域收口。
+    """一键刷新属地：按类型 provider 门控 + 敏感操作幂等 + 数据作用域收口。
 
-    门控：``disabled`` → 503、``real`` → 501（在线适配器未接入）、``mock`` → 干跑
-    （仅统计候选行、不写库、恒 dry_run=True）、``offline`` → 真实解析并分批回写。
+    - ``disabled`` → 503；
+    - ``api`` 未配置（Endpoint/Key/AuthCode）→ 503；
+    - ``mock``（旧配置）→ 干跑，仅统计候选行、不写库、恒 dry_run=True；
+    - ``offline`` / ``api`` → 真实解析并分批回写；API 全部失败 → 502。
 
-    数据文件缺失不降级：抛 ``RegionDataNotReady`` 转 503，绝不把「未知」写进展示列。
+    数据文件/配置缺失不降级：抛 ``RegionDataNotReady`` 转 503，绝不把「未知」写进展示列。
     写库 SQL 全部下沉到 ``app/services/region/refresh.py``，本函数不出现写属地列的语句。
     """
-    provider = settings.region_resolver_provider
-    if provider == "disabled":
-        raise HTTPException(503, detail="属地解析服务未接入（厂商未配置）")
-    if provider == "real":
-        raise HTTPException(501, detail="属地解析适配器待接入")
-
     region_kind = RegionKind(kind)
+    provider_for_kind = region_registry.provider_for(region_kind)
+    if provider_for_kind == "disabled":
+        raise HTTPException(503, detail="属地解析服务未接入（厂商未配置）")
+    if provider_for_kind == "api" and not region_registry.adapter_implemented(region_kind):
+        raise HTTPException(503, detail="阿里云属地 API 未配置（Endpoint/Key/AuthCode）")
+
     params: dict[str, object] = {}
     scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = users.id")
     reservation, replayed = await begin_sensitive_operation(
@@ -895,7 +908,7 @@ async def _refresh_region(
     if replayed is not None:
         return RegionRefreshResult(**replayed)
     try:
-        if provider == "mock":
+        if provider_for_kind == "mock":
             scanned = await region_refresh.count_candidates(
                 db, kind=region_kind, scope_sql=scope, params=params, include_empty_only=not overwrite
             )
@@ -918,8 +931,12 @@ async def _refresh_region(
                 overwrite=overwrite,
                 scope_label=_scope_label(scope),
             )
+    except RegionUpstreamError as exc:
+        # 第三方接口整体不可用：502，且回滚半途业务写入、释放幂等预占。
+        await abort_sensitive_operation(db, reservation)
+        raise HTTPException(502, detail=str(exc)) from exc
     except RegionDataNotReady as exc:
-        # 资源未就绪（库文件/号段表/绑定缺失）属「能力未开放」，不是请求错误。
+        # 资源未就绪（库文件/号段表/绑定/API 配置缺失）属「能力未开放」，不是请求错误。
         await abort_sensitive_operation(db, reservation)
         raise HTTPException(503, detail=str(exc)) from exc
     except region_refresh.OverwriteTooLarge as exc:
@@ -932,12 +949,13 @@ async def _refresh_region(
 
     result = RegionRefreshResult(
         kind=kind,
-        provider=provider,
-        dry_run=provider == "mock",
+        provider=stats.provider or provider_for_kind,
+        dry_run=provider_for_kind == "mock",
         scanned_count=stats.scanned,
         updated_count=stats.updated,
         skipped_count=stats.skipped,
         unknown_count=stats.unknown,
+        failed_count=stats.failed,
         overwrite=overwrite,
         scope=_scope_label(scope),
         affects_all=scope == "1 = 1",

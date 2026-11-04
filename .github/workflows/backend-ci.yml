@@ -140,6 +140,8 @@ jobs:
           app/services/region/__init__.py app/services/region/types.py
           app/services/region/ip_offline.py app/services/region/phone_offline.py
           app/services/region/registry.py app/services/region/refresh.py
+          app/services/region/http_client.py app/services/region/online_ip.py
+          app/services/region/online_phone.py
           app/services/customer_lead_admin.py app/services/finance.py
           app/services/idempotency.py app/services/matchmaker_member_admin.py
           app/services/promoter_staff_admin.py app/services/user_columns.py
@@ -158,6 +160,7 @@ jobs:
           tests/test_permission_code_seed_coverage.py tests/test_realname_face_unification.py
           tests/test_refund_membership_revoke.py
           tests/test_region_refresh_20261101.py
+          tests/test_region_online_20261104.py
           tests/test_member_lifecycle_gap_fill_20261024.py
           tests/test_phone_region_invalidation_20261104.py
       - name: Admin scope, redaction and soft delete contracts
@@ -185,6 +188,7 @@ jobs:
           tests/test_realname_face_unification.py
           tests/test_refund_membership_revoke.py
           tests/test_region_refresh_20261101.py
+          tests/test_region_online_20261104.py
           tests/test_member_lifecycle_gap_fill_20261024.py
           tests/test_phone_region_invalidation_20261104.py -q
 
