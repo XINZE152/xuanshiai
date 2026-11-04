@@ -145,9 +145,14 @@ def _get_searcher() -> Any:
         return searcher
 
 
+def binding_available() -> bool:
+    """只读探测查询绑定是否可导入（不构造 searcher）。"""
+    return _import_searcher_class() is not None
+
+
 def is_ready() -> bool:
     """只读探测：库文件存在且绑定可导入（不构造 searcher，避免读盘放大）。"""
-    return resolve_db_path().is_file() and _import_searcher_class() is not None
+    return resolve_db_path().is_file() and binding_available()
 
 
 def resolve_many(values: list[str]) -> ResolveOutcome:

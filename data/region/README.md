@@ -34,6 +34,7 @@
 - 格式：`prefix,province,city,isp,updated_at`（UTF-8，可带 BOM）。`prefix` 需为纯数字。
 - 放置路径：`data/region/phone_segment.csv`，或通过 `REGION_PHONE_SEGMENT_PATH` 指定。
 - 示例见 `phone_segment.sample.csv`（**仅演示格式，不是可用数据**）。
+- **仓库只保留 sample**；真实号段表由运维下发并记录 sha256。数据许可允许时再评估是否提交 git，不要用 sample 冒充生产数据。
 
 ### 数据来源与更新
 
@@ -57,3 +58,13 @@ IP 与手机的就绪度**互相独立**：IP 库缺失时 `refresh-ip-region` �
 但 `refresh-phone-region` 仍可正常刷新。就绪状态可通过
 `GET /api/v1/admin/matchmaker/members/region-resolver` 的
 `ip_db_ready` / `phone_segment_ready` 查看。
+
+## 4. 上线预检
+
+```bash
+cd /home/xuanshiai
+.venv/bin/python scripts/region_preflight.py --expect-ready
+```
+
+脚本只读检查 IP 库、`xdbSearcher` 绑定、号段表表头/行数、`users` 相关列与候选数量，
+任一未就绪时退出码为 2。输出中的 sha256 与号段表 `max_updated_at` 应记录到发布记录。

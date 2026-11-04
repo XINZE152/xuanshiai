@@ -17,6 +17,7 @@ from app.schemas.matchmaker_member_admin import (
     MemberAuditLogItem,
 )
 from app.schemas.matchmaker_crm_admin import MemberOption, MemberOptions
+from app.services.user_columns import should_reset_phone_region
 
 
 def _mask_phone(phone: str | None) -> str | None:
@@ -131,6 +132,12 @@ async def update_member(
             user_values[flag] = 1 if user_values[flag] else 0
     if phone is not None:
         user_values["phone"] = phone
+        current_phone = (
+            await db.execute(text("SELECT phone FROM users WHERE id = :id"), {"id": member_id})
+        ).scalar()
+        # 后台保存表单常把未改动的手机号一并提交；只有真的换号才让旧属地失效。
+        if await should_reset_phone_region(db, phone_changed=phone != current_phone):
+            user_values["phone_region"] = None
     auth_values = {key: values.pop(key) for key in ("education", "school", "job", "company", "auth_status") if key in values}
     match_status = values.pop("match_status", None) if "match_status" in values else None
     profile_columns: set[str] = set()

@@ -16,7 +16,7 @@ import pytest
 
 from app.api.routes import matchmaker_crm_admin as crm
 from app.core.config import Settings, settings
-from app.services.region import ip_offline, phone_offline, registry
+from app.services.region import ip_offline, phone_offline, refresh as region_refresh, registry
 from app.services.region.types import RegionDataNotReady, RegionKind
 
 SAMPLE_SEGMENT = Path(__file__).resolve().parents[1] / "data" / "region" / "phone_segment.sample.csv"
@@ -162,3 +162,86 @@ def test_resolver_status_has_scope_fields() -> None:
     assert status.ip_db_ready is False
     assert status.phone_segment_ready is False
     assert status.db_version is None
+
+
+class _AuditDb:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.committed = False
+
+    async def execute(self, statement: object, params: dict[str, object] | None = None) -> None:
+        self.calls.append((str(statement), dict(params or {})))
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+@pytest.mark.asyncio
+async def test_audit_fill_empty_mode_records_changed_user_ids() -> None:
+    db = _AuditDb()
+    stats = region_refresh.RefreshStats(
+        scanned=2,
+        updated=2,
+        overwritten=[
+            {"user_id": 11, "old": None, "new": "江苏省南京市"},
+            {"user_id": 12, "old": "", "new": "广东省深圳市"},
+        ],
+    )
+    await region_refresh.write_audit(
+        db, actor_id=5, kind=RegionKind.PHONE, stats=stats, overwrite=False, scope_label="ALL"
+    )
+
+    assert db.committed is True
+    assert len(db.calls) == 1
+    _, params = db.calls[0]
+    assert "只填空" in str(params["reason"])
+    assert '"user_id": 11' in str(params["after"])
+    assert '"user_id": 12' in str(params["after"])
+
+
+@pytest.mark.asyncio
+async def test_audit_overwrite_mode_keeps_before_snapshot() -> None:
+    db = _AuditDb()
+    stats = region_refresh.RefreshStats(
+        scanned=1,
+        updated=1,
+        overwritten=[{"user_id": 21, "old": "北京市", "new": "江苏省南京市"}],
+    )
+    await region_refresh.write_audit(
+        db, actor_id=5, kind=RegionKind.IP, stats=stats, overwrite=True, scope_label="ALL"
+    )
+
+    _, params = db.calls[0]
+    assert "覆盖" in str(params["reason"])
+    assert '"old": "北京市"' in str(params["before"])
+
+
+@pytest.mark.asyncio
+async def test_audit_slices_large_changes_into_500_row_records() -> None:
+    db = _AuditDb()
+    stats = region_refresh.RefreshStats(
+        scanned=1200,
+        updated=1200,
+        overwritten=[
+            {"user_id": index, "old": None, "new": "江苏省南京市"} for index in range(1200)
+        ],
+    )
+    await region_refresh.write_audit(
+        db, actor_id=5, kind=RegionKind.PHONE, stats=stats, overwrite=False, scope_label="ALL"
+    )
+
+    assert len(db.calls) == 3
+    assert "第 3 批" in str(db.calls[-1][1]["reason"])
+
+
+@pytest.mark.asyncio
+async def test_audit_without_changes_writes_one_summary() -> None:
+    db = _AuditDb()
+    stats = region_refresh.RefreshStats(scanned=3, updated=0)
+    await region_refresh.write_audit(
+        db, actor_id=5, kind=RegionKind.IP, stats=stats, overwrite=False, scope_label="ALL"
+    )
+
+    assert len(db.calls) == 1
+    _, params = db.calls[0]
+    assert "扫描 3 / 更新 0" in str(params["reason"])
