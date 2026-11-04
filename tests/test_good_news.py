@@ -14,9 +14,37 @@ from app.schemas.good_news import (
     GoodNewsReportCreate,
     GoodNewsReviewRequest,
 )
+from app.services import admin_content as admin_service
 from app.services import good_news as service
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+class _Result:
+    def __init__(self, rows: list[dict] | None = None) -> None:
+        self._rows = rows or []
+
+    def mappings(self) -> "_Result":
+        return self
+
+    def first(self) -> dict | None:
+        return dict(self._rows[0]) if self._rows else None
+
+    def all(self) -> list[dict]:
+        return [dict(row) for row in self._rows]
+
+
+class _Db:
+    def __init__(self, *results: _Result) -> None:
+        self.results = list(results)
+        self.calls: list[tuple[str, dict]] = []
+
+    async def execute(self, statement, params: dict | None = None) -> _Result:
+        self.calls.append((str(statement), dict(params or {})))
+        return self.results.pop(0) if self.results else _Result()
+
+    async def commit(self) -> None:
+        return None
 
 
 def test_good_news_routes_registered() -> None:
@@ -95,6 +123,14 @@ def test_public_item_hides_member_ids() -> None:
     assert item.from_user_id is None
     assert item.to_user_id is None
     assert item.from_name == "张*"
+    assert item.from_avatar is None
+    assert item.to_avatar is None
+
+
+def test_mask_avatar_only_full_exposes_real_avatar() -> None:
+    assert service._mask_avatar("/storage/a.webp", "FULL") == "/storage/a.webp"
+    assert service._mask_avatar("/storage/a.webp", "MASKED") is None
+    assert service._mask_avatar("/storage/a.webp", "ANONYMOUS") is None
 
 
 def test_mask_name_modes() -> None:
@@ -199,3 +235,165 @@ def test_clean_images_rejects_non_storage_url() -> None:
     assert error.value.status_code == 422
     with pytest.raises(HTTPException):
         service._clean_images(["https://external.example/tracker.webp"])
+
+
+def test_clean_images_enforces_owner_prefix() -> None:
+    assert service._clean_images(
+        ["/storage/uploads/good_news/7/a.webp"], owner_ids={7}
+    ) == ["/storage/uploads/good_news/7/a.webp"]
+    with pytest.raises(HTTPException) as error:
+        service._clean_images(["/storage/uploads/good_news/8/a.webp"], owner_ids={7})
+    assert error.value.status_code == 422
+
+
+def test_public_where_checks_content_name_and_photo_scopes() -> None:
+    source = (ROOT / "app/services/good_news.py").read_text(encoding="utf-8")
+    assert "JSON_CONTAINS" in source
+    assert "scopes_json" in source
+    assert "JSON_QUOTE('content')" in source
+    assert "JSON_QUOTE('name')" in source
+    assert "JSON_QUOTE('photos')" in source
+
+
+def test_can_revoke_consent_role_boundaries() -> None:
+    assert service._can_revoke_consent(
+        role="FROM", user_id=31, meta_from_user_id=31, meta_to_user_id=42, consent_user_id=31
+    )
+    assert service._can_revoke_consent(
+        role="TO", user_id=42, meta_from_user_id=31, meta_to_user_id=42, consent_user_id=42
+    )
+    assert not service._can_revoke_consent(
+        role="FROM", user_id=42, meta_from_user_id=31, meta_to_user_id=42, consent_user_id=31
+    )
+    assert not service._can_revoke_consent(
+        role="TO", user_id=31, meta_from_user_id=31, meta_to_user_id=42, consent_user_id=42
+    )
+    assert not service._can_revoke_consent(
+        role="FROM", user_id=31, meta_from_user_id=None, meta_to_user_id=42, consent_user_id=None
+    )
+    assert not service._can_revoke_consent(
+        role="FROM", user_id=31, meta_from_user_id=31, meta_to_user_id=42, consent_user_id=99
+    )
+
+
+def test_member_report_party_ids_reject_arbitrary_user_and_require_name() -> None:
+    with pytest.raises(HTTPException) as error:
+        service._resolve_report_party_ids(
+            submitter_id=7,
+            submitter_role="MEMBER",
+            body=GoodNewsReportCreate(stage="恋爱生活", content="在一起了", partner_name="王先生", to_user_id=42),
+        )
+    assert error.value.status_code == 422
+    with pytest.raises(HTTPException):
+        service._resolve_report_party_ids(
+            submitter_id=7,
+            submitter_role="MEMBER",
+            body=GoodNewsReportCreate(stage="恋爱生活", content="在一起了"),
+        )
+    assert service._resolve_report_party_ids(
+        submitter_id=7,
+        submitter_role="MEMBER",
+        body=GoodNewsReportCreate(stage="恋爱生活", content="在一起了", partner_name="王先生"),
+    ) == (7, None)
+
+
+def test_matchmaker_report_party_ids_keep_explicit_ids() -> None:
+    assert service._resolve_report_party_ids(
+        submitter_id=12,
+        submitter_role="MATCHMAKER",
+        body=GoodNewsReportCreate(
+            stage="已订婚",
+            content="订婚了",
+            partner_name="王先生",
+            from_user_id=31,
+            to_user_id=42,
+        ),
+    ) == (31, 42)
+
+
+def test_couple_stage_pending_duplicate_guard_is_used() -> None:
+    source = (ROOT / "app/services/good_news.py").read_text(encoding="utf-8")
+    assert "m.couple_key = :couple_key" in source
+    assert "r.status = 'PENDING'" in source
+    schema = (ROOT / "app/db/business_schema.py").read_text(encoding="utf-8")
+    assert "UNIQUE KEY `uk_good_news_meta_couple`" not in schema
+
+
+def test_review_relevant_change_detects_content_and_metadata() -> None:
+    old = {"content": "旧正文", "display_mode": "MASKED", "sort": 1}
+    assert admin_service._good_news_review_changed(
+        old,
+        {"content": "新正文", "display_mode": "MASKED", "sort": 1},
+        old_title="A & B",
+        new_title="A & B",
+        old_subtitle="红娘",
+        new_subtitle="红娘",
+        old_image_url="/a.webp",
+        new_image_url="/a.webp",
+        old_status=1,
+        new_status=1,
+    )
+    assert admin_service._good_news_review_changed(
+        old,
+        {"content": "旧正文", "display_mode": "FULL", "sort": 1},
+        old_title="A & B",
+        new_title="A & B",
+        old_subtitle="红娘",
+        new_subtitle="红娘",
+        old_image_url="/a.webp",
+        new_image_url="/a.webp",
+        old_status=1,
+        new_status=1,
+    )
+    assert admin_service._good_news_review_changed(
+        old,
+        {"content": "旧正文", "display_mode": "MASKED", "sort": 1},
+        old_title="A & B",
+        new_title="A & C",
+        old_subtitle="红娘",
+        new_subtitle="红娘",
+        old_image_url="/a.webp",
+        new_image_url="/a.webp",
+        old_status=1,
+        new_status=1,
+    )
+    assert not admin_service._good_news_review_changed(
+        old,
+        {"content": "旧正文", "display_mode": "MASKED", "sort": 2},
+        old_title="A & B",
+        new_title="A & B",
+        old_subtitle="红娘",
+        new_subtitle="红娘",
+        old_image_url="/a.webp",
+        new_image_url="/a.webp",
+        old_status=1,
+        new_status=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reset_good_news_review_marks_pending_and_audits() -> None:
+    db = _Db(
+        _Result(rows=[{"review_status": "APPROVED", "public_status": "PUBLISHED"}]),
+    )
+    await admin_service._reset_good_news_review(
+        db, news_id=5, admin_id=1, reason="内容变更，需重新审核"
+    )
+    sql = "\n".join(statement for statement, _ in db.calls)
+    assert "review_status = 'PENDING'" in sql
+    assert "public_status = :after_public" in sql
+    assert db.calls[1][1]["after_public"] == "UNPUBLISHED"
+    assert "UPDATE good_news_report SET status = 'PENDING'" in sql
+    assert "good_news_audit" in sql
+    assert "CONTENT_CHANGED" in sql
+
+
+def test_record_consent_unpublishes_published_news() -> None:
+    source = (ROOT / "app/services/good_news.py").read_text(encoding="utf-8")
+    assert "CONSENT_CHANGED" in source
+    assert "public_status = 'UNPUBLISHED'" in source
+
+
+def test_admin_content_update_passes_admin_id_for_audit() -> None:
+    source = (ROOT / "app/api/routes/admin_content.py").read_text(encoding="utf-8")
+    assert "update_item(db, domain, item_id, body, current.account.id)" in source

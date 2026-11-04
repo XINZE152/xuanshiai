@@ -84,6 +84,7 @@
 - 需要登录。
 - `stage` 仅接受 7 个阶段：牵手成功、恋爱生活、已见父母、已订婚、已领证、已办婚礼、婚后生活。
 - 只返回 `review_status=APPROVED AND public_status=PUBLISHED` 且双方同意未撤回的内容。
+- 同时校验同意 scope：正文必须有 `content`；非匿名展示必须有 `name`；有生活照必须有 `photos`。
 - 按 `published_at DESC, id DESC` 排序。
 
 返回 `GoodNewsPage`：
@@ -94,7 +95,7 @@
 | `items[].stage` / `stage_label` | string | 阶段值/展示文案 |
 | `items[].from_user_id` / `to_user_id` | integer \| null | 工作台返回会员 ID；公共接口固定返回 `null`，避免枚举资料 |
 | `items[].from_name` / `to_name` | string \| null | 按 `display_mode` 脱敏后的展示名 |
-| `items[].from_avatar` / `to_avatar` | string \| null | 头像；匿名模式为空 |
+| `items[].from_avatar` / `to_avatar` | string \| null | 头像；仅 `FULL` 返回真实头像，`MASKED`/`ANONYMOUS` 固定为空，前端按 `display_mode` 渲染占位 |
 | `items[].matchmaker_id` | integer \| null | 服务红娘 ID |
 | `items[].matchmaker_name` | string \| null | 服务红娘昵称，缺失回落“服务红娘” |
 | `items[].meet_duration` | string \| null | 原始时长文案 |
@@ -202,8 +203,9 @@
 `POST /api/v1/good-news/reports`
 
 - 需要登录 + 实名。
+- 会员只接受 `partner_name`，必须填写；传 `to_user_id` 返回 422。
 - `Idempotency-Key` 可选；同提交人同键重复请求返回首次结果。
-- 无幂等键时，同提交人 + 同阶段 + 同对方称呼 + 24 小时内已有 `PENDING` 记录返回 409。
+- 无幂等键时，同 `couple_key + stage` 已有 `PENDING` 返回 409；`couple_key` 为空时回退为同提交人 + 同阶段 + 同对方称呼 + 24 小时。
 - 创建后立即生成待审内容，会员端不会看到未公开内容。
 
 请求体：
@@ -211,12 +213,12 @@
 | 参数 | 类型 | 必填 | 校验 | 含义 |
 |---|---|---|---|---|
 | `stage` | string | 是 | 7 阶段枚举 | 当前进展 |
-| `partner_name` | string | 否 | ≤64 | 对方称呼；无 `to_user_id` 时用于展示 |
-| `to_user_id` | integer | 否 | ≥1 | 对方会员 ID |
+| `partner_name` | string | 会员必填 | ≤64 | 对方称呼；会员报喜必须填写 |
+| `to_user_id` | integer | 会员不可传 | ≥1 | 对方会员 ID；仅红娘代登记可用，会员传值返回 422 |
 | `meet_duration` | string | 否 | ≤32 | 兼容旧前端的时长字符串 |
 | `meet_duration_months` | integer | 否 | 0–1200 | 相识月数，优先于字符串 |
 | `content` | string | 是 | 1–2000 | 正文 |
-| `images` | string[] | 否 | ≤9；必须是 `/storage/` 上传结果 | 生活照 |
+| `images` | string[] | 否 | ≤9；必须是当前提交人通过 `/good-news/photo` 上传的 `/storage/uploads/good_news/{user_id}/` 路径，不能引用他人图片 | 生活照 |
 | `blessing` | string | 否 | ≤255 | 祝福语 |
 | `display_mode` | string | 否 | `FULL/MASKED/ANONYMOUS`，默认 `MASKED` | 展示方式 |
 | `verification_level` | string | 否 | 默认 `SELF_REPORTED` | 核验等级 |
@@ -274,9 +276,9 @@ Content-Type: application/json
 | HTTP | 触发条件 | 前端处理 |
 |---|---|---|
 | 401/403 | 未登录/未实名 | 跳登录/实名 |
-| 409 | 24 小时内重复提交或幂等键冲突 | 提示等待审核 |
-| 422 | 阶段非法、正文为空、图片超限/地址非法 | 按字段提示 |
-| 404 | 对方会员不存在 | 重新选择 |
+| 409 | 同一对会员该阶段已有待审、24 小时内重复提交或幂等键冲突 | 提示等待审核 |
+| 422 | 会员传 `to_user_id`、未填对方称呼、阶段非法、正文为空、图片超限/不属于本人 | 按字段提示 |
+| 404 | 红娘代登记关联的会员不存在 | 重新选择 |
 
 ### 3.7 我的报喜
 
@@ -310,10 +312,10 @@ Content-Type: application/json
 
 `POST /api/v1/good-news/{news_id}/consent/revoke?role=FROM|TO`
 
-- 需要登录；仅同意记录本人可撤回。
+- 需要登录；`role=FROM` 只能由 `from_user_id` 撤回，`role=TO` 只能由 `to_user_id` 撤回。
 - 撤回后立即把 `public_status` 置为 `UNPUBLISHED`，公开流不再展示。
 - 写 `good_news_audit`；成功返回 204。
-- 同意记录 `user_id` 为空（红娘代登记且未关联会员）时，只有喜讯双方会员可撤回；无法判定时由后台下架。
+- 红娘代登记且未关联会员（meta 的 from/to 为空）时，会员无法撤回；由后台下架。
 
 ## 4. 红娘工作台接口
 
@@ -474,3 +476,16 @@ Content-Type: application/json
 - 公共页路由与入口；`pages.json` 受保护，需单独授权。
 
 前端上线前需在 `api/matchmaker-remote.uts` 的 `REMOTE_OPERATIONS` 中加入已部署的 good-news 操作，未部署前保持“远端暂未开放”。
+
+## 8. P1 加固规则（2026-11-04）
+
+| 规则 | 行为 |
+|---|---|
+| 公共 scope 持续校验 | 列表/详情同时检查 `content`、`name`（非匿名）、`photos`（有图）；缺 scope 不返回 |
+| 发布后内容变更 | 管理端修改正文/图片/标题/展示方式/阶段/时长/同意范围时，已发布内容转 `UNPUBLISHED`，否则转 `DRAFT`；`review_status=PENDING`，清空发布时间，写 `CONTENT_CHANGED` 审计 |
+| 同意记录变更 | 已发布内容补录/修改同意后立即 `UNPUBLISHED`，需管理员重新发布 |
+| 图片归属 | 会员/红娘报喜只能引用自己 `/storage/uploads/good_news/{user_id}/` 下的图片 |
+| 撤回角色 | FROM 只能由发起方撤，TO 只能由对方撤；未关联会员的登记不允许会员撤回 |
+| MASKED 头像 | 仅 `FULL` 返回真实头像并校验 `avatar` scope；`MASKED`/`ANONYMOUS` 返回空头像，前端渲染占位；服务红娘姓名按平台服务信息展示，不强制会员 `matchmaker` scope |
+| 会员关联对象 | 会员报喜只接受 `partner_name`，传 `to_user_id` 返回 422；关系关联由红娘代登记或后续服务端从业务记录推导 |
+| 一 Couple 一故事 | 本期不加 `couple_key` 唯一约束；同 `couple_key + stage + PENDING` 只允许一条待审；如产品改为“一 Couple 一故事”，另建 story/history 表。会员侧无 `to_user_id` 时 `couple_key` 只能基于提交人+称呼，跨双方账号无法完全去重，需红娘/管理员关联后合并 |

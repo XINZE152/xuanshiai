@@ -295,6 +295,106 @@ async def _sync_good_news_meta(db: AsyncSession, news_id: int, extra: dict[str, 
     )
 
 
+_GOOD_NEWS_REVIEW_EXTRA_KEYS = frozenset(
+    {
+        "stage",
+        "status",
+        "feedback_name",
+        "partner_name",
+        "from_user_id",
+        "to_user_id",
+        "from_avatar",
+        "to_avatar",
+        "matchmaker_id",
+        "matchmaker_name",
+        "meet_duration",
+        "meet_duration_months",
+        "content",
+        "content_html",
+        "images",
+        "blessing",
+        "display_mode",
+        "verification_level",
+        "source_type",
+        "source_id",
+        "public",
+    }
+)
+
+
+def _good_news_review_changed(
+    old_extra: dict[str, Any],
+    new_extra: dict[str, Any],
+    *,
+    old_title: str,
+    new_title: str,
+    old_subtitle: str | None,
+    new_subtitle: str | None,
+    old_image_url: str | None,
+    new_image_url: str | None,
+    old_status: int,
+    new_status: int,
+) -> bool:
+    if old_title != new_title:
+        return True
+    if (old_subtitle or "") != (new_subtitle or ""):
+        return True
+    if (old_image_url or "") != (new_image_url or ""):
+        return True
+    if old_status != new_status:
+        return True
+    return any(old_extra.get(key) != new_extra.get(key) for key in _GOOD_NEWS_REVIEW_EXTRA_KEYS)
+
+
+async def _reset_good_news_review(
+    db: AsyncSession,
+    *,
+    news_id: int,
+    admin_id: int | None,
+    reason: str,
+) -> None:
+    before = (
+        await db.execute(
+            text("SELECT review_status, public_status FROM good_news_meta WHERE news_id = :news_id"),
+            {"news_id": news_id},
+        )
+    ).mappings().first()
+    if before is None:
+        return
+    before_status = f"{before.get('review_status') or 'PENDING'}/{before.get('public_status') or 'DRAFT'}"
+    after_public = "UNPUBLISHED" if str(before.get("public_status") or "") == "PUBLISHED" else "DRAFT"
+    after_status = f"PENDING/{after_public}"
+    await db.execute(
+        text(
+            "UPDATE good_news_meta SET review_status = 'PENDING', public_status = :after_public, "
+            "published_at = NULL, reviewed_by = NULL, reviewed_at = NULL, reject_reason = NULL "
+            "WHERE news_id = :news_id"
+        ),
+        {"news_id": news_id, "after_public": after_public},
+    )
+    await db.execute(
+        text(
+            "UPDATE good_news_report SET status = 'PENDING', reject_reason = NULL, reviewed_at = NULL "
+            "WHERE news_id = :news_id"
+        ),
+        {"news_id": news_id},
+    )
+    await db.execute(
+        text(
+            "INSERT INTO good_news_audit "
+            "(news_id, actor_user_id, actor_role, action, reason, before_status, after_status) "
+            "VALUES (:news_id, :admin_id, 'ADMIN', 'CONTENT_CHANGED', :reason, :before_status, :after_status)"
+        ),
+        {
+            "news_id": news_id,
+            "admin_id": admin_id,
+            "reason": reason,
+            "before_status": before_status,
+            "after_status": after_status,
+        },
+    )
+
+
 async def create_item(db: AsyncSession, current_admin_id: int, domain: str, body: ContentItemCreate) -> ContentItem:
     _ensure_domain(domain)
     if body.status not in (1, 2):
@@ -329,7 +429,13 @@ async def create_item(db: AsyncSession, current_admin_id: int, domain: str, body
     return _row_to_item(row)
 
 
-async def update_item(db: AsyncSession, domain: str, item_id: int, body: ContentItemUpdate) -> ContentItem:
+async def update_item(
+    db: AsyncSession,
+    domain: str,
+    item_id: int,
+    body: ContentItemUpdate,
+    current_admin_id: int | None = None,
+) -> ContentItem:
     _ensure_domain(domain)
     row = (
         await db.execute(
@@ -362,21 +468,45 @@ async def update_item(db: AsyncSession, domain: str, item_id: int, body: Content
     if body.sort is not None:
         updates.append("sort = :sort")
         params["sort"] = body.sort
+    old_extra = dict(_row_to_item(row).extra)
     merged_extra: dict[str, Any] | None = None
     if body.extra is not None:
-        merged_extra = dict(_row_to_item(row).extra)
+        merged_extra = dict(old_extra)
         merged_extra.update(body.extra)
         updates.append("extra_json = :extra")
         params["extra"] = json.dumps(merged_extra, ensure_ascii=False)
     if not updates:
         return _row_to_item(row)
 
+    review_changed = False
+    if domain == "good_news":
+        review_changed = _good_news_review_changed(
+            old_extra,
+            merged_extra if merged_extra is not None else old_extra,
+            old_title=str(row.get("title") or ""),
+            new_title=body.title if body.title is not None else str(row.get("title") or ""),
+            old_subtitle=row.get("subtitle"),
+            new_subtitle=body.subtitle if body.subtitle is not None else row.get("subtitle"),
+            old_image_url=row.get("image_url"),
+            new_image_url=body.image_url if body.image_url is not None else row.get("image_url"),
+            old_status=int(row.get("status") or 1),
+            new_status=body.status if body.status is not None else int(row.get("status") or 1),
+        )
+
     await db.execute(
         text(f"UPDATE admin_content_item SET {', '.join(updates)} WHERE id = :id"),
         params,
     )
-    if domain == "good_news" and merged_extra is not None:
-        await _sync_good_news_meta(db, item_id, merged_extra)
+    if domain == "good_news":
+        if merged_extra is not None:
+            await _sync_good_news_meta(db, item_id, merged_extra)
+        if review_changed:
+            await _reset_good_news_review(
+                db,
+                news_id=item_id,
+                admin_id=current_admin_id,
+                reason="内容变更，需重新审核",
+            )
     await db.commit()
     fresh = (
         await db.execute(text("SELECT * FROM admin_content_item WHERE id = :id"), {"id": item_id})

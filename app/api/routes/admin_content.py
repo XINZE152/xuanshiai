@@ -89,7 +89,7 @@ async def content_update(
     db: AsyncSession = Depends(get_db),
 ) -> ContentItem:
     current.require("platform.config.write")
-    return await update_item(db, domain, item_id, body)
+    return await update_item(db, domain, item_id, body, current.account.id)
 
 
 @declare_permission("platform.config.write")
