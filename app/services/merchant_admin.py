@@ -601,6 +601,7 @@ async def list_orders(
     verify_start: str | None,
     verify_end: str | None,
     search_type: str | None = None,
+    buyer_field: str | None = None,
     *,
     scope: str | None = None,
     scope_params: dict[str, Any] | None = None,
@@ -624,7 +625,12 @@ async def list_orders(
         where.append("o.order_no LIKE CONCAT('%', :order_no, '%')")
         params["order_no"] = order_no
     if buyer_keyword:
-        where.append("(u.nickname LIKE CONCAT('%', :bk, '%') OR u.phone LIKE CONCAT('%', :bk, '%'))")
+        if buyer_field == "nickname":
+            where.append("u.nickname LIKE CONCAT('%', :bk, '%')")
+        elif buyer_field == "phone":
+            where.append("u.phone LIKE CONCAT('%', :bk, '%')")
+        else:
+            where.append("(u.nickname LIKE CONCAT('%', :bk, '%') OR u.phone LIKE CONCAT('%', :bk, '%'))")
         params["bk"] = buyer_keyword
     if verify_start:
         where.append("o.verified_at >= :verify_start")

@@ -274,6 +274,7 @@ async def order_list(
     verify_start: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     verify_end: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     search_type: str | None = Query(None, pattern="^(product|phone)$", description="keyword 的匹配目标：product 按商品关键词 / phone 按买家手机"),
+    buyer_field: str | None = Query(None, pattern="^(nickname|phone)$", description="buyer_keyword 的匹配目标：nickname 按昵称 / phone 按手机号；缺省两者取其一"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> MerchantOrderPage:
@@ -281,7 +282,7 @@ async def order_list(
     scope, scope_params = _scope(current)
     return await service.list_orders(
         db, page, page_size, merchant_id, status, verify_status, keyword, order_no, buyer_keyword,
-        verify_start, verify_end, search_type, scope=scope, scope_params=scope_params,
+        verify_start, verify_end, search_type, buyer_field=buyer_field, scope=scope, scope_params=scope_params,
     )
 
 
@@ -296,6 +297,7 @@ async def order_export(
     verify_start: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     verify_end: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     search_type: str | None = Query(None, pattern="^(product|phone)$", description="keyword 的匹配目标：product 按商品关键词 / phone 按买家手机"),
+    buyer_field: str | None = Query(None, pattern="^(nickname|phone)$", description="buyer_keyword 的匹配目标：nickname 按昵称 / phone 按手机号；缺省两者取其一"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
@@ -305,7 +307,7 @@ async def order_export(
         db, scope=scope, scope_params=scope_params,
         merchant_id=merchant_id, status=status, verify_status=verify_status, keyword=keyword,
         order_no=order_no, buyer_keyword=buyer_keyword, verify_start=verify_start, verify_end=verify_end,
-        search_type=search_type,
+        search_type=search_type, buyer_field=buyer_field,
     )
     return Response(
         content=content,
