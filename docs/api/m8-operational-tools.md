@@ -105,6 +105,12 @@ PUT   /admin/configs/{namespace}    保存（整体覆盖）
 }
 ```
 
+> 2026-11-04 起，`good_news` 的审核/公开/来源/同意/祝福/报喜数据改存关系表
+> `good_news_meta` / `good_news_consent` / `good_news_blessing` / `good_news_report` /
+> `good_news_audit`。`extra_json` 仍用于内容编辑，但**审核状态不再写进行级 `status`**；
+> 行级 `status` 继续表示 `1 正常 / 2 停用`。管理端审核列表、审核/发布/下架、
+> 同意记录接口见 [`good-news.md`](good-news.md)。
+
 ### 3.2 good_news_pennant（锦旗管理）
 
 ```json

@@ -47,8 +47,8 @@ def _real_settings(**overrides: object) -> Settings:
         "allow_real_pay_in_dev": True,
         "wechat_pay_mode": "real",
         "wechat_pay_mch_id": "1111571577",
-        "wechat_pay_app_id": "wxebcf0a4036441fd1",
-        "wechat_app_id": "wxebcf0a4036441fd1",
+        "wechat_pay_app_id": "wx0000000000000000",
+        "wechat_app_id": "wx0000000000000000",
         "wechat_app_secret": "test-app-secret",
         "wechat_pay_serial_no": "455499E1B986BC88DAE636F196AA468DE035649D",
         "wechat_pay_private_key": "-----BEGIN PRIVATE KEY-----\ndummy\n-----END PRIVATE KEY-----",
@@ -70,7 +70,7 @@ def test_real_accepts_complete_configuration() -> None:
 
 def test_real_rejects_app_id_mismatch() -> None:
     with pytest.raises(ValidationError, match="必须一致"):
-        _real_settings(wechat_app_id="wx744472d3e3e7f825")
+        _real_settings(wechat_app_id="wx1111111111111111")
 
 
 def test_real_requires_app_secret() -> None:
@@ -122,7 +122,7 @@ def test_disabled_mode_skips_real_payment_checks() -> None:
         environment="development",
         auto_init_db=True,
         wechat_pay_mode="disabled",
-        wechat_app_id="wx744472d3e3e7f825",
-        wechat_pay_app_id="wxebcf0a4036441fd1",
+        wechat_app_id="wx1111111111111111",
+        wechat_pay_app_id="wx0000000000000000",
     )
     assert settings.wechat_pay_mode == "disabled"

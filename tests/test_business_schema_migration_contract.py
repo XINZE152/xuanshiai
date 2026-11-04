@@ -58,6 +58,7 @@ def test_manifest_checksums_are_lf_normalised() -> None:
         "20261030_03_payment_entitlement_keys",
         "20261030_04_user_points_biz_key",
         "20261102_01_user_feedback",
+        "20261104_01_good_news",
     ]
     for entry in manifest["versions"]:
         for direction in ("up", "down", "verify", "verify_previous"):

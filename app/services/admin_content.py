@@ -235,6 +235,66 @@ async def list_items(
     )
 
 
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _good_news_meta_params(news_id: int, extra: dict[str, Any]) -> dict[str, Any]:
+    months = _int_or_none(extra.get("meet_duration_months"))
+    if months is None:
+        match = re.search(r"\d+", str(extra.get("meet_duration") or ""))
+        months = int(match.group()) if match else None
+    return {
+        "news_id": news_id,
+        "stage": str(extra.get("stage") or extra.get("status") or ""),
+        "review_status": str(extra.get("review_status") or "PENDING"),
+        "public_status": str(extra.get("public_status") or "DRAFT"),
+        "source_type": str(extra.get("source_type") or "MANUAL"),
+        "source_id": _int_or_none(extra.get("source_id")),
+        "from_user_id": _int_or_none(extra.get("from_user_id")),
+        "to_user_id": _int_or_none(extra.get("to_user_id")),
+        "matchmaker_id": _int_or_none(extra.get("matchmaker_id")),
+        "months": months,
+        "display_mode": str(extra.get("display_mode") or "MASKED"),
+        "verification_level": str(extra.get("verification_level") or "SELF_REPORTED"),
+    }
+
+
+async def _insert_good_news_meta(db: AsyncSession, news_id: int, extra: dict[str, Any]) -> None:
+    params = _good_news_meta_params(news_id, extra)
+    # 通用内容创建入口不允许通过 extra 直接发布；必须走审核/发布接口。
+    params["review_status"] = "PENDING"
+    params["public_status"] = "DRAFT"
+    await db.execute(
+        text(
+            "INSERT INTO good_news_meta "
+            "(news_id, stage, review_status, public_status, source_type, source_id, from_user_id, to_user_id, "
+            "matchmaker_id, meet_duration_months, display_mode, verification_level, submitted_by_role) "
+            "VALUES (:news_id, :stage, :review_status, :public_status, :source_type, :source_id, :from_user_id, "
+            ":to_user_id, :matchmaker_id, :months, :display_mode, :verification_level, 'ADMIN') "
+            "ON DUPLICATE KEY UPDATE stage = :stage, meet_duration_months = :months, "
+            "display_mode = :display_mode, verification_level = :verification_level"
+        ),
+        params,
+    )
+
+
+async def _sync_good_news_meta(db: AsyncSession, news_id: int, extra: dict[str, Any]) -> None:
+    params = _good_news_meta_params(news_id, extra)
+    await db.execute(
+        text(
+            "UPDATE good_news_meta SET stage = :stage, meet_duration_months = :months, "
+            "display_mode = :display_mode, verification_level = :verification_level WHERE news_id = :news_id"
+        ),
+        params,
+    )
+
+
 async def create_item(db: AsyncSession, current_admin_id: int, domain: str, body: ContentItemCreate) -> ContentItem:
     _ensure_domain(domain)
     if body.status not in (1, 2):
@@ -257,8 +317,10 @@ async def create_item(db: AsyncSession, current_admin_id: int, domain: str, body
             "created_by": current_admin_id,
         },
     )
-    await db.commit()
     item_id = int(result.lastrowid or 0)
+    if domain == "good_news" and item_id > 0:
+        await _insert_good_news_meta(db, item_id, body.extra or {})
+    await db.commit()
     row = (
         await db.execute(text("SELECT * FROM admin_content_item WHERE id = :id"), {"id": item_id})
     ).mappings().first()
@@ -300,11 +362,12 @@ async def update_item(db: AsyncSession, domain: str, item_id: int, body: Content
     if body.sort is not None:
         updates.append("sort = :sort")
         params["sort"] = body.sort
+    merged_extra: dict[str, Any] | None = None
     if body.extra is not None:
-        merged = dict(_row_to_item(row).extra)
-        merged.update(body.extra)
+        merged_extra = dict(_row_to_item(row).extra)
+        merged_extra.update(body.extra)
         updates.append("extra_json = :extra")
-        params["extra"] = json.dumps(merged, ensure_ascii=False)
+        params["extra"] = json.dumps(merged_extra, ensure_ascii=False)
     if not updates:
         return _row_to_item(row)
 
@@ -312,6 +375,8 @@ async def update_item(db: AsyncSession, domain: str, item_id: int, body: Content
         text(f"UPDATE admin_content_item SET {', '.join(updates)} WHERE id = :id"),
         params,
     )
+    if domain == "good_news" and merged_extra is not None:
+        await _sync_good_news_meta(db, item_id, merged_extra)
     await db.commit()
     fresh = (
         await db.execute(text("SELECT * FROM admin_content_item WHERE id = :id"), {"id": item_id})

@@ -70,15 +70,93 @@ COMPLETION_RULES: tuple[tuple[str, str, int], ...] = (
     ("height", "身高", 4),
     ("weight", "体重", 4),
     ("hometown", "家乡", 4),
-    ("avatar", "头像", 15),
-    ("intro", "关于我", 10),
-    ("album", "相册", 8),
-    ("personal_tags", "兴趣标签", 8),
+    ("avatar", "头像", 11),
+    ("intro", "关于我", 8),
+    ("album", "相册", 5),
+    ("personal_tags", "兴趣标签", 5),
     ("mbti", "MBTI", 2),
     ("preference", "择偶要求", 3),
     ("realname", "实名认证", 5),
     ("single_pledge", "单身承诺", 1),
+    # 9 项详细资料纳入权重表：从头像/关于我/相册/兴趣标签扣回 12 分，
+    # 9 项合计 12 分，总和仍为 100。前端只读接口 weight，不再维护副本。
+    ("company", "公司", 2),
+    ("school", "毕业学校", 2),
+    ("house", "购房情况", 1),
+    ("car", "购车情况", 1),
+    ("household", "户口所在地", 2),
+    ("ethnicity", "民族", 1),
+    ("religion", "宗教信仰", 1),
+    ("smoking", "吸烟习惯", 1),
+    ("drinking", "饮酒习惯", 1),
 )
+
+_COMPLETION_EMPTY_TEXTS = {"", "未填写", "请选择"}
+
+
+def _completion_text_present(value: Any) -> bool:
+    if value is None:
+        return False
+    return str(value).strip() not in _COMPLETION_EMPTY_TEXTS
+
+
+def _completion_state(row: Any) -> dict[str, bool]:
+    """单一完成度判定：所有出口共用，避免 score 与 items 各算一套。"""
+    return {
+        "gender": row["gender"] in (1, 2),
+        "birthday": bool(row["birthday"] and _calculate_age(row["birthday"]) >= 18),
+        "location": bool(row["residence_province_code"] and row["residence_city_code"]),
+        "marriage": row["is_married"] in (1, 2, 3),
+        "occupation": _completion_text_present(row["occupation"]),
+        "education": row["education_level"] is not None,
+        "income": row["income"] is not None,
+        "height": row["height"] is not None,
+        "weight": row["weight"] is not None,
+        "hometown": bool(row["hometown_province_code"] and row["hometown_city_code"]),
+        "avatar": _completion_text_present(row["avatar"]),
+        "intro": bool(row["self_intro"] and len(str(row["self_intro"]).strip()) >= 20),
+        "album": bool(row["album_done"]),
+        "personal_tags": len(personal_tags(_profile_tag_values(row), _profile_custom_tags(row))) >= 3,
+        "mbti": _completion_text_present(row["mbti"]),
+        "preference": row["preference_age_min"] is not None and row["preference_age_max"] is not None,
+        "realname": row["realname_status"] == 2,
+        "single_pledge": row["is_single_pledge"] == 1,
+        "company": _completion_text_present(row.get("company")),
+        "school": _completion_text_present(row.get("school")),
+        "house": _completion_text_present(row.get("house")),
+        "car": _completion_text_present(row.get("car")),
+        "household": bool(
+            (row.get("household_province_code") and row.get("household_city_code"))
+            or _completion_text_present(row.get("household"))
+        ),
+        "ethnicity": _completion_text_present(row.get("ethnicity")),
+        "religion": _completion_text_present(row.get("religion")),
+        "smoking": _completion_text_present(row.get("smoking")),
+        "drinking": _completion_text_present(row.get("drinking")),
+    }
+
+
+def _completion_score(completed: dict[str, bool]) -> float:
+    return float(sum(weight for key, _, weight in COMPLETION_RULES if completed[key]))
+
+
+_COMPLETION_ROW_SELECT = """SELECT u.gender, u.birthday, u.is_married, u.avatar, u.is_single_pledge,
+              COALESCE(ua.realname_status, 0) AS realname_status,
+              ua.school, ua.company,
+              p.occupation, p.education_level, p.income, p.height, p.weight, p.self_intro,
+              p.household, p.household_province_code, p.household_city_code,
+              p.ethnicity, p.house, p.car, p.smoking, p.drinking, p.religion,
+              p.hometown_province_code, p.hometown_city_code,
+              p.residence_province_code, p.residence_city_code, p.interest_tags,
+              p.personality_tags, p.mbti, p.tags, pref.age_min AS preference_age_min,
+              pref.age_max AS preference_age_max,
+              EXISTS (SELECT 1 FROM user_media m WHERE m.user_id = u.id
+                      AND m.media_type = 'photo' AND m.deleted_at IS NULL) AS album_done
+       FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
+       LEFT JOIN user_partner_preference pref ON pref.user_id = u.id
+       LEFT JOIN user_auth ua ON ua.user_id = u.id
+       WHERE u.id = :id"""
+
 
 INTRO_TEMPLATES: tuple[dict[str, str], ...] = (
     {
@@ -565,46 +643,12 @@ async def recalculate_completion(db: AsyncSession, user_id: int) -> float:
         text("SELECT id FROM users WHERE id = :user_id FOR UPDATE"),
         {"user_id": user_id},
     )
-    result = await db.execute(
-        text("""SELECT u.gender, u.birthday, u.is_married, u.avatar, u.is_single_pledge,
-                      COALESCE(ua.realname_status, 0) AS realname_status,
-                      p.occupation, p.education_level, p.income, p.height, p.weight, p.self_intro,
-                      p.hometown_province_code, p.hometown_city_code,
-                      p.residence_province_code, p.residence_city_code, p.interest_tags,
-                      p.personality_tags, p.mbti, p.tags, pref.age_min AS preference_age_min,
-                      pref.age_max AS preference_age_max,
-                      EXISTS (SELECT 1 FROM user_media m WHERE m.user_id = u.id
-                              AND m.media_type = 'photo' AND m.deleted_at IS NULL) AS album_done
-               FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
-               LEFT JOIN user_partner_preference pref ON pref.user_id = u.id
-               LEFT JOIN user_auth ua ON ua.user_id = u.id
-               WHERE u.id = :id"""),
-        {"id": user_id},
-    )
+    result = await db.execute(text(_COMPLETION_ROW_SELECT), {"id": user_id})
     row = result.mappings().first()
     if not row:
         raise HTTPException(404, detail="用户不存在")
-    completed = {
-        "gender": row["gender"] in (1, 2),
-        "birthday": bool(row["birthday"] and _calculate_age(row["birthday"]) >= 18),
-        "location": bool(row["residence_province_code"] and row["residence_city_code"]),
-        "marriage": row["is_married"] in (1, 2, 3),
-        "occupation": bool(row["occupation"]),
-        "education": row["education_level"] is not None,
-        "income": row["income"] is not None,
-        "height": row["height"] is not None,
-        "weight": row["weight"] is not None,
-        "hometown": bool(row["hometown_province_code"] and row["hometown_city_code"]),
-        "avatar": bool(row["avatar"]),
-        "intro": bool(row["self_intro"] and len(row["self_intro"].strip()) >= 20),
-        "album": bool(row["album_done"]),
-        "personal_tags": len(personal_tags(_profile_tag_values(row), _profile_custom_tags(row))) >= 3,
-        "mbti": bool(row["mbti"]),
-        "preference": row["preference_age_min"] is not None and row["preference_age_max"] is not None,
-        "realname": row["realname_status"] == 2,
-        "single_pledge": row["is_single_pledge"] == 1,
-    }
-    score = float(sum(weight for key, _, weight in COMPLETION_RULES if completed[key]))
+    completed = _completion_state(row)
+    score = _completion_score(completed)
     columns = {
         "gender_completed": completed["gender"],
         "birthday_completed": completed["birthday"],
@@ -628,8 +672,8 @@ async def recalculate_completion(db: AsyncSession, user_id: int) -> float:
     assignments = ", ".join(f"{key} = :{key}" for key in (*columns, "score"))
     await db.execute(
         text(f"""INSERT INTO user_profile_completion (user_id, {', '.join(columns)}, score, algorithm_version, calculated_at)
-                   VALUES (:user_id, {', '.join(f':{key}' for key in columns)}, :score, 'profile-v4', UTC_TIMESTAMP())
-                   ON DUPLICATE KEY UPDATE {assignments}, algorithm_version = 'profile-v4', calculated_at = UTC_TIMESTAMP()"""),
+                   VALUES (:user_id, {', '.join(f':{key}' for key in columns)}, :score, 'profile-v5', UTC_TIMESTAMP())
+                   ON DUPLICATE KEY UPDATE {assignments}, algorithm_version = 'profile-v5', calculated_at = UTC_TIMESTAMP()"""),
         {"user_id": user_id, **{key: int(value) for key, value in columns.items()}, "score": score},
     )
     await db.execute(text("UPDATE users SET data_complete_rate = :score WHERE id = :id"), {"score": score, "id": user_id})
@@ -637,45 +681,12 @@ async def recalculate_completion(db: AsyncSession, user_id: int) -> float:
 
 
 async def get_completion(db: AsyncSession, user_id: int) -> CompletionResponse:
-    score = await recalculate_completion(db, user_id)
+    await recalculate_completion(db, user_id)
     await db.commit()
-    result = await db.execute(
-        text("""SELECT u.gender, u.birthday, u.is_married, u.is_single_pledge, u.avatar,
-                      COALESCE(ua.realname_status, 0) AS realname_status,
-                      p.occupation, p.education_level, p.income, p.height, p.weight, p.self_intro,
-                      p.hometown_province_code, p.hometown_city_code,
-                      p.residence_province_code, p.residence_city_code, p.interest_tags,
-                      p.personality_tags, p.mbti, p.tags, pref.age_min AS preference_age_min,
-                      pref.age_max AS preference_age_max,
-                      EXISTS (SELECT 1 FROM user_media m WHERE m.user_id = u.id
-                              AND m.media_type = 'photo' AND m.deleted_at IS NULL) AS album_done
-               FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
-               LEFT JOIN user_partner_preference pref ON pref.user_id = u.id
-               LEFT JOIN user_auth ua ON ua.user_id = u.id
-               WHERE u.id = :id"""),
-        {"id": user_id},
-    )
+    result = await db.execute(text(_COMPLETION_ROW_SELECT), {"id": user_id})
     row = result.mappings().one()
-    completed = {
-        "gender": row["gender"] in (1, 2),
-        "birthday": bool(row["birthday"] and _calculate_age(row["birthday"]) >= 18),
-        "location": bool(row["residence_province_code"] and row["residence_city_code"]),
-        "marriage": row["is_married"] in (1, 2, 3),
-        "occupation": bool(row["occupation"]),
-        "education": row["education_level"] is not None,
-        "income": row["income"] is not None,
-        "height": row["height"] is not None,
-        "weight": row["weight"] is not None,
-        "hometown": bool(row["hometown_province_code"] and row["hometown_city_code"]),
-        "avatar": bool(row["avatar"]),
-        "intro": bool(row["self_intro"] and len(row["self_intro"].strip()) >= 20),
-        "album": bool(row["album_done"]),
-        "personal_tags": len(personal_tags(_profile_tag_values(row), _profile_custom_tags(row))) >= 3,
-        "mbti": bool(row["mbti"]),
-        "preference": row["preference_age_min"] is not None and row["preference_age_max"] is not None,
-        "realname": row["realname_status"] == 2,
-        "single_pledge": row["is_single_pledge"] == 1,
-    }
+    completed = _completion_state(row)
+    score = _completion_score(completed)
     items = [
         CompletionItemResponse(key=key, label=label, weight=weight, completed=completed[key])
         for key, label, weight in COMPLETION_RULES
