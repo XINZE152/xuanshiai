@@ -89,10 +89,28 @@ _PUBLIC_WHERE = """
     AND EXISTS (
         SELECT 1 FROM good_news_consent cf
         WHERE cf.news_id = c.id AND cf.role = 'FROM' AND cf.revoked_at IS NULL
+          AND JSON_CONTAINS(COALESCE(cf.scopes_json, JSON_ARRAY()), JSON_QUOTE('content'))
+          AND (
+              m.display_mode = 'ANONYMOUS'
+              OR JSON_CONTAINS(COALESCE(cf.scopes_json, JSON_ARRAY()), JSON_QUOTE('name'))
+          )
+          AND (
+              COALESCE(JSON_LENGTH(JSON_EXTRACT(c.extra_json, '$.images')), 0) = 0
+              OR JSON_CONTAINS(COALESCE(cf.scopes_json, JSON_ARRAY()), JSON_QUOTE('photos'))
+          )
     )
     AND EXISTS (
         SELECT 1 FROM good_news_consent ct
         WHERE ct.news_id = c.id AND ct.role = 'TO' AND ct.revoked_at IS NULL
+          AND JSON_CONTAINS(COALESCE(ct.scopes_json, JSON_ARRAY()), JSON_QUOTE('content'))
+          AND (
+              m.display_mode = 'ANONYMOUS'
+              OR JSON_CONTAINS(COALESCE(ct.scopes_json, JSON_ARRAY()), JSON_QUOTE('name'))
+          )
+          AND (
+              COALESCE(JSON_LENGTH(JSON_EXTRACT(c.extra_json, '$.images')), 0) = 0
+              OR JSON_CONTAINS(COALESCE(ct.scopes_json, JSON_ARRAY()), JSON_QUOTE('photos'))
+          )
     )
 """
 
@@ -178,14 +196,20 @@ def _mask_name(name: str | None, mode: str) -> str | None:
 
 
 def _mask_avatar(avatar: str | None, mode: str) -> str | None:
-    if mode == "ANONYMOUS":
-        return None
-    return avatar
+    # 只有 FULL 才允许公开真实头像；MASKED 也使用中性占位（前端按 display_mode 渲染）。
+    if mode == "FULL":
+        return avatar
+    return None
 
 
-def _clean_images(images: list[str]) -> list[str]:
+def _clean_images(images: list[str], *, owner_ids: set[int] | None = None) -> list[str]:
     if len(images) > 9:
         raise HTTPException(422, detail="一条喜讯最多上传 9 张图片")
+    allowed_prefixes = (
+        tuple(f"/storage/uploads/good_news/{owner_id}/" for owner_id in owner_ids)
+        if owner_ids
+        else ()
+    )
     result: list[str] = []
     for raw in images:
         value = str(raw).strip()
@@ -193,6 +217,8 @@ def _clean_images(images: list[str]) -> list[str]:
             continue
         if not value.startswith("/storage/"):
             raise HTTPException(422, detail="图片需先通过喜讯图片上传接口上传")
+        if allowed_prefixes and not value.startswith(allowed_prefixes):
+            raise HTTPException(422, detail="图片不属于当前提交人")
         result.append(value)
     return result
 
@@ -701,6 +727,21 @@ async def _ensure_workspace_member(db: AsyncSession, actor: Any, member_id: int)
         raise HTTPException(403, detail="只能登记工作范围内的会员")
 
 
+def _resolve_report_party_ids(
+    *,
+    submitter_id: int,
+    submitter_role: str,
+    body: GoodNewsReportCreate,
+) -> tuple[int | None, int | None]:
+    if submitter_role == "MEMBER":
+        if body.to_user_id is not None:
+            raise HTTPException(422, detail="会员报喜只需填写对方称呼，不能指定会员 ID")
+        if not (body.partner_name or "").strip():
+            raise HTTPException(422, detail="请填写对方称呼")
+        return submitter_id, None
+    return body.from_user_id, body.to_user_id
+
+
 async def create_report(
     db: AsyncSession,
     *,
@@ -728,24 +769,12 @@ async def create_report(
             if existing.get("news_id"):
                 return await _get_item_for_submitter(db, int(existing["news_id"]), submitter_id), int(existing["id"])
             raise HTTPException(409, detail="该报喜已提交，正在处理")
-    else:
-        partner_key = (body.partner_name or "").strip()
-        existing = (
-            await db.execute(
-                text(
-                    "SELECT id FROM good_news_report "
-                    "WHERE submitter_id = :submitter_id AND stage = :stage "
-                    "AND COALESCE(partner_name, '') = :partner_name AND status = 'PENDING' "
-                    "AND created_at >= (NOW() - INTERVAL 24 HOUR) LIMIT 1"
-                ),
-                {"submitter_id": submitter_id, "stage": body.stage, "partner_name": partner_key},
-            )
-        ).mappings().first()
-        if existing:
-            raise HTTPException(409, detail="24 小时内已提交过相同进展，请等待审核")
 
-    from_user_id = body.from_user_id if submitter_role == "MATCHMAKER" else submitter_id
-    to_user_id = body.to_user_id
+    from_user_id, to_user_id = _resolve_report_party_ids(
+        submitter_id=submitter_id,
+        submitter_role=submitter_role,
+        body=body,
+    )
     if submitter_role == "MATCHMAKER":
         if from_user_id:
             await _ensure_workspace_member(db, actor, from_user_id)
@@ -769,7 +798,7 @@ async def create_report(
         matchmaker_id = submitter_id
     matchmaker_name = await _load_matchmaker_name(db, matchmaker_id) or "服务红娘"
     months = _duration_months(body)
-    images = _clean_images(body.images)
+    images = _clean_images(body.images, owner_ids={submitter_id})
     display_mode = body.display_mode or "MASKED"
     # 核验等级由服务端控制，客户端不能自封 PLATFORM_VERIFIED。
     verification_level = "SELF_REPORTED" if submitter_role == "MEMBER" else "MATCHMAKER_FOLLOWUP"
@@ -779,6 +808,37 @@ async def create_report(
     elif source_type == "SELF_REPORTED":
         source_type = "MANUAL"
     couple_key = _couple_key(from_user_id, to_user_id, to_name, submitter_id)
+    # 同 Couple + 阶段只允许一条待审；couple_key 为空时回退为提交人 + 称呼 + 24h。
+    if couple_key:
+        existing = (
+            await db.execute(
+                text(
+                    "SELECT r.id FROM good_news_report r "
+                    "JOIN good_news_meta m ON m.news_id = r.news_id "
+                    "WHERE r.stage = :stage AND r.status = 'PENDING' AND m.couple_key = :couple_key "
+                    "LIMIT 1"
+                ),
+                {"stage": body.stage, "couple_key": couple_key},
+            )
+        ).mappings().first()
+    else:
+        existing = (
+            await db.execute(
+                text(
+                    "SELECT id FROM good_news_report "
+                    "WHERE submitter_id = :submitter_id AND stage = :stage "
+                    "AND COALESCE(partner_name, '') = :partner_name AND status = 'PENDING' "
+                    "AND created_at >= (NOW() - INTERVAL 24 HOUR) LIMIT 1"
+                ),
+                {
+                    "submitter_id": submitter_id,
+                    "stage": body.stage,
+                    "partner_name": (to_name or "").strip(),
+                },
+            )
+        ).mappings().first()
+    if existing:
+        raise HTTPException(409, detail="同一对会员该阶段已有待审喜讯，请等待审核")
     title = _display_title(from_name, to_name)
     raw_duration = (body.meet_duration or "").strip() or (str(months) if months is not None else None)
     extra = {
@@ -1486,6 +1546,26 @@ async def record_consent(
         consent_version=consent_version,
         consent_source=source,
     )
+    meta = await _fetch_row(db, news_id)
+    if meta is not None and str(meta.get("meta_public_status") or "") == "PUBLISHED":
+        await db.execute(
+            text(
+                "UPDATE good_news_meta SET public_status = 'UNPUBLISHED', published_at = NULL "
+                "WHERE news_id = :news_id"
+            ),
+            {"news_id": news_id},
+        )
+        await _audit(
+            db,
+            news_id=news_id,
+            report_id=None,
+            actor_user_id=admin_account_id,
+            actor_role="ADMIN",
+            action="CONSENT_CHANGED",
+            reason=role,
+            before_status="APPROVED/PUBLISHED",
+            after_status="APPROVED/UNPUBLISHED",
+        )
     await _audit(
         db,
         news_id=news_id,
@@ -1499,6 +1579,22 @@ async def record_consent(
     return await list_consents(db, news_id)
 
 
+def _can_revoke_consent(
+    *,
+    role: str,
+    user_id: int,
+    meta_from_user_id: int | None,
+    meta_to_user_id: int | None,
+    consent_user_id: int | None,
+) -> bool:
+    expected = meta_from_user_id if role == "FROM" else meta_to_user_id
+    if expected is None or user_id != expected:
+        return False
+    if consent_user_id is not None and consent_user_id != expected:
+        return False
+    return True
+
+
 async def revoke_consent(db: AsyncSession, *, news_id: int, user_id: int, role: str) -> None:
     row = (
         await db.execute(
@@ -1509,12 +1605,17 @@ async def revoke_consent(db: AsyncSession, *, news_id: int, user_id: int, role: 
     if row is None:
         raise HTTPException(404, detail="同意记录不存在")
     consent_user = _as_int(row.get("user_id"))
-    if consent_user is not None and consent_user != user_id:
+    meta = await _fetch_row(db, news_id)
+    if meta is None:
+        raise HTTPException(404, detail="喜讯不存在")
+    if not _can_revoke_consent(
+        role=role,
+        user_id=user_id,
+        meta_from_user_id=_as_int(meta.get("meta_from_user_id")),
+        meta_to_user_id=_as_int(meta.get("meta_to_user_id")),
+        consent_user_id=consent_user,
+    ):
         raise HTTPException(403, detail="无权撤回该同意")
-    if consent_user is None:
-        meta = await _fetch_row(db, news_id)
-        if meta is None or user_id not in {_as_int(meta.get("meta_from_user_id")), _as_int(meta.get("meta_to_user_id"))}:
-            raise HTTPException(403, detail="无权撤回该同意")
     await db.execute(
         text("UPDATE good_news_consent SET revoked_at = NOW() WHERE news_id = :news_id AND role = :role"),
         {"news_id": news_id, "role": role},
