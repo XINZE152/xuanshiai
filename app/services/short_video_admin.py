@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException
@@ -215,6 +216,7 @@ async def list_videos(
     flag: str | None,
     keyword: str | None,
     order_by: str | None,
+    search_by: str | None = None,
 ) -> ShortVideoPage:
     where = ["v.deleted_at IS NULL"]
     params: dict = {"limit": page_size, "offset": (page - 1) * page_size}
@@ -231,7 +233,10 @@ async def list_videos(
     elif flag == "hot":
         where.append("v.is_hot = 1")
     if keyword:
-        where.append("v.description LIKE CONCAT('%', :kw, '%')")
+        if search_by == "nick":
+            where.append("u.nickname LIKE CONCAT('%', :kw, '%')")
+        else:
+            where.append("v.description LIKE CONCAT('%', :kw, '%')")
         params["kw"] = keyword
     clause = " AND ".join(where)
     order = "v.is_top DESC, v.sort DESC, v.id DESC"
@@ -239,11 +244,15 @@ async def list_videos(
         order = "v.published_at DESC, v.id DESC"
     elif order_by == "views":
         order = "v.view_count DESC, v.id DESC"
+    elif order_by == "likes":
+        order = "v.like_count DESC, v.id DESC"
+    elif order_by == "comments":
+        order = "v.comment_count DESC, v.id DESC"
     rows = await db.execute(
         text(f"{_VIDEO_SELECT} WHERE {clause} ORDER BY {order} LIMIT :limit OFFSET :offset"), params
     )
     count = await db.execute(
-        text(f"SELECT COUNT(*) FROM short_video v WHERE {clause}"),
+        text(f"SELECT COUNT(*) FROM short_video v LEFT JOIN users u ON u.id = v.publisher_user_id WHERE {clause}"),
         {k: v for k, v in params.items() if k not in ("limit", "offset")},
     )
     total = int(count.scalar() or 0)
@@ -258,6 +267,10 @@ async def list_videos(
 
 async def create_video(db: AsyncSession, body: ShortVideoCreate) -> ShortVideoItem:
     payload = _video_payload(body, partial=False)
+    # published_at 列为 NOT NULL，而后台「添加视频」抽屉不提交发布时间（自动占位），
+    # 缺省时以当前 UTC 时间兜底，避免插入 NULL 触发 1048。
+    if payload.get("published_at") is None:
+        payload["published_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     columns = ", ".join(payload.keys())
     placeholders = ", ".join(f":{k}" for k in payload)
     result = await db.execute(text(f"INSERT INTO short_video ({columns}) VALUES ({placeholders})"), payload)
@@ -476,6 +489,10 @@ async def list_tips(
     if keyword:
         if search_by == "video":
             where.append("v.description LIKE CONCAT('%', :kw, '%')")
+        elif search_by == "tipper":
+            where.append("tu.nickname LIKE CONCAT('%', :kw, '%')")
+        elif search_by == "receiver":
+            where.append("ru.nickname LIKE CONCAT('%', :kw, '%')")
         else:
             where.append("(tu.nickname LIKE CONCAT('%', :kw, '%') OR ru.nickname LIKE CONCAT('%', :kw, '%'))")
         params["kw"] = keyword

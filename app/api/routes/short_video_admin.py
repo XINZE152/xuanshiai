@@ -89,12 +89,13 @@ async def video_list(
     category_id: int | None = Query(None, ge=1),
     flag: str | None = Query(None, pattern="^(top|recommend|hot)$"),
     keyword: str | None = Query(None, max_length=128),
-    order_by: str | None = Query(None, pattern="^(publish|views)$"),
+    order_by: str | None = Query(None, pattern="^(publish|views|likes|comments)$"),
+    search_by: str | None = Query(None, pattern="^(title|nick)$", description="keyword 的匹配目标：title 按视频描述 / nick 按发布者昵称"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> ShortVideoPage:
     current.require("video.read")
-    return await service.list_videos(db, page, page_size, audit_status, category_id, flag, keyword, order_by)
+    return await service.list_videos(db, page, page_size, audit_status, category_id, flag, keyword, order_by, search_by)
 
 
 @video_router.post("", response_model=ShortVideoItem, status_code=201, summary="新增视频")
@@ -205,8 +206,8 @@ async def tip_list(
     page: int = Query(1, ge=1, le=1000),
     page_size: int = Query(20, ge=1, le=100),
     keyword: str | None = Query(None, max_length=64),
-    search_by: str | None = Query(None, pattern="^(video|user)$"),
-    search_type: str | None = Query(None, pattern="^(video|user)$", description="与 search_by 等价：video 按视频搜 / user 按昵称搜"),
+    search_by: str | None = Query(None, pattern="^(video|user|nick|tipper|receiver)$"),
+    search_type: str | None = Query(None, pattern="^(video|user|nick|tipper|receiver)$", description="与 search_by 等价：video 按视频 / nick 按双方昵称 / tipper 按打赏人 / receiver 按受赏人"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> VideoTipPage:
