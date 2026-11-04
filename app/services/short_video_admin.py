@@ -215,6 +215,7 @@ async def list_videos(
     flag: str | None,
     keyword: str | None,
     order_by: str | None,
+    search_by: str | None = None,
 ) -> ShortVideoPage:
     where = ["v.deleted_at IS NULL"]
     params: dict = {"limit": page_size, "offset": (page - 1) * page_size}
@@ -231,7 +232,10 @@ async def list_videos(
     elif flag == "hot":
         where.append("v.is_hot = 1")
     if keyword:
-        where.append("v.description LIKE CONCAT('%', :kw, '%')")
+        if search_by == "nick":
+            where.append("u.nickname LIKE CONCAT('%', :kw, '%')")
+        else:
+            where.append("v.description LIKE CONCAT('%', :kw, '%')")
         params["kw"] = keyword
     clause = " AND ".join(where)
     order = "v.is_top DESC, v.sort DESC, v.id DESC"
@@ -239,11 +243,15 @@ async def list_videos(
         order = "v.published_at DESC, v.id DESC"
     elif order_by == "views":
         order = "v.view_count DESC, v.id DESC"
+    elif order_by == "likes":
+        order = "v.like_count DESC, v.id DESC"
+    elif order_by == "comments":
+        order = "v.comment_count DESC, v.id DESC"
     rows = await db.execute(
         text(f"{_VIDEO_SELECT} WHERE {clause} ORDER BY {order} LIMIT :limit OFFSET :offset"), params
     )
     count = await db.execute(
-        text(f"SELECT COUNT(*) FROM short_video v WHERE {clause}"),
+        text(f"SELECT COUNT(*) FROM short_video v LEFT JOIN users u ON u.id = v.publisher_user_id WHERE {clause}"),
         {k: v for k, v in params.items() if k not in ("limit", "offset")},
     )
     total = int(count.scalar() or 0)
@@ -476,6 +484,10 @@ async def list_tips(
     if keyword:
         if search_by == "video":
             where.append("v.description LIKE CONCAT('%', :kw, '%')")
+        elif search_by == "tipper":
+            where.append("tu.nickname LIKE CONCAT('%', :kw, '%')")
+        elif search_by == "receiver":
+            where.append("ru.nickname LIKE CONCAT('%', :kw, '%')")
         else:
             where.append("(tu.nickname LIKE CONCAT('%', :kw, '%') OR ru.nickname LIKE CONCAT('%', :kw, '%'))")
         params["kw"] = keyword
