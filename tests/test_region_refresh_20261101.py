@@ -83,6 +83,14 @@ def test_format_region_handles_version_layouts(monkeypatch: pytest.MonkeyPatch) 
     assert ip_offline.format_region("亚洲|中国|广东|深圳|福田|电信|114.05|22.55") == "广东深圳"
 
 
+def test_format_region_parts_normalizes_short_api_names() -> None:
+    assert ip_offline.format_region_parts("中国", "浙江", "杭州") == "浙江省杭州市"
+    assert ip_offline.format_region_parts("中国", "北京", "北京") == "北京市"
+    assert ip_offline.format_region_parts("中国", "内蒙古", "呼和浩特") == "内蒙古自治区呼和浩特市"
+    assert ip_offline.format_region_parts("中国", "香港", "香港") == "香港特别行政区"
+    assert ip_offline.format_region_parts("美国", "California", "Los Angeles") == "美国"
+
+
 def test_phone_segment_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "region_phone_segment_path", str(SAMPLE_SEGMENT))
     outcome = phone_offline.resolve_many(
@@ -129,9 +137,10 @@ def test_kind_maps_to_internal_columns() -> None:
 
 
 def test_refresh_region_keeps_gating_literals() -> None:
-    """路由层保持既有门控字面量，写库语句只允许出现在 services/region/refresh.py。"""
+    """路由层保持门控字面量，写库语句只允许出现在 services/region/refresh.py。"""
     src = inspect.getsource(crm._refresh_region)
-    assert "503" in src and "501" in src
+    assert "provider_for" in src
+    assert "503" in src and "api" in src
     assert "dry_run=True" in src
     assert "UPDATE users SET ip_region" not in src
     assert "UPDATE users SET phone_region" not in src
@@ -140,7 +149,7 @@ def test_refresh_region_keeps_gating_literals() -> None:
 def test_refresh_result_backward_compatible_defaults() -> None:
     result = crm.RegionRefreshResult(
         kind="ip",
-        provider="offline",
+        provider="api",
         dry_run=False,
         scanned_count=10,
         updated_count=3,
@@ -148,6 +157,7 @@ def test_refresh_result_backward_compatible_defaults() -> None:
     )
     assert result.skipped_count == 0
     assert result.unknown_count == 0
+    assert result.failed_count == 0
     assert result.overwrite is False
     assert result.affects_all is False
     assert result.elapsed_ms == 0
@@ -155,12 +165,14 @@ def test_refresh_result_backward_compatible_defaults() -> None:
 
 def test_resolver_status_has_scope_fields() -> None:
     status = crm.RegionResolverStatus(
-        provider="offline", refresh_enabled=True, adapter_implemented=True
+        provider="disabled", refresh_enabled=True, adapter_implemented=True
     )
     assert status.scope == ""
     assert status.affects_all is False
     assert status.ip_db_ready is False
     assert status.phone_segment_ready is False
+    assert status.ip_api_ready is False
+    assert status.phone_api_ready is False
     assert status.db_version is None
 
 
@@ -245,3 +257,20 @@ async def test_audit_without_changes_writes_one_summary() -> None:
     assert len(db.calls) == 1
     _, params = db.calls[0]
     assert "扫描 3 / 更新 0" in str(params["reason"])
+
+
+@pytest.mark.asyncio
+async def test_audit_partial_api_failure_adds_summary_row() -> None:
+    db = _AuditDb()
+    stats = region_refresh.RefreshStats(
+        scanned=3,
+        updated=1,
+        failed=2,
+        overwritten=[{"user_id": 31, "old": None, "new": "江苏省南京市"}],
+    )
+    await region_refresh.write_audit(
+        db, actor_id=5, kind=RegionKind.IP, stats=stats, overwrite=False, scope_label="ALL"
+    )
+
+    assert len(db.calls) == 2
+    assert "2 行 API 失败" in str(db.calls[-1][1]["reason"])

@@ -165,6 +165,44 @@ class Settings(BaseSettings):
     region_refresh_batch_size: int = 500
     region_refresh_overwrite_max_rows: int = 5000
 
+    # 在线 API（2026-11-04 定：IP 走云市场 AppCode，手机走号码百科 AccessKey）。
+    # 按类型 provider 是新开关，旧 region_resolver_provider 继续保留兼容。
+    region_ip_provider: Literal["disabled", "offline", "api"] = "disabled"
+    region_phone_provider: Literal["disabled", "offline", "api"] = "disabled"
+    region_ip_fallback_provider: Literal["offline", "none"] = "offline"
+    region_phone_fallback_provider: Literal["offline", "none"] = "none"
+
+    # 阿里云云市场 IP 归属地：AppCode 鉴权，GET/POST 由商品决定。
+    region_ip_api_vendor: Literal["aliyun"] = "aliyun"
+    region_ip_api_endpoint: str | None = None
+    region_ip_api_path: str | None = None
+    region_ip_api_method: Literal["GET", "POST"] = "GET"
+    region_ip_api_request_format: Literal["json", "form"] = "json"
+    region_ip_api_ip_field: str = "ip"
+    region_ip_api_province_field: str = "province"
+    region_ip_api_city_field: str = "city"
+    region_ip_api_country_field: str = "country"
+    region_ip_api_app_code: SecretStr | None = None
+    region_ip_api_timeout_seconds: float = Field(default=5, gt=0, le=60)
+    region_ip_api_concurrency: int = Field(default=10, ge=1, le=50)
+    region_ip_api_qps: int = Field(default=10, ge=1, le=100)
+    region_ip_api_max_retries: int = Field(default=2, ge=0, le=5)
+
+    # 阿里云号码百科：RPC 签名 + AuthCode；Mask 控制明文/哈希入参。
+    region_phone_api_vendor: Literal["aliyun"] = "aliyun"
+    region_phone_api_endpoint: str | None = None
+    region_phone_api_action: str = "DescribePhoneNumberOperatorAttribute"
+    region_phone_api_version: str = "2020-02-17"
+    region_phone_api_region: str = "cn-hangzhou"
+    region_phone_api_auth_code: SecretStr | None = None
+    region_phone_api_mask: Literal["NORMAL", "MD5", "SHA256"] = "NORMAL"
+    region_phone_api_access_key_id: SecretStr | None = None
+    region_phone_api_access_key_secret: SecretStr | None = None
+    region_phone_api_timeout_seconds: float = Field(default=5, gt=0, le=60)
+    region_phone_api_concurrency: int = Field(default=5, ge=1, le=50)
+    region_phone_api_qps: int = Field(default=5, ge=1, le=100)
+    region_phone_api_max_retries: int = Field(default=2, ge=0, le=5)
+
     # AI avatar calls an OpenAI-compatible chat-completions service from the
     # backend only. API keys must never be exposed to the mini-program.
     ai_avatar_provider: Literal["disabled", "openai_compatible"] = "disabled"

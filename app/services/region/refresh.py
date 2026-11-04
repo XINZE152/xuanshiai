@@ -36,6 +36,8 @@ class RefreshStats:
     updated: int = 0
     skipped: int = 0
     unknown: int = 0
+    failed: int = 0
+    provider: str = ""
     elapsed_ms: int = 0
     overwritten: list[dict[str, Any]] = field(default_factory=list)
 
@@ -123,7 +125,10 @@ async def refresh(
             f"overwrite 命中 {len(records)} 行，超过单次上限 {max_overwrite_rows}；请改用脚本分批执行"
         )
 
-    outcome = registry.resolve(kind, [str(record["source_value"]) for record in records])
+    # 在线 API 可能持续数秒到数十秒：先结束只读事务，避免长时间占用数据库连接。
+    # 幂等预占行由 begin_sensitive_operation 单独 commit，不会因这里提交而丢失。
+    await db.commit()
+    outcome = await registry.resolve_async(kind, [str(record["source_value"]) for record in records])
 
     updates: list[dict[str, Any]] = []
     overwritten: list[dict[str, Any]] = []
@@ -161,6 +166,8 @@ async def refresh(
         updated=updated,
         skipped=outcome.skipped,
         unknown=outcome.unknown,
+        failed=outcome.failed,
+        provider=outcome.provider,
         elapsed_ms=int((time.monotonic() - started) * 1000),
         overwritten=overwritten,
     )
@@ -207,6 +214,27 @@ async def write_audit(
                     "reason": f"一键刷新{label}属地（{mode_label}，第 {offset // size + 1} 批）"[:255],
                 },
             )
+        if stats.failed:
+            await db.execute(
+                statement,
+                {
+                    "actor": actor_id,
+                    "action": action,
+                    "before": json.dumps(
+                        {"mode": "overwrite" if overwrite else "fill-empty"}, ensure_ascii=False
+                    ),
+                    "after": json.dumps(
+                        {
+                            "failed": stats.failed,
+                            "unknown": stats.unknown,
+                            "scanned": stats.scanned,
+                            "updated": stats.updated,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "reason": f"一键刷新{label}属地：{stats.failed} 行 API 失败未写入"[:255],
+                },
+            )
     else:
         await db.execute(
             statement,
@@ -222,6 +250,7 @@ async def write_audit(
                         "updated": stats.updated,
                         "skipped": stats.skipped,
                         "unknown": stats.unknown,
+                        "failed": stats.failed,
                         "scope": scope_label,
                         "overwrite": overwrite,
                     },
@@ -229,7 +258,9 @@ async def write_audit(
                 ),
                 "reason": (
                     f"一键刷新{label}属地（{'覆盖' if overwrite else '只填空'}，"
-                    f"扫描 {stats.scanned} / 更新 {stats.updated}）"
+                    f"扫描 {stats.scanned} / 更新 {stats.updated}"
+                    + (f" / 失败 {stats.failed}" if stats.failed else "")
+                    + "）"
                 )[:255],
             },
         )

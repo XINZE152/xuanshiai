@@ -59,6 +59,10 @@ def test_phone_segment_status_rejects_bad_header(preflight: Any, tmp_path: Path)
 def test_readiness_requires_offline_assets_and_columns(preflight: Any) -> None:
     payload = {
         "provider": "offline",
+        "ip_provider": "offline",
+        "phone_provider": "offline",
+        "ip_api_ready": False,
+        "phone_api_ready": False,
         "ip": {"exists": True, "size_bytes": 10, "binding_available": True},
         "phone": {"exists": True, "size_bytes": 10, "header_ok": True, "rows": 2},
         "db_checked": True,
@@ -74,10 +78,22 @@ def test_readiness_requires_offline_assets_and_columns(preflight: Any) -> None:
     }
     assert preflight._readiness(payload) == {"ip": True, "phone": True}
 
-    payload["provider"] = "disabled"
+    payload["ip_provider"] = "disabled"
+    payload["phone_provider"] = "disabled"
     assert preflight._readiness(payload) == {"ip": False, "phone": False}
 
-    payload["provider"] = "offline"
+    payload["ip_provider"] = "api"
+    payload["phone_provider"] = "api"
+    payload["ip_api_ready"] = True
+    payload["phone_api_ready"] = True
+    assert preflight._readiness(payload) == {"ip": True, "phone": True}
+
+    payload["phone_api_ready"] = False
+    assert preflight._readiness(payload) == {"ip": True, "phone": False}
+
+    payload["ip_provider"] = "offline"
+    payload["phone_provider"] = "offline"
+    payload["phone_api_ready"] = True
     payload["db"]["columns"]["phone_region"] = False
     assert preflight._readiness(payload) == {"ip": True, "phone": False}
 

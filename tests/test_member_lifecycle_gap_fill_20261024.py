@@ -5,7 +5,7 @@
   路由 ``sort_by`` 枚举放行 ``points|integral``。
 - 会员软删除：列表/详情默认排除 ``users.deleted_at``；``batch-delete`` 与单条 ``DELETE``
   为软删（UPDATE deleted_at，不物理删），敏感写（幂等+二次确认）+ D-16 作用域收口。
-- 一键刷新属地：provider 门控（disabled→503、real→501、mock→干跑不写库）；
+- 一键刷新属地：provider 门控（disabled→503、api 未配置→503、mock→干跑不写库）；
   三端点注册；config ``region_resolver_provider`` 默认 disabled 且生产禁 mock。
 """
 
@@ -72,8 +72,8 @@ def test_delete_routes_registered() -> None:
 # --------------------------------------------------------------------------- #
 def test_region_refresh_gating_and_dry_run() -> None:
     src = inspect.getsource(crm._refresh_region)
-    assert "region_resolver_provider" in src
-    assert "503" in src and "501" in src
+    assert "provider_for" in src
+    assert "503" in src and "api" in src
     assert "dry_run=True" in src                    # mock 不伪造真实地理、不写库
     assert "UPDATE users SET ip_region" not in src  # 干跑阶段绝不落库
 
