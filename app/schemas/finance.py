@@ -83,7 +83,7 @@ class PaymentOrderResponse(BaseModel):
     id: int
     order_no: str
     user_id: int
-    product_type: int
+    product_type: int | str | None = None
     product_name: str
     amount: Decimal
     status: Literal[0, 1, 2, 3]
