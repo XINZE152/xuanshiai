@@ -126,3 +126,79 @@ def test_disabled_mode_skips_real_payment_checks() -> None:
         wechat_pay_app_id="wx0000000000000000",
     )
     assert settings.wechat_pay_mode == "disabled"
+
+
+def _production_settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "environment": "production",
+        "live_provider": "tencent",
+        "wechat_payment_mode": "real",
+    }
+    values.update(overrides)
+    return _real_settings(**values)
+
+
+def test_production_rejects_face_mock() -> None:
+    with pytest.raises(ValidationError, match="人脸核验"):
+        _production_settings(face_provider="mock")
+
+
+def test_production_rejects_identity_mock() -> None:
+    with pytest.raises(ValidationError, match="实名核验"):
+        _production_settings(identity_provider="mock")
+
+
+def test_production_rejects_education_mock() -> None:
+    with pytest.raises(ValidationError, match="学历核验"):
+        _production_settings(education_provider="mock")
+
+
+def test_aliyun_identity_requires_access_keys() -> None:
+    with pytest.raises(ValidationError, match="IDENTITY_ACCESS_KEY"):
+        Settings(
+            _env_file=None,
+            environment="development",
+            identity_provider="aliyun",
+        )
+
+
+def test_aliyun_identity_rejects_empty_secret() -> None:
+    with pytest.raises(ValidationError, match="IDENTITY_ACCESS_KEY"):
+        Settings(
+            _env_file=None,
+            environment="development",
+            identity_provider="aliyun",
+            identity_access_key_id="test-access-key",
+            identity_access_key_secret="",
+        )
+
+
+def test_aliyun_identity_accepts_complete_credentials() -> None:
+    settings = Settings(
+        _env_file=None,
+        environment="development",
+        identity_provider="aliyun",
+        identity_access_key_id="test-access-key",
+        identity_access_key_secret="test-access-secret",
+    )
+    assert settings.identity_provider == "aliyun"
+
+
+def test_aliyun_face_requires_scene_id() -> None:
+    with pytest.raises(ValidationError, match="FACE_SCENE_ID"):
+        Settings(
+            _env_file=None,
+            environment="development",
+            face_provider="aliyun",
+            face_access_key_id="test-access-key",
+            face_access_key_secret="test-access-secret",
+        )
+
+
+def test_aliyun_market_education_requires_market_config() -> None:
+    with pytest.raises(ValidationError, match="EDUCATION_MARKET"):
+        Settings(
+            _env_file=None,
+            environment="development",
+            education_provider="aliyun_market",
+        )

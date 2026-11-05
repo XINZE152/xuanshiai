@@ -32,20 +32,34 @@ class _Db:
         self.results = list(results)
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.committed = False
+        self.rolled_back = False
 
     async def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _Result:
         self.calls.append((str(statement), dict(params or {})))
         return self.results.pop(0) if self.results else _Result()
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
 
     async def commit(self) -> None:
         self.committed = True
 
 
 class _Provider:
+    name = "mock"
+
     def __init__(self, result: FaceVerifyResult | Exception) -> None:
         self.result = result
 
-    async def verify(self, *, user_id: int, image_ref: str, scene: str = "realname") -> FaceVerifyResult:
+    async def verify(
+        self,
+        *,
+        user_id: int,
+        image_ref: str,
+        scene: str = "realname",
+        real_name: str | None = None,
+        id_card_number: str | None = None,
+    ) -> FaceVerifyResult:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result

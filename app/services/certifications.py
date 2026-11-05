@@ -1,4 +1,6 @@
-"""Manual certification submissions; external verification is deliberately deferred."""
+"""Certification submissions with optional online verification and manual fallback."""
+
+import logging
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +9,8 @@ from pydantic import ValidationError
 
 from app.core.config import settings
 from app.services.auth import accept_agreement
+from app.services.education.base import EducationVerifyRequest, EducationVerifyResult
+from app.services.education.providers import DisabledEducationProvider, get_education_provider
 from app.services.media_access import (
     MEDIA_CATEGORY_CERT,
     VIEWER_KIND_ADMIN,
@@ -24,6 +28,9 @@ from app.schemas.certifications import (
     CertificationReviewPage,
 )
 from app.schemas.admin import CertificationReviewRequest, CertificationReviewResponse
+
+
+logger = logging.getLogger(__name__)
 
 
 def _sign_cert_material(material: str | None, viewer: int, kind: str) -> str | None:
@@ -204,6 +211,50 @@ async def _store_certification_image(user_id: int, prefix: str, file: UploadFile
     return _media_url(user_id, image_path.name)
 
 
+def _education_status_for_result(result: EducationVerifyResult | None) -> tuple[int, str | None]:
+    if result is None:
+        return 1, None
+    if result.verified:
+        return 2, None
+    return 3, (result.reason or "学历材料核验未通过").strip()[:255]
+
+
+async def _verify_education_with_provider(
+    provider,
+    *,
+    user_id: int,
+    education: str,
+    school: str,
+    material: str,
+    real_name: str | None,
+) -> EducationVerifyResult | None:
+    """调用在线学历核验；未配置/不可用时返回 None，由调用方转人工审核。"""
+    try:
+        return await provider.verify(
+            EducationVerifyRequest(
+                user_id=user_id,
+                education=education,
+                school=school,
+                image_ref=material,
+                real_name=real_name,
+            )
+        )
+    except HTTPException as exc:
+        logger.warning(
+            "education_provider_unavailable provider=%s status=%s",
+            getattr(provider, "name", "unknown"),
+            exc.status_code,
+        )
+        return None
+    except Exception as exc:  # 供应商异常必须降级人工，不能阻断提交
+        logger.warning(
+            "education_provider_failed provider=%s error_type=%s",
+            getattr(provider, "name", "unknown"),
+            type(exc).__name__,
+        )
+        return None
+
+
 async def submit_education_material(
     db: AsyncSession,
     user_id: int,
@@ -218,18 +269,55 @@ async def submit_education_material(
     normalized_school = school.strip()
     if len(normalized_school) < 2 or len(normalized_school) > 128:
         raise HTTPException(422, detail="毕业学校需填写2至128个字符")
+
+    provider = get_education_provider()
     material = await _store_certification_image(user_id, "education-cert", file)
-    await db.execute(text("""INSERT INTO user_auth
-        (user_id, education, school, education_cert, education_verified, education_submitted_at)
-        VALUES (:id,:education,:school,:material,1,UTC_TIMESTAMP())
-        ON DUPLICATE KEY UPDATE education=VALUES(education), school=VALUES(school),
-        education_cert=VALUES(education_cert), education_verified=1, education_fail_reason=NULL,
-        education_reviewed_at=NULL, education_submitted_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP()"""), {
+    if isinstance(provider, DisabledEducationProvider):
+        result = None
+    else:
+        identity = await db.execute(
+            text(
+                "SELECT real_name FROM user_auth "
+                "WHERE user_id = :id AND realname_status = 2"
+            ),
+            {"id": user_id},
+        )
+        real_name = identity.scalar()
+        # 证件读取事务必须在外部核验前关闭，避免网络调用占用数据库事务。
+        await db.rollback()
+        result = await _verify_education_with_provider(
+            provider,
+            user_id=user_id,
+            education=validated.education,
+            school=normalized_school,
+            material=material,
+            real_name=real_name,
+        )
+
+    status, reason = _education_status_for_result(result)
+    reviewed_at = "NULL" if status == 1 else "UTC_TIMESTAMP()"
+    await db.execute(
+        text(
+            f"""INSERT INTO user_auth
+            (user_id, education, school, education_cert, education_verified,
+             education_submitted_at, education_reviewed_at, education_fail_reason)
+            VALUES (:id, :education, :school, :material, :status,
+                    UTC_TIMESTAMP(), {reviewed_at}, :reason)
+            ON DUPLICATE KEY UPDATE education=VALUES(education), school=VALUES(school),
+            education_cert=VALUES(education_cert), education_verified=VALUES(education_verified),
+            education_fail_reason=VALUES(education_fail_reason),
+            education_reviewed_at=VALUES(education_reviewed_at), reviewed_by=NULL,
+            education_submitted_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP()"""
+        ),
+        {
             "id": user_id,
             "education": validated.education,
             "school": normalized_school,
             "material": material,
-        })
+            "status": status,
+            "reason": reason,
+        },
+    )
     await db.commit()
     return await get_certifications(db, user_id)
 
