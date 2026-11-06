@@ -68,6 +68,7 @@ async def test_history_is_scoped_to_viewer_and_paginated() -> None:
     assert result["total"] == 3
     assert result["has_more"] is True
     assert result["items"][1]["target_available"] is False
+    assert result["items"][0]["points_cost"] == 80
 
     count_sql, count_params = db.calls[0]
     list_sql, list_params = db.calls[1]

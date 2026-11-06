@@ -187,6 +187,16 @@ async def _session(db: AsyncSession, user_id: int, session_id: int) -> tuple[dic
     return dict(row), target_id
 
 
+def _session_preview(row: dict[str, Any]) -> tuple[str, Any]:
+    last_visible_type = row.get("last_visible_type")
+    if last_visible_type is None:
+        return "暂无消息", row.get("last_message_time")
+    return (
+        _message_preview(int(last_visible_type), row.get("last_visible_content")),
+        row.get("last_visible_time") or row.get("last_message_time"),
+    )
+
+
 async def list_chat_sessions(db: AsyncSession, user_id: int, page: int, page_size: int) -> ChatSessionPage:
     count_result = await db.execute(text("""SELECT COUNT(*) FROM chat_session s
         WHERE ((s.user1_id = :user_id AND s.is_user1_hidden = 0) OR (s.user2_id = :user_id AND s.is_user2_hidden = 0))
@@ -208,7 +218,22 @@ async def list_chat_sessions(db: AsyncSession, user_id: int, page: int, page_siz
                   WHERE um.user_id = u.id AND um.media_type = 'avatar' AND um.deleted_at IS NULL
                   ORDER BY um.id DESC LIMIT 1), u.avatar) AS avatar_thumb,
         CASE WHEN s.user1_id = :user_id THEN s.unread_count_user1 ELSE s.unread_count_user2 END AS unread_count,
-        CASE WHEN s.user1_id = :user_id THEN s.user1_pinned_at ELSE s.user2_pinned_at END AS pinned_at
+        CASE WHEN s.user1_id = :user_id THEN s.user1_pinned_at ELSE s.user2_pinned_at END AS pinned_at,
+        (SELECT lm.type FROM chat_message lm
+          WHERE lm.session_id = s.id AND lm.revoked_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM chat_message_hidden h
+                            WHERE h.message_id = lm.id AND h.user_id = :user_id)
+          ORDER BY lm.id DESC LIMIT 1) AS last_visible_type,
+        (SELECT lm.content FROM chat_message lm
+          WHERE lm.session_id = s.id AND lm.revoked_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM chat_message_hidden h
+                            WHERE h.message_id = lm.id AND h.user_id = :user_id)
+          ORDER BY lm.id DESC LIMIT 1) AS last_visible_content,
+        (SELECT lm.created_at FROM chat_message lm
+          WHERE lm.session_id = s.id AND lm.revoked_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM chat_message_hidden h
+                            WHERE h.message_id = lm.id AND h.user_id = :user_id)
+          ORDER BY lm.id DESC LIMIT 1) AS last_visible_time
         FROM chat_session s JOIN users u ON u.id = CASE WHEN s.user1_id = :user_id THEN s.user2_id ELSE s.user1_id END
         WHERE ((s.user1_id = :user_id AND s.is_user1_hidden = 0) OR (s.user2_id = :user_id AND s.is_user2_hidden = 0))
           AND EXISTS (SELECT 1 FROM user_match um WHERE um.user_id = :user_id
@@ -224,9 +249,28 @@ async def list_chat_sessions(db: AsyncSession, user_id: int, page: int, page_siz
                    OR (ub.target_user_id = :user_id
                       AND ub.user_id = CASE WHEN s.user1_id = :user_id THEN s.user2_id ELSE s.user1_id END))
         ORDER BY (CASE WHEN s.user1_id = :user_id THEN s.user1_pinned_at ELSE s.user2_pinned_at END) IS NOT NULL DESC,
-        COALESCE(CASE WHEN s.user1_id = :user_id THEN s.user1_pinned_at ELSE s.user2_pinned_at END, s.last_message_time, s.created_at) DESC
+        COALESCE(CASE WHEN s.user1_id = :user_id THEN s.user1_pinned_at ELSE s.user2_pinned_at END, last_visible_time, s.created_at) DESC
         LIMIT :limit OFFSET :offset"""), {"user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size})
-    items = [ChatSessionResponse(id=int(row["id"]), target=SocialUser(user_id=int(row["target_id"]), nickname=row["nickname"], avatar=row["avatar"], avatar_thumb=row["avatar_thumb"], gender=row["gender"], age=_calculate_age(row["birthday"]) if row["birthday"] else None), last_message=row["last_message"], last_message_time=row["last_message_time"], unread_count=int(row["unread_count"] or 0), pinned=row["pinned_at"] is not None) for row in result.mappings().all()]
+    items = []
+    for row in result.mappings().all():
+        preview, preview_time = _session_preview(row)
+        items.append(
+            ChatSessionResponse(
+                id=int(row["id"]),
+                target=SocialUser(
+                    user_id=int(row["target_id"]),
+                    nickname=row["nickname"],
+                    avatar=row["avatar"],
+                    avatar_thumb=row["avatar_thumb"],
+                    gender=row["gender"],
+                    age=_calculate_age(row["birthday"]) if row["birthday"] else None,
+                ),
+                last_message=preview,
+                last_message_time=preview_time,
+                unread_count=int(row["unread_count"] or 0),
+                pinned=row["pinned_at"] is not None,
+            )
+        )
     return ChatSessionPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
@@ -424,9 +468,12 @@ async def list_messages(
     result = await db.execute(
         text("""SELECT id, session_id, from_user_id, to_user_id, type, content, media_url,
             client_message_id, quote_message_id, is_read, revoked_at, created_at FROM chat_message
-            WHERE session_id = :session_id ORDER BY created_at DESC, id DESC
+            WHERE session_id = :session_id
+              AND NOT EXISTS (SELECT 1 FROM chat_message_hidden h
+                              WHERE h.message_id = chat_message.id AND h.user_id = :user_id)
+            ORDER BY created_at DESC, id DESC
             LIMIT :limit OFFSET :offset"""),
-        {"session_id": session_id, "limit": page_size, "offset": (page - 1) * page_size},
+        {"session_id": session_id, "user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size},
     )
     rows = [dict(row) for row in reversed(result.mappings().all())]
     quotes = await _load_quotes(db, rows)
@@ -545,6 +592,41 @@ async def recall_message(db: AsyncSession, user_id: int, message_id: int) -> Cha
 async def revoke_message(db: AsyncSession, user_id: int, message_id: int) -> None:
     """Backward-compatible 204 endpoint; the recall endpoint returns the message projection."""
     await recall_message(db, user_id, message_id)
+
+
+async def hide_message_for_me(db: AsyncSession, user_id: int, message_id: int) -> None:
+    """Hide one message for the current user only; the other participant is unaffected."""
+    result = await db.execute(
+        text(
+            """SELECT id, session_id, to_user_id, is_read FROM chat_message
+               WHERE id = :message_id"""
+        ),
+        {"message_id": message_id},
+    )
+    row = result.mappings().first()
+    if not row:
+        raise HTTPException(404, detail="消息不存在")
+    session, _ = await _session(db, user_id, int(row["session_id"]))
+    inserted = await db.execute(
+        text(
+            """INSERT IGNORE INTO chat_message_hidden (message_id, user_id)
+               VALUES (:message_id, :user_id)"""
+        ),
+        {"message_id": message_id, "user_id": user_id},
+    )
+    if getattr(inserted, "rowcount", 0) > 0 and int(row["to_user_id"]) == user_id and not int(row["is_read"] or 0):
+        unread_field = (
+            "unread_count_user1" if int(session["user1_id"]) == user_id else "unread_count_user2"
+        )
+        await db.execute(
+            text(
+                f"""UPDATE chat_session
+                    SET {unread_field} = GREATEST({unread_field} - 1, 0)
+                    WHERE id = :session_id"""
+            ),
+            {"session_id": int(row["session_id"])},
+        )
+    await db.commit()
 
 
 async def list_notifications(
@@ -1482,9 +1564,11 @@ async def set_chat_session_visibility(db: AsyncSession, user_id: int, session_id
 async def list_messages_cursor(db: AsyncSession, user_id: int, session_id: int, cursor: int | None, page_size: int) -> ChatMessagePage:
     await _session(db, user_id, session_id)
     condition = "AND id < :cursor" if cursor is not None else ""
-    params = {"session_id": session_id, "cursor": cursor, "limit": page_size + 1}
+    params = {"session_id": session_id, "user_id": user_id, "cursor": cursor, "limit": page_size + 1}
     rows = (await db.execute(text(f"""SELECT id, session_id, from_user_id, to_user_id, type, content, media_url,
         client_message_id, quote_message_id, is_read, revoked_at, created_at FROM chat_message WHERE session_id = :session_id {condition}
+        AND NOT EXISTS (SELECT 1 FROM chat_message_hidden h
+                        WHERE h.message_id = chat_message.id AND h.user_id = :user_id)
         ORDER BY id DESC LIMIT :limit"""), params)).mappings().all()
     has_more = len(rows) > page_size
     selected = [dict(row) for row in rows[:page_size]]

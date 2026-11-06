@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.candidate_visibility import CandidateVisibilityService, VisibilityScene
 from app.services.points import _balance
 
-PAPER_PLANE_PROFILE_UNLOCK_COST = 80
+PAPER_PLANE_PROFILE_UNLOCK_COST = 50
 
 
 class ProfileUnlockError(Exception):
@@ -48,7 +48,7 @@ class UnlockStore(Protocol):
 class PaperPlaneProfileUnlockService:
     def __init__(self, store: UnlockStore, points_cost: int = PAPER_PLANE_PROFILE_UNLOCK_COST) -> None:
         if points_cost != PAPER_PLANE_PROFILE_UNLOCK_COST:
-            raise ValueError("paper-plane profile unlock cost is fixed at 80 points")
+            raise ValueError("paper-plane profile unlock cost is fixed at 50 points")
         self.store = store
         self.points_cost = points_cost
 

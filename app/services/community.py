@@ -240,6 +240,56 @@ def _post_response(row: dict[str, Any]) -> CommunityPostResponse:
     )
 
 
+async def _resolve_remind_targets(
+    db: AsyncSession, author_id: int, remind_user_ids: list[int]
+) -> list[int]:
+    """Validate Q74 reminder targets: active, visible, and not blocked by either side."""
+    unique_ids = list(dict.fromkeys(int(item) for item in remind_user_ids))
+    if not unique_ids:
+        return []
+    if author_id in unique_ids:
+        raise HTTPException(
+            422,
+            detail={"code": "REMIND_TARGET_INVALID", "message": "不能提醒自己"},
+        )
+    placeholders = ",".join(f":u{index}" for index in range(len(unique_ids)))
+    params = {f"u{index}": value for index, value in enumerate(unique_ids)}
+    params["author_id"] = author_id
+    rows = (
+        await db.execute(
+            text(
+                f"""SELECT u.id, u.status, COALESCE(pr.show_profile, 1) AS show_profile,
+                           EXISTS(
+                               SELECT 1 FROM user_block b
+                               WHERE (b.user_id = :author_id AND b.target_user_id = u.id)
+                                  OR (b.user_id = u.id AND b.target_user_id = :author_id)
+                           ) AS blocked
+                    FROM users u
+                    LEFT JOIN user_privacy pr ON pr.user_id = u.id
+                    WHERE u.id IN ({placeholders})"""
+            ),
+            params,
+        )
+    ).mappings().all()
+    found = {int(row["id"]): row for row in rows}
+    for target_id in unique_ids:
+        row = found.get(target_id)
+        if (
+            row is None
+            or int(row["status"] or 0) != 1
+            or int(row["show_profile"] or 0) != 1
+            or bool(row["blocked"])
+        ):
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "REMIND_TARGET_INVALID",
+                    "message": "提醒对象不存在、不可见或已被拉黑",
+                },
+            )
+    return unique_ids
+
+
 async def create_post(
     db: AsyncSession,
     user_id: int,
@@ -318,6 +368,7 @@ async def create_post(
         )
         if not topic.scalar():
             raise HTTPException(404, detail="话题不存在")
+    remind_ids = await _resolve_remind_targets(db, user_id, request.remind_user_ids)
     result = await db.execute(
         text(
             """INSERT INTO community_post
@@ -357,6 +408,27 @@ async def create_post(
             ),
             {"topic_id": request.topic_id, "user_id": user_id},
         )
+    if remind_ids:
+        for target_id in remind_ids:
+            await db.execute(
+                text(
+                    """INSERT IGNORE INTO community_post_remind (post_id, user_id)
+                       VALUES (:post_id, :user_id)"""
+                ),
+                {"post_id": post_id, "user_id": target_id},
+            )
+        if moderation_status == 1:
+            for target_id in remind_ids:
+                await emit_notification(
+                    db,
+                    recipient_user_id=target_id,
+                    actor_user_id=user_id,
+                    event_type="community_post_remind",
+                    title="有人提醒你看一条动态",
+                    content="你被提醒查看一条新动态",
+                    target_type="community_post",
+                    target_id=post_id,
+                )
     if commit:
         await db.commit()
     try:
@@ -414,7 +486,19 @@ async def get_post(db: AsyncSession, user_id: int, post_id: int, *, include_pend
     row = result.mappings().first()
     if not row:
         raise HTTPException(404, detail="动态不存在")
-    return _post_response(dict(row))
+    post = _post_response(dict(row))
+    if int(row["user_id"]) == user_id:
+        remind_rows = (
+            await db.execute(
+                text(
+                    """SELECT user_id FROM community_post_remind
+                       WHERE post_id = :post_id ORDER BY id"""
+                ),
+                {"post_id": post_id},
+            )
+        ).mappings().all()
+        post.remind_user_ids = [int(item["user_id"]) for item in remind_rows]
+    return post
 
 
 # 社区同城常用市名 → 6 位市码（与 discovery / profile 对齐；短码 3301 规范化为 330100）

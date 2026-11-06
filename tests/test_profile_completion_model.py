@@ -59,6 +59,8 @@ def _base_row() -> dict[str, Any]:
         "preference_age_min": None,
         "preference_age_max": None,
         "album_done": 0,
+        "album_count": 0,
+        "completion_grandfathered": 0,
     }
 
 
@@ -97,9 +99,23 @@ def _full_row() -> dict[str, Any]:
             "preference_age_min": 25,
             "preference_age_max": 35,
             "album_done": 1,
+            "album_count": 3,
         }
     )
     return row
+
+
+def test_album_requires_three_photos_and_legacy_allows_one() -> None:
+    row = _full_row()
+    row["album_count"] = 1
+    row["score"] = 95
+    completed = _completion_state(row)
+    assert completed["album"] is False
+    assert _completion_score(completed) == 95
+
+    legacy = _completion_state(row, legacy=True)
+    assert legacy["album"] is True
+    assert _completion_score(legacy) == 100
 
 
 def test_completion_rules_total_100() -> None:
@@ -196,6 +212,25 @@ async def test_get_completion_returns_score_and_items_from_same_state() -> None:
     assert completion.can_browse is True
     assert completion.can_apply is True
     assert completion.can_chat is True
+
+
+@pytest.mark.asyncio
+async def test_grandfathered_read_keeps_stored_score_and_legacy_album() -> None:
+    row = _full_row()
+    row["album_count"] = 1
+    row["completion_grandfathered"] = 1
+    row["completion_score"] = 100
+    result = MagicMock()
+    result.mappings.return_value.first.return_value = row
+    result.mappings.return_value.one.return_value = row
+    db = AsyncMock()
+    db.execute.return_value = result
+
+    completion = await profile.get_completion(db, 42)
+
+    assert completion.score == 100
+    album = next(item for item in completion.items if item.key == "album")
+    assert album.completed is True
 
 
 @pytest.mark.asyncio

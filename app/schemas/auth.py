@@ -25,12 +25,20 @@ QA_QUESTION_TEXTS: dict[int, str] = {
 }
 
 
+class ProfileQaMedia(BaseModel):
+    id: int
+    file_url: str
+    thumbnail_url: str | None = None
+
+
 class ProfileQaAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question_id: Literal[1, 2, 3]
     question: str | None = Field(default=None, max_length=64)
     answer: str = Field(default="", max_length=300)
+    media_ids: list[int] = Field(default_factory=list, max_length=1)
+    media: list[ProfileQaMedia] = Field(default_factory=list)
 
     @field_validator("answer", mode="before")
     @classmethod

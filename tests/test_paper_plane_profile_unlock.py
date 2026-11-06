@@ -42,12 +42,12 @@ class MemoryUnlockStore:
 
 
 def service(store: MemoryUnlockStore) -> PaperPlaneProfileUnlockService:
-    return PaperPlaneProfileUnlockService(store=store, points_cost=80)
+    return PaperPlaneProfileUnlockService(store=store, points_cost=50)
 
 
 @pytest.mark.asyncio
 async def test_unlock_is_scoped_to_viewer_and_target_and_never_returns_raw_contact() -> None:
-    store = MemoryUnlockStore(points={7: 160}, visible_targets={11, 12})
+    store = MemoryUnlockStore(points={7: 100}, visible_targets={11, 12})
     first = await service(store).unlock(viewer_id=7, target_id=11, idempotency_key='unlock-11')
     second = await service(store).unlock(viewer_id=7, target_id=12, idempotency_key='unlock-12')
     assert (7, 11) in store.unlocks and (7, 12) in store.unlocks
@@ -58,7 +58,7 @@ async def test_unlock_is_scoped_to_viewer_and_target_and_never_returns_raw_conta
 
 @pytest.mark.asyncio
 async def test_same_idempotency_key_replays_one_target_without_a_second_debit() -> None:
-    store = MemoryUnlockStore(points={7: 80}, visible_targets={11})
+    store = MemoryUnlockStore(points={7: 50}, visible_targets={11})
     first = await service(store).unlock(viewer_id=7, target_id=11, idempotency_key='same-key')
     replay = await service(store).unlock(viewer_id=7, target_id=11, idempotency_key='same-key')
     assert replay == first
@@ -68,16 +68,16 @@ async def test_same_idempotency_key_replays_one_target_without_a_second_debit() 
 @pytest.mark.asyncio
 async def test_unlock_rejects_insufficient_points_self_and_invisible_target() -> None:
     with pytest.raises(ProfileUnlockInsufficientPoints):
-        await service(MemoryUnlockStore(points={7: 79}, visible_targets={11})).unlock(viewer_id=7, target_id=11, idempotency_key='low')
+        await service(MemoryUnlockStore(points={7: 49}, visible_targets={11})).unlock(viewer_id=7, target_id=11, idempotency_key='low')
     with pytest.raises(ProfileUnlockForbidden):
-        await service(MemoryUnlockStore(points={7: 80}, visible_targets={7})).unlock(viewer_id=7, target_id=7, idempotency_key='self')
+        await service(MemoryUnlockStore(points={7: 50}, visible_targets={7})).unlock(viewer_id=7, target_id=7, idempotency_key='self')
     with pytest.raises(ProfileUnlockForbidden):
-        await service(MemoryUnlockStore(points={7: 80}, visible_targets=set())).unlock(viewer_id=7, target_id=11, idempotency_key='invisible')
+        await service(MemoryUnlockStore(points={7: 50}, visible_targets=set())).unlock(viewer_id=7, target_id=11, idempotency_key='invisible')
 
 
 @pytest.mark.asyncio
 async def test_reusing_a_key_for_a_different_target_is_a_conflict() -> None:
-    store = MemoryUnlockStore(points={7: 160}, visible_targets={11, 12})
+    store = MemoryUnlockStore(points={7: 100}, visible_targets={11, 12})
     unlocker = service(store)
     await unlocker.unlock(viewer_id=7, target_id=11, idempotency_key='reused-key')
     with pytest.raises(ProfileUnlockConflict):

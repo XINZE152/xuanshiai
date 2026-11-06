@@ -35,6 +35,8 @@ def _row(**overrides: Any) -> dict[str, Any]:
         "personality_tags": "[]",
         "tags": None,
         "realname_status": 0,
+        "face_verified": 0,
+        "education_verified": 0,
         "is_single_pledge": 0,
         "is_vip": 0,
         "is_boosted": 0,
@@ -63,6 +65,20 @@ def test_card_select_carries_raw_columns_for_display_fields() -> None:
         "p.residence_district_code",
     ):
         assert column in CARD_SELECT, column
+    assert "ua.face_verified" in CARD_SELECT
+    assert "ua.education_verified" in CARD_SELECT
+
+
+def test_certification_tags_follow_contract_order() -> None:
+    card = _card(
+        _row(realname_status=2, face_verified=1, education_verified=2, is_single_pledge=1),
+        60.0,
+        "r",
+    )
+    assert card.certification_tags == ["实名认证", "人脸认证", "学历认证", "单身承诺"]
+
+    unverified = _card(_row(), 60.0, "r")
+    assert unverified.certification_tags == []
 
 
 def test_card_returns_public_fields_when_unlocked() -> None:

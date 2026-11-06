@@ -23,6 +23,7 @@ class CommunityPostCreate(BaseModel):
     topic_id: int | None = Field(default=None, ge=1)
     visibility: Literal[0, 1, 2] = 0
     declaration: Literal["", "内容包含虚构演绎", "内容包含广告推广", "内容可能引起不适"] = ""
+    remind_user_ids: list[PositiveInt] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def validate_media_and_content(self) -> "CommunityPostCreate":
@@ -77,6 +78,7 @@ class CommunityPostResponse(BaseModel):
     residence: str | None = None
     realname_status: int = 0
     moderation_status: Literal["approved", "pending", "rejected", "deleted", "hidden"] = "approved"
+    remind_user_ids: list[int] | None = None
     created_at: datetime
 
 

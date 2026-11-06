@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 class PaperPlaneProfileUnlockResponse(BaseModel):
     target_user_id: int = Field(ge=1)
     unlocked: bool
-    points_cost: int = Field(default=80, ge=0)
+    points_cost: int = Field(default=50, ge=0)
     balance: int = Field(ge=0)
     unlocked_at: datetime | None = None
     # Deliberately privacy-filtered. Contact details are never part of this API.

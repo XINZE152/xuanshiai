@@ -44,6 +44,7 @@ jobs:
           app/api/routes/admin_good_news.py
           app/api/routes/admin_user_feedback.py app/api/routes/users.py
           app/schemas/ai_common.py app/schemas/auth.py app/schemas/discovery.py
+          app/schemas/community.py app/services/notifications.py database_setup_marriage.py
           app/schemas/emotion_lab.py app/schemas/matchmaker.py app/schemas/support.py
           app/schemas/good_news.py app/schemas/face.py
           app/services/auth.py app/services/community.py app/services/discovery.py
@@ -65,6 +66,9 @@ jobs:
           tests/test_aliyun_cloudauth.py
           tests/test_schema_contract.py
           tests/test_business_schema_migration_contract.py
+          tests/test_discovery_card_qa.py tests/test_profile_qa_media.py
+          tests/test_paper_plane_unlock_price_migration.py
+          tests/test_chat_message_hidden.py tests/test_community_post_remind.py
           scripts/manage_business_migration.py
           scripts/schema_contract.py
           tests/test_discovery_features.py
@@ -72,7 +76,7 @@ jobs:
       - name: Message and media unit contracts (no integration/live/manual)
         env:
           UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-uploads
-        run: uv run --no-sync pytest tests/test_social_features.py tests/test_social_message_idempotency.py tests/test_discovery_features.py tests/test_member_follow_up_media.py tests/test_apply_chat_greeting_and_superlike_scope.py tests/test_discovery_is_liked.py tests/test_discovery_card_public_fields.py tests/test_discovery_card_preview.py tests/test_quota_limit_single_source.py tests/test_vip_authorization_consistency.py tests/test_paper_plane_chances.py tests/test_emotion_lab_profile_source.py tests/test_chat_session_pinned.py tests/test_chat_recall_preview.py tests/test_social_user_avatar_thumb.py tests/test_community_quotas_points_available.py tests/test_auth_phone_change.py tests/test_ai_capabilities.py tests/test_comment_delete_cascade.py tests/test_discovery_mbti_filter.py tests/test_discovery_visibility_history.py tests/test_emotion_lab_matches.py tests/test_matchmaker_service_order_assignment.py tests/test_support_feedback.py tests/test_good_news.py tests/test_face_verify.py tests/test_schema_contract.py tests/test_business_schema_migration_contract.py tests/test_profile_completion_model.py tests/test_personal_tags.py tests/test_region_preflight_20261104.py tests/test_identity_verification.py tests/test_education_verification.py tests/test_realname_auto_verification.py tests/test_education_auto_verification.py tests/test_aliyun_cloudauth.py tests/test_paper_plane_profile_unlock.py tests/test_paper_plane_unlock_history.py tests/test_chat_message_quote.py -q
+        run: uv run --no-sync pytest tests/test_social_features.py tests/test_social_message_idempotency.py tests/test_discovery_features.py tests/test_member_follow_up_media.py tests/test_apply_chat_greeting_and_superlike_scope.py tests/test_discovery_is_liked.py tests/test_discovery_card_public_fields.py tests/test_discovery_card_preview.py tests/test_quota_limit_single_source.py tests/test_vip_authorization_consistency.py tests/test_paper_plane_chances.py tests/test_emotion_lab_profile_source.py tests/test_chat_session_pinned.py tests/test_chat_recall_preview.py tests/test_social_user_avatar_thumb.py tests/test_community_quotas_points_available.py tests/test_auth_phone_change.py tests/test_ai_capabilities.py tests/test_comment_delete_cascade.py tests/test_discovery_mbti_filter.py tests/test_discovery_visibility_history.py tests/test_emotion_lab_matches.py tests/test_matchmaker_service_order_assignment.py tests/test_support_feedback.py tests/test_good_news.py tests/test_face_verify.py tests/test_schema_contract.py tests/test_business_schema_migration_contract.py tests/test_profile_completion_model.py tests/test_personal_tags.py tests/test_region_preflight_20261104.py tests/test_identity_verification.py tests/test_education_verification.py tests/test_realname_auto_verification.py tests/test_education_auto_verification.py tests/test_aliyun_cloudauth.py tests/test_paper_plane_profile_unlock.py tests/test_paper_plane_unlock_history.py tests/test_chat_message_quote.py tests/test_profile_qa_media.py tests/test_paper_plane_unlock_price_migration.py tests/test_chat_message_hidden.py tests/test_community_post_remind.py tests/test_discovery_card_qa.py -q
 
   ai-unit:
     runs-on: ubuntu-24.04
