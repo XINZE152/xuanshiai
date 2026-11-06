@@ -191,3 +191,8 @@ def test_face_unknown_provider_is_rejected(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(HTTPException) as exc:
         face_providers.get_face_provider()
     assert exc.value.status_code == 503
+
+
+def test_face_aliyun_provider_is_registered(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "face_provider", "aliyun")
+    assert face_providers.get_face_provider().name == "aliyun"

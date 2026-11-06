@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import secrets
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -33,12 +34,17 @@ from app.schemas.auth import (
     WechatLoginRequest,
     ExistingAccountLoginRequest,
 )
+from app.services.identity_verify.base import IdentityVerifyRequest, IdentityVerifyResult
+from app.services.identity_verify.providers import DisabledIdentityProvider, get_identity_provider
 from app.services.sms.providers import get_sms_provider
 from app.services.user_columns import should_reset_phone_region
 from app.services.wechat.providers import get_wechat_provider
 from app.services.presence import mark_session_online
 from app.services.points import auto_login_reward
 from app.services.runtime_config import mini_realname_enabled, platform_registration_open, same_id_multiple_accounts_allowed
+
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_user_agent(user_agent: str | None) -> str | None:
@@ -696,6 +702,118 @@ def calculate_age(birthday: date) -> int:
     return today.year - birthday.year - ((today.month, today.day) < (birthday.month, birthday.day))
 
 
+async def _check_realname_submission_guard(
+    db: AsyncSession, *, user_id: int, card_hash: str, allow_same_id: bool
+) -> None:
+    """校验重复证件与已认证状态；调用方必须处于事务内。"""
+    if not allow_same_id:
+        duplicate = await db.execute(
+            text(
+                "SELECT user_id FROM user_auth WHERE id_card_hash = :hash "
+                "AND user_id <> :uid AND realname_status = 2"
+            ),
+            {"hash": card_hash, "uid": user_id},
+        )
+        if duplicate.first():
+            raise HTTPException(409, detail="该身份信息已被其他账号认证")
+    current = await db.execute(
+        text("SELECT realname_status FROM user_auth WHERE user_id = :uid FOR UPDATE"),
+        {"uid": user_id},
+    )
+    if current.scalar() == 2:
+        raise HTTPException(409, detail="实名认证通过后不能修改认证信息")
+
+
+async def _write_realname_submission(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    request: RealNameRequest,
+    card_hash: str,
+    birth: date,
+    allow_same_id: bool,
+    status: int,
+    reason: str | None,
+) -> None:
+    """写入一次实名提交；status 1=人工审核 2=自动通过 3=自动未通过。"""
+    await _check_realname_submission_guard(
+        db, user_id=user_id, card_hash=card_hash, allow_same_id=allow_same_id
+    )
+    step = 3 if status == 1 else 4 if status == 2 else 5
+    await db.execute(
+        text(
+            """INSERT INTO user_auth
+            (user_id, real_name, id_card, id_card_hash, id_card_masked, realname_status,
+             auth_status, auth_step, submitted_at, retry_count, fail_reason)
+            VALUES (:uid, :name, :card, :hash, :masked, :status, :status, :step,
+                    UTC_TIMESTAMP(), 1, :reason)
+            ON DUPLICATE KEY UPDATE real_name = VALUES(real_name), id_card = VALUES(id_card),
+            id_card_hash = VALUES(id_card_hash), id_card_masked = VALUES(id_card_masked),
+            realname_status = :status, auth_status = :status, auth_step = :step,
+            submitted_at = UTC_TIMESTAMP(), retry_count = retry_count + 1,
+            fail_reason = :reason"""
+        ),
+        {
+            "uid": user_id,
+            "name": request.real_name,
+            "card": encrypt_sensitive(request.id_card),
+            "hash": card_hash,
+            "masked": mask_id_card(request.id_card),
+            "status": status,
+            "step": step,
+            "reason": reason,
+        },
+    )
+    reviewed_at = "NULL" if status == 1 else "UTC_TIMESTAMP()"
+    await db.execute(
+        text(f"UPDATE user_auth SET reviewed_by = NULL, reviewed_at = {reviewed_at} WHERE user_id = :uid"),
+        {"uid": user_id},
+    )
+    await db.execute(
+        text("UPDATE users SET birthday = COALESCE(birthday, :birthday) WHERE id = :uid"),
+        {"uid": user_id, "birthday": birth},
+    )
+
+
+def _realname_status_for_result(result: IdentityVerifyResult | None) -> tuple[int, str | None]:
+    if result is None:
+        return 1, None
+    if result.verified:
+        return 2, None
+    return 3, (result.reason or "身份信息核验未通过").strip()[:255]
+
+
+async def _verify_realname_with_provider(
+    user_id: int, request: RealNameRequest
+) -> IdentityVerifyResult | None:
+    """调用在线核验；未配置/不可用时返回 None，由调用方转人工审核。"""
+    provider = get_identity_provider()
+    if isinstance(provider, DisabledIdentityProvider):
+        return None
+    try:
+        return await provider.verify(
+            IdentityVerifyRequest(
+                user_id=user_id,
+                real_name=request.real_name.strip(),
+                id_card_number=request.id_card.upper(),
+            )
+        )
+    except HTTPException as exc:
+        logger.warning(
+            "realname_provider_unavailable provider=%s status=%s",
+            getattr(provider, "name", "unknown"),
+            exc.status_code,
+        )
+        return None
+    except Exception as exc:  # 供应商异常必须降级人工，不能阻断提交
+        logger.warning(
+            "realname_provider_failed provider=%s error_type=%s",
+            getattr(provider, "name", "unknown"),
+            type(exc).__name__,
+        )
+        return None
+
+
 async def submit_realname(db: AsyncSession, user_id: int, request: RealNameRequest) -> dict[str, Any]:
     if not await mini_realname_enabled(db):
         raise HTTPException(403, detail="实名认证功能暂未开放")
@@ -707,21 +825,41 @@ async def submit_realname(db: AsyncSession, user_id: int, request: RealNameReque
     # Runtime-config reads start a SQLAlchemy transaction on this request.
     # Close it before opening the atomic identity-submission transaction.
     await db.rollback()
+
+    provider = get_identity_provider()
+    if isinstance(provider, DisabledIdentityProvider):
+        async with db.begin():
+            await _write_realname_submission(
+                db,
+                user_id=user_id,
+                request=request,
+                card_hash=card_hash,
+                birth=birth,
+                allow_same_id=allow_same_id,
+                status=1,
+                reason=None,
+            )
+        return {"status": 1, "id_card_masked": mask_id_card(request.id_card)}
+
+    # 第三方调用不能放在数据库事务内：先做一次只读校验，调用后再原子写入。
     async with db.begin():
-        if not allow_same_id:
-            duplicate = await db.execute(text("SELECT user_id FROM user_auth WHERE id_card_hash = :hash AND user_id <> :uid AND realname_status = 2"), {"hash": card_hash, "uid": user_id})
-            if duplicate.first():
-                raise HTTPException(409, detail="该身份信息已被其他账号认证")
-        current = await db.execute(text("SELECT realname_status FROM user_auth WHERE user_id = :uid FOR UPDATE"), {"uid": user_id})
-        existing = current.scalar()
-        if existing == 2:
-            raise HTTPException(409, detail="实名认证通过后不能修改认证信息")
-        await db.execute(text("""INSERT INTO user_auth (user_id, real_name, id_card, id_card_hash, id_card_masked, realname_status, auth_status, auth_step, submitted_at, retry_count)
-             VALUES (:uid, :name, :card, :hash, :masked, 1, 1, 3, UTC_TIMESTAMP(), 1)
-             ON DUPLICATE KEY UPDATE real_name = VALUES(real_name), id_card = VALUES(id_card), id_card_hash = VALUES(id_card_hash), id_card_masked = VALUES(id_card_masked), realname_status = 1, auth_status = 1, auth_step = 3, submitted_at = UTC_TIMESTAMP(), retry_count = retry_count + 1, fail_reason = NULL"""), {"uid": user_id, "name": request.real_name, "card": encrypt_sensitive(request.id_card), "hash": card_hash, "masked": mask_id_card(request.id_card)})
-        await db.execute(text("UPDATE user_auth SET reviewed_by = NULL, reviewed_at = NULL WHERE user_id = :uid"), {"uid": user_id})
-        await db.execute(text("UPDATE users SET birthday = COALESCE(birthday, :birthday) WHERE id = :uid"), {"uid": user_id, "birthday": birth})
-    return {"status": 1, "id_card_masked": mask_id_card(request.id_card)}
+        await _check_realname_submission_guard(
+            db, user_id=user_id, card_hash=card_hash, allow_same_id=allow_same_id
+        )
+    result = await _verify_realname_with_provider(user_id, request)
+    status, reason = _realname_status_for_result(result)
+    async with db.begin():
+        await _write_realname_submission(
+            db,
+            user_id=user_id,
+            request=request,
+            card_hash=card_hash,
+            birth=birth,
+            allow_same_id=allow_same_id,
+            status=status,
+            reason=reason,
+        )
+    return {"status": status, "id_card_masked": mask_id_card(request.id_card)}
 
 
 async def list_realname_reviews(db: AsyncSession, *, page: int, page_size: int, status: int | None = None, search: str | None = None, scope: str | None = None, scope_params: dict[str, object] | None = None):

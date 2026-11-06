@@ -80,6 +80,28 @@ class Settings(BaseSettings):
     # mock 仅允许 development/testing。
     face_provider: str = "disabled"
     face_mock_pass: bool = True
+    # 阿里云金融级实人认证：人脸照片比对（ContrastFaceVerify）。
+    face_access_key_id: str | None = None
+    face_access_key_secret: SecretStr | None = None
+    face_endpoint: str = "cloudauth.aliyuncs.com"
+    face_scene_id: int | None = Field(default=None, ge=1)
+    face_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    # 实名二要素自动核验：disabled（默认，保持人工审核）/ mock（仅开发测试）/
+    # aliyun（阿里云 Id2MetaVerify）/ real（其他厂商占位）。
+    identity_provider: Literal["disabled", "mock", "aliyun", "real"] = "disabled"
+    identity_mock_pass: bool = True
+    identity_access_key_id: str | None = None
+    identity_access_key_secret: SecretStr | None = None
+    identity_endpoint: str = "cloudauth.aliyuncs.com"
+    identity_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    # 学历自动核验：aliyun_market 走阿里云云市场第三方学历接口，
+    # 具体请求/响应字段依赖服务商，当前适配器为占位。
+    education_provider: Literal["disabled", "mock", "aliyun_market", "real"] = "disabled"
+    education_mock_pass: bool = True
+    education_market_base_url: str | None = None
+    education_market_path: str | None = None
+    education_market_app_code: SecretStr | None = None
+    education_market_timeout_seconds: float = Field(default=10, gt=0, le=60)
     wechat_mock_openid_prefix: str = "mock-openid-"
     sms_provider: str = "disabled"
     agreement_versions_raw: str = (
@@ -667,6 +689,40 @@ class Settings(BaseSettings):
             raise ValueError("staging/production 环境必须关闭 AUTO_INIT_DB")
         if self.environment in {"staging", "production"} and self.live_provider == "mock":
             raise ValueError("staging/production 环境禁止使用直播 Mock Provider")
+        if self.face_provider.lower() == "aliyun":
+            face_secret = (
+                self.face_access_key_secret.get_secret_value().strip()
+                if self.face_access_key_secret is not None
+                else ""
+            )
+            if not (self.face_access_key_id or "").strip() or not face_secret:
+                raise ValueError("启用阿里云人脸核验必须配置 FACE_ACCESS_KEY_ID / FACE_ACCESS_KEY_SECRET")
+            if not self.face_scene_id:
+                raise ValueError("启用阿里云人脸核验必须配置 FACE_SCENE_ID")
+        if self.identity_provider == "aliyun":
+            identity_secret = (
+                self.identity_access_key_secret.get_secret_value().strip()
+                if self.identity_access_key_secret is not None
+                else ""
+            )
+            if not (self.identity_access_key_id or "").strip() or not identity_secret:
+                raise ValueError("启用阿里云实名核验必须配置 IDENTITY_ACCESS_KEY_ID / IDENTITY_ACCESS_KEY_SECRET")
+        if self.education_provider == "aliyun_market":
+            if not (self.education_market_base_url or "").strip() or not (self.education_market_path or "").strip():
+                raise ValueError("启用阿里云云市场学历核验必须配置 EDUCATION_MARKET_BASE_URL / EDUCATION_MARKET_PATH")
+            market_code = (
+                self.education_market_app_code.get_secret_value().strip()
+                if self.education_market_app_code is not None
+                else ""
+            )
+            if not market_code:
+                raise ValueError("启用阿里云云市场学历核验必须配置 EDUCATION_MARKET_APP_CODE")
+        if self.environment in {"staging", "production"} and self.face_provider.lower() == "mock":
+            raise ValueError("staging/production 环境禁止使用人脸核验 Mock Provider")
+        if self.environment in {"staging", "production"} and self.identity_provider.lower() == "mock":
+            raise ValueError("staging/production 环境禁止使用实名核验 Mock Provider")
+        if self.environment in {"staging", "production"} and self.education_provider.lower() == "mock":
+            raise ValueError("staging/production 环境禁止使用学历核验 Mock Provider")
         if self.environment in {"staging", "production"} and self.verification_recharge_provider == "mock":
             raise ValueError("staging/production 环境禁止使用核验充值 Mock Provider")
         if self.environment in {"staging", "production"} and self.region_resolver_provider == "mock":

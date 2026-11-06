@@ -69,6 +69,26 @@ code .env
 
 `.env` 包含本地密钥和连接信息，不要提交到 Git。完整配置说明见 `.env.example`。
 
+### 自动核验配置（2026-11-05）
+
+实名二要素与学历自动核验默认关闭，保持原人工审核流程：
+
+```env
+IDENTITY_PROVIDER=disabled
+EDUCATION_PROVIDER=disabled
+FACE_PROVIDER=disabled
+```
+
+- `disabled`：不调用第三方，提交后进入人工审核；
+- `mock`：仅 development/testing，按 `IDENTITY_MOCK_PASS` / `EDUCATION_MOCK_PASS` 返回固定结果；
+- `aliyun`：阿里云官方金融级实人认证 `Id2MetaVerify`，需 `IDENTITY_ACCESS_KEY_ID` / `IDENTITY_ACCESS_KEY_SECRET`；
+- `aliyun_market`：阿里云云市场第三方学历接口占位，需 `EDUCATION_MARKET_BASE_URL` / `EDUCATION_MARKET_PATH` / `EDUCATION_MARKET_APP_CODE`，服务商确认前不会发起真实请求；
+- `real`：其他厂商适配器占位；当前未实现，调用会降级人工审核并记录 warning。
+
+人脸核验支持 `FACE_PROVIDER=aliyun`，使用官方 `ContrastFaceVerify`，需 `FACE_ACCESS_KEY_ID` / `FACE_ACCESS_KEY_SECRET` / `FACE_SCENE_ID`。
+
+staging/production 启动校验会拒绝 `FACE_PROVIDER=mock`、`IDENTITY_PROVIDER=mock`、`EDUCATION_PROVIDER=mock`。真实厂商接入前不要开启未实现的 `real`。
+
 ### Mock 认证服务
 
 没有短信服务商或微信小程序配置时，可以在开发/测试环境使用 Mock：
