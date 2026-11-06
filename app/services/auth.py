@@ -775,11 +775,26 @@ async def _write_realname_submission(
     )
 
 
+# 允许据 verified=True 直接判定实名通过的服务端 provider 白名单：
+# aliyun_cloudauth 为生产在线核验，mock 仅在测试环境生效。其余任何 provider
+# （含未来误接入/占位实现）即便返回 verified=True 也一律降级人工审核，
+# 绝不把非白名单/未核验状态映射为“已实名”，实现 deny-by-default。
+_TRUSTED_VERIFIED_PROVIDERS: frozenset[str] = frozenset({"aliyun_cloudauth", "mock"})
+
+
 def _realname_status_for_result(result: IdentityVerifyResult | None) -> tuple[int, str | None]:
     if result is None:
+        # 未配置/供应商异常/超时：转人工审核（status=1），不自动通过。
         return 1, None
     if result.verified:
-        return 2, None
+        if result.provider in _TRUSTED_VERIFIED_PROVIDERS:
+            return 2, None
+        # 非白名单 provider 声称已核验：不采信，降级人工审核并告警。
+        logger.warning(
+            "realname_verified_ignored_untrusted_provider provider=%s",
+            result.provider,
+        )
+        return 1, None
     return 3, (result.reason or "身份信息核验未通过").strip()[:255]
 
 
