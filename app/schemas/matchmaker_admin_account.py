@@ -16,6 +16,7 @@ class MatchmakerAdminAccountItem(BaseModel):
     status: Literal[1, 2, 3]
     failed_count: int
     locked_until: datetime | None
+    lock_at: datetime | None = None
     last_login_at: datetime | None
     last_login_ip: str | None
     phone: str | None = None
@@ -36,6 +37,8 @@ class MatchmakerAdminAccountCreate(BaseModel):
     username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
     password: str = Field(min_length=8, max_length=128)
     display_name: str = Field(min_length=1, max_length=128)
+    phone: str | None = Field(default=None, max_length=20, pattern=r"^\+?[0-9\- ]{6,20}$")
+    lock_at: datetime | None = None
     matchmaker_user_id: int | None = Field(default=None, ge=1)
     data_scope: Literal["SELF", "STORE", "ORGANIZATION", "ALL"] = "SELF"
     organization_id: int | None = Field(default=None, ge=1)
@@ -44,6 +47,8 @@ class MatchmakerAdminAccountCreate(BaseModel):
 
 class MatchmakerAdminAccountUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=128)
+    phone: str | None = Field(default=None, max_length=20, pattern=r"^\+?[0-9\- ]{6,20}$")
+    lock_at: datetime | None = None
     matchmaker_user_id: int | None = Field(default=None, ge=1)
     data_scope: Literal["SELF", "STORE", "ORGANIZATION", "ALL"] | None = None
     organization_id: int | None = Field(default=None, ge=1)

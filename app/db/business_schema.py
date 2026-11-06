@@ -386,6 +386,8 @@ BUSINESS_TABLES = {
             `status` tinyint NOT NULL DEFAULT '1' COMMENT '1正常 2停用',
             `failed_count` int unsigned NOT NULL DEFAULT '0',
             `locked_until` datetime DEFAULT NULL,
+            `phone` varchar(20) DEFAULT NULL COMMENT '账号联系手机号（接收短信通知），空则回显关联会员手机号',
+            `lock_at` datetime DEFAULT NULL COMMENT '定时锁定(UTC)：到达该时间后登录自动置为已锁定',
             `last_login_at` datetime DEFAULT NULL,
             `last_login_ip` varchar(64) DEFAULT NULL,
             `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,

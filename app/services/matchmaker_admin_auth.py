@@ -103,6 +103,27 @@ async def login(
     )
     row = result.mappings().first()
     now = datetime.now(UTC).replace(tzinfo=None)
+    # 定时锁定惰性判定：越过 lock_at 时间点即自动置为“已锁定”(status=3)并拒绝登录，
+    # 无需后台调度器；管理员通过状态接口恢复 status=1 时会同时清除 lock_at。
+    if row and row.get("lock_at") and row["lock_at"] <= now and int(row["status"]) == 1:
+        await db.execute(
+            text("UPDATE matchmaker_admin_account SET status = 3, updated_at = UTC_TIMESTAMP() WHERE id = :id"),
+            {"id": row["id"]},
+        )
+        await db.execute(
+            text("""INSERT INTO matchmaker_admin_login_log
+            (account_id, username, login_status, ip, user_agent, failure_reason)
+            VALUES (:account_id, :username, 0, :ip, :user_agent, :failure_reason)"""),
+            {
+                "account_id": row["id"],
+                "username": request.username,
+                "ip": ip,
+                "user_agent": user_agent[:255] if user_agent else None,
+                "failure_reason": "scheduled_lock",
+            },
+        )
+        await db.commit()
+        raise HTTPException(403, detail="账号已按定时锁定设置自动锁定，请联系管理员解除")
     if (
         not row
         or int(row["status"]) != 1
