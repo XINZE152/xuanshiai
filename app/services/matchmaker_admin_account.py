@@ -34,7 +34,7 @@ def _account_item(row: dict) -> MatchmakerAdminAccountItem:
     return MatchmakerAdminAccountItem(
         **{key: row[key] for key in (
             "id", "username", "display_name", "matchmaker_user_id", "data_scope", "organization_id", "status",
-            "failed_count", "locked_until", "last_login_at", "last_login_ip",
+            "failed_count", "locked_until", "last_login_at", "last_login_ip", "phone",
             "created_at", "updated_at",
         )},
         permissions=_permissions(row),
@@ -84,9 +84,10 @@ async def list_accounts(
         )
         params["cancellation_status"] = cancellation_status
     where = " AND ".join(conditions)
-    select = """SELECT a.*, GROUP_CONCAT(p.permission ORDER BY p.permission SEPARATOR '\n') AS permissions
+    select = """SELECT a.*, u.phone AS phone, GROUP_CONCAT(p.permission ORDER BY p.permission SEPARATOR '\n') AS permissions
         FROM matchmaker_admin_account a
         LEFT JOIN matchmaker_admin_permission p ON p.account_id = a.id
+        LEFT JOIN users u ON u.id = a.matchmaker_user_id
         WHERE {where}
         GROUP BY a.id
         ORDER BY a.created_at DESC
@@ -107,9 +108,10 @@ async def list_accounts(
 
 
 async def get_account(db: AsyncSession, account_id: int) -> MatchmakerAdminAccountItem:
-    result = await db.execute(text("""SELECT a.*, GROUP_CONCAT(p.permission ORDER BY p.permission SEPARATOR '\n') AS permissions
+    result = await db.execute(text("""SELECT a.*, u.phone AS phone, GROUP_CONCAT(p.permission ORDER BY p.permission SEPARATOR '\n') AS permissions
         FROM matchmaker_admin_account a
         LEFT JOIN matchmaker_admin_permission p ON p.account_id = a.id
+        LEFT JOIN users u ON u.id = a.matchmaker_user_id
         WHERE a.id = :id GROUP BY a.id"""), {"id": account_id})
     row = result.mappings().first()
     if not row:
@@ -308,7 +310,7 @@ async def list_audit_logs(
         conditions.append("(a.reason LIKE CONCAT('%', :kw, '%') OR a.action LIKE CONCAT('%', :kw, '%'))")
         params["kw"] = keyword
     condition = " AND ".join(conditions)
-    rows = await db.execute(text(f"""SELECT a.id, a.actor_user_id, acc.username AS actor_name,
+    rows = await db.execute(text(f"""SELECT a.id, a.actor_user_id AS actor_account_id, acc.username AS actor_name,
         a.action, a.resource_type, a.resource_id, a.reason, a.created_at
         FROM business_audit_log a
         LEFT JOIN matchmaker_admin_account acc ON acc.id = a.actor_user_id

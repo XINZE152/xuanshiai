@@ -18,6 +18,7 @@ class MatchmakerAdminAccountItem(BaseModel):
     locked_until: datetime | None
     last_login_at: datetime | None
     last_login_ip: str | None
+    phone: str | None = None
     permissions: list[str]
     created_at: datetime
     updated_at: datetime
