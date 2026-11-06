@@ -693,6 +693,8 @@ async def get_completion(db: AsyncSession, user_id: int) -> CompletionResponse:
     ]
     missing = [item.label for item in items if not item.completed]
     return CompletionResponse(
+        rules_version="profile-v5",
+        total_items=len(COMPLETION_RULES),
         score=score,
         missing_items=missing,
         items=items,

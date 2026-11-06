@@ -190,6 +190,8 @@ async def test_get_completion_returns_score_and_items_from_same_state() -> None:
     completion = await profile.get_completion(db, 42)
 
     assert completion.score == 100
+    assert completion.rules_version == "profile-v5"
+    assert completion.total_items == len(profile.COMPLETION_RULES) == 27
     assert sum(item.weight for item in completion.items if not item.completed) == 0
     assert completion.can_browse is True
     assert completion.can_apply is True

@@ -125,6 +125,11 @@ async def test_ninth_distinct_target_is_rejected(
     with pytest.raises(HTTPException) as excinfo:
         await _browse_quota(session, 910002, 109)
     assert excinfo.value.status_code == 429
+    detail = excinfo.value.detail
+    assert detail["code"] == "BROWSE_QUOTA_EXHAUSTED"
+    assert detail["message"] == "今日完整浏览额度已用完"
+    assert detail["quota"] == {"code": "browse", "remaining": 0, "is_vip": False}
+    assert detail["suggested_actions"] == ["upgrade_vip", "redeem_points"]
 
 
 @pytest.mark.asyncio

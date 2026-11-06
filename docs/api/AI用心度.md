@@ -5,6 +5,8 @@
 > 变更记录：2026-09-07 新增。
 >
 > 变更记录：2026-10-24 —— ①`POST` 生成失败（含 `503 AI返回格式无效`）现在会退还当日额度，与军师/润色/搜索/匹配一致；②`ai_provider.parse_json` 增加容错（剥离 Markdown 围栏、截取首个 `{` 到最后一个 `}`、去除尾逗号），该项为公共解析层改动，对全部 AI 结构化输出接口生效；③`ai_deepseek_max_tokens` 默认值由 2048 提升至 4096，避免 summary+4 条 advice 的长输出被截断。
+>
+> 变更记录：2026-11-06（UT-2026-11-02-DOC-02，Q49/Q24）——①模型首次输出非 JSON 时自动追加“只输出 JSON”严格提示重试 1 次，仍失败返回 `503 AI_OUTPUT_INVALID`（`retryable=true`），额度只扣一次并退还；②用心度门禁改为 `AiFeature.PROFILE`，与 `GET /ai/capabilities.profile` 一致；③错误 `detail` 由字符串改为对象，旧客户端请改读 `detail.code` 或顶层 `message`。
 
 ## 接口一：`GET /api/v1/ai/profile/thoughtfulness`
 
@@ -107,7 +109,7 @@ Authorization: Bearer <access_token>
 | `404` | 用户资料不存在（理论上登录用户不会触发） | `{"detail": "用户资料不存在"}` | 提示重试 |
 | `422` | trigger/edited_keys 校验失败 | `{"detail": [...]}` | 检查参数 |
 | `429` | 当日额度耗尽 | `{"detail": "今日 AI 使用次数已用完"}` | 提示明日再试或减少手动重试（**不退还额度**） |
-| `503` | AI 服务不可用 / 模型输出无法解析为合法 JSON / Redis 不可用 | `{"detail": "AI 服务暂时不可用"}` 或 `{"detail": "AI返回格式无效"}` | 展示重试入口；该次**已退还额度**，重试不额外消耗 |
+| `503` | AI 功能未开放 / 模型连续两次输出非 JSON / Redis 不可用 | `{"detail":{"code":"AI_FEATURE_DISABLED","message":"AI 功能暂不可用","retryable":false,"feature":"profile"}}` 或 `{"detail":{"code":"AI_OUTPUT_INVALID","message":"AI返回格式无效","retryable":true}}` | 读 `detail.code`：`AI_FEATURE_DISABLED` 展示“AI 未开放”空态；`AI_OUTPUT_INVALID` 展示重试入口。该次**已退还额度**，重试不额外消耗 |
 
 ## 数据存储
 

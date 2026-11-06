@@ -384,6 +384,8 @@ class NicknameUpdateResponse(BaseModel):
 
 
 class CompletionResponse(BaseModel):
+    rules_version: str = "profile-v5"
+    total_items: int
     score: float
     missing_items: list[str]
     items: list[CompletionItemResponse]

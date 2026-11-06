@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.redis import consume_daily, daily_quota_key, refund_daily
 from app.services.ai.audit import emit_ai_metric
+from app.services.ai.flags import AiFeature
 from app.schemas.ai import (
     AIAssistantMessageResponse,
     AIAssistantSessionPage,
@@ -36,6 +37,60 @@ from app.schemas.auth import QA_QUESTION_TEXTS
 
 MatchType = Literal["who_likes_me", "i_like", "material", "soul"]
 logger = logging.getLogger(__name__)
+
+
+def _detail_message(detail: object) -> str:
+    if isinstance(detail, dict):
+        return str(detail.get("message") or "")
+    return str(detail or "")
+
+
+def _is_invalid_json_error(exc: HTTPException) -> bool:
+    return exc.status_code == 503 and _detail_message(exc.detail) == "AI返回格式无效"
+
+
+async def _complete_json_with_retry(
+    messages: list[dict[str, str]],
+    *,
+    scene: str,
+    feature: AiFeature = AiFeature.PROFILE,
+) -> dict[str, Any]:
+    """Call the model and retry once when the first response is not valid JSON."""
+    raw = await complete(messages, json_mode=True, scene=scene, feature=feature)
+    try:
+        return parse_json(raw)
+    except HTTPException as exc:
+        if not _is_invalid_json_error(exc):
+            raise
+    retry_messages = [
+        *messages,
+        {
+            "role": "system",
+            "content": (
+                "上一次输出不是合法 JSON。只输出一个 JSON 对象，"
+                "不要 Markdown 围栏、解释文字或任何尾随内容。"
+            ),
+        },
+    ]
+    raw = await complete(
+        retry_messages,
+        json_mode=True,
+        scene=f"{scene}_json_retry",
+        feature=feature,
+    )
+    try:
+        return parse_json(raw)
+    except HTTPException as exc:
+        if _is_invalid_json_error(exc):
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "AI_OUTPUT_INVALID",
+                    "message": "AI返回格式无效",
+                    "retryable": True,
+                },
+            ) from exc
+        raise
 
 
 async def _require_vip(db: AsyncSession, user_id: int) -> None:
@@ -121,21 +176,35 @@ async def polish_profile(db: AsyncSession, user_id: int, request: AIProfilePolis
     # ai_enabled and is_test_mode and ai_allow_mock_fallback）：全部成立时
     # complete() 才返回原文截断 300 字回显，这里显式留痕避免 mock 降级静默
     # 发生；flag=false 时 complete() 抛 503，不得谎报降级。
-    if (
+    mock_fallback = (
         not settings.ai_enabled
         and settings.is_test_mode
         and settings.ai_allow_mock_fallback
-    ):
+    )
+    if mock_fallback:
         logger.warning(
             "ai_mock_fallback scene=profile_polish user_id=%s mode=echo_truncated_300",
             user_id,
         )
     try:
-        content = await complete([{"role": "system", "content": "你只润色用户提供的原文，不添加未提供的事实。输出JSON：polished(string), changed_points(array[string])。"}, {"role": "user", "content": f"PROFILE_POLISH style={request.style} max_length={request.max_length}\n{request.content}"}], json_mode=True, scene="profile_polish")
-        data = parse_json(content)
+        data = await _complete_json_with_retry(
+            [
+                {"role": "system", "content": "你只润色用户提供的原文，不添加未提供的事实。输出JSON：polished(string), changed_points(array[string])。"},
+                {"role": "user", "content": f"PROFILE_POLISH style={request.style} max_length={request.max_length}\n{request.content}"},
+            ],
+            scene="profile_polish",
+            feature=AiFeature.PROFILE,
+        )
         polished = str(data.get("polished") or request.content).strip()[:request.max_length]
         points = data.get("changed_points") if isinstance(data.get("changed_points"), list) else []
-        return AIProfilePolishResponse(original=request.content, polished=polished, style=request.style, changed_points=[str(x) for x in points[:5]])
+        return AIProfilePolishResponse(
+            original=request.content,
+            polished=polished,
+            style=request.style,
+            changed_points=[str(x) for x in points[:5]],
+            changed=False if mock_fallback else polished != request.content.strip(),
+            fallback="mock_echo" if mock_fallback else "none",
+        )
     except Exception:
         await _refund_ai_quota_safely(quota_key)
         raise
@@ -273,7 +342,7 @@ async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProf
         previous_text = json.dumps({"summary": previous_summary, "todos": previous_todos}, ensure_ascii=False)
         run_id = request.analysis_run_id or "server-generated"
 
-        raw = await complete(
+        data = await _complete_json_with_retry(
             [
                 {"role": "system", "content": THOUGHTFULNESS_SYSTEM_PROMPT},
                 {"role": "user", "content": (
@@ -284,15 +353,14 @@ async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProf
                     + "\n".join(facts)
                 )},
             ],
-            json_mode=True,
             scene="thoughtfulness",
+            feature=AiFeature.PROFILE,
         )
-        data = parse_json(raw)
 
         # 模型偶尔会在资料未变化时复读上一版；追加一次明确的重写指令，保证手动重分析确实重新生成。
         current_text = json.dumps({"summary": data.get("summary"), "todos": data.get("todos")}, ensure_ascii=False)
         if previous_summary != "" and current_text == previous_text:
-            raw = await complete(
+            data = await _complete_json_with_retry(
                 [
                     {"role": "system", "content": THOUGHTFULNESS_SYSTEM_PROMPT},
                     {"role": "user", "content": (
@@ -301,10 +369,9 @@ async def analyze_thoughtfulness(db: AsyncSession, user_id: int, request: AIProf
                         f"上一版：{previous_text}\n" + "\n".join(facts)
                     )},
                 ],
-                json_mode=True,
-                scene="thoughtfulness",
+                scene="thoughtfulness_rewrite",
+                feature=AiFeature.PROFILE,
             )
-            data = parse_json(raw)
         try:
             score = max(0, min(100, int(data.get("score"))))
         except (TypeError, ValueError):

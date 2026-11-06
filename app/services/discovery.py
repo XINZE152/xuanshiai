@@ -787,7 +787,17 @@ async def _consume_browse(db: AsyncSession, user_id: int, match_score: float, is
         # 积分池在 MySQL，无法与 Redis 原子扣减；补记 seen，避免同一用户重复扣积分。
         await mark_daily_member(seen_key, member)
         return 0
-    raise HTTPException(429, detail="今日完整浏览额度已用完")
+    suggested_actions = ["redeem_points"] if is_vip else ["upgrade_vip", "redeem_points"]
+    raise HTTPException(
+        429,
+        detail={
+            "code": "BROWSE_QUOTA_EXHAUSTED",
+            "message": "今日完整浏览额度已用完",
+            "retryable": False,
+            "quota": {"code": "browse", "remaining": 0, "is_vip": is_vip},
+            "suggested_actions": suggested_actions,
+        },
+    )
 
 
 async def _record_browse(db: AsyncSession, viewer_id: int, target_id: int) -> None:
