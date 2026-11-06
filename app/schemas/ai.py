@@ -51,6 +51,8 @@ class AIProfilePolishResponse(BaseModel):
     polished: str
     style: str
     changed_points: list[str]
+    changed: bool = True
+    fallback: Literal["none", "mock_echo"] = "none"
 
 
 class AIProfileThoughtfulnessRequest(BaseModel):

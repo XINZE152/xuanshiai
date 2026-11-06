@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.candidate_visibility import CandidateVisibilityService, VisibilityScene
 from app.services.points import _balance
 
-PAPER_PLANE_PROFILE_UNLOCK_COST = 80
+PAPER_PLANE_PROFILE_UNLOCK_COST = 50
 
 
 class ProfileUnlockError(Exception):
@@ -48,7 +48,7 @@ class UnlockStore(Protocol):
 class PaperPlaneProfileUnlockService:
     def __init__(self, store: UnlockStore, points_cost: int = PAPER_PLANE_PROFILE_UNLOCK_COST) -> None:
         if points_cost != PAPER_PLANE_PROFILE_UNLOCK_COST:
-            raise ValueError("paper-plane profile unlock cost is fixed at 80 points")
+            raise ValueError("paper-plane profile unlock cost is fixed at 50 points")
         self.store = store
         self.points_cost = points_cost
 
@@ -215,4 +215,72 @@ async def get_profile_unlock(
         "balance": await _balance(db, viewer_id),
         "unlocked_at": row["unlocked_at"] if row else None,
         "profile": {"display_name": "匿名用户", "phone": None, "wechat": None} if row else None,
+    }
+
+
+async def list_profile_unlocks(
+    db: AsyncSession, viewer_id: int, page: int, page_size: int
+) -> dict[str, object]:
+    """List the current viewer's unlock history without re-exposing profiles."""
+    params = {
+        "viewer": viewer_id,
+        "limit": page_size,
+        "offset": (page - 1) * page_size,
+    }
+    total = int(
+        (
+            await db.execute(
+                text(
+                    """SELECT COUNT(*) FROM paper_plane_profile_unlock
+                       WHERE viewer_user_id = :viewer"""
+                ),
+                {"viewer": viewer_id},
+            )
+        ).scalar()
+        or 0
+    )
+    rows = (
+        await db.execute(
+            text(
+                """SELECT l.target_user_id, u.nickname, u.avatar,
+                          COALESCE((SELECT um.thumbnail_url FROM user_media um
+                                    WHERE um.user_id = u.id AND um.media_type = 'avatar'
+                                      AND um.deleted_at IS NULL
+                                    ORDER BY um.id DESC LIMIT 1), u.avatar) AS avatar_thumb,
+                          CASE WHEN u.birthday IS NOT NULL
+                               THEN TIMESTAMPDIFF(YEAR, u.birthday, UTC_DATE())
+                               ELSE NULL END AS age,
+                          l.unlocked_at, l.points_cost, l.unlock_source,
+                          CASE WHEN u.status = 1 AND COALESCE(pr.show_profile, 1) = 1
+                               THEN 1 ELSE 0 END AS target_available
+                   FROM paper_plane_profile_unlock l
+                   JOIN users u ON u.id = l.target_user_id
+                   LEFT JOIN user_privacy pr ON pr.user_id = u.id
+                   WHERE l.viewer_user_id = :viewer
+                   ORDER BY l.unlocked_at DESC, l.id DESC
+                   LIMIT :limit OFFSET :offset"""
+            ),
+            params,
+        )
+    ).mappings().all()
+    items = [
+        {
+            "target_user_id": int(row["target_user_id"]),
+            "nickname": row["nickname"],
+            "avatar": row["avatar"],
+            "avatar_thumb": row["avatar_thumb"],
+            "age": int(row["age"]) if row["age"] is not None else None,
+            "unlocked_at": row["unlocked_at"],
+            "points_cost": int(row["points_cost"]),
+            "unlock_source": str(row["unlock_source"]),
+            "target_available": bool(row["target_available"]),
+        }
+        for row in rows
+    ]
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "has_more": page * page_size < total,
     }

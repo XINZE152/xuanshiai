@@ -59,6 +59,7 @@ class ChatMessageCreate(BaseModel):
     content: str | None = Field(default=None, max_length=5000)
     media_url: str | None = Field(default=None, max_length=500)
     client_message_id: str | None = Field(default=None, max_length=128)
+    quote_message_id: int | None = Field(default=None, ge=1)
 
     @field_validator("client_message_id", mode="before")
     @classmethod
@@ -82,6 +83,14 @@ class ChatMessageCreate(BaseModel):
         return self
 
 
+class ChatMessageQuote(BaseModel):
+    id: int
+    type: int
+    content: str | None
+    from_user_id: int
+    revoked: bool
+
+
 class ChatMessageResponse(BaseModel):
     id: int
     session_id: int
@@ -91,6 +100,8 @@ class ChatMessageResponse(BaseModel):
     content: str | None
     media_url: str | None
     client_message_id: str | None = None
+    quote_message_id: int | None = None
+    quote: ChatMessageQuote | None = None
     is_read: bool
     revoked: bool
     is_recalled: bool = False

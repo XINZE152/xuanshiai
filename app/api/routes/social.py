@@ -48,6 +48,7 @@ from app.services.social import (
     mark_notification_read,
     revoke_message,
     recall_message,
+    hide_message_for_me,
     send_message,
     set_block,
     set_follow,
@@ -172,6 +173,11 @@ async def read_messages(session_id: int = Path(..., ge=1), current: CurrentUser 
 @router.delete("/chat/messages/{message_id}", status_code=204, summary="撤回聊天消息")
 async def revoke(message_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> None:
     await revoke_message(db, current.id, message_id)
+
+
+@router.delete("/chat/messages/{message_id}/for-me", status_code=204, summary="仅自己隐藏聊天消息")
+async def hide_for_me(message_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> None:
+    await hide_message_for_me(db, current.id, message_id)
 
 
 @router.post("/chat/messages/{message_id}/recall", response_model=ChatMessageResponse, summary="撤回聊天消息并返回最新状态")

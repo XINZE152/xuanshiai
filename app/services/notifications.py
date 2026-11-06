@@ -29,6 +29,7 @@ _PREFERENCE_BY_EVENT = {
     "matchmaker_service_admin_updated": "notify_system",
     "activity": "notify_activity",
     "system": "notify_system",
+    "community_post_remind": "notify_system",
 }
 _MANDATORY_EVENT_TYPES = frozenset({
     "report_result",

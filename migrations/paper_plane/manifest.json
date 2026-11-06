@@ -10,6 +10,12 @@
       "version": "20260903_02_contact_exchange",
       "up": "20260903_02_contact_exchange_up.sql",
       "down": "20260903_02_contact_exchange_down.sql"
+    },
+    {
+      "version": "20261106_01_unlock_cost",
+      "up": "20261106_01_unlock_cost_up.sql",
+      "down": "20261106_01_unlock_cost_down.sql",
+      "verify": "20261106_01_unlock_cost_verify.sql"
     }
   ]
 }

@@ -59,6 +59,8 @@ def test_manifest_checksums_are_lf_normalised() -> None:
         "20261030_04_user_points_biz_key",
         "20261102_01_user_feedback",
         "20261104_01_good_news",
+        "20261106_01_profile_completion_grandfather",
+        "20261106_02_community_post_remind",
     ]
     for entry in manifest["versions"]:
         for direction in ("up", "down", "verify", "verify_previous"):
@@ -203,3 +205,22 @@ def test_checksum_rejects_tampered_sql(tmp_path: Path) -> None:
     path.write_bytes(b"SELECT 2;\n")
     with pytest.raises(MigrationError, match="checksum mismatch"):
         _checksum(path, digest)
+
+
+def test_q23_grandfather_migration_is_reversible_and_backfills_once() -> None:
+    up = (MIGRATION_ROOT / "20261106_01_profile_completion_grandfather_up.sql").read_text(encoding="utf-8")
+    down = (MIGRATION_ROOT / "20261106_01_profile_completion_grandfather_down.sql").read_text(encoding="utf-8")
+    verify = (MIGRATION_ROOT / "20261106_01_profile_completion_grandfather_verify.sql").read_text(encoding="utf-8")
+    assert "completion_grandfathered" in up
+    assert "SET `completion_grandfathered` = 1" in up
+    assert "@completion_grandfathered_exists = 0" in up
+    assert "DROP COLUMN `completion_grandfathered`" in down
+    assert "'completion_grandfathered'" in verify
+
+
+def test_q74_remind_migration_creates_author_only_table() -> None:
+    up = (MIGRATION_ROOT / "20261106_02_community_post_remind_up.sql").read_text(encoding="utf-8")
+    down = (MIGRATION_ROOT / "20261106_02_community_post_remind_down.sql").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS `community_post_remind`" in up
+    assert "uk_community_post_remind_post_user" in up
+    assert "DROP TABLE IF EXISTS `community_post_remind`" in down

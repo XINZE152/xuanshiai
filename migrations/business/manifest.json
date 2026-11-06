@@ -144,6 +144,32 @@
         "verify": "20b09becb29f8ec027e749335fa30d489eee3cf028cf08e14b0ddb63408eb5bd",
         "verify_previous": "525125a135af71e3282ed80d1f4a1d83d0f2063e08879f04c30e27c3cc84c38f"
       }
+    },
+    {
+      "version": "20261106_01_profile_completion_grandfather",
+      "up": "20261106_01_profile_completion_grandfather_up.sql",
+      "down": "20261106_01_profile_completion_grandfather_down.sql",
+      "verify": "20261106_01_profile_completion_grandfather_verify.sql",
+      "verify_previous": "20261106_01_profile_completion_grandfather_verify_previous.sql",
+      "sha256": {
+        "up": "ffb95cc6250364013a6cdb44596f2aa0a75217d8ce89df28e069314725fa9cbf",
+        "down": "019a2062984e3c5ffdaa7e995a3a1af06bf297ead5290f0cdcc4d7193981a402",
+        "verify": "4c39699e5bc4d2bfb5d94e309dcff48b86d8b595532785e8da6d7d25e53d10ff",
+        "verify_previous": "1c365e522b1ae092c56ef5bbbdcdb03e337cc14226cf8534cf9760d96fa66699"
+      }
+    },
+    {
+      "version": "20261106_02_community_post_remind",
+      "up": "20261106_02_community_post_remind_up.sql",
+      "down": "20261106_02_community_post_remind_down.sql",
+      "verify": "20261106_02_community_post_remind_verify.sql",
+      "verify_previous": "20261106_02_community_post_remind_verify_previous.sql",
+      "sha256": {
+        "up": "20898c82ade64f94c7c43624ab1ed05312d02e55fdf589417377e3908bcc2176",
+        "down": "f8fc283fc197a4d6fbcf97b7101bbbd10e5119870f8297c7c15037995c5756e2",
+        "verify": "778ffd3635cd0525914588f1ebb3c87e1744617fbaec4dcf441e45903c346124",
+        "verify_previous": "9d33bd746ca1231b595c7b1209e48d73bd0c7d4ebfe019cd876bb4def20a3951"
+      }
     }
   ]
 }

@@ -1,11 +1,14 @@
 """Paper-plane target-specific profile unlock endpoints."""
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user
 from app.db.session import get_db
-from app.schemas.paper_plane_unlock import PaperPlaneProfileUnlockResponse
+from app.schemas.paper_plane_unlock import (
+    PaperPlaneProfileUnlockPage,
+    PaperPlaneProfileUnlockResponse,
+)
 from app.services.paper_plane_unlock import (
     PaperPlaneProfileUnlockService,
     ProfileUnlockConflict,
@@ -14,9 +17,25 @@ from app.services.paper_plane_unlock import (
     ProfileUnlockNotFound,
     SqlAlchemyPaperPlaneUnlockStore,
     get_profile_unlock,
+    list_profile_unlocks,
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/paper-plane/profile-unlocks",
+    response_model=PaperPlaneProfileUnlockPage,
+    summary="查询本人解锁过的纸飞机目标资料",
+)
+async def profile_unlock_history(
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PaperPlaneProfileUnlockPage:
+    result = await list_profile_unlocks(db, current.id, page, page_size)
+    return PaperPlaneProfileUnlockPage(**result)
 
 
 @router.get(
