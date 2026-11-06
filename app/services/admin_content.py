@@ -153,6 +153,11 @@ EXTRA_FILTER_KEYS: frozenset[str] = frozenset(
         "source",
         "qrcode_id",
         "broadcast_id",
+        # sales_library（销售匹配库/眼缘库）的到店状态与销售红娘姓名筛选（均存于 extra_json）。
+        # 此前前端靠把 arrival/matchmaker 塞进 keyword 做 JSON 子串匹配（脆弱 hack，永远零结果），
+        # 后改客户端后处理（仅作用当前页），现走正式后端参数实现跨页全局筛选。
+        "arrival",
+        "matchmaker",
     }
 )
 
@@ -209,10 +214,12 @@ async def list_items(
                 continue
             if key == "qrcode_id" and domain != "fan_qrcode_stat":
                 continue
+            if key in {"arrival", "matchmaker"} and domain != "sales_library":
+                continue
             json_key = "status" if key == "good_news_status" else key
-            operator = "LIKE" if key == "nick" else "="
+            operator = "LIKE" if key in {"nick", "matchmaker"} else "="
             conditions.append(f"JSON_UNQUOTE(JSON_EXTRACT(extra_json, '$.{json_key}')) {operator} :extra_{key}")
-            params[f"extra_{key}"] = f"%{value}%" if key == "nick" else value
+            params[f"extra_{key}"] = f"%{value}%" if key in {"nick", "matchmaker"} else value
     where = " AND ".join(conditions)
 
     total = int(
