@@ -80,6 +80,28 @@ class Settings(BaseSettings):
     # mock 仅允许 development/testing。
     face_provider: str = "disabled"
     face_mock_pass: bool = True
+    # 阿里云金融级实人认证：人脸照片比对（ContrastFaceVerify）。
+    face_access_key_id: str | None = None
+    face_access_key_secret: SecretStr | None = None
+    face_endpoint: str = "cloudauth.aliyuncs.com"
+    face_scene_id: int | None = Field(default=None, ge=1)
+    face_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    # 实名二要素自动核验：disabled（默认，保持人工审核）/ mock（仅开发测试）/
+    # aliyun（阿里云 Id2MetaVerify）/ real（其他厂商占位）。
+    identity_provider: Literal["disabled", "mock", "aliyun", "real"] = "disabled"
+    identity_mock_pass: bool = True
+    identity_access_key_id: str | None = None
+    identity_access_key_secret: SecretStr | None = None
+    identity_endpoint: str = "cloudauth.aliyuncs.com"
+    identity_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    # 学历自动核验：aliyun_market 走阿里云云市场第三方学历接口，
+    # 具体请求/响应字段依赖服务商，当前适配器为占位。
+    education_provider: Literal["disabled", "mock", "aliyun_market", "real"] = "disabled"
+    education_mock_pass: bool = True
+    education_market_base_url: str | None = None
+    education_market_path: str | None = None
+    education_market_app_code: SecretStr | None = None
+    education_market_timeout_seconds: float = Field(default=10, gt=0, le=60)
     wechat_mock_openid_prefix: str = "mock-openid-"
     sms_provider: str = "disabled"
     agreement_versions_raw: str = (
@@ -171,6 +193,44 @@ class Settings(BaseSettings):
     region_phone_segment_path: str | None = None
     region_refresh_batch_size: int = 500
     region_refresh_overwrite_max_rows: int = 5000
+
+    # 在线 API（2026-11-04 定：IP 走云市场 AppCode，手机走号码百科 AccessKey）。
+    # 按类型 provider 是新开关，旧 region_resolver_provider 继续保留兼容。
+    region_ip_provider: Literal["disabled", "offline", "api"] = "disabled"
+    region_phone_provider: Literal["disabled", "offline", "api"] = "disabled"
+    region_ip_fallback_provider: Literal["offline", "none"] = "offline"
+    region_phone_fallback_provider: Literal["offline", "none"] = "none"
+
+    # 阿里云云市场 IP 归属地：AppCode 鉴权，GET/POST 由商品决定。
+    region_ip_api_vendor: Literal["aliyun"] = "aliyun"
+    region_ip_api_endpoint: str | None = None
+    region_ip_api_path: str | None = None
+    region_ip_api_method: Literal["GET", "POST"] = "GET"
+    region_ip_api_request_format: Literal["json", "form"] = "json"
+    region_ip_api_ip_field: str = "ip"
+    region_ip_api_province_field: str = "province"
+    region_ip_api_city_field: str = "city"
+    region_ip_api_country_field: str = "country"
+    region_ip_api_app_code: SecretStr | None = None
+    region_ip_api_timeout_seconds: float = Field(default=5, gt=0, le=60)
+    region_ip_api_concurrency: int = Field(default=10, ge=1, le=50)
+    region_ip_api_qps: int = Field(default=10, ge=1, le=100)
+    region_ip_api_max_retries: int = Field(default=2, ge=0, le=5)
+
+    # 阿里云号码百科：RPC 签名 + AuthCode；Mask 控制明文/哈希入参。
+    region_phone_api_vendor: Literal["aliyun"] = "aliyun"
+    region_phone_api_endpoint: str | None = None
+    region_phone_api_action: str = "DescribePhoneNumberOperatorAttribute"
+    region_phone_api_version: str = "2020-02-17"
+    region_phone_api_region: str = "cn-hangzhou"
+    region_phone_api_auth_code: SecretStr | None = None
+    region_phone_api_mask: Literal["NORMAL", "MD5", "SHA256"] = "NORMAL"
+    region_phone_api_access_key_id: SecretStr | None = None
+    region_phone_api_access_key_secret: SecretStr | None = None
+    region_phone_api_timeout_seconds: float = Field(default=5, gt=0, le=60)
+    region_phone_api_concurrency: int = Field(default=5, ge=1, le=50)
+    region_phone_api_qps: int = Field(default=5, ge=1, le=100)
+    region_phone_api_max_retries: int = Field(default=2, ge=0, le=5)
 
     # AI avatar calls an OpenAI-compatible chat-completions service from the
     # backend only. API keys must never be exposed to the mini-program.
@@ -636,6 +696,40 @@ class Settings(BaseSettings):
             raise ValueError("staging/production 环境必须关闭 AUTO_INIT_DB")
         if self.environment in {"staging", "production"} and self.live_provider == "mock":
             raise ValueError("staging/production 环境禁止使用直播 Mock Provider")
+        if self.face_provider.lower() == "aliyun":
+            face_secret = (
+                self.face_access_key_secret.get_secret_value().strip()
+                if self.face_access_key_secret is not None
+                else ""
+            )
+            if not (self.face_access_key_id or "").strip() or not face_secret:
+                raise ValueError("启用阿里云人脸核验必须配置 FACE_ACCESS_KEY_ID / FACE_ACCESS_KEY_SECRET")
+            if not self.face_scene_id:
+                raise ValueError("启用阿里云人脸核验必须配置 FACE_SCENE_ID")
+        if self.identity_provider == "aliyun":
+            identity_secret = (
+                self.identity_access_key_secret.get_secret_value().strip()
+                if self.identity_access_key_secret is not None
+                else ""
+            )
+            if not (self.identity_access_key_id or "").strip() or not identity_secret:
+                raise ValueError("启用阿里云实名核验必须配置 IDENTITY_ACCESS_KEY_ID / IDENTITY_ACCESS_KEY_SECRET")
+        if self.education_provider == "aliyun_market":
+            if not (self.education_market_base_url or "").strip() or not (self.education_market_path or "").strip():
+                raise ValueError("启用阿里云云市场学历核验必须配置 EDUCATION_MARKET_BASE_URL / EDUCATION_MARKET_PATH")
+            market_code = (
+                self.education_market_app_code.get_secret_value().strip()
+                if self.education_market_app_code is not None
+                else ""
+            )
+            if not market_code:
+                raise ValueError("启用阿里云云市场学历核验必须配置 EDUCATION_MARKET_APP_CODE")
+        if self.environment in {"staging", "production"} and self.face_provider.lower() == "mock":
+            raise ValueError("staging/production 环境禁止使用人脸核验 Mock Provider")
+        if self.environment in {"staging", "production"} and self.identity_provider.lower() == "mock":
+            raise ValueError("staging/production 环境禁止使用实名核验 Mock Provider")
+        if self.environment in {"staging", "production"} and self.education_provider.lower() == "mock":
+            raise ValueError("staging/production 环境禁止使用学历核验 Mock Provider")
         if self.environment in {"staging", "production"} and self.verification_recharge_provider == "mock":
             raise ValueError("staging/production 环境禁止使用核验充值 Mock Provider")
         if self.environment in {"staging", "production"} and self.region_resolver_provider == "mock":

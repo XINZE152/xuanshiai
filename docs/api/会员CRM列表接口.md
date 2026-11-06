@@ -151,8 +151,8 @@ Authorization: Bearer <access-token>
 | `ip_location` | string/null | 否 | 无注册 IP/缺列为 null | `users.register_ip` |
 | `points` | int | 否 | 无流水为 `0` | **A12**：积分余额，取 `user_points` 流水最新一条 `balance`（相关子查询，无新表）；`sort_by=points`/`integral` 走同一表达式 |
 | `login_num` | int/null | 否 | 缺列（迁移未执行）为 `null` | **A12-补列**：累计登录次数，取 `users.login_num`（`migrations/user_login_num/20261024_01`，登录链路自增） |
-| `ip_region` | string/null | 否 | 缺列为 `null`；本轮仅展示、不自动解析 | **A12-属地**：`users.ip_region`（`migrations/user_region/20261024_01`） |
-| `phone_region` | string/null | 否 | 缺列为 `null` | **A12-属地**：`users.phone_region` |
+| `ip_region` | string/null | 否 | 未刷新/缺列为 `null` | **A12-属地**：`users.ip_region`（`migrations/user_region/20261024_01`），由一键刷新接口回填，市级精度 |
+| `phone_region` | string/null | 否 | 未刷新/缺列为 `null` | **A12-属地**：`users.phone_region`，由一键刷新接口回填；手机号变更后置空待刷新 |
 | `balance` | number | 否 | 无流水为 `0` | **A12-钱包**：取 `account_ledger`（`account_type='user'`、`state='AVAILABLE'`）CREDIT−DEBIT，相关子查询、无新表；`sort_by=balance` 走同一表达式 |
 
 所有新增列所需的 JOIN（`users u` / `user_profile p` / `user_auth ua`）本已存在，纯 SELECT 补列；迁移未执行时按缺列降级为 `NULL`，字段均可选，不会让整页 500。旧客户端忽略新增字段即可，向后兼容。
@@ -195,6 +195,8 @@ Content-Type: application/json
 **业务规则**：以 `member_abandonment` 有效行（`restored_at IS NULL`）为弃海口径；写操作前对作用域内目标行加 `FOR UPDATE` 锁，防并发重复；写一份 `business_audit_log`（`action='member.batch_abandon'`，成员清单记入 `after_json`）。
 
 ## 变更记录
+
+- 2026-11-04（A12-属地刷新收口）：`ip_region` / `phone_region` 改为由一键刷新接口回填（IP 市级、手机省+市）；手机号变更后 `phone_region` 置空待刷新。字段本身与类型不变，向后兼容。刷新契约见 `docs/api/一键刷新属地接口-2026-10-24.md`。
 
 - 2026-10-27（A12-积分 BUG 修复）：后台「发放积分 / 扣减积分」`credit-grants`/`credit-deductions` 的写入账本由 `account_ledger`改为 C 端 `user_points`（type=5、滚动余额）。**`points` 列口径不变（仍取 `user_points` 最新 `balance`），但自此后台发放会即时拉高列表「积分」列，不再误涨「余额」列**（历史误发不回填）。`balance` 列仍取 `account_ledger`。详见 `docs/api/扣减积分接口-2026-10-24.md`。
 

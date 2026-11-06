@@ -131,6 +131,19 @@
         "verify": "0e56f1df512f5adc31474d629e4118f644aadf890ee94aac98791736797705ca",
         "verify_previous": "e9160d54bb483e03b76c368de185aa110db41aad7ddfd1ab9fcbbd8cfa4f40ef"
       }
+    },
+    {
+      "version": "20261104_01_good_news",
+      "up": "20261104_01_good_news_up.sql",
+      "down": "20261104_01_good_news_down.sql",
+      "verify": "20261104_01_good_news_verify.sql",
+      "verify_previous": "20261104_01_good_news_verify_previous.sql",
+      "sha256": {
+        "up": "781e4dc662542f0176b08a74f4a2f8f2022b1b63fa6e3a6f7f4aff8904dc407a",
+        "down": "3951a2ef31c4010f0cd2e5215781e261afedabe711e68acfb55b75d136bb2378",
+        "verify": "20b09becb29f8ec027e749335fa30d489eee3cf028cf08e14b0ddb63408eb5bd",
+        "verify_previous": "525125a135af71e3282ed80d1f4a1d83d0f2063e08879f04c30e27c3cc84c38f"
+      }
     }
   ]
 }

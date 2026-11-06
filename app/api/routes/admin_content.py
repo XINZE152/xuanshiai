@@ -33,6 +33,8 @@ async def content_list(
     source: str | None = Query(None, max_length=64, description="【仅 free_form】客户来源，取自 extra.source，精确匹配"),
     broadcast_id: str | None = Query(None, max_length=20, description="【仅 sms_send_record】发送明细所属群发任务 ID，取自 extra.broadcast_id"),
     qrcode_id: str | None = Query(None, max_length=20, description="【仅 fan_qrcode_stat】统计所属二维码 ID，取自 extra.qrcode_id"),
+    arrival: str | None = Query(None, max_length=16, description="【仅 sales_library】到店状态，取自 extra.arrival：已到店 / 未到店"),
+    matchmaker: str | None = Query(None, max_length=64, description="【仅 sales_library】销售红娘姓名，按 extra.matchmaker 模糊筛选"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> ContentItemPage:
@@ -51,6 +53,8 @@ async def content_list(
         "source": source,
         "broadcast_id": broadcast_id,
         "qrcode_id": qrcode_id,
+        "arrival": arrival,
+        "matchmaker": matchmaker,
     }
     return await list_items(db, domain, page, page_size, keyword, status, extra_filters, search_type)
 
@@ -89,7 +93,7 @@ async def content_update(
     db: AsyncSession = Depends(get_db),
 ) -> ContentItem:
     current.require("platform.config.write")
-    return await update_item(db, domain, item_id, body)
+    return await update_item(db, domain, item_id, body, current.account.id)
 
 
 @declare_permission("platform.config.write")

@@ -5,13 +5,24 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from app.core.config import settings
+from app.services.face.aliyun import AliyunCloudAuthFaceProvider
 from app.services.face.base import FaceProvider, FaceVerifyResult
 
 
 class DisabledFaceProvider:
     """未接入人脸服务时的实现：fail-closed，拒绝一切核验请求。"""
 
-    async def verify(self, *, user_id: int, image_ref: str, scene: str = "realname") -> FaceVerifyResult:
+    name = "disabled"
+
+    async def verify(
+        self,
+        *,
+        user_id: int,
+        image_ref: str,
+        scene: str = "realname",
+        real_name: str | None = None,
+        id_card_number: str | None = None,
+    ) -> FaceVerifyResult:
         raise HTTPException(status_code=503, detail="人脸认证服务未配置")
 
 
@@ -21,7 +32,17 @@ class MockFaceProvider:
     返回结果由 ``FACE_MOCK_PASS`` 决定，便于测试覆盖通过与拒绝两条分支。
     """
 
-    async def verify(self, *, user_id: int, image_ref: str, scene: str = "realname") -> FaceVerifyResult:
+    name = "mock"
+
+    async def verify(
+        self,
+        *,
+        user_id: int,
+        image_ref: str,
+        scene: str = "realname",
+        real_name: str | None = None,
+        id_card_number: str | None = None,
+    ) -> FaceVerifyResult:
         if not settings.is_test_mode:
             raise HTTPException(status_code=503, detail="人脸 Mock 服务仅允许测试环境使用")
         passed = bool(settings.face_mock_pass)
@@ -38,6 +59,7 @@ def get_face_provider() -> FaceProvider:
     providers: dict[str, FaceProvider] = {
         "disabled": DisabledFaceProvider(),
         "mock": MockFaceProvider(),
+        "aliyun": AliyunCloudAuthFaceProvider(),
     }
     provider = providers.get((settings.face_provider or "disabled").lower())
     if provider is None:

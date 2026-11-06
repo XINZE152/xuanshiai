@@ -22,6 +22,7 @@ from app.api.routes import (
     admin_config,
     admin_common_upload,
     admin_content,
+    admin_good_news,
     admin_cms,
     admin_user_feedback,
     ai_avatar,
@@ -40,6 +41,8 @@ from app.api.routes import (
     discovery,
     emotion_lab,
     finance,
+    good_news,
+    good_news_workspace,
     health,
     identity,
     location,
@@ -123,6 +126,7 @@ api_router.include_router(ai_avatar.router, tags=["AI 分身"])
 api_router.include_router(ai_avatar.memory_router, tags=["AI 分身"])
 api_router.include_router(users.router, tags=["账号与认证"])
 api_router.include_router(support.router, tags=["客服与反馈"])
+api_router.include_router(good_news.router, tags=["红娘喜讯"])
 api_router.include_router(certifications.router, tags=["认证审核"])
 api_router.include_router(membership.router, tags=["会员"])
 api_router.include_router(payments.router, tags=["支付"])
@@ -137,6 +141,8 @@ api_router.include_router(profile.router, tags=["首页与资料"])
 api_router.include_router(discovery.router, tags=["首页与资料"])
 api_router.include_router(discovery.users_router, tags=["首页与资料"])
 api_router.include_router(matchmaker.router, tags=["红娘"])
+# 静态 /matchmaker/workbench/good-news 必须先于工作台动态路由挂载。
+api_router.include_router(good_news_workspace.router, tags=["红娘"])
 api_router.include_router(matchmaker_workspace.router, tags=["红娘"])
 api_router.include_router(matchmaker.product_router, tags=["红娘"])
 api_router.include_router(matchmaker.requests_router, tags=["红娘"])
@@ -151,6 +157,8 @@ api_router.include_router(admin.router, tags=["管理后台"])
 api_router.include_router(admin_home.router, tags=["管理端首页"])
 api_router.include_router(admin_config.router, tags=["管理后台配置"])
 api_router.include_router(admin_common_upload.router, tags=["管理后台通用上传"])
+# 静态 /admin/content/good_news 必须先于通用 /admin/content/{domain} 挂载。
+api_router.include_router(admin_good_news.router, tags=["管理后台"])
 api_router.include_router(admin_content.router, tags=["管理后台通用内容"])
 # A11-CMS：系统更新公告 / 使用帮助文档（复用通用内容表，前端约定路径）
 api_router.include_router(admin_cms.update_report_router, tags=["管理后台"])

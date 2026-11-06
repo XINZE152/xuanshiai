@@ -105,7 +105,16 @@ PUT   /admin/configs/{namespace}    保存（整体覆盖）
 }
 ```
 
-> 消费方：小程序「红娘管理中心 → 服务导航 → 红娘喜讯」读同一批行，并且红娘能在里面「报喜 - 反馈喜讯」代会员插待审行（`status=2`，等后台放行），接口契约与字段回落规则见 `docs/红娘后台接口.md` 19 / 19.4。`from_user_id` / `to_user_id` / `blessing_count` 后台喜讯抽屉与红娘端都不写，`images` 只有红娘端会写。
+> 2026-11-04 起，`good_news` 的审核/公开/来源/同意/祝福/报喜数据改存关系表
+> `good_news_meta` / `good_news_consent` / `good_news_blessing` / `good_news_report` /
+> `good_news_audit`。`extra_json` 仍用于内容编辑，但**审核状态不再写进行级 `status`**；
+> 行级 `status` 继续表示 `1 正常 / 2 停用`。管理端审核列表、审核/发布/下架、
+> 同意记录接口见 [`good-news.md`](good-news.md)。
+>
+> 注意：通过通用 `PATCH /admin/content/good_news/{id}` 修改已发布喜讯的正文、图片、
+> 标题、展示方式、阶段、时长或同意范围时，后端会自动把内容转为 `UNPUBLISHED`
+> （未发布则 `DRAFT`），并重置为 `PENDING`；必须重新审核/发布。修改仅 `sort` 等
+> 非展示字段不会触发回退。
 
 ### 3.2 good_news_pennant（锦旗管理）
 

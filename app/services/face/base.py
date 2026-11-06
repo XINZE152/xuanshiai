@@ -23,5 +23,15 @@ class FaceVerifyResult:
 class FaceProvider(Protocol):
     """人脸认证供应商必须实现的接口。"""
 
-    async def verify(self, *, user_id: int, image_ref: str, scene: str = "realname") -> FaceVerifyResult:
+    name: str
+
+    async def verify(
+        self,
+        *,
+        user_id: int,
+        image_ref: str,
+        scene: str = "realname",
+        real_name: str | None = None,
+        id_card_number: str | None = None,
+    ) -> FaceVerifyResult:
         """比对用户实名照与活体照；失败时抛出异常。"""

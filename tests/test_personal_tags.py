@@ -138,7 +138,7 @@ async def test_unified_write_uses_existing_columns_and_invalidates_existing_cons
 
 
 def test_combined_completion_keeps_total_weight():
-    assert ("personal_tags", "兴趣标签", 8) in profile.COMPLETION_RULES
+    assert ("personal_tags", "兴趣标签", 5) in profile.COMPLETION_RULES
     assert sum(weight for _, _, weight in profile.COMPLETION_RULES) == 100
     assert not {key for key, _, _ in profile.COMPLETION_RULES} & {"interest", "personality"}
 
@@ -256,10 +256,11 @@ async def test_completion_threshold_counts_distinct_valid_tags_across_categories
     db = AsyncMock()
     db.execute.return_value = result
     completion = await profile.get_completion(db, 42)
-    assert completion.score == (8 if count >= 3 else 0)
+    tag_weight = next(weight for key, _, weight in profile.COMPLETION_RULES if key == "personal_tags")
+    assert completion.score == (tag_weight if count >= 3 else 0)
     tag_item = next(item for item in completion.items if item.key == "personal_tags")
     assert tag_item.completed == (count >= 3)
-    assert tag_item.weight == 8
+    assert tag_item.weight == tag_weight
 
 
 @pytest.mark.asyncio

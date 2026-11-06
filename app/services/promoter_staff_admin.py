@@ -43,6 +43,7 @@ from app.schemas.promoter_staff_admin import (
     PromoterUserCandidate,
 )
 from app.services.matchmaker_admin_auth import _issue_session
+from app.services.user_columns import should_reset_phone_region
 from app.services.matchmaker_admin_account import create_account as create_admin_account
 from app.services import user_candidates
 
@@ -324,6 +325,21 @@ async def create_promoter(
     return await get_promoter(db, user_id)
 
 
+async def _update_promoter_phone(db: AsyncSession, user_id: int, phone: str) -> None:
+    """更新推广红娘手机号；号码变化时让旧属地失效。"""
+    current_phone = (
+        await db.execute(text("SELECT phone FROM users WHERE id = :uid"), {"uid": user_id})
+    ).scalar()
+    set_parts = ["phone = :phone"]
+    # 只有号码变化才清空属地；后台表单原样回传同一号码时保留已解析值。
+    if await should_reset_phone_region(db, phone_changed=phone != current_phone):
+        set_parts.append("phone_region = NULL")
+    await db.execute(
+        text(f"UPDATE users SET {', '.join(set_parts)} WHERE id = :uid"),
+        {"phone": phone, "uid": user_id},
+    )
+
+
 async def update_promoter(
     db: AsyncSession,
     user_id: int,
@@ -377,10 +393,7 @@ async def update_promoter(
             {"name": body.display_name, "uid": user_id},
         )
     if body.phone is not None:
-        await db.execute(
-            text("UPDATE users SET phone = :phone WHERE id = :uid"),
-            {"phone": body.phone, "uid": user_id},
-        )
+        await _update_promoter_phone(db, user_id, body.phone)
     await db.commit()
     return await get_promoter(db, user_id)
 

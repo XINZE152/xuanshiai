@@ -893,13 +893,16 @@ def _replace_media(cur: Any, member: dict[str, Any], user_id: int, assets: dict[
 
 def _refresh_completion(cur: Any, user_id: int) -> float:
     """Recompute completion with the production rule weights and persist it."""
-    from app.services.profile import COMPLETION_RULES
+    from app.services.profile import COMPLETION_RULES, _completion_state
 
     cur.execute(
         """SELECT u.gender, u.birthday, u.is_married, u.is_single_pledge, u.avatar,
-        COALESCE(ua.realname_status, 0) AS realname_status, p.occupation, p.education_level,
+        COALESCE(ua.realname_status, 0) AS realname_status, ua.school, ua.company,
+        p.occupation, p.education_level,
         p.income, p.height, p.weight, p.self_intro, p.hometown_province_code, p.hometown_city_code,
         p.residence_province_code, p.residence_city_code, p.interest_tags, p.personality_tags,
+        p.household, p.household_province_code, p.household_city_code,
+        p.ethnicity, p.house, p.car, p.smoking, p.drinking, p.religion,
         p.mbti, p.tags, pref.age_min, pref.age_max,
         EXISTS (SELECT 1 FROM user_media m WHERE m.user_id = u.id AND m.media_type='photo'
                 AND m.deleted_at IS NULL) AS album_done
@@ -912,41 +915,10 @@ def _refresh_completion(cur: Any, user_id: int) -> float:
     )
     row = cur.fetchone()
 
-    def as_list(value: Any) -> list[Any]:
-        if value is None:
-            return []
-        if isinstance(value, (list, tuple)):
-            return list(value)
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-            except json.JSONDecodeError:
-                return []
-            return list(parsed) if isinstance(parsed, list) else []
-        return []
-
-    raw_tags = as_list(row["interest_tags"]) + as_list(row["personality_tags"]) + as_list(row["tags"])
-    age = _age_of(row["birthday"]) if row["birthday"] else 0
-    completed = {
-        "gender": row["gender"] in (1, 2),
-        "birthday": bool(row["birthday"] and age >= 18),
-        "location": bool(row["residence_province_code"] and row["residence_city_code"]),
-        "marriage": row["is_married"] in (1, 2, 3),
-        "occupation": bool(row["occupation"]),
-        "education": row["education_level"] is not None,
-        "income": row["income"] is not None,
-        "height": row["height"] is not None,
-        "weight": row["weight"] is not None,
-        "hometown": bool(row["hometown_province_code"] and row["hometown_city_code"]),
-        "avatar": bool(row["avatar"]),
-        "intro": bool(row["self_intro"] and len(str(row["self_intro"]).strip()) >= 20),
-        "album": bool(row["album_done"]),
-        "personal_tags": len(raw_tags) >= 3,
-        "mbti": bool(row["mbti"]),
-        "preference": row["age_min"] is not None and row["age_max"] is not None,
-        "realname": int(row["realname_status"] or 0) == 2,
-        "single_pledge": int(row["is_single_pledge"] or 0) == 1,
-    }
+    row_data = dict(row)
+    row_data["preference_age_min"] = row["age_min"]
+    row_data["preference_age_max"] = row["age_max"]
+    completed = _completion_state(row_data)
     score = float(sum(weight for key, _, weight in COMPLETION_RULES if completed[key]))
     # 列名与规则键并非一一对应（interest_completed 承载 personal_tags），
     # 因此沿用生产 recalculate_completion 的显式映射，避免写出不存在的列。
@@ -974,10 +946,10 @@ def _refresh_completion(cur: Any, user_id: int) -> float:
     cur.execute(
         f"""INSERT INTO user_profile_completion
         (user_id, {', '.join(names)}, score, algorithm_version, calculated_at)
-        VALUES (%s, {', '.join(['%s'] * len(names))}, %s, 'profile-v4', UTC_TIMESTAMP())
+        VALUES (%s, {', '.join(['%s'] * len(names))}, %s, 'profile-v5', UTC_TIMESTAMP())
         ON DUPLICATE KEY UPDATE
         {', '.join(f'{name}=VALUES({name})' for name in names)},
-        score=VALUES(score), algorithm_version='profile-v4', calculated_at=UTC_TIMESTAMP()""",
+        score=VALUES(score), algorithm_version='profile-v5', calculated_at=UTC_TIMESTAMP()""",
         (user_id, *[int(value) for value in columns.values()], score),
     )
     cur.execute("UPDATE users SET data_complete_rate=%s WHERE id=%s", (int(score), user_id))

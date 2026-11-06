@@ -22,12 +22,15 @@ def test_code_schema_covers_every_table_with_a_primary_key() -> None:
     schema = parse_code_schema()
     # 257 基线 + 微信支付改造 5 张表（payment_refund / payment_fulfillment_job /
     # payment_notify_log / payment_reconcile_batch / payment_reconcile_diff）
-    # + 红娘菜单权限已配置标记表（F15）+ C 端反馈表 user_feedback（Q54），合计 264。
-    assert len(schema) == 264
+    # + 红娘菜单权限已配置标记表（F15）+ C 端反馈表 user_feedback（Q54）
+    # + 红娘喜讯 5 张关系表（meta / consent / blessing / report / audit），合计 269。
+    assert len(schema) == 269
     assert all(spec["has_primary_key"] for spec in schema.values()), "所有表都应有主键"
     assert "paper_plane_profile_unlock" in schema
     assert "payment_refund" in schema
     assert "user_feedback" in schema
+    assert "good_news_meta" in schema
+    assert "good_news_blessing" in schema
     assert schema["users"]["columns"]["id"] == "bigint unsigned"
 
 

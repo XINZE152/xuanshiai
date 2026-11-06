@@ -23,6 +23,33 @@ from app.services.region.types import RegionDataNotReady, ResolveOutcome
 
 _CONTINENTS = frozenset({"亚洲", "欧洲", "非洲", "北美洲", "南美洲", "大洋洲", "南极洲"})
 _HOME_COUNTRY = "中国"
+_HOME_COUNTRY_ALIASES = frozenset({"中国", "China", "CN", "中华人民共和国"})
+_PROVINCE_ALIASES = {
+    "北京": "北京市",
+    "上海": "上海市",
+    "天津": "天津市",
+    "重庆": "重庆市",
+    "内蒙古": "内蒙古自治区",
+    "广西": "广西壮族自治区",
+    "西藏": "西藏自治区",
+    "宁夏": "宁夏回族自治区",
+    "新疆": "新疆维吾尔自治区",
+    "香港": "香港特别行政区",
+    "澳门": "澳门特别行政区",
+    "台湾": "台湾省",
+}
+
+
+def _normalize_province(value: str) -> str:
+    if not value or value.endswith(("省", "市", "自治区", "特别行政区")):
+        return value
+    return _PROVINCE_ALIASES.get(value, f"{value}省")
+
+
+def _normalize_city(value: str) -> str:
+    if not value or value.endswith(("市", "地区", "自治州", "盟")):
+        return value
+    return f"{value}市"
 # 运营商 CGNAT 共享地址段：``ipaddress`` 的 ``is_private`` 不覆盖它，必须显式排除。
 # 该段出现在 ``register_ip`` 通常意味着反向代理配置异常或客户端伪造 XFF，而非真实用户出口。
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
@@ -100,6 +127,26 @@ def format_region(raw: str) -> str | None:
     return f"{province}{city}"
 
 
+def format_region_parts(country: str | None, province: str | None, city: str | None) -> str | None:
+    """把结构化字段格式化为展示串：境外只保留国家，境内为省+市（不拼区县）。"""
+    country = (country or "").strip()
+    province = _normalize_province((province or "").strip())
+    city = _normalize_city((city or "").strip())
+    if country and country not in _HOME_COUNTRY_ALIASES:
+        return country
+    if not province and not city:
+        return None
+    if city in {"香港", "香港市", "澳门", "澳门市"} or (
+        province.endswith("特别行政区") and city.startswith(province)
+    ):
+        city = ""
+    if not city or city == province:
+        return province or city
+    if city.startswith(province):
+        return city
+    return f"{province}{city}"
+
+
 def _import_searcher_class() -> Any | None:
     for module_name in ("app.services.region.vendor.xdbSearcher", "xdbSearcher"):
         try:
@@ -145,9 +192,14 @@ def _get_searcher() -> Any:
         return searcher
 
 
+def binding_available() -> bool:
+    """只读探测查询绑定是否可导入（不构造 searcher）。"""
+    return _import_searcher_class() is not None
+
+
 def is_ready() -> bool:
     """只读探测：库文件存在且绑定可导入（不构造 searcher，避免读盘放大）。"""
-    return resolve_db_path().is_file() and _import_searcher_class() is not None
+    return resolve_db_path().is_file() and binding_available()
 
 
 def resolve_many(values: list[str]) -> ResolveOutcome:
