@@ -67,6 +67,10 @@ def configure_logging(settings: Settings) -> None:
     file_handler.addFilter(context_filter)
 
     root_logger.setLevel(level)
+    # httpx 在 INFO 级别打印完整请求 URL（httpx/_client.py 的 "HTTP Request: GET <url>"）。
+    # 微信 jscode2session 把 appid/secret/js_code 全放在 query 里，按根级别 INFO 落盘
+    # 等于把 AppSecret 明文写进 app.log。压到 WARNING 只保留失败类日志。
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
     root_logger._xuanshi_configured = True
