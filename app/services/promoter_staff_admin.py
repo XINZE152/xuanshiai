@@ -315,9 +315,11 @@ async def create_promoter(
     )
     await db.execute(
         text(
-            "INSERT IGNORE INTO user_role (user_id, role_code, status) VALUES (:id, 'promoter', 1)"
+            """INSERT INTO user_role (user_id, role_code, status, granted_by)
+            VALUES (:id, 'promoter', 1, :actor)
+            ON DUPLICATE KEY UPDATE granted_by = IFNULL(granted_by, :actor)"""
         ),
-        {"id": user_id},
+        {"id": user_id, "actor": actor_account_id},
     )
     await db.commit()
     return await get_promoter(db, user_id)

@@ -168,8 +168,9 @@ async def test_crm_member_detail_keeps_none_wechat() -> None:
 # --------------------------------------------------------------------------- #
 def _lead_row(**overrides) -> dict:
     row = {
-        "id": 3, "name": "张女士", "phone": PHONE, "wechat": WECHAT,
-        "source": "抖音", "intention_level": 2, "status": "NEW", "audit_status": "active",
+        "id": 3, "name": "张女士", "real_name": None, "phone": PHONE, "wechat": WECHAT,
+        "source": "抖音", "photo": None, "gender": None, "birthday": None,
+        "intention_level": 2, "status": "NEW", "audit_status": "active",
         "matchmaker_id": None, "organization_id": None, "promoter_id": None,
         "next_follow_at": None, "converted_user_id": None, "remark": None,
         "created_by": 1, "created_at": NOW, "updated_at": NOW,
@@ -213,6 +214,20 @@ async def test_lead_update_drops_masked_wechat_echo() -> None:
     assert "SET updated_at" in sql
     assert not any("zha***" in str(p.values()) for _, p in db.statements)
     assert updated.wechat == mask_contact(WECHAT, REDACTION_LEVEL_STANDARD)
+
+
+@pytest.mark.asyncio
+async def test_lead_update_exempts_masked_phone_echo() -> None:
+    """历史掩码手机号按旧值豁免：脱敏回显在 schema 层就被丢弃，既不参与格式校验也不写回。"""
+    db = _update_lead_db()
+    await update_lead(db, 1, 3, CustomerLeadUpdate(name="张女士", phone="139****0101"))
+    update_stmts = [(s, p) for s, p in db.statements if s.startswith("UPDATE customer_lead")]
+    assert len(update_stmts) == 1
+    sql, params = update_stmts[0]
+    assert params["name"] == "张女士"
+    assert "phone" not in params
+    assert "phone = :phone" not in sql
+    assert not any("139****0101" in str(p.values()) for _, p in db.statements)
 
 
 @pytest.mark.asyncio

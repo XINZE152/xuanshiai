@@ -148,8 +148,14 @@ def _silence_profile_writes(monkeypatch: pytest.MonkeyPatch) -> None:
     async def empty_profile(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {}
 
+    async def noop_completion_state(*_args: Any, **_kwargs: Any) -> tuple[float, dict[str, bool]]:
+        return 0.0, {}
+
     monkeypatch.setattr(profile, "_lock_profile_update", noop)
     monkeypatch.setattr(profile, "recalculate_completion", noop)
+    # 2026-10-21 起 update_profile 走 recalculate_completion_state（返回分数 + 基础信息完成位），
+    # 只桩掉 recalculate_completion 会让它打到 _WriteDb 的空结果上抛 404。
+    monkeypatch.setattr(profile, "recalculate_completion_state", noop_completion_state)
     monkeypatch.setattr(profile, "increment_revision_and_enqueue", noop)
     monkeypatch.setattr(profile, "get_profile", empty_profile)
 

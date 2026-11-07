@@ -28,6 +28,8 @@ _DEFAULT_FEATURE_FLAGS = {
     "ai_moxiang_journey_enabled": False,
     "ai_enabled": False,
     "ai_provider": "mock",
+    # 会员填完基础信息的自动归属也按声明默认值跑：本地 .env 配了门店 id 不应改变单元测试行为。
+    "member_auto_assign_organization_id": None,
 }
 
 

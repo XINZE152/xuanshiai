@@ -117,7 +117,7 @@ class ChatMessagePage(BaseModel):
 
 class ChatSessionRequestCreate(BaseModel):
     request_type: Literal["ANSWER_EXCHANGE", "LOVE_MODE", "WECHAT", "PHONE"]
-    payload: dict | None = None
+    payload: dict | None = Field(default=None, description="WECHAT 必须传 contact_value（6–20位、字母开头，仅字母数字下划线短横线）；PHONE 忽略客户端值，由服务端取当前账号绑定手机号；其他类型沿用其业务载荷。")
     expire_hours: int = Field(default=48, ge=1, le=168)
 
 
@@ -131,7 +131,7 @@ class ChatSessionRequestResponse(BaseModel):
     requester_id: int
     responder_id: int
     request_type: str
-    payload: dict | None
+    payload: dict | None = Field(description="PHONE/WECHAT 仅在 ACCEPTED 时返回 {contact_value: string}，其他状态为 null；其他请求类型保持原载荷。")
     status: str
     expire_at: datetime | None
     responded_at: datetime | None

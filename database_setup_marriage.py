@@ -152,6 +152,25 @@ def get_logger(name):
 logger = get_logger(__name__)
 
 
+def _column_collation(column: object) -> str:
+    """读取 SHOW FULL COLUMNS 行里的 Collation。
+
+    初始化脚本使用 DictCursor，行是 dict；但 pymysql 的 DictCursor 会**丢弃
+    重复列名**，而 SHOW FULL COLUMNS 同时含 `Field` 和 `Type`（恰好都是 'Type'
+    时会冲突），因此按名字取可能取不到。这里同时兼容 dict 与 tuple 两种游标。
+    """
+    if isinstance(column, dict):
+        for key in ("Collation", "collation"):
+            if key in column:
+                value = column[key]
+                return "" if value is None else str(value)
+        return ""
+    if isinstance(column, (list, tuple)) and len(column) > 2:
+        value = column[2]
+        return "" if value is None else str(value)
+    return ""
+
+
 class DatabaseManager:
     def __init__(self):
         # 结构收敛过程中的失败统一记在这里，启动结束前一次性决定是否阻断（见 _raise_on_schema_failures）。
@@ -574,6 +593,16 @@ class DatabaseManager:
         - 旧库已有的 active_phone / active_wechat 生成列定义不含 deleted_at，
           需检测并重建为「软删除也置 NULL」，才能让删除后的客源不再占用联系方式；
         - 新建 customer_lead_source 字典表并幂等播种常见来源（INSERT IGNORE）。
+
+        同时镜像 migrations/customer_lead_gaps/20261029_01_lead_profile_columns_up.sql：
+        customer_lead 补 real_name / photo / birthday。三列在 2026-10-24 快照 035efa9
+        只加进了 app/db/business_schema.py 的建表语句，旧库既没有列也没有补列入口，
+        而后台与红娘工作台的客源查询无条件 SELECT 它们，于是列表接口报 1054 → 500。
+
+        还镜像 migrations/customer_lead_profile/20261028_01_lead_profile_up.sql（上游
+        2026-10-28 的「本人资料」扩展，列名是 birth_date / photos 那一套）：服务层靠
+        information_schema 探测列、缺列静默降级不报错，但操作员在后台填了资料而库里
+        没列时值会被丢掉，只能反查数据库才发现，所以这里一并补齐。
         """
         try:
             cursor.execute("SHOW TABLES LIKE 'customer_lead'")
@@ -583,6 +612,20 @@ class DatabaseManager:
                 "gender": "tinyint NOT NULL DEFAULT 0 COMMENT '性别 0未知 1男 2女（A13）'",
                 "deleted_at": "datetime DEFAULT NULL COMMENT '软删除时间；空为有效'",
                 "deleted_by": "bigint unsigned DEFAULT NULL COMMENT '删除操作人 matchmaker_admin_account.id'",
+                "real_name": "varchar(64) DEFAULT NULL COMMENT '客源真实姓名（选填）'",
+                "photo": "varchar(512) DEFAULT NULL COMMENT '客源照片URL'",
+                "birthday": "date DEFAULT NULL",
+                "birth_date": "date DEFAULT NULL COMMENT '出生日期；age 由此派生'",
+                "weight": "int DEFAULT NULL COMMENT '体重kg'",
+                "income": "varchar(32) DEFAULT NULL COMMENT '年收入档位'",
+                "house": "varchar(32) DEFAULT NULL COMMENT '购房情况'",
+                "car": "varchar(32) DEFAULT NULL COMMENT '购车情况'",
+                "smoking": "varchar(32) DEFAULT NULL COMMENT '吸烟情况'",
+                "drinking": "varchar(32) DEFAULT NULL COMMENT '饮酒情况'",
+                "ethnicity": "varchar(32) DEFAULT NULL COMMENT '民族'",
+                "school": "varchar(128) DEFAULT NULL COMMENT '毕业学校'",
+                "company": "varchar(128) DEFAULT NULL COMMENT '工作单位'",
+                "photos": "json DEFAULT NULL COMMENT '相册图片URL列表'",
             }))
             self._ensure_optional_index(cursor, "customer_lead", "idx_customer_lead_deleted", "(`deleted_at`)")
             # 生成列旧定义不引用 deleted_at，软删除后仍会占用联系方式唯一键；
@@ -1398,6 +1441,9 @@ class DatabaseManager:
                     `housing_requirement` tinyint DEFAULT NULL COMMENT '0不限 1有房 2无房',
                     `smoking_requirement` tinyint DEFAULT NULL COMMENT '0不限 1不抽烟 2可接受',
                     `drinking_requirement` tinyint DEFAULT NULL COMMENT '0不限 1不饮酒 2可接受',
+                    `occupation_requirement` varchar(64) DEFAULT NULL COMMENT '期望职业：不限/具体职业',
+                    `marriage_accept` varchar(32) DEFAULT NULL COMMENT '婚况接受度：不接受离异/可接受离异未育/接受离异带娃/视情况而定',
+                    `wedding_plan` varchar(32) DEFAULT NULL COMMENT '结婚计划：不限/计划一年内/计划两年内/计划三年内/时机成熟时结婚/不婚',
                     `dating_goal` varchar(32) DEFAULT NULL COMMENT '交友目标：倾向恋爱/倾向结婚',
                     `meeting_pace` varchar(64) DEFAULT NULL COMMENT '见面节奏',
                     `children_intention` varchar(64) DEFAULT NULL COMMENT '生育意愿',
@@ -3640,7 +3686,7 @@ class DatabaseManager:
                 "varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL "
                 "COMMENT '客户端消息幂等键' AFTER `media_url`"
             )
-        elif column["Collation"] != "utf8mb4_bin":
+        elif _column_collation(column) != "utf8mb4_bin":
             cursor.execute(
                 "ALTER TABLE `chat_message` MODIFY COLUMN `client_message_id` "
                 "varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL "

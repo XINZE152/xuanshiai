@@ -166,9 +166,11 @@ class ProfileUpdateRequest(BaseModel):
 
     gender: Literal[1, 2] | None = None
     birthday: date | None = None
+    # 写入域只有 1/2/3，与会员端「我的-资料编辑」的婚况选项同一套；库里 4~7 是旧的离异细分档，
+    # 只读展示继续按原文案渲染，但不再允许新写入。
     is_married: Literal[1, 2, 3] | None = None
     height: int | None = Field(default=None, ge=140, le=220)
-    weight: int | None = Field(default=None, ge=40, le=120)
+    weight: int | None = Field(default=None, ge=30, le=150)
     occupation: str | None = Field(default=None, max_length=128)
     industry: str | None = Field(default=None, max_length=128)
     education_level: int | None = Field(default=None, ge=1, le=8)
@@ -343,6 +345,10 @@ class ProfileResponse(BaseModel):
     education_level: int | None
     income: float | None
     income_display: str | None = None
+    house: str | None = None
+    car: str | None = None
+    ethnicity: str | None = None
+    ideal_partner: str | None = None
     hometown_province_code: str | None
     hometown_city_code: str | None
     hometown_district_code: str | None
@@ -502,6 +508,9 @@ class PreferenceUpdateRequest(BaseModel):
     education_min: int | None = Field(default=None, ge=1, le=5)
     income_min: float | None = Field(default=None, ge=0, le=1_000_000)
     marriage_status: Literal[0, 1, 2, 3] | None = None
+    occupation_requirement: str | None = Field(default=None, max_length=64)
+    marriage_accept: Literal["不接受离异", "可接受离异未育", "接受离异带娃", "视情况而定"] | None = None
+    wedding_plan: Literal["不限", "计划一年内", "计划两年内", "计划三年内", "时机成熟时结婚", "不婚"] | None = None
     preferred_province_code: str | None = Field(default=None, max_length=32)
     preferred_city_codes: list[str] | None = Field(default=None, max_length=20)
     accept_long_distance: bool | None = None
@@ -541,6 +550,11 @@ class PreferenceResponse(BaseModel):
     education_min: int | None
     income_min: float | None
     marriage_status: int | None
+    # 这三列只在会员侧有；未入库客源的暂存表 customer_lead_preference 没有它们，
+    # 读取时按「未填」返回，所以给默认值而不是必填——否则暂存表整行反序列化 500。
+    occupation_requirement: str | None = None
+    marriage_accept: str | None = None
+    wedding_plan: str | None = None
     preferred_province_code: str | None
     preferred_city_codes: list[str]
     accept_long_distance: bool
@@ -590,6 +604,12 @@ class MatchmakerSuccessCase(BaseModel):
     images: list[str] = Field(default_factory=list, max_length=3)
 
 
+class MatchmakerSuccessCaseInput(MatchmakerSuccessCase):
+    """提交口径：案例说明 50 字以内；读取仍用宽松模型，历史长案例要能读出来。"""
+
+    description: str = Field(min_length=1, max_length=50)
+
+
 class MatchmakerApplicationDetails(BaseModel):
     """审核资料；仅返回给申请人本人或管理员，不用于公开红娘资料。"""
 
@@ -608,13 +628,19 @@ class MatchmakerApplicationDetails(BaseModel):
         return cleaned
 
 
+class MatchmakerApplicationDetailsInput(MatchmakerApplicationDetails):
+    success_cases: list[MatchmakerSuccessCaseInput] = Field(default_factory=list, max_length=3)
+
+
 class MatchmakerApplicationCreate(BaseModel):
     application_type: Literal["promoter", "partner", "service_matchmaker"]
     real_name: str = Field(min_length=2, max_length=64)
     phone: str = Field(pattern=r"^1[3-9]\d{9}$")
     intro: str = Field(min_length=10, max_length=2000)
     cert_images: list[str] = Field(default_factory=list, max_length=6)
-    application_details: MatchmakerApplicationDetails = Field(default_factory=MatchmakerApplicationDetails)
+    application_details: MatchmakerApplicationDetailsInput = Field(
+        default_factory=MatchmakerApplicationDetailsInput
+    )
 
     @model_validator(mode="before")
     @classmethod

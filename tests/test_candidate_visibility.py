@@ -5,6 +5,7 @@ import pytest
 from app.services.candidate_visibility import (
     CandidateContext,
     CandidateVisibilityService,
+    CompletionWaiver,
     ViewerContext,
     VisibilityScene,
     evaluate_visibility,
@@ -337,6 +338,45 @@ def test_sql_predicate_enforces_profile_visibility() -> None:
     assert "COALESCE(pr.profile_visibility, 'all') IN ('all', 'friends', 'only_me')" in predicate.clause
     assert "user_match vm" in predicate.clause
     assert "vm.status IN (1, 2)" in predicate.clause
+    assert predicate.clause.count("(") == predicate.clause.count(")")
+
+
+def test_sql_predicate_keeps_completion_gate_strict_without_waiver() -> None:
+    """非服务红娘一律保持「完整度 100 才可见」，豁免不能默认打开。"""
+    predicate = CandidateVisibilityService().predicate(
+        ViewerContext(user_id=1, realname_status=2, is_vip=False),
+        VisibilityScene.PROFILE,
+    )
+    assert "COALESCE(c.score, 0) >= 100" in predicate.clause
+    assert "resource_assignment" not in predicate.clause
+    assert "visibility_waiver_matchmaker_id" not in predicate.params
+
+
+def test_sql_predicate_waives_completion_for_assigned_matchmaker() -> None:
+    """普通红娘的豁免只认自己名下的代管关系。"""
+    predicate = CandidateVisibilityService().predicate(
+        ViewerContext(user_id=7, realname_status=2, is_vip=False),
+        VisibilityScene.PROFILE,
+        completion_waiver=CompletionWaiver(matchmaker_id=7),
+    )
+    assert "COALESCE(c.score, 0) >= 100 OR EXISTS (SELECT 1 FROM resource_assignment waiver_ra" in predicate.clause
+    assert "waiver_ra.matchmaker_id = :visibility_waiver_matchmaker_id" in predicate.clause
+    assert "waiver_ra.organization_id" not in predicate.clause
+    assert predicate.params["visibility_waiver_matchmaker_id"] == 7
+    assert predicate.clause.count("(") == predicate.clause.count(")")
+
+
+def test_sql_predicate_waives_completion_for_organization_scope() -> None:
+    """超级红娘带门店范围时按 organization_id 判，口径与工作台会员列表一致。"""
+    predicate = CandidateVisibilityService().predicate(
+        ViewerContext(user_id=7, realname_status=2, is_vip=False),
+        VisibilityScene.PROFILE,
+        completion_waiver=CompletionWaiver(matchmaker_id=7, organization_id=3),
+    )
+    assert "waiver_ra.organization_id = :visibility_waiver_organization_id" in predicate.clause
+    assert "waiver_ra.matchmaker_id" not in predicate.clause
+    assert predicate.params["visibility_waiver_organization_id"] == 3
+    assert "visibility_waiver_matchmaker_id" not in predicate.params
     assert predicate.clause.count("(") == predicate.clause.count(")")
 
 
