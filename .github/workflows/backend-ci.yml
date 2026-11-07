@@ -73,6 +73,18 @@ jobs:
           scripts/schema_contract.py
           tests/test_discovery_features.py
           app/services/user_columns.py tests/test_region_preflight_20261104.py
+      - name: Ruff (workspace member filters)
+        run: uv run --no-sync ruff check tests/test_workspace_member_filter_scope.py
+      - name: Workspace member filter contracts
+        run: uv run --no-sync pytest tests/test_workspace_member_filter_scope.py -q
+      - name: Ruff (payment commission arithmetic)
+        run: uv run --no-sync ruff check app/services/payment/commission_math.py tests/test_payment_commission_math.py
+      - name: Payment commission arithmetic contracts
+        run: uv run --no-sync pytest tests/test_payment_commission_math.py -q
+      - name: Ruff (workspace lead filters)
+        run: uv run --no-sync ruff check tests/test_workspace_lead_filters.py
+      - name: Workspace lead filter contracts
+        run: uv run --no-sync pytest tests/test_workspace_lead_filters.py -q
       - name: Message and media unit contracts (no integration/live/manual)
         env:
           UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-uploads
@@ -395,4 +407,5 @@ jobs:
           tests/integration/ai/test_continuous_portrait_real_db.py
           tests/integration/ai/test_moxiang_journey_ws_chain_real_db.py
           tests/integration/ai/test_ai_memory_projection_real_db.py
-          tests/integration/ai/test_consent_generation_identity_real_db.py -q
+          tests/integration/ai/test_consent_generation_identity_real_db.py
+          tests/integration/business/test_workspace_member_pickup_mysql.py -q
