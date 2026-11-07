@@ -16,6 +16,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.services import ai_provider
+from app.services.ai.flags import AiFeature, AiFeatureDisabledError
 
 _GENERIC_MESSAGES = [
     {"role": "system", "content": "你是婚恋沟通助手。"},
@@ -38,7 +39,9 @@ async def test_ai_allow_mock_fallback_false_fails_closed_with_503(
     with pytest.raises(HTTPException) as exc_info:
         await ai_provider.complete(_GENERIC_MESSAGES, json_mode=False)
     assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "AI服务未启用"
+    detail = exc_info.value.detail
+    assert detail["code"] == "AI_FEATURE_DISABLED"
+    assert detail["message"] == "AI 功能暂不可用"
 
 
 @pytest.mark.asyncio
@@ -85,7 +88,26 @@ async def test_production_environment_never_falls_back_to_mock(
     with pytest.raises(HTTPException) as exc_info:
         await ai_provider.complete(_GENERIC_MESSAGES, json_mode=False)
     assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "AI服务未启用"
+    assert exc_info.value.detail["code"] == "AI_FEATURE_DISABLED"
+
+
+@pytest.mark.asyncio
+async def test_feature_gate_reports_stable_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_provider.settings, "ai_enabled", True)
+
+    def deny(_feature, _settings):
+        raise AiFeatureDisabledError(AiFeature.PROFILE)
+
+    monkeypatch.setattr(ai_provider, "require_ai_feature", deny)
+    with pytest.raises(HTTPException) as exc_info:
+        await ai_provider.complete(
+            _GENERIC_MESSAGES, json_mode=True, feature=AiFeature.PROFILE
+        )
+
+    detail = exc_info.value.detail
+    assert exc_info.value.status_code == 503
+    assert detail["code"] == "AI_FEATURE_DISABLED"
+    assert detail["feature"] == "profile"
 
 
 def _source(relative_path: str) -> str:
@@ -112,7 +134,7 @@ def test_mock_fallback_boolean_is_shared_across_all_three_sites() -> None:
 
     assistant_src = _source("app/services/ai_assistant.py")
     assistant_match = re.search(
-        r"if \(\n(.*?)\):\n        logger\.warning\(\n            \"ai_mock_fallback",
+        r"mock_fallback = \(\n(.*?)\n    \)",
         assistant_src,
         re.DOTALL,
     )

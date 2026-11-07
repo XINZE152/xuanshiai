@@ -96,8 +96,9 @@ async def test_polish_profile_refunds_when_provider_payload_is_invalid(monkeypat
     monkeypatch.setattr(service, "_consume_ai_quota", _consumed("quota:polish", refunded))
     monkeypatch.setattr(service, "refund_daily", lambda key: _record_refund(refunded, key))
 
-    with pytest.raises(HTTPException, match="AI返回格式无效"):
+    with pytest.raises(HTTPException) as exc_info:
         await service.polish_profile(object(), 7, AIProfilePolishRequest(content="原文"))
+    assert exc_info.value.detail["code"] == "AI_OUTPUT_INVALID"
     assert refunded == ["quota:polish"]
 
 
@@ -235,10 +236,11 @@ async def test_thoughtfulness_refunds_when_model_output_is_not_json(monkeypatch)
     monkeypatch.setattr(service, "_consume_ai_quota", _consumed("quota:thoughtfulness", refunded))
     monkeypatch.setattr(service, "refund_daily", lambda key: _record_refund(refunded, key))
 
-    with pytest.raises(HTTPException, match="AI返回格式无效"):
+    with pytest.raises(HTTPException) as exc_info:
         await service.analyze_thoughtfulness(
             db, 7, AIProfileThoughtfulnessRequest(trigger="manual")
         )
+    assert exc_info.value.detail["code"] == "AI_OUTPUT_INVALID"
 
     assert refunded == ["quota:thoughtfulness"]
     assert db.committed is False
@@ -286,6 +288,62 @@ async def test_thoughtfulness_keeps_quota_after_success(monkeypatch):
 
     assert refunded == []
     assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_thoughtfulness_retries_once_when_first_output_is_not_json(monkeypatch):
+    """首次非 JSON 时追加严格提示重试一次；第二次合法即成功且不退款。"""
+    now = datetime.now(UTC).replace(tzinfo=None)
+    db = _ThoughtfulnessDb(
+        result_row={
+            "score": 66,
+            "summary": "重试后成功的资料评审。",
+            "todos": json.dumps([], ensure_ascii=False),
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    refunded: list[str] = []
+    scenes: list[str] = []
+
+    async def complete_first_invalid_then_valid(*_args, **kwargs):
+        scenes.append(str(kwargs.get("scene")))
+        if len(scenes) == 1:
+            return "好的，我分析完了：你的资料不错"
+        return json.dumps({"score": 66, "summary": "重试后成功的资料评审。", "todos": []}, ensure_ascii=False)
+
+    monkeypatch.setattr(service, "complete", complete_first_invalid_then_valid)
+    monkeypatch.setattr(service, "_consume_ai_quota", _consumed("quota:thoughtfulness", refunded))
+    monkeypatch.setattr(service, "refund_daily", lambda key: _record_refund(refunded, key))
+
+    await service.analyze_thoughtfulness(
+        db, 7, AIProfileThoughtfulnessRequest(trigger="manual")
+    )
+
+    assert scenes == ["thoughtfulness", "thoughtfulness_json_retry"]
+    assert refunded == []
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_polish_reports_mock_echo_and_unchanged(monkeypatch):
+    monkeypatch.setattr(service.settings, "ai_enabled", False)
+    monkeypatch.setattr(service.settings, "environment", "testing")
+    monkeypatch.setattr(service.settings, "ai_allow_mock_fallback", True)
+
+    async def complete_echo(*_args, **_kwargs):
+        return json.dumps({"polished": "原文", "changed_points": []}, ensure_ascii=False)
+
+    monkeypatch.setattr(service, "complete", complete_echo)
+    monkeypatch.setattr(service, "_require_vip", _noop)
+    monkeypatch.setattr(service, "_consume_ai_quota", _consumed("quota:polish", []))
+
+    response = await service.polish_profile(
+        object(), 7, AIProfilePolishRequest(content="原文")
+    )
+
+    assert response.changed is False
+    assert response.fallback == "mock_echo"
 
 
 @pytest.mark.asyncio

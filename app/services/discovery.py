@@ -125,6 +125,8 @@ CARD_SELECT = """
                 ELSE 0 END AS online_status,
            p.last_active_at, COALESCE(c.score, 0) AS completion_score,
            COALESCE(ua.realname_status, 0) AS realname_status,
+           COALESCE(ua.face_verified, 0) AS face_verified,
+           COALESCE(ua.education_verified, 0) AS education_verified,
            COALESCE(pr.only_vip_can_see_detail, 0) AS only_vip_can_see_detail,
            COALESCE(pr.hide_school, 0) AS hide_school,
            COALESCE(pr.hide_company, 0) AS hide_company,
@@ -350,7 +352,7 @@ def _candidate_score(viewer: dict[str, Any], candidate: dict[str, Any]) -> tuple
     return round(min(100.0, points), 2), "、".join(reasons[:3]) or "资料匹配"
 
 
-def _card_qa_answers(value: Any) -> list[dict[str, str]]:
+def _card_qa_answers(value: Any) -> list[dict[str, Any]]:
     """卡片只下发已作答的公开问答，最多 3 条；格式与详情页 qa_answers 一致。"""
     if value is None:
         return []
@@ -361,7 +363,7 @@ def _card_qa_answers(value: Any) -> list[dict[str, str]]:
             return []
     if not isinstance(value, list):
         return []
-    result: list[dict[str, str]] = []
+    result: list[dict[str, Any]] = []
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -369,16 +371,97 @@ def _card_qa_answers(value: Any) -> list[dict[str, str]]:
         if answer == "":
             continue
         question = str(item.get("question") or "").strip()
-        result.append({"question": question or "关于我", "answer": answer})
+        entry: dict[str, Any] = {
+            "question": question or "关于我",
+            "answer": answer,
+        }
+        media_ids: list[int] = []
+        for raw_id in item.get("media_ids") or []:
+            try:
+                media_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if media_id >= 1 and media_id not in media_ids:
+                media_ids.append(media_id)
+            if len(media_ids) >= 1:
+                break
+        if media_ids:
+            entry["media_ids"] = media_ids
+        result.append(entry)
         if len(result) >= 3:
             break
     return result
+
+
+async def _attach_card_qa_media(db: AsyncSession, cards: list[DiscoveryCard]) -> None:
+    """Batch-attach approved Q&A photos to cards, at most one per answer."""
+    ids: list[int] = []
+    for card in cards:
+        for answer in card.qa_answers:
+            if not isinstance(answer, dict):
+                continue
+            for raw_id in answer.get("media_ids") or []:
+                try:
+                    media_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if media_id not in ids:
+                    ids.append(media_id)
+    if not ids:
+        return
+    placeholders = ",".join(f":m{index}" for index in range(len(ids)))
+    params = {f"m{index}": value for index, value in enumerate(ids)}
+    rows = (
+        await db.execute(
+            text(
+                f"""SELECT id, user_id, file_url, thumbnail_url FROM user_media
+                    WHERE id IN ({placeholders})
+                      AND media_type = 'photo' AND deleted_at IS NULL
+                      AND review_status = 1"""
+            ),
+            params,
+        )
+    ).mappings().all()
+    by_id = {
+        int(row["id"]): {
+            "id": int(row["id"]),
+            "user_id": int(row["user_id"]),
+            "file_url": str(row["file_url"]),
+            "thumbnail_url": row["thumbnail_url"],
+        }
+        for row in rows
+    }
+    for card in cards:
+        for answer in card.qa_answers:
+            if not isinstance(answer, dict):
+                continue
+            media = []
+            for raw_id in answer.get("media_ids") or []:
+                try:
+                    media_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                item = by_id.get(media_id)
+                if item is not None and item["user_id"] == card.user_id:
+                    media.append(
+                        {
+                            "id": item["id"],
+                            "file_url": item["file_url"],
+                            "thumbnail_url": item["thumbnail_url"],
+                        }
+                    )
+            answer["media_ids"] = [item["id"] for item in media]
+            answer["media"] = media
 
 
 def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = False) -> DiscoveryCard:
     certification_tags: list[str] = []
     if row.get("realname_status") == 2:
         certification_tags.append("实名认证")
+    if row.get("face_verified") == 1:
+        certification_tags.append("人脸认证")
+    if row.get("education_verified") == 2:
+        certification_tags.append("学历认证")
     if row.get("is_single_pledge") == 1:
         certification_tags.append("单身承诺")
     return DiscoveryCard(
@@ -675,6 +758,7 @@ async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: Discover
         )
         for row in candidate_page.items
     ]
+    await _attach_card_qa_media(db, items)
     return DiscoveryPage(
         items=items,
         page=candidate_page.page,
@@ -715,6 +799,7 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         )
         for row in candidate_page.items
     ]
+    await _attach_card_qa_media(db, items)
     return DiscoveryPage(
         items=items,
         page=candidate_page.page,
@@ -823,7 +908,17 @@ async def _consume_browse(db: AsyncSession, user_id: int, match_score: float, is
         # 积分池在 MySQL，无法与 Redis 原子扣减；补记 seen，避免同一用户重复扣积分。
         await mark_daily_member(seen_key, member)
         return 0
-    raise HTTPException(429, detail="今日完整浏览额度已用完")
+    suggested_actions = ["redeem_points"] if is_vip else ["upgrade_vip", "redeem_points"]
+    raise HTTPException(
+        429,
+        detail={
+            "code": "BROWSE_QUOTA_EXHAUSTED",
+            "message": "今日完整浏览额度已用完",
+            "retryable": False,
+            "quota": {"code": "browse", "remaining": 0, "is_vip": is_vip},
+            "suggested_actions": suggested_actions,
+        },
+    )
 
 
 async def _record_browse(db: AsyncSession, viewer_id: int, target_id: int) -> None:
@@ -991,6 +1086,7 @@ async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> Publ
     full = vip or is_matchmaker or (not privacy_locked and quota is not None)
     await _record_browse(db, viewer_id, target_id)
     card = _card(row, score, reason, detail_locked=not full)
+    await _attach_card_qa_media(db, [card])
     profile = await get_profile(db, target_id, public=True) if full else None
     if profile is not None:
         privacy = (await db.execute(text("SELECT hide_school, hide_company FROM user_privacy WHERE user_id = :user_id"), {"user_id": target_id})).mappings().first()
@@ -1042,9 +1138,11 @@ async def preview_card(db: AsyncSession, viewer_id: int, target_id: int) -> Disc
     income_display = (
         f"{float(income) / 10000:.1f}".rstrip("0").rstrip(".") + "w" if income is not None and not detail_locked else None
     )
+    card = _card(row, score, reason, detail_locked=detail_locked)
+    await _attach_card_qa_media(db, [card])
     return DiscoveryCardPreviewResponse(
         user_id=target_id,
-        card=_card(row, score, reason, detail_locked=detail_locked),
+        card=card,
         background_wall=backgrounds[0] if backgrounds else None,
         photos=photos,
         income_display=income_display,
@@ -1116,6 +1214,7 @@ async def browse_history(db: AsyncSession, viewer_id: int, page: int, page_size:
         if target:
             score, reason = _candidate_score(viewer, target)
             items.append(BrowseHistoryItem(target=_card(target, score, reason, detail_locked=bool(target.get("only_vip_can_see_detail")) and not vip), viewed_at=row["viewed_at"]))
+    await _attach_card_qa_media(db, [item.target for item in items])
     count = await db.execute(text(f"""SELECT COUNT(DISTINCT h.target_user_id)
         FROM user_browse_history h JOIN users u ON u.id = h.target_user_id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
@@ -1165,6 +1264,7 @@ async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) 
         for row in rows
         if int(row["user_id"]) in targets
     ]
+    await _attach_card_qa_media(db, [item.target for item in items])
     return VisitorPage(can_view_details=True, count=count, items=items, page=page, page_size=page_size, has_more=page * page_size < count)
 
 
@@ -1306,6 +1406,7 @@ async def list_favorites(db: AsyncSession, viewer_id: int, page: int, page_size:
         )
         for target_id in targets
     ]
+    await _attach_card_qa_media(db, items)
     return FavoritePage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 

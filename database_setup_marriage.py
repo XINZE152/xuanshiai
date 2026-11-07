@@ -1549,6 +1549,7 @@ class DatabaseManager:
                     `realname_completed` tinyint NOT NULL DEFAULT '0',
                     `mbti_completed` tinyint NOT NULL DEFAULT '0',
                     `single_pledge_completed` tinyint NOT NULL DEFAULT '0',
+                    `completion_grandfathered` tinyint NOT NULL DEFAULT '0' COMMENT '1=保留旧完整度规则直到下次主动编辑',
                     `score` decimal(5,2) NOT NULL DEFAULT '0.00',
                     `algorithm_version` varchar(32) DEFAULT NULL,
                     `calculated_at` datetime DEFAULT NULL,
@@ -2150,6 +2151,19 @@ class DatabaseManager:
                     UNIQUE KEY `uq_chat_message_sender_session_client_message` (`from_user_id`, `session_id`, `client_message_id`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='聊天消息'
             """,
+            "chat_message_hidden": """
+                CREATE TABLE IF NOT EXISTS `chat_message_hidden` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `message_id` bigint unsigned NOT NULL,
+                    `user_id` bigint unsigned NOT NULL,
+                    `hidden_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_chat_message_hidden_message_user` (`message_id`,`user_id`),
+                    KEY `idx_chat_message_hidden_user` (`user_id`,`hidden_at`),
+                    CONSTRAINT `fk_chat_message_hidden_message` FOREIGN KEY (`message_id`) REFERENCES `chat_message` (`id`) ON DELETE CASCADE,
+                    CONSTRAINT `fk_chat_message_hidden_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户仅自己隐藏的聊天消息'
+            """,
             # AI 分身会话与真人聊天完全隔离，不参与消息列表和未读计数。
             "ai_avatar_conversation": """
                 CREATE TABLE IF NOT EXISTS `ai_avatar_conversation` (
@@ -2375,6 +2389,19 @@ class DatabaseManager:
                     KEY `idx_status_like_created` (`status`,`like_count`,`created_at`)
                     ,KEY `idx_post_visibility_state` (`status`,`moderation_status`,`deleted_at`,`created_at`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='社区动态'
+            """,
+            "community_post_remind": """
+                CREATE TABLE IF NOT EXISTS `community_post_remind` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `post_id` bigint unsigned NOT NULL,
+                    `user_id` bigint unsigned NOT NULL,
+                    `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_community_post_remind_post_user` (`post_id`,`user_id`),
+                    KEY `idx_community_post_remind_user` (`user_id`,`created_at`),
+                    CONSTRAINT `fk_community_post_remind_post` FOREIGN KEY (`post_id`) REFERENCES `community_post` (`id`) ON DELETE CASCADE,
+                    CONSTRAINT `fk_community_post_remind_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='动态提醒谁看名单'
             """,
             # ============================================
             # 23. 动态评论

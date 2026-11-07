@@ -31,14 +31,16 @@ def _permissions(row: dict) -> list[str]:
 
 
 def _account_item(row: dict) -> MatchmakerAdminAccountItem:
-    return MatchmakerAdminAccountItem(
-        **{key: row[key] for key in (
-            "id", "username", "display_name", "matchmaker_user_id", "data_scope", "organization_id", "status",
-            "failed_count", "locked_until", "last_login_at", "last_login_ip",
-            "created_at", "updated_at",
-        )},
-        permissions=_permissions(row),
-    )
+    data = {key: row[key] for key in (
+        "id", "username", "display_name", "matchmaker_user_id", "data_scope", "organization_id", "status",
+        "failed_count", "locked_until", "last_login_at", "last_login_ip",
+        "created_at", "updated_at",
+    )}
+    # 手机号优先取账号自身 phone 列，未设置时回退关联会员 users.phone（linked_user_phone）。
+    data["phone"] = row.get("phone") or row.get("linked_user_phone")
+    # 定时锁定：老库未补列时 get 返回 None，行为与未开启一致。
+    data["lock_at"] = row.get("lock_at")
+    return MatchmakerAdminAccountItem(**data, permissions=_permissions(row))
 
 
 # 注销状态与账号启用状态（status）是两套维度：前者看 admin_account_cancellation
@@ -84,9 +86,10 @@ async def list_accounts(
         )
         params["cancellation_status"] = cancellation_status
     where = " AND ".join(conditions)
-    select = """SELECT a.*, GROUP_CONCAT(p.permission ORDER BY p.permission SEPARATOR '\n') AS permissions
+    select = """SELECT a.*, u.phone AS linked_user_phone, GROUP_CONCAT(p.permission ORDER BY p.permission SEPARATOR '\n') AS permissions
         FROM matchmaker_admin_account a
         LEFT JOIN matchmaker_admin_permission p ON p.account_id = a.id
+        LEFT JOIN users u ON u.id = a.matchmaker_user_id
         WHERE {where}
         GROUP BY a.id
         ORDER BY a.created_at DESC
@@ -107,9 +110,10 @@ async def list_accounts(
 
 
 async def get_account(db: AsyncSession, account_id: int) -> MatchmakerAdminAccountItem:
-    result = await db.execute(text("""SELECT a.*, GROUP_CONCAT(p.permission ORDER BY p.permission SEPARATOR '\n') AS permissions
+    result = await db.execute(text("""SELECT a.*, u.phone AS linked_user_phone, GROUP_CONCAT(p.permission ORDER BY p.permission SEPARATOR '\n') AS permissions
         FROM matchmaker_admin_account a
         LEFT JOIN matchmaker_admin_permission p ON p.account_id = a.id
+        LEFT JOIN users u ON u.id = a.matchmaker_user_id
         WHERE a.id = :id GROUP BY a.id"""), {"id": account_id})
     row = result.mappings().first()
     if not row:
@@ -125,14 +129,16 @@ async def create_account(db: AsyncSession, body: MatchmakerAdminAccountCreate, a
     if duplicate.scalar():
         raise HTTPException(409, detail="后台账号用户名已存在")
     result = await db.execute(text("""INSERT INTO matchmaker_admin_account
-        (username, password_hash, matchmaker_user_id, display_name, data_scope, organization_id)
-        VALUES (:username, :password_hash, :matchmaker_user_id, :display_name, :data_scope, :organization_id)"""), {
+        (username, password_hash, matchmaker_user_id, display_name, data_scope, organization_id, phone, lock_at)
+        VALUES (:username, :password_hash, :matchmaker_user_id, :display_name, :data_scope, :organization_id, :phone, :lock_at)"""), {
         "username": body.username,
         "password_hash": hash_password(body.password),
         "matchmaker_user_id": body.matchmaker_user_id,
         "display_name": body.display_name,
         "data_scope": body.data_scope,
         "organization_id": body.organization_id,
+        "phone": body.phone,
+        "lock_at": body.lock_at.replace(tzinfo=None) if body.lock_at and body.lock_at.tzinfo else body.lock_at,
     })
     account_id = int(result.lastrowid)
     for permission in set(body.permissions):
@@ -156,6 +162,12 @@ async def update_account(db: AsyncSession, account_id: int, body: MatchmakerAdmi
     if body.display_name is not None:
         updates.append("display_name = :display_name")
         params["display_name"] = body.display_name
+    if "phone" in body.model_fields_set:
+        updates.append("phone = :phone")
+        params["phone"] = body.phone
+    if "lock_at" in body.model_fields_set:
+        updates.append("lock_at = :lock_at")
+        params["lock_at"] = body.lock_at.replace(tzinfo=None) if body.lock_at and body.lock_at.tzinfo else body.lock_at
     if "matchmaker_user_id" in body.model_fields_set:
         updates.append("matchmaker_user_id = :matchmaker_user_id")
         params["matchmaker_user_id"] = body.matchmaker_user_id
@@ -186,7 +198,8 @@ async def update_account_status(db: AsyncSession, account_id: int, body: Matchma
     await get_account(db, account_id)
     if account_id == actor_id and body.status != 1:
         raise HTTPException(403, detail="不能停用自己的账号")
-    await db.execute(text("UPDATE matchmaker_admin_account SET status = :status, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {
+    # 人工恢复为“正常”时同时解除未到期的定时锁定，避免登录后又被惰性判定重新锁定。
+    await db.execute(text("UPDATE matchmaker_admin_account SET status = :status, lock_at = CASE WHEN :status = 1 THEN NULL ELSE lock_at END, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {
         "status": body.status, "id": account_id,
     })
     if body.status != 1:
@@ -308,7 +321,7 @@ async def list_audit_logs(
         conditions.append("(a.reason LIKE CONCAT('%', :kw, '%') OR a.action LIKE CONCAT('%', :kw, '%'))")
         params["kw"] = keyword
     condition = " AND ".join(conditions)
-    rows = await db.execute(text(f"""SELECT a.id, a.actor_user_id, acc.username AS actor_name,
+    rows = await db.execute(text(f"""SELECT a.id, a.actor_user_id AS actor_account_id, acc.username AS actor_name,
         a.action, a.resource_type, a.resource_id, a.reason, a.created_at
         FROM business_audit_log a
         LEFT JOIN matchmaker_admin_account acc ON acc.id = a.actor_user_id

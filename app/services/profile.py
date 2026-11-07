@@ -151,8 +151,14 @@ def _completion_text_present(value: Any) -> bool:
     return str(value).strip() not in _COMPLETION_EMPTY_TEXTS
 
 
-def _completion_state(row: Any) -> dict[str, bool]:
-    """单一完成度判定：所有出口共用，避免 score 与 items 各算一套。"""
+def _completion_state(row: Any, *, legacy: bool = False) -> dict[str, bool]:
+    """单一完成度判定：所有出口共用，避免 score 与 items 各算一套。
+
+    ``legacy=True`` 用于 Q23 grandfather：旧规则只要求相册至少 1 张，
+    其余判定与当前规则一致（location 省+市、intro 20 字）。
+    """
+    album_done = bool(row.get("album_done"))
+    album_count = int(row.get("album_count") or 0)
     return {
         "gender": row["gender"] in (1, 2),
         "birthday": bool(row["birthday"] and _calculate_age(row["birthday"]) >= 18),
@@ -166,7 +172,7 @@ def _completion_state(row: Any) -> dict[str, bool]:
         "hometown": bool(row["hometown_province_code"] and row["hometown_city_code"]),
         "avatar": _completion_text_present(row["avatar"]),
         "intro": bool(row["self_intro"] and len(str(row["self_intro"]).strip()) >= 20),
-        "album": bool(row["album_done"]),
+        "album": album_done if legacy else album_count >= 3,
         "personal_tags": len(personal_tags(_profile_tag_values(row), _profile_custom_tags(row))) >= 3,
         "mbti": _completion_text_present(row["mbti"]),
         "preference": row["preference_age_min"] is not None and row["preference_age_max"] is not None,
@@ -202,10 +208,15 @@ _COMPLETION_ROW_SELECT = """SELECT u.gender, u.birthday, u.is_married, u.avatar,
               p.personality_tags, p.mbti, p.tags, pref.age_min AS preference_age_min,
               pref.age_max AS preference_age_max,
               EXISTS (SELECT 1 FROM user_media m WHERE m.user_id = u.id
-                      AND m.media_type = 'photo' AND m.deleted_at IS NULL) AS album_done
+                      AND m.media_type = 'photo' AND m.deleted_at IS NULL) AS album_done,
+              (SELECT COUNT(*) FROM user_media m WHERE m.user_id = u.id
+               AND m.media_type = 'photo' AND m.deleted_at IS NULL) AS album_count,
+              COALESCE(c.score, 0) AS completion_score,
+              COALESCE(c.completion_grandfathered, 0) AS completion_grandfathered
        FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
        LEFT JOIN user_partner_preference pref ON pref.user_id = u.id
        LEFT JOIN user_auth ua ON ua.user_id = u.id
+       LEFT JOIN user_profile_completion c ON c.user_id = u.id
        WHERE u.id = :id"""
 
 
@@ -294,12 +305,73 @@ def _qa_answers_from_value(value: Any) -> list[dict[str, Any]]:
             continue
         answer = str(item.get("answer") or "").strip()[:300]
         question = str(item.get("question") or QA_QUESTION_TEXTS[question_id]).strip()[:64]
+        media_ids: list[int] = []
+        for raw_id in item.get("media_ids") or []:
+            try:
+                media_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if media_id >= 1 and media_id not in media_ids:
+                media_ids.append(media_id)
+            if len(media_ids) >= 1:
+                break
         by_id[question_id] = {
             "question_id": question_id,
             "question": question or QA_QUESTION_TEXTS[question_id],
             "answer": answer,
+            "media_ids": media_ids,
         }
     return [by_id[key] for key in sorted(by_id)]
+
+
+async def attach_qa_media(
+    db: AsyncSession, user_id: int, answers: list[dict[str, Any]]
+) -> None:
+    """Attach approved Q&A images; unapproved/deleted media is hidden from every reader."""
+    ids: list[int] = []
+    for answer in answers:
+        for raw_id in answer.get("media_ids") or []:
+            try:
+                media_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if media_id not in ids:
+                ids.append(media_id)
+    if not ids:
+        return
+    placeholders = ",".join(f":m{index}" for index in range(len(ids)))
+    params = {f"m{index}": value for index, value in enumerate(ids)}
+    params["user_id"] = user_id
+    rows = (
+        await db.execute(
+            text(
+                f"""SELECT id, file_url, thumbnail_url FROM user_media
+                    WHERE user_id = :user_id AND id IN ({placeholders})
+                      AND media_type = 'photo' AND deleted_at IS NULL
+                      AND review_status = 1"""
+            ),
+            params,
+        )
+    ).mappings().all()
+    by_id = {
+        int(row["id"]): {
+            "id": int(row["id"]),
+            "file_url": str(row["file_url"]),
+            "thumbnail_url": row["thumbnail_url"],
+        }
+        for row in rows
+    }
+    for answer in answers:
+        media = []
+        for raw_id in answer.get("media_ids") or []:
+            try:
+                media_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if media_id in by_id and by_id[media_id] not in media:
+                media.append(by_id[media_id])
+        answer["media_ids"] = [item["id"] for item in media]
+        answer["media"] = media
 
 
 def _profile_tag_values(row: Any) -> list[str]:
@@ -450,6 +522,7 @@ async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> d
     data["interest_tags"] = _json_list(data["interest_tags"])
     data["personality_tags"] = _json_list(data["personality_tags"])
     data["qa_answers"] = _qa_answers_from_value(data.get("qa_answers"))
+    await attach_qa_media(db, user_id, data["qa_answers"])
     raw_tags = _profile_tag_values(data)
     data["custom_tag_categories"] = _profile_custom_tag_categories(data)
     data["custom_tags"] = list(data["custom_tag_categories"])
@@ -517,6 +590,53 @@ async def _lock_profile_update(db: AsyncSession, user_id: int) -> None:
         text("SELECT id FROM users WHERE id = :user_id FOR UPDATE"),
         {"user_id": user_id},
     )
+
+
+async def _validate_qa_media_ids(
+    db: AsyncSession, user_id: int, media_ids: Any
+) -> list[int]:
+    normalized: list[int] = []
+    for raw_id in media_ids or []:
+        try:
+            media_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if media_id >= 1 and media_id not in normalized:
+            normalized.append(media_id)
+    if len(normalized) > 1:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "QA_MEDIA_INVALID",
+                "message": "每个问答最多上传 1 张图片",
+            },
+        )
+    if not normalized:
+        return []
+    placeholders = ",".join(f":m{index}" for index in range(len(normalized)))
+    params = {f"m{index}": value for index, value in enumerate(normalized)}
+    params["user_id"] = user_id
+    rows = (
+        await db.execute(
+            text(
+                f"""SELECT id FROM user_media
+                    WHERE user_id = :user_id AND id IN ({placeholders})
+                      AND media_type = 'photo' AND deleted_at IS NULL
+                      AND review_status = 1"""
+            ),
+            params,
+        )
+    ).mappings().all()
+    found = {int(row["id"]) for row in rows}
+    if found != set(normalized):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "QA_MEDIA_INVALID",
+                "message": "问答图片必须是本人已通过审核的相册图片",
+            },
+        )
+    return normalized
 
 
 async def update_profile(
@@ -638,6 +758,10 @@ async def update_profile(
                 raise HTTPException(422, detail="关于我问答内容不适合公开展示，请修改后重试")
             if decision.action == "replace" and isinstance(item, dict):
                 item["answer"] = decision.display_content
+            if isinstance(item, dict):
+                item["media_ids"] = await _validate_qa_media_ids(
+                    db, user_id, item.get("media_ids")
+                )
         values["qa_answers"] = _json_value(_qa_answers_from_value(raw_answers))
     if values:
         columns = ["user_id", *values]
@@ -736,9 +860,9 @@ async def recalculate_completion_state(db: AsyncSession, user_id: int) -> tuple[
     }
     assignments = ", ".join(f"{key} = :{key}" for key in (*columns, "score"))
     await db.execute(
-        text(f"""INSERT INTO user_profile_completion (user_id, {', '.join(columns)}, score, algorithm_version, calculated_at)
-                   VALUES (:user_id, {', '.join(f':{key}' for key in columns)}, :score, 'profile-v5', UTC_TIMESTAMP())
-                   ON DUPLICATE KEY UPDATE {assignments}, algorithm_version = 'profile-v5', calculated_at = UTC_TIMESTAMP()"""),
+        text(f"""INSERT INTO user_profile_completion (user_id, {', '.join(columns)}, score, completion_grandfathered, algorithm_version, calculated_at)
+                   VALUES (:user_id, {', '.join(f':{key}' for key in columns)}, :score, 0, 'profile-v5', UTC_TIMESTAMP())
+                   ON DUPLICATE KEY UPDATE {assignments}, completion_grandfathered = 0, algorithm_version = 'profile-v5', calculated_at = UTC_TIMESTAMP()"""),
         {"user_id": user_id, **{key: int(value) for key, value in columns.items()}, "score": score},
     )
     await db.execute(text("UPDATE users SET data_complete_rate = :score WHERE id = :id"), {"score": score, "id": user_id})
@@ -750,19 +874,37 @@ async def recalculate_completion(db: AsyncSession, user_id: int) -> float:
     return score
 
 
-async def get_completion(db: AsyncSession, user_id: int) -> CompletionResponse:
+async def _ensure_completion_current(db: AsyncSession, user_id: int) -> None:
+    """Reads never recalculate a grandfathered row; active edits clear the flag via recalculate."""
+    result = await db.execute(
+        text(
+            """SELECT completion_grandfathered FROM user_profile_completion
+               WHERE user_id = :user_id"""
+        ),
+        {"user_id": user_id},
+    )
+    row = result.mappings().first()
+    if row is not None and bool(row.get("completion_grandfathered")):
+        return
     await recalculate_completion(db, user_id)
     await db.commit()
+
+
+async def get_completion(db: AsyncSession, user_id: int) -> CompletionResponse:
+    await _ensure_completion_current(db, user_id)
     result = await db.execute(text(_COMPLETION_ROW_SELECT), {"id": user_id})
     row = result.mappings().one()
-    completed = _completion_state(row)
-    score = _completion_score(completed)
+    grandfathered = bool(row.get("completion_grandfathered"))
+    completed = _completion_state(row, legacy=grandfathered)
+    score = float(row["completion_score"]) if grandfathered else _completion_score(completed)
     items = [
         CompletionItemResponse(key=key, label=label, weight=weight, completed=completed[key])
         for key, label, weight in COMPLETION_RULES
     ]
     missing = [item.label for item in items if not item.completed]
     return CompletionResponse(
+        rules_version="profile-v5",
+        total_items=len(COMPLETION_RULES),
         score=score,
         missing_items=missing,
         items=items,

@@ -24,13 +24,14 @@ async def complete(
     json_mode: bool = False,
     request_id: str | None = None,
     scene: str = "legacy",
+    feature: AiFeature = AiFeature.ADVISOR,
 ) -> str:
-    """Call the shared AI gateway under the existing advisor gate.
+    """Call the shared AI gateway under the requested AI feature gate.
 
     ``ai_enabled=False`` in development/testing still returns the local mock
     (existing contract) unless ``ai_allow_mock_fallback`` is disabled, in
     which case it fails closed with 503.  Any real call requires
-    ``require_ai_feature(ADVISOR)`` so master + ``ai_enabled`` + production
+    ``require_ai_feature(feature)`` so master + feature switch + production
     approvals cannot be bypassed.  Generation audit is owned by
     ``AIGateway.chat`` and must not be repeated here.
     """
@@ -45,15 +46,45 @@ async def complete(
                 request_id,
             )
             return _mock_response(messages, json_mode=json_mode)
-        raise HTTPException(503, detail="AI服务未启用")
+        raise HTTPException(
+            503,
+            detail={
+                "code": "AI_FEATURE_DISABLED",
+                "message": "AI 功能暂不可用",
+                "retryable": False,
+                "feature": feature.value,
+            },
+        )
     try:
-        require_ai_feature(AiFeature.ADVISOR, settings)
+        require_ai_feature(feature, settings)
     except AiFeatureDisabledError as exc:
-        raise HTTPException(503, detail="AI服务未启用") from exc
+        raise HTTPException(
+            503,
+            detail={
+                "code": "AI_FEATURE_DISABLED",
+                "message": "AI 功能暂不可用",
+                "retryable": False,
+                "feature": feature.value,
+            },
+        ) from exc
     if not settings.ai_api_key:
-        raise HTTPException(503, detail="AI服务未配置 API Key")
+        raise HTTPException(
+            503,
+            detail={
+                "code": "AI_TEMPORARILY_UNAVAILABLE",
+                "message": "AI 服务未配置 API Key",
+                "retryable": False,
+            },
+        )
     if settings.ai_provider == "mock":
-        raise HTTPException(503, detail="AI服务未启用")
+        raise HTTPException(
+            503,
+            detail={
+                "code": "AI_TEMPORARILY_UNAVAILABLE",
+                "message": "AI 服务未启用",
+                "retryable": False,
+            },
+        )
     context = AITaskContext(
         task_id="",
         request_id=request_id or uuid.uuid4().hex,
@@ -69,7 +100,14 @@ async def complete(
     )
     if isinstance(outcome.result, str) and outcome.result.strip():
         return outcome.result.strip()
-    raise HTTPException(503, detail="AI服务暂时不可用")
+    raise HTTPException(
+        503,
+        detail={
+            "code": "AI_TEMPORARILY_UNAVAILABLE",
+            "message": "AI 服务暂时不可用",
+            "retryable": True,
+        },
+    )
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 _TRAILING_COMMA = re.compile(r",\s*([}\]])")

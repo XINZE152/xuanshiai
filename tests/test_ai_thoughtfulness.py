@@ -147,7 +147,7 @@ def _patch_thoughtfulness_model(monkeypatch) -> dict:
     async def fake_quota(db, user_id, code, limit):
         return "quota-key"
 
-    async def fake_complete(messages, json_mode=False, scene=""):
+    async def fake_complete(messages, json_mode=False, scene="", **_kwargs):
         captured["prompt"] = messages[-1]["content"]
         return json.dumps({"score": 80, "summary": "模型摘要", "todos": []})
 

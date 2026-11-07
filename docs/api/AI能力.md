@@ -68,7 +68,12 @@ provider。Provider API key 只能放在环境变量或配置中心，不能提�
 
 只润色用户提交的文字，不自动写回资料，也不得补造职业、收入、学历等事实。
 
-请求体：`content` 1~2000 字符；`style` 为 `natural/warm/humorous/mature/concise`；`max_length` 50~2000，默认 300。返回 `original/polished/style/changed_points`。用户确认后由原资料接口保存。
+请求体：`content` 1~2000 字符；`style` 为 `natural/warm/humorous/mature/concise`；`max_length` 50~2000，默认 300。返回 `original/polished/style/changed_points/changed/fallback`：
+- `changed`：本次是否真的产生改写；AI 未启用时的 mock 回显固定为 `false`。
+- `fallback`：`none` 表示正常模型；`mock_echo` 表示测试环境 mock 回退，前端应提示“当前未产生改写”。
+用户确认后由原资料接口保存。
+
+错误：门禁失败返回 `503 {"detail":{"code":"AI_FEATURE_DISABLED","message":"AI 功能暂不可用","retryable":false,"feature":"profile"}}`；模型连续两次输出非 JSON 返回 `503 AI_OUTPUT_INVALID`，本次额度已退还。旧客户端读 `detail` 字符串会看到 `[object Object]`，请改读 `detail.code` 或顶层 `message`。
 
 ### `GET|POST /api/v1/ai/profile/thoughtfulness`
 
@@ -145,6 +150,7 @@ WebSocket 路径不会出现在 OpenAPI `paths`，但属于同一发布边界：
 
 ### 变更记录
 
+- 2026-11-06（UT-2026-11-02-DOC-02，Q35/Q49/Q24）：①`POST /ai/profile/polish` 新增 `changed`、`fallback` 字段，用于前端识别 mock 回显“未产生改写”；②用心度/润色改为按 `AiFeature.PROFILE` 门禁，与 `GET /ai/capabilities.profile` 一致；③门禁失败统一返回 `AI_FEATURE_DISABLED`，模型连续两次非 JSON 返回 `AI_OUTPUT_INVALID`（`retryable=true`）；④`detail` 由字符串改为对象，旧客户端请改读 `detail.code` 或顶层 `message`。
 - 2026-11-02：新增 `GET /ai/capabilities` 运行时能力探测。此前前端无法预知 AI 开关，四个症状（AI 搜索不可用 / 画像不可用 / 语音不可用 / 用心度 503）实为同一事实。
 - 2026-09-25：按当前运行时 OpenAPI 重建路径索引；AI 默认关闭和生产 fail-closed 配置改为实际 `ai_*` 字段，移除旧的 `AI_ENABLED=true` 示例。
 - 2026-09-07：新增 AI 资料用心度评审接口（GET/POST `/ai/profile/thoughtfulness`）。
