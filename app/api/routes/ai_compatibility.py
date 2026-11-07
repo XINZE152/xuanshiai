@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from uuid import uuid4
 
@@ -50,8 +51,28 @@ from app.services.ai.tasks import TaskError
 
 router = APIRouter()
 
+logger = logging.getLogger(__name__)
+
 # Idempotency-Key 契约（§11.1）：8-128 位 ASCII，禁止空白。
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+
+
+def _log_visibility_denied(
+    scene: str, viewer_id: int, target_user_id: int, exc: CandidateNotVisible
+) -> None:
+    """把可见性拒绝的真实原因只写进服务端日志（AIT-08）。
+
+    对外仍然只有稳定的 ``CANDIDATE_NOT_VISIBLE``：原因码会泄露「对方隐藏了资料 /
+    对方资料不完整 / 双方互相关系状态」这类归属信息，因此这里**只**落日志，
+    不进 ``_error_response``。
+    """
+    logger.warning(
+        "ai_visibility_denied scene=%s denial_code=%s viewer_id=%s target_user_id=%s",
+        scene,
+        exc.denial_code or "UNKNOWN",
+        viewer_id,
+        target_user_id,
+    )
 
 
 def _request_id() -> str:
@@ -129,6 +150,7 @@ async def get_compatibility_route(
     try:
         result = await read_compatibility_snapshot(db, current.id, target_user_id)
     except CandidateNotVisible as exc:
+        _log_visibility_denied("read", current.id, target_user_id, exc)
         raise _error_response(exc.code, exc.message, exc.status_code) from exc
     # 读取路径的 stale 落库标记（read_compatibility_snapshot → _mark_snapshot_stale
     # 的 UPDATE）在同一事务内执行；get_db 在请求结束时只关闭回滚、不提交。若不在此
@@ -146,6 +168,7 @@ async def get_compatibility_route(
                 db, current.id, target_user_id
             )
         except CandidateNotVisible as exc:
+            _log_visibility_denied("llm_refresh", current.id, target_user_id, exc)
             raise _error_response(exc.code, exc.message, exc.status_code) from exc
     await db.commit()
     if accepted is not None:
@@ -191,6 +214,7 @@ async def recompute_compatibility_route(
             idempotency_key,
         )
     except CandidateNotVisible as exc:
+        _log_visibility_denied("recompute", current.id, target_user_id, exc)
         raise _error_response(exc.code, exc.message, exc.status_code) from exc
     except CompatibilityResultStale as exc:
         raise _error_response(exc.code, exc.message, exc.status_code) from exc

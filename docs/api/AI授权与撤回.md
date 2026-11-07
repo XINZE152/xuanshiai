@@ -10,7 +10,7 @@
 | 前缀 | `/api/v1/ai` |
 | 认证 | `Authorization: Bearer <access_token>` |
 | Content-Type | `application/json` |
-| scope 枚举 | `profile_text_extract`、`search_parse`、`compatibility_shadow` |
+| scope 枚举 | `profile_text_extract`、`search_parse`、`compatibility_shadow`、`compatibility_display` |
 | policy_revision | `ai-policy-2026-08-07-v1`（当前冻结值） |
 
 ### per-scope consent_version 注册表
@@ -22,6 +22,7 @@
 | `profile_text_extract` | `profile-text-v1` | M04 画像文字抽取 |
 | `search_parse` | `search-parse-v1` | M03 搜索条件解析 |
 | `compatibility_shadow` | `compatibility-shadow-v1` | M06 兼容度 shadow 计算 |
+| `compatibility_display` | `compatibility-display-v1` | M06 兼容度结果外显（`display_eligible` 门禁） |
 
 ---
 
@@ -149,6 +150,7 @@ Content-Type: application/json
 | `profile_text_extract` | 画像草稿/会话、特征投影、搜索结果、兼容度快照 |
 | `search_parse` | 搜索草稿、搜索快照、搜索结果 |
 | `compatibility_shadow` | 兼容度快照 |
+| `compatibility_display` | 兼容度结果外显：读取时 `display_eligible` 强制置 `false`（`app/services/ai/compatibility.py:1574-1579`），快照数据本身保留 |
 
 ---
 
@@ -202,4 +204,14 @@ Content-Type: application/json
 ### 边界场景
 - 已撤回的 scope 再次 revoke：返回 `status=already_revoked`，privacy revision 不变。
 - privacy revision 过期：返回 `409 AI_CONSENT_VERSION_CONFLICT`，前端重新拉取后重试。
+
+---
+
+## 变更记录
+
+- 2026-11-07（AIT / BE-04，文档漂移修正）：scope 枚举、per-scope consent_version 注册表、撤回传播范围三处补齐第 4 个 scope `compatibility_display`（`compatibility-display-v1`），与代码 `app/schemas/ai_common.py:32`、`app/services/ai/consents.py:34-39` 逐字对齐。
+  - 变更前：文档只列 3 个 scope，前端按文档实现会漏掉 `compatibility_display`，误判为「scope 非法」。
+  - 变更后：4 个 scope 全部列出，并补充该 scope 的撤回语义（只关外显，不删快照）。
+  - 影响范围：**纯文档修正**，接口 URL/Method/参数/错误码均未变化，已按 3 个 scope 实现的客户端行为不受影响。
+- 2026-08-16：v1.0 首版（Task 3 / G2-A），冻结 3 个 scope。
 - 并发 grant/revoke：`FOR UPDATE` 锁定 `user_revision_state`，只允许一个提交。
