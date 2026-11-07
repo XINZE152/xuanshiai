@@ -71,6 +71,7 @@ from app.schemas.matchmaker_workspace import (
     WorkspaceMemberEntryCreate,
     WorkspaceMemberEntryResult,
     WorkspaceMemberPage,
+    WorkspaceMemberPickupResult,
     WorkspaceMemberReviewUpdate,
     WorkspaceMeetingRequestPage,
     WorkspaceMeetingRecordSummary,
@@ -84,6 +85,7 @@ from app.schemas.matchmaker_workspace import (
     PartnerJoinRequestSummary,
 )
 from app.services.matchmaker_workspace import (
+    pickup_workspace_member,
     abandon_workspace_lead,
     add_workspace_lead_follow_up,
     assign_workspace_lead,
@@ -220,10 +222,40 @@ async def workbench_leads(
     page_size: int = Query(20, ge=1, le=100),
     status: str | None = Query(None, pattern="^(NEW|CONTACTED|INTENDED|CONVERTED|LOST|CLOSED)$"),
     search: str | None = Query(None, max_length=64),
+    source: str | None = Query(None, max_length=64),
+    matchmaker_id: int | None = Query(None, ge=1),
+    intention_level: int | None = Query(None, ge=1, le=7, description="客户意向 A-G 七档：1 A未接 2 B初步沟通 3 C深入沟通未缔结 4 D待确定到店 5 E已确定到店 6 F预约需二邀 7 G已到店未签约"),
+    gender: int | None = Query(None, ge=0, le=2, description="性别 0未知 1男 2女（A13）"),
+    start_date: str | None = Query(None, max_length=10, description="录入时间起（含，兼容前端空字符串）"),
+    end_date: str | None = Query(None, max_length=10, description="录入时间止（含，兼容前端空字符串）"),
+    assign_start: str | None = Query(None, max_length=10, description="分派时间起（含，兼容前端空字符串）"),
+    assign_end: str | None = Query(None, max_length=10, description="分派时间止（含，兼容前端空字符串）"),
+    promoter_id: int | None = Query(None, ge=1, description="推广红娘 users.id"),
+    xiangqin_status: int | None = Query(None, ge=1, le=5, description="相亲状态 1公开相亲 2委托红娘 3完全私密 4关闭相亲 5已经脱单"),
+    bind_mode: str | None = Query(None, pattern="^(bind|auto|custom)$", description="落户方式 bind绑定已有账号/auto自动生成账号/custom自定义创建"),
+    wechat_added: int | None = Query(None, ge=0, le=2, description="加微信结果 0未添加 1已加上 2没加上"),
+    age_min: int | None = Query(None, ge=16, le=100),
+    age_max: int | None = Query(None, ge=16, le=100),
+    height_min: int | None = Query(None, ge=80, le=250),
+    height_max: int | None = Query(None, ge=80, le=250),
+    marriage: str | None = Query(None, max_length=255, description="婚况多选，英文逗号分隔"),
+    education: str | None = Query(None, max_length=255, description="学历多选，英文逗号分隔"),
+    occupation: str | None = Query(None, max_length=255, description="职业多选，英文逗号分隔"),
+    residence: str | None = Query(None, max_length=64, description="现居地模糊匹配"),
+    hometown: str | None = Query(None, max_length=64, description="家乡模糊匹配"),
+    hide_followed_today: bool | None = Query(None, description="隐藏今日已跟进的线索"),
+    hide_called_today: bool | None = Query(None, description="隐藏今日已通话的线索"),
+    has_phone: bool | None = Query(None, description="是否登记手机号"),
+    has_wechat: bool | None = Query(None, description="是否登记微信号"),
+    assigned: bool | None = Query(None, description="分派状态筛选：true 已分派 / false 待分派（B11）"),
+    audit_status: str | None = Query(None, pattern="^(active|pending|rejected)$", description="审核状态：active 有效 / pending 待核 / rejected 无效（B11）"),
+    stored: bool | None = Query(None, description="入库情况：true 已入库(已转会员) / false 未入库（B11）"),
+    order: str | None = Query(None, pattern="^(latest|earliest)$", description="记录排序，默认 latest"),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceLeadPage:
-    return await list_workspace_leads(db, await require_workspace(db, current), page, page_size, status, search)
+    return await list_workspace_leads(db, await require_workspace(db, current), page, page_size, status, search,
+        source=source, matchmaker_id=matchmaker_id, intention_level=intention_level, gender=gender, start_date=start_date, end_date=end_date, assign_start=assign_start, assign_end=assign_end, promoter_id=promoter_id, xiangqin_status=xiangqin_status, bind_mode=bind_mode, wechat_added=wechat_added, age_min=age_min, age_max=age_max, height_min=height_min, height_max=height_max, marriage=marriage, education=education, occupation=occupation, residence=residence, hometown=hometown, hide_followed_today=hide_followed_today, hide_called_today=hide_called_today, has_phone=has_phone, has_wechat=has_wechat, assigned=assigned, audit_status=audit_status, stored=stored, order=order)
 
 
 @router.post("/workbench/leads", response_model=WorkspaceLead, status_code=201, summary="录入工作范围客源线索")
@@ -330,10 +362,11 @@ async def workbench_members(
     page_size: int = Query(20, ge=1, le=100),
     review_status: str | None = Query(None, pattern="^(PENDING|PASSED|REJECTED)$"),
     search: str | None = Query(None, max_length=64),
+    filters: str | None = Query(None, max_length=4096),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceMemberPage:
-    return await list_workspace_members(db, await require_workspace(db, current), page, page_size, review_status, search)
+    return await list_workspace_members(db, await require_workspace(db, current), page, page_size, review_status, search, filters)
 
 
 @router.get(
@@ -385,6 +418,15 @@ async def workbench_meeting_requests(
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceMeetingRequestPage:
     return await list_workspace_meeting_requests(db, await require_workspace(db, current), page, page_size, search)
+
+
+@router.post("/workbench/members/{member_id}/pickup", response_model=WorkspaceMemberPickupResult, summary="捞取弃海会员")
+async def pickup_workbench_member(
+    member_id: int = Path(..., ge=1),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceMemberPickupResult:
+    return await pickup_workspace_member(db, await require_workspace(db, current), member_id)
 
 
 @router.patch("/workbench/members/{member_id}/public-profile-review", response_model=WorkspaceMember, summary="审核会员公开资料")

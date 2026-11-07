@@ -318,6 +318,7 @@ class WorkspaceMemberPage(BaseModel):
     page_size: int
     total: int
     has_more: bool
+    filter_version: int = 1
 
 
 class WorkspaceMemberReviewUpdate(BaseModel):
@@ -335,6 +336,12 @@ class WorkspaceMemberMatchmakerUpdate(BaseModel):
     """修改会员的跟进服务红娘；置 null 表示改为待分派。"""
 
     matchmaker_id: int | None = Field(default=None, ge=1)
+
+
+class WorkspaceMemberPickupResult(BaseModel):
+    member_id: int
+    matchmaker_id: int
+    review_status: Literal["PENDING"] = "PENDING"
 
 
 class WorkspaceMemberNoteUpdate(BaseModel):

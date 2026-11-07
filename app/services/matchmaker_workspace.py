@@ -108,6 +108,7 @@ from app.schemas.matchmaker_workspace import (
     WorkspaceMemberNote,
     WorkspaceMemberNoteUpdate,
     WorkspaceMemberPage,
+    WorkspaceMemberPickupResult,
     WorkspaceMemberReviewUpdate,
     WorkspaceMeetingRecordSummary,
     WorkspaceMeetingRequest,
@@ -1013,50 +1014,37 @@ async def _require_scoped_lead(db: AsyncSession, actor: WorkspaceActor, lead_id:
 
 
 async def list_workspace_leads(
-    db: AsyncSession,
-    actor: WorkspaceActor,
-    page: int,
-    page_size: int,
-    status: str | None,
-    search: str | None,
+    db: AsyncSession, actor: WorkspaceActor, page: int, page_size: int,
+    status: str | None, search: str | None, **filters: object,
 ) -> WorkspaceLeadPage:
-    params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
+    # 复用后台筛选口径，同时保留工作台的数据范围和弃海可见规则。
+    from app.services.customer_lead_admin import list_leads
+
+    scope_params: dict[str, object] = {}
     if actor.scope == "SELF":
-        # 普通红娘按「分派给自己」圈定范围；但弃海会把 matchmaker_id 清空，
-        # 导致自己再也查不到刚弃海的客源。这里按弃海记录兜底：只要存在
-        # 「由本人弃海且未恢复」的记录，就仍归入本人可见范围（可恢复）。
-        params["scope_matchmaker_id"] = actor.user_id
-        params["abandoned_by"] = actor.user_id
-        where = [
-            "(l.matchmaker_id = :scope_matchmaker_id OR EXISTS ("
-            "SELECT 1 FROM customer_lead_abandonment a WHERE a.lead_id = l.id "
-            "AND a.restored_at IS NULL AND a.abandoned_by = :abandoned_by))"
-        ]
+        scope_params.update(scope_matchmaker_id=actor.user_id, abandoned_by=actor.user_id)
+        scope = ("(customer_lead.matchmaker_id = :scope_matchmaker_id OR EXISTS ("
+                 "SELECT 1 FROM customer_lead_abandonment a WHERE a.lead_id = customer_lead.id "
+                 "AND a.restored_at IS NULL AND a.abandoned_by = :abandoned_by))")
     else:
-        where = [_scope_predicate(actor, "l", params)]
-    if status:
-        where.append("l.status = :status")
-        params["status"] = status
-    if search:
-        where.append("(l.name LIKE CONCAT('%', :search, '%') OR l.phone LIKE CONCAT('%', :search, '%'))")
-        params["search"] = search
-    clause = " AND ".join(where)
-    rows = await db.execute(
-        text(f"{_LEAD_SELECT} WHERE {clause} ORDER BY l.id DESC LIMIT :limit OFFSET :offset"),
-        params,
+        scope = _scope_predicate(actor, "customer_lead", scope_params)
+    result = await list_leads(
+        db, page, page_size, status, filters.pop("source", None),
+        filters.pop("matchmaker_id", None), search,
+        scope=scope, scope_params=scope_params, **filters,
     )
-    count_params = {key: value for key, value in params.items() if key not in {"limit", "offset"}}
-    total = int(
-        await db.scalar(text(f"SELECT COUNT(*) FROM customer_lead l WHERE {clause}"), count_params)
-        or 0
-    )
-    return WorkspaceLeadPage(
-        items=[_lead_from_row(row) for row in rows.mappings().all()],
-        page=page,
-        page_size=page_size,
-        total=total,
-        has_more=_page(total, page, page_size),
-    )
+    ids = [item.id for item in result.items]
+    if not ids:
+        return WorkspaceLeadPage(items=[], page=page, page_size=page_size,
+                                 total=result.total, has_more=result.has_more)
+    params: dict[str, object] = {"lead_id_" + str(i): value for i, value in enumerate(ids)}
+    placeholders = ", ".join(":" + key for key in params)
+    params.update(scope_params)
+    scoped_where = scope.replace("customer_lead.", "l.")
+    rows = (await db.execute(text(f"{_LEAD_SELECT} WHERE l.id IN ({placeholders}) AND {scoped_where}"), params)).mappings().all()
+    by_id = {int(row["id"]): _lead_from_row(row) for row in rows}
+    return WorkspaceLeadPage(items=[by_id[id] for id in ids if id in by_id], page=page,
+                             page_size=page_size, total=result.total, has_more=result.has_more)
 
 
 async def upload_lead_photo(
@@ -1495,6 +1483,132 @@ async def _require_scoped_member(db: AsyncSession, actor: WorkspaceActor, member
         raise HTTPException(404, detail="会员不存在或不在当前工作范围")
 
 
+def _append_workspace_member_filters(where: list[str], params: dict[str, object], actor: WorkspaceActor, raw: str) -> None:
+    """Apply validated member choices before LIMIT, alongside the existing scope predicate."""
+    try:
+        values = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, detail="筛选条件格式不正确") from exc
+    if not isinstance(values, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in values.items()):
+        raise HTTPException(422, detail="筛选条件格式不正确")
+    exact = {
+        "occupation": ("COALESCE(NULLIF(p.occupation, ''), ua.job)", ["私企员工", "央企/国企", "事业单位/公务员", "外企员工", "自由职业", "创业者/个体", "教师", "医生", "律师", "金融从业", "互联网/IT", "制造业", "服务业", "在校学生"]),
+        "housing": ("p.house", ["已购房", "未购房", "与父母同住"]),
+        "vehicle": ("p.car", ["已购车", "未购车"]),
+        "smoking": ("p.smoking", ["不吸烟", "偶尔吸烟", "经常吸烟"]),
+        "drinking": ("p.drinking", ["不饮酒", "社交场合饮酒", "经常饮酒"]),
+        "ethnicity": ("p.ethnicity", ["汉族", "回族", "满族", "蒙古族", "壮族", "维吾尔族", "藏族", "苗族", "彝族", "其他"]),
+        "religion": ("p.religion", ["无宗教信仰", "佛教", "基督教", "伊斯兰教", "道教", "其他"]),
+        "mbti": ("p.mbti", ["INTJ", "INTP", "ENTJ", "ENTP", "INFJ", "INFP", "ENFJ", "ENFP", "ISTJ", "ISFJ", "ESTJ", "ESFJ", "ISTP", "ISFP", "ESTP", "ESFP"]),
+    }
+    choices = {
+        "gender": {"male": "u.gender = 1", "female": "u.gender = 2"},
+        "marital": {"1": "u.is_married = 1", "2": "u.is_married IN (2,4,5,6,7)", "3": "u.is_married = 3"},
+        "ageRange": {"under20": "TIMESTAMPDIFF(YEAR,u.birthday,CURDATE()) < 20", "20-25": "TIMESTAMPDIFF(YEAR,u.birthday,CURDATE()) BETWEEN 20 AND 25", "26-30": "TIMESTAMPDIFF(YEAR,u.birthday,CURDATE()) BETWEEN 26 AND 30", "31-35": "TIMESTAMPDIFF(YEAR,u.birthday,CURDATE()) BETWEEN 31 AND 35", "36-40": "TIMESTAMPDIFF(YEAR,u.birthday,CURDATE()) BETWEEN 36 AND 40", "over40": "TIMESTAMPDIFF(YEAR,u.birthday,CURDATE()) > 40"},
+        "heightRange": {"under160": "p.height < 160", "160-169": "p.height BETWEEN 160 AND 169", "170-179": "p.height BETWEEN 170 AND 179", "over180": "p.height >= 180"},
+        "income": {"under10": "p.income < 100000", "10-20": "p.income >= 100000 AND p.income < 200000", "30-50": "p.income >= 300000 AND p.income < 500000", "50-100": "p.income >= 500000 AND p.income < 1000000", "over100": "p.income >= 1000000"},
+    }
+    allowed = set(exact) | set(choices) | {"education", "hometown", "residence", "household", "weight", "mine"}
+    if any(key not in allowed or len(value) > 128 for key, value in values.items()):
+        raise HTTPException(422, detail="不支持的筛选条件")
+    for key, value in values.items():
+        if not value:
+            continue
+        if key in {"ageRange", "heightRange", "weight"} and value.startswith("range:"):
+            match = re.fullmatch(r"range:(\d*):(\d*)", value)
+            limits = {"ageRange": (18, 120), "heightRange": (140, 220), "weight": (30, 150)}
+            if not match or not (match.group(1) or match.group(2)):
+                raise HTTPException(422, detail=f"无效的筛选范围：{key}")
+            lower = int(match.group(1)) if match.group(1) else None
+            upper = int(match.group(2)) if match.group(2) else None
+            minimum, maximum = limits[key]
+            if (lower is not None and not minimum <= lower <= maximum) or (upper is not None and not minimum <= upper <= maximum) or (lower is not None and upper is not None and lower > upper):
+                raise HTTPException(422, detail=f"无效的筛选范围：{key}")
+            column = {"ageRange": "TIMESTAMPDIFF(YEAR,u.birthday,CURDATE())", "heightRange": "p.height", "weight": "p.weight"}[key]
+            if lower is not None:
+                where.append(f"{column} >= :filter_{key}_min")
+                params[f"filter_{key}_min"] = lower
+            if upper is not None:
+                where.append(f"{column} <= :filter_{key}_max")
+                params[f"filter_{key}_max"] = upper
+        elif key in exact:
+            column, allowed_values = exact[key]
+            if value not in allowed_values:
+                raise HTTPException(422, detail=f"无效的筛选条件：{key}")
+            where.append(f"{column} = :filter_{key}")
+            params[f"filter_{key}"] = value
+        elif key in choices:
+            if key in {"ageRange", "heightRange"} and value.isdigit() and ((key == "ageRange" and 18 <= int(value) <= 120) or (key == "heightRange" and 140 <= int(value) <= 220)):
+                column = "TIMESTAMPDIFF(YEAR,u.birthday,CURDATE())" if key == "ageRange" else "p.height"
+                where.append(f"{column} = :filter_{key}")
+                params[f"filter_{key}"] = int(value)
+            elif value not in choices[key]:
+                raise HTTPException(422, detail=f"无效的筛选条件：{key}")
+            else:
+                where.append(f"({choices[key][value]})")
+        elif key == "mine":
+            if value != "1":
+                raise HTTPException(422, detail="无效的筛选条件：mine")
+            where.append("ra.matchmaker_id = :filter_mine")
+            params["filter_mine"] = actor.user_id
+        elif key == "weight":
+            weight_ranges = {
+                "under40": "p.weight < 40", "40-49": "p.weight >= 40 AND p.weight < 50",
+                "50-59": "p.weight >= 50 AND p.weight < 60", "60-69": "p.weight >= 60 AND p.weight < 70",
+                "70-79": "p.weight >= 70 AND p.weight < 80", "over80": "p.weight >= 80",
+            }
+            if value in weight_ranges:
+                where.append(f"({weight_ranges[value]})")
+            elif value.isdigit() and 40 <= int(value) <= 120:
+                # 兼容仍发送单值的旧客户端。
+                where.append("p.weight = :filter_weight")
+                params["filter_weight"] = int(value)
+            else:
+                raise HTTPException(422, detail="无效的体重")
+        elif key == "education":
+            labels = {"highschool": ["高中及以下"], "college": ["大专"], "bachelor": ["本科"], "master": ["硕士", "博士"], "doctor": ["博士"], "masters": ["硕士"]}
+            if value not in labels:
+                raise HTTPException(422, detail="无效的学历")
+            education_sql = "CASE WHEN COALESCE(ua.education_verified,0) = 1 AND NULLIF(ua.education,'') IS NOT NULL THEN ua.education WHEN p.education_level = 1 THEN '高中及以下' WHEN p.education_level = 2 THEN '大专' WHEN p.education_level = 3 THEN '本科' WHEN p.education_level = 4 THEN '硕士' WHEN p.education_level = 5 THEN '博士' ELSE ua.education END"
+            tokens = []
+            for index, label in enumerate(labels[value]):
+                param = f"filter_education_{index}"
+                tokens.append(f":{param}")
+                params[param] = label
+            where.append(f"({education_sql}) IN ({', '.join(tokens)})")
+        else:
+            from app.services.regions import list_cities, list_districts, list_provinces
+            parts = value.split()
+            province = next((p for p in list_provinces().items if p.name == parts[0]), None)
+            if province is None:
+                raise HTTPException(422, detail=f"无效的地区：{value}")
+            conditions = [f"p.{key}_province_code LIKE :filter_{key}_province"]
+            params[f"filter_{key}_province"] = f"{province.code[:2]}%"
+            if len(parts) > 1:
+                cities = list_cities(province.code).items
+                city = next((c for c in cities if c.name == parts[1]), None)
+                if city is None and len(cities) == 1 and parts[1] == province.name:
+                    city = cities[0]
+                if city is None:
+                    raise HTTPException(422, detail=f"无效的地区：{value}")
+                conditions.append(f"p.{key}_city_code LIKE :filter_{key}_city")
+                params[f"filter_{key}_city"] = f"{city.code[:4]}%"
+                if len(parts) > 2:
+                    district = next((d for d in list_districts(city.code).items if d.name == parts[2]), None)
+                    if district is None:
+                        raise HTTPException(422, detail=f"无效的地区：{value}")
+                    conditions.append(f"p.{key}_district_code = :filter_{key}_district")
+                    params[f"filter_{key}_district"] = district.code
+            if len(parts) > 3:
+                raise HTTPException(422, detail=f"无效的地区：{value}")
+            legacy = []
+            for index, part in enumerate(dict.fromkeys(parts)):
+                param = f"filter_{key}_text_{index}"
+                legacy.append(f"p.{key} LIKE :{param}")
+                params[param] = f"%{part}%"
+            where.append(f"(({' AND '.join(conditions)}) OR ({' AND '.join(legacy)}))")
+
+
 async def list_workspace_members(
     db: AsyncSession,
     actor: WorkspaceActor,
@@ -1502,9 +1616,14 @@ async def list_workspace_members(
     page_size: int,
     review_status: str | None,
     search: str | None,
+    filters: str | None = None,
 ) -> WorkspaceMemberPage:
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
-    where = [_member_scope_predicate(actor, params)]
+    if review_status == "REJECTED" and actor.organization_id is not None:
+        params["pool_organization_id"] = actor.organization_id
+        where = ["EXISTS (SELECT 1 FROM resource_assignment pool_ra WHERE pool_ra.user_id = u.id AND pool_ra.status = 1 AND pool_ra.organization_id = :pool_organization_id AND pool_ra.id = (SELECT MAX(pool_latest.id) FROM resource_assignment pool_latest WHERE pool_latest.user_id = u.id AND pool_latest.status = 1))"]
+    else:
+        where = [_member_scope_predicate(actor, params)]
     if review_status:
         where.append("COALESCE(mr.status, 'PENDING') = :review_status")
         params["review_status"] = review_status
@@ -1514,6 +1633,8 @@ async def list_workspace_members(
             " OR REPLACE(COALESCE(u.phone, ''), '-', '') LIKE CONCAT('%', REPLACE(:search, '-', ''), '%'))"
         )
         params["search"] = search
+    if filters:
+        _append_workspace_member_filters(where, params, actor, filters)
     clause = " AND ".join(where)
     base = """FROM users u
         LEFT JOIN user_profile p ON p.user_id = u.id
@@ -1591,6 +1712,36 @@ def _member_education(row: dict[str, Any]) -> str | None:
         if label is not None:
             return label
     return str(auth_education) if auth_education else None
+
+
+async def pickup_workspace_member(db: AsyncSession, actor: WorkspaceActor, member_id: int) -> WorkspaceMemberPickupResult:
+    """Claim a rejected member within the actor's organization and return them to review."""
+    params: dict[str, object] = {"member_id": member_id}
+    if actor.organization_id is not None:
+        scope = "ra.organization_id = :pool_org"
+        params["pool_org"] = actor.organization_id
+    else:
+        scope = _member_scope_predicate(actor, params)
+    row = (await db.execute(text(f"""SELECT u.id, mr.status, ra.matchmaker_id
+        FROM users u JOIN matchmaker_member_review mr ON mr.user_id = u.id
+        JOIN resource_assignment ra ON ra.user_id = u.id AND ra.status = 1
+        WHERE u.id = :member_id AND {scope}
+        AND ra.id = (SELECT MAX(latest.id) FROM resource_assignment latest WHERE latest.user_id = u.id AND latest.status = 1)
+        ORDER BY ra.id DESC LIMIT 1 FOR UPDATE"""), params)).mappings().first()
+    if row is None:
+        raise HTTPException(404, detail="会员不存在或不在当前弃海范围")
+    if row["status"] != "REJECTED":
+        raise HTTPException(409, detail="该会员已被捞取或不在弃海状态")
+    old_owner = row["matchmaker_id"]
+    await db.execute(text("UPDATE resource_assignment SET status = 2, ended_at = UTC_TIMESTAMP(), end_reason = 'reassigned' WHERE user_id = :member_id AND status = 1"), {"member_id": member_id})
+    await db.execute(text("""INSERT INTO resource_assignment
+        (user_id, organization_id, matchmaker_id, source, status, assigned_by)
+        VALUES (:member_id, :organization_id, :actor_id, 'manual', 1, :actor_id)"""),
+        {"member_id": member_id, "organization_id": actor.organization_id, "actor_id": actor.user_id})
+    await db.execute(text("UPDATE matchmaker_member_review SET status = 'PENDING', reason = NULL, reviewed_by = NULL, reviewed_at = NULL, updated_at = UTC_TIMESTAMP() WHERE user_id = :member_id"), {"member_id": member_id})
+    await _audit(db, actor.user_id, "matchmaker_workspace.member.pickup", "user", member_id, f"弃海捞取；原服务红娘：{old_owner}")
+    await db.commit()
+    return WorkspaceMemberPickupResult(member_id=member_id, matchmaker_id=actor.user_id)
 
 
 async def review_workspace_member(
