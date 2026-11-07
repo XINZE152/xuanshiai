@@ -81,6 +81,9 @@ class MemberListItem(BaseModel):
     # 本轮仅展示不自动解析（缺列降级 None）；ip_location 仍为原始注册 IP。
     ip_region: str | None = None
     phone_region: str | None = None
+    # 推广人：promotion_attribution 里 status=1 的最新一条归属，取该推广账号的昵称。
+    # 用标量子查询而不是 JOIN，避免一个用户多条归属把列表行数放大。
+    promoter_nickname: str | None = None
     # A12-钱包（余额）：取 account_ledger 中 account_type='user' 的可用余额，
     # 与 finance.get_balance 口径一致（无流水为 0）；纯只读派生，不新建表。
     balance: Decimal = Field(default=Decimal(0))

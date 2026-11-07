@@ -1,5 +1,4 @@
 """约见申请、安排和私有反馈服务。"""
-
 from __future__ import annotations
 
 from datetime import datetime
@@ -27,6 +26,7 @@ from app.schemas.meeting import (
 )
 from app.services.social import ensure_users_can_interact
 from app.services.notifications import emit_notification
+from app.services.meeting_ownership import applicant_assignment
 
 
 def _dt(value: Any) -> datetime:
@@ -56,9 +56,19 @@ async def create_meeting_request(db: AsyncSession, current: CurrentUser, request
     quota = (await db.execute(text("SELECT id, available_count FROM matchmaker_service_quota WHERE user_id = :id FOR UPDATE"), {"id": current.id})).mappings().first()
     if not quota or int(quota["available_count"] or 0) < 1:
         raise HTTPException(409, detail="约见资源不足")
+    assignment = await applicant_assignment(db, current.id)
+    if not assignment.get("matchmaker_id"):
+        raise HTTPException(409, detail="尚未分配服务红娘，请联系平台后再申请约会")
+    # 配额行锁后再检查一次，避免并发重复申请。
+    duplicate = await db.scalar(text("""SELECT id FROM meeting_request WHERE user_id = :user_id
+        AND target_user_id = :target_id AND status IN ('SUBMITTED', 'CONTACTED', 'ACCEPTED') LIMIT 1 FOR UPDATE"""),
+        {"user_id": current.id, "target_id": request.target_user_id})
+    if duplicate:
+        raise HTTPException(409, detail="已有处理中约见申请")
     await db.execute(text("UPDATE matchmaker_service_quota SET available_count = available_count - 1, used_count = used_count + 1 WHERE id = :id"), {"id": quota["id"]})
-    result = await db.execute(text("""INSERT INTO meeting_request (user_id, target_user_id, note)
-        VALUES (:user_id, :target_id, :note)"""), {"user_id": current.id, "target_id": request.target_user_id, "note": request.note})
+    result = await db.execute(text("""INSERT INTO meeting_request (user_id, target_user_id, note, matchmaker_id, organization_id)
+        VALUES (:user_id, :target_id, :note, :matchmaker_id, :organization_id)"""), {
+        "user_id": current.id, "target_id": request.target_user_id, "note": request.note, **assignment})
     request_id = int(result.lastrowid)
     await emit_notification(db, recipient_user_id=request.target_user_id, actor_user_id=current.id, event_type="match_application", title="收到约见申请", content="有人向你提交了约见申请，请及时查看", target_type="meeting_request", target_id=request_id)
     await db.commit()
@@ -95,12 +105,21 @@ async def create_matchmaker_meeting_request(
     quota = (await db.execute(text("SELECT id, available_count FROM matchmaker_service_quota WHERE user_id = :id FOR UPDATE"), {"id": service["user_id"]})).mappings().first()
     if not quota or int(quota["available_count"] or 0) < 1:
         raise HTTPException(409, detail="约见资源不足")
+    duplicate_id = await db.scalar(text("""SELECT id FROM meeting_request WHERE user_id = :user_id
+        AND target_user_id = :target_id AND status IN ('SUBMITTED', 'CONTACTED', 'ACCEPTED') LIMIT 1 FOR UPDATE"""),
+        {"user_id": service["user_id"], "target_id": request.target_user_id})
+    if duplicate_id:
+        raise HTTPException(409, detail="已有处理中约见申请")
+    assignment = await applicant_assignment(db, int(service["user_id"]))
+    if assignment.get("matchmaker_id") != current.id:
+        raise HTTPException(409, detail="申请人的服务红娘已变更，请由当前归属红娘发起约会")
     await db.execute(text("UPDATE matchmaker_service_quota SET available_count = available_count - 1, used_count = used_count + 1 WHERE id = :id"), {"id": quota["id"]})
     result = await db.execute(text("""INSERT INTO meeting_request
-        (user_id, target_user_id, matchmaker_id, service_id, note)
-        VALUES (:user_id, :target_id, :matchmaker_id, :service_id, :note)"""), {
+        (user_id, target_user_id, matchmaker_id, organization_id, service_id, note)
+        VALUES (:user_id, :target_id, :matchmaker_id, :organization_id, :service_id, :note)"""), {
         "user_id": service["user_id"], "target_id": request.target_user_id,
-        "matchmaker_id": current.id, "service_id": request.service_id, "note": request.note,
+        "matchmaker_id": current.id, "organization_id": assignment.get("organization_id"),
+        "service_id": request.service_id, "note": request.note,
     })
     request_id = int(result.lastrowid)
     await db.commit()
@@ -126,8 +145,17 @@ async def update_meeting_request(db: AsyncSession, current: CurrentUser, request
         raise HTTPException(404, detail="约见申请不存在")
     if current.id not in (row["user_id"], row["target_user_id"]):
         raise HTTPException(403, detail="无权处理该约见申请")
+    if request.status in {"ACCEPTED", "DECLINED"} and current.id != row["target_user_id"]:
+        raise HTTPException(403, detail="只有被邀请方可以接受或拒绝约会申请")
+    if request.status == "CONTACTED":
+        raise HTTPException(403, detail="请由服务红娘记录联系状态")
     if row["status"] not in ("SUBMITTED", "CONTACTED", "ACCEPTED"):
         raise HTTPException(409, detail="当前约见申请状态不能修改")
+    if row["status"] == request.status:
+        return _request_response(row)
+    arranged = await db.scalar(text("SELECT COUNT(*) FROM meeting_record WHERE request_id = :id"), {"id": request_id})
+    if arranged:
+        raise HTTPException(409, detail="已有约会安排，请联系服务红娘处理")
     if request.status in ("DECLINED", "CLOSED") and not request.reason:
         raise HTTPException(422, detail="拒绝或关闭约见申请必须填写原因")
     await db.execute(text("UPDATE meeting_request SET status = :status, updated_at = UTC_TIMESTAMP() WHERE id = :id"), {
@@ -136,7 +164,7 @@ async def update_meeting_request(db: AsyncSession, current: CurrentUser, request
     if request.status in ("DECLINED", "CLOSED"):
         await db.execute(text("UPDATE matchmaker_service_quota SET available_count = available_count + 1, used_count = GREATEST(used_count - 1, 0), refunded_count = refunded_count + 1 WHERE user_id = :id"), {"id": row["user_id"]})
     if request.status == "ACCEPTED":
-        await emit_notification(db, recipient_user_id=int(row["target_user_id"]), actor_user_id=int(row["user_id"]), event_type="match_application_accepted", title="约见申请已通过", content="你的约见申请已通过审核", target_type="meeting_request", target_id=request_id)
+        await emit_notification(db, recipient_user_id=int(row["user_id"]), actor_user_id=int(row["target_user_id"]), event_type="match_application_accepted", title="约见申请已通过", content="对方已接受你的约见申请", target_type="meeting_request", target_id=request_id)
     elif request.status in ("DECLINED", "CLOSED"):
         await emit_notification(db, recipient_user_id=int(row["user_id"]), actor_user_id=int(row["target_user_id"]), event_type="match_application_rejected", title="约见申请未通过", content=request.reason or "你的约见申请未通过", target_type="meeting_request", target_id=request_id)
     await db.commit()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+import json
 import secrets
 from typing import Any
 
@@ -16,6 +17,7 @@ from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser
 from app.schemas.matchmaker import (
     MatchmakerAdminServiceRequestUpdate,
     MatchmakerCard,
+    MatchmakerCaseCard,
     MatchmakerPage,
     MatchmakerContactResponse,
     MatchmakerContactExchangeCreate,
@@ -45,13 +47,50 @@ def _datetime(value: Any) -> datetime:
     return datetime.fromisoformat(str(value))
 
 
+def _application_details(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _case_cards(raw: Any) -> list[MatchmakerCaseCard]:
+    items = raw if isinstance(raw, list) else []
+    result: list[MatchmakerCaseCard] = []
+    for entry in items[:3]:
+        if not isinstance(entry, dict):
+            continue
+        description = str(entry.get("description") or "").strip()
+        if not description:
+            continue
+        images = entry.get("images") if isinstance(entry.get("images"), list) else []
+        result.append(
+            MatchmakerCaseCard(
+                description=description,
+                images=[str(image).strip() for image in images if str(image).strip()][:3],
+            )
+        )
+    return result
+
+
+def _specialties(raw: Any) -> list[str]:
+    items = raw if isinstance(raw, list) else []
+    return [str(item).strip() for item in items if str(item).strip()][:5]
+
+
 def _card(row: Any) -> MatchmakerCard:
+    details = _application_details(row["application_details"])
     return MatchmakerCard(
         user_id=int(row["user_id"]),
         nickname=row["nickname"],
         avatar=row["avatar"],
         application_type="service_matchmaker",
         intro=row["intro"] or "",
+        slogan=row["slogan"],
+        specialties=_specialties(details.get("specialties")),
+        cases=_case_cards(details.get("success_cases")),
         certification_tags=["平台认证"],
         success_count=int(row["success_count"] or 0),
         rating_score=float(row["rating_score"] or 0),
@@ -97,7 +136,8 @@ async def list_matchmakers(
         filters.append("role.status = :role_status")
         params["role_status"] = 1 if available else 2
     filter_sql = " AND ".join(filters)
-    query = text(f"""SELECT app.user_id, u.nickname, u.avatar, app.intro, app.cert_images,
+    query = text(f"""SELECT app.user_id, u.nickname, u.avatar, app.intro, app.slogan, app.cert_images,
+        app.application_details,
         COALESCE(service_stats.success_count, 0) AS success_count,
         COALESCE(rating_stats.rating_score, 0) AS rating_score,
         COALESCE(rating_stats.rating_count, 0) AS rating_count,
@@ -152,7 +192,8 @@ async def get_matchmaker(
                 "AND scope_member.role_code = 'store_matchmaker' "
                 "AND scope_member.status = 1 AND " + scope + ")"
             )
-    result = await db.execute(text("""SELECT app.user_id, u.nickname, u.avatar, app.intro, app.cert_images,
+    result = await db.execute(text("""SELECT app.user_id, u.nickname, u.avatar, app.intro, app.slogan,
+        app.cert_images, app.application_details,
         COALESCE(service_stats.success_count, 0) AS success_count,
         COALESCE(rating_stats.rating_score, 0) AS rating_score,
         COALESCE(rating_stats.rating_count, 0) AS rating_count,

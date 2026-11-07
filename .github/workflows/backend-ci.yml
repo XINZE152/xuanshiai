@@ -73,6 +73,18 @@ jobs:
           scripts/schema_contract.py
           tests/test_discovery_features.py
           app/services/user_columns.py tests/test_region_preflight_20261104.py
+      - name: Ruff (workspace member filters)
+        run: uv run --no-sync ruff check tests/test_workspace_member_filter_scope.py
+      - name: Workspace member filter contracts
+        run: uv run --no-sync pytest tests/test_workspace_member_filter_scope.py -q
+      - name: Ruff (payment commission arithmetic)
+        run: uv run --no-sync ruff check app/services/payment/commission_math.py tests/test_payment_commission_math.py
+      - name: Payment commission arithmetic contracts
+        run: uv run --no-sync pytest tests/test_payment_commission_math.py -q
+      - name: Ruff (workspace lead filters)
+        run: uv run --no-sync ruff check tests/test_workspace_lead_filters.py
+      - name: Workspace lead filter contracts
+        run: uv run --no-sync pytest tests/test_workspace_lead_filters.py -q
       - name: Message and media unit contracts (no integration/live/manual)
         env:
           UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-uploads
@@ -133,6 +145,56 @@ jobs:
   # 审计整改（脱敏 / 数据范围 / 事务 / 报名软删除）：全部为不依赖 DB 的单元契约。
   # 2026-10-14 补齐 PR #49 新增的 7 个测试文件（此前未挂任何 job，CI 里从不执行，
   # 导致「新增回归测试」实际没有门禁）；同批补齐了配套的 Ruff 文件列表。
+  workspace-lead-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ENVIRONMENT: testing
+      AUTO_INIT_DB: "false"
+      DATABASE_URL: mysql+aiomysql://ci:ci@127.0.0.1:1/ci_unreachable
+      REDIS_URL: redis://127.0.0.1:1/5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install backend and dev dependencies
+        run: uv sync --locked --extra dev
+      - name: Ruff workspace lead contracts
+        run: uv run --no-sync ruff check app/schemas/matchmaker_workspace.py app/services/meeting.py app/services/meeting_ownership.py app/services/matchmaker_workspace.py app/services/workspace_good_news.py app/api/routes/matchmaker_workspace.py scripts/verify_remote_workspace_leads.py tests/test_matchmaker_workspace_contracts.py tests/test_workspace_meeting_workflow.py tests/test_matchmaker_workbench_good_news.py tests/test_workspace_good_news_flow.py
+      - name: Test workspace lead contracts
+        run: uv run --no-sync pytest tests/test_matchmaker_workspace_contracts.py tests/test_workspace_meeting_workflow.py tests/test_matchmaker_workbench_good_news.py tests/test_workspace_good_news_flow.py -q
+
+  workspace-meeting-mysql:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: meeting_ci
+          MYSQL_DATABASE: meeting_ci
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pmeeting_ci"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      ENVIRONMENT: testing
+      AUTO_INIT_DB: "false"
+      DATABASE_URL: mysql+aiomysql://root:meeting_ci@127.0.0.1:3306/meeting_ci
+      WORKSPACE_MEETING_MYSQL_URL: mysql+aiomysql://root:meeting_ci@127.0.0.1:3306/meeting_ci
+      REDIS_URL: redis://127.0.0.1:1/5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked --extra dev
+      - run: uv run --no-sync ruff check tests/integration/business/test_workspace_meeting_mysql.py tests/integration/business/test_workspace_good_news_mysql.py
+      - run: uv run --no-sync pytest tests/integration/business/test_workspace_meeting_mysql.py tests/integration/business/test_workspace_good_news_mysql.py -q
+
   admin-scope-unit:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -345,4 +407,5 @@ jobs:
           tests/integration/ai/test_continuous_portrait_real_db.py
           tests/integration/ai/test_moxiang_journey_ws_chain_real_db.py
           tests/integration/ai/test_ai_memory_projection_real_db.py
-          tests/integration/ai/test_consent_generation_identity_real_db.py -q
+          tests/integration/ai/test_consent_generation_identity_real_db.py
+          tests/integration/business/test_workspace_member_pickup_mysql.py -q

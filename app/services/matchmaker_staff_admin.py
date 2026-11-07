@@ -13,12 +13,13 @@ from app.api.dependencies import CurrentMatchmakerAdmin
 from app.core.security import hash_password
 from app.schemas.matchmaker_admin import MatchmakerAdminAccount
 from app.services.matchmaker_admin_auth import _issue_session
-from app.services import user_candidates
+from app.services import matchmaker_workspace, user_candidates
 from app.schemas.matchmaker_staff_admin import (
     AdminMenuNode,
     CommissionLevelItem,
     MatchmakerDeleteResponse,
     MatchmakerDetailReport,
+    MatchmakerFrontPreview,
     MatchmakerPermissions,
     MatchmakerPermissionsUpdate,
     MatchmakerPlatformTokenResponse,
@@ -262,6 +263,15 @@ async def _validate_refs(
         raise HTTPException(422, detail="分成级别不存在或已停用")
 
 
+def _workspace_level(role_tag: str | None) -> str | None:
+    """后台角色下拉 → 工作台级别；未知值返回 None，交给同步函数保持原级别。"""
+    if role_tag == "super":
+        return "SUPER"
+    if role_tag == "normal":
+        return "NORMAL"
+    return None
+
+
 async def create_staff(
     db: AsyncSession, admin: CurrentMatchmakerAdmin, body: MatchmakerStaffCreate
 ) -> MatchmakerStaffDetail:
@@ -286,15 +296,33 @@ async def create_staff(
             raise HTTPException(409, detail="该手机号已注册，请通过账号绑定选择普通用户")
         result = await db.execute(text("INSERT INTO users (phone,nickname,avatar,status) VALUES (:phone,:name,:avatar,1)"), {"phone": body.phone, "name": body.display_name, "avatar": body.avatar})
         user_id = int(result.lastrowid)
+    # 下面四张表都带唯一键，直接 INSERT 会在「该用户已提交过申请 / 已建过档案 / 已绑过门店」时
+    # 撞键抛 IntegrityError（接口 500）。统一改为幂等 upsert，并顺手补写审计字段 granted_by。
     await db.execute(
         text(
-            "INSERT INTO user_role (user_id,role_code,status) VALUES (:id,'service_matchmaker',1)"
+            """INSERT INTO user_role (user_id, role_code, status, granted_by)
+            VALUES (:id, 'service_matchmaker', 1, :actor)
+            ON DUPLICATE KEY UPDATE status = 1, granted_by = :actor,
+                granted_at = UTC_TIMESTAMP(), revoked_at = NULL, revoke_reason = NULL"""
         ),
-        {"id": user_id},
+        {"id": user_id, "actor": admin.account.id},
     )
     await db.execute(
         text(
-            "INSERT INTO user_matchmaker_apply (user_id,application_type,real_name,phone,intro,status,reviewed_by,reviewed_at) VALUES (:id,'service_matchmaker',:name,:phone,:description,1,:actor,UTC_TIMESTAMP())"
+            """INSERT INTO user_matchmaker_apply
+            (user_id, application_type, real_name, phone, intro, status, reviewed_by, reviewed_at)
+            VALUES (:id, 'service_matchmaker', :name, :phone, :description, 1, :actor, UTC_TIMESTAMP())
+            ON DUPLICATE KEY UPDATE
+                real_name = :name,
+                phone = :phone,
+                intro = :description,
+                status = 1,
+                fail_reason = NULL,
+                reviewed_by = :actor,
+                reviewed_at = UTC_TIMESTAMP(),
+                suspended_at = NULL,
+                suspension_reason = NULL,
+                updated_at = UTC_TIMESTAMP()"""
         ),
         {
             "id": user_id,
@@ -325,10 +353,20 @@ async def create_staff(
     if body.store_id:
         await db.execute(
             text(
-                "INSERT INTO organization_member (organization_id,user_id,role_code,status) VALUES (:store,:id,'store_matchmaker',1)"
+                """INSERT INTO organization_member
+                (organization_id, user_id, role_code, status, granted_by)
+                VALUES (:store, :id, 'store_matchmaker', 1, :actor)
+                ON DUPLICATE KEY UPDATE status = 1, granted_by = :actor,
+                    ended_at = NULL, end_reason = NULL"""
             ),
-            {"store": body.store_id, "id": user_id},
+            {"store": body.store_id, "id": user_id, "actor": admin.account.id},
         )
+    # 小程序「修改红娘」读的是 matchmaker_workspace_profile，过去后台建档不写这张表，
+    # 建完的红娘在小程序里根本选不到。同一事务内补齐，两边才是同一批人。
+    # 后台的角色下拉就是工作台级别：总店-超级红娘 = 平台范围，总店-普通红娘 = 自己名下。
+    await matchmaker_workspace.sync_workspace_profile(
+        db, user_id, overwrite=True, level=_workspace_level(body.role_tag)
+    )
     await db.commit()
     return await get_staff(db, user_id)
 
@@ -368,6 +406,20 @@ async def update_staff(
                 text(f"UPDATE matchmaker_profile SET {target}=:value WHERE user_id=:id"),
                 {"value": value, "id": matchmaker_id},
             )
+    homepage_map = {"description": "intro", "slogan": "slogan"}
+    homepage_values = {
+        column: values[source] for source, column in homepage_map.items() if source in values
+    }
+    if homepage_values:
+        # 公开主页与红娘本人编辑都读入驻申请表，后台改介绍/签名必须同步落到这里。
+        assignments = ", ".join(f"{column} = :{column}" for column in homepage_values)
+        await db.execute(
+            text(
+                f"UPDATE user_matchmaker_apply SET {assignments} "
+                "WHERE user_id = :id AND application_type = 'service_matchmaker'"
+            ),
+            {**homepage_values, "id": matchmaker_id},
+        )
     if "password" in values:
         await db.execute(
             text(
@@ -389,6 +441,12 @@ async def update_staff(
                 ),
                 {"store": values["store_id"], "id": matchmaker_id},
             )
+    # 后台改了昵称、门店或角色，工作台档案必须跟着走，否则小程序「修改红娘」显示的是旧名字、
+    # 同店同事列表按旧门店范围取人、角色下拉升降级也不生效。
+    if "display_name" in values or "store_id" in values or "role_tag" in values:
+        await matchmaker_workspace.sync_workspace_profile(
+            db, matchmaker_id, overwrite=True, level=_workspace_level(values.get("role_tag"))
+        )
     await db.commit()
     return await get_staff(db, matchmaker_id)
 
@@ -664,6 +722,25 @@ async def platform_token(db: AsyncSession, matchmaker_id: int) -> MatchmakerPlat
         refresh_token=issued.refresh_token,
         expires_in=issued.expires_in,
         jump_url=f"/matchmaker/workbench?token={issued.access_token}",
+    )
+
+
+async def front_preview(
+    db: AsyncSession, matchmaker_id: int, admin: CurrentMatchmakerAdmin
+) -> MatchmakerFrontPreview:
+    """按被查看红娘的工作台身份取小程序红娘管理中心首页数据。
+
+    只读：不建红娘会话、不发 Token、不改业务数据；数据范围沿用 get_staff 的门店校验。
+    工作台未开通（无 service_matchmaker 有效角色）时按会员侧同一口径 403；
+    总店超级红娘（SUPER 且不挂门店）范围即平台全部，不再算未绑定。
+    """
+    await get_staff(db, matchmaker_id, admin)
+    actor = await matchmaker_workspace.require_workspace_for_user(db, matchmaker_id)
+    return MatchmakerFrontPreview(
+        matchmaker_id=matchmaker_id,
+        workspace_level=actor.level,
+        workspace_scope=actor.scope,
+        dashboard=await matchmaker_workspace.workspace_dashboard(db, actor),
     )
 
 

@@ -30,6 +30,9 @@ class _Result:
     def mappings(self) -> "_Result":
         return self
 
+    def all(self) -> list[dict[str, Any]]:
+        return [] if self._one is None else [self._one]
+
     def first(self) -> dict[str, Any] | None:
         return self._one
 
@@ -64,6 +67,9 @@ class _FakeDb:
                 "expire_at": None,
                 "created_at": CREATED_AT,
             })
+        if "FROM match_apply" in sql and "expire_at IS NOT NULL" in sql:
+            # 超时清扫（_expire_pending_applications）在没有到期行时不该产生任何副作用
+            return _Result()
         if "FROM match_apply" in sql:
             return _Result(one={
                 "id": 7,

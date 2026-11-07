@@ -27,6 +27,10 @@ from app.services.membership import (
     active_membership_exists_for_column_sql,
     has_active_membership,
 )
+from app.services.matchmaker_workspace import (
+    record_member_application_introduction,
+    sync_member_application_introduction,
+)
 from app.schemas.discovery import (
     ApplicationCreateRequest,
     ApplicationPage,
@@ -62,6 +66,7 @@ from app.services.candidate_query import (
 )
 from app.services.candidate_visibility import (
     CandidateVisibilityService,
+    CompletionWaiver,
     SqlPredicate,
     ViewerContext,
     VisibilityScene,
@@ -197,6 +202,7 @@ def _visibility_predicate(
     candidate_alias: str = "u",
     privacy_alias: str = "pr",
     completion_alias: str = "c",
+    completion_waiver: CompletionWaiver | None = None,
     skip_completion_gate: bool = False,
 ) -> SqlPredicate:
     return candidate_visibility_service.predicate(
@@ -209,8 +215,37 @@ def _visibility_predicate(
         candidate_alias=candidate_alias,
         privacy_alias=privacy_alias,
         completion_alias=completion_alias,
+        completion_waiver=completion_waiver,
         skip_completion_gate=skip_completion_gate,
     )
+
+
+async def _serving_matchmaker_waiver(
+    db: AsyncSession, viewer_id: int
+) -> CompletionWaiver | None:
+    """服务红娘返回完整度豁免范围，普通会员返回 None。
+
+    红娘录入的会员资料本就是半成品，代管人必须能打开其主页核对与编辑；范围口径
+    与工作台 _member_scope_predicate 一致，主页可见范围不宽于工作台会员列表。
+    """
+    row = (
+        await db.execute(
+            text(
+                """SELECT COALESCE(p.level, 'NORMAL') AS level, p.organization_id
+                FROM user_role r
+                LEFT JOIN matchmaker_workspace_profile p ON p.user_id = r.user_id AND p.status = 1
+                WHERE r.user_id = :user_id AND r.role_code = 'service_matchmaker'
+                  AND r.status = 1 LIMIT 1"""
+            ),
+            {"user_id": viewer_id},
+        )
+    ).mappings().first()
+    if not row:
+        return None
+    organization_id = int(row["organization_id"]) if row["organization_id"] else None
+    if str(row["level"]) != "SUPER":
+        organization_id = None
+    return CompletionWaiver(matchmaker_id=viewer_id, organization_id=organization_id)
 
 
 async def _scene_visibility(
@@ -433,6 +468,7 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         user_id=int(row["user_id"]),
         nickname=row.get("nickname"),
         avatar=row.get("avatar"),
+        gender=row.get("card_gender") if row.get("card_gender") is not None else row.get("gender"),
         age=_calculate_age(row["birthday"]) if row.get("birthday") else None,
         height=row.get("height") if not detail_locked else None,
         education_level=row.get("education_level") if not detail_locked and not row.get("hide_school") else None,
@@ -1028,18 +1064,26 @@ async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> Publ
         raise HTTPException(403, detail=await platform_maintenance_message(db))
     if viewer_id == target_id:
         raise HTTPException(422, detail="不能浏览自己的名片")
+    # 服务红娘代管的会员本就多为半成品，先按代管关系拿到完整度豁免再判可见性。
+    waiver = await _serving_matchmaker_waiver(db, viewer_id)
     skip = _skip_discovery_gates()
-    await _ensure_target(db, viewer_id, target_id, skip_completion_gate=skip)
-    rows = await _target_rows(db, viewer_id, [target_id], skip_completion_gate=skip)
+    await _ensure_target(db, viewer_id, target_id, completion_waiver=waiver, skip_completion_gate=skip)
+    rows = await _target_rows(db, viewer_id, [target_id], completion_waiver=waiver, skip_completion_gate=skip)
     row = rows.get(target_id)
     if not row:
         raise HTTPException(404, detail="用户不存在或当前不可见")
     viewer = await _viewer_context(db, viewer_id)
     score, reason = _candidate_score(viewer, row)
     vip = await _is_vip(db, viewer_id)
-    privacy_locked = bool(row.get("only_vip_can_see_detail")) and not vip
-    quota = None if privacy_locked else await _consume_browse(db, viewer_id, score, vip, target_id)
-    full = vip or (not privacy_locked and quota is not None)
+    # 服务红娘在管理中心查看会员公开档案时不受会员/浏览额度限制。
+    is_matchmaker = waiver is not None
+    privacy_locked = bool(row.get("only_vip_can_see_detail")) and not vip and not is_matchmaker
+    quota = (
+        None
+        if privacy_locked
+        else (None if is_matchmaker else await _consume_browse(db, viewer_id, score, vip, target_id))
+    )
+    full = vip or is_matchmaker or (not privacy_locked and quota is not None)
     await _record_browse(db, viewer_id, target_id)
     card = _card(row, score, reason, detail_locked=not full)
     await _attach_card_qa_media(db, [card])
@@ -1106,7 +1150,12 @@ async def preview_card(db: AsyncSession, viewer_id: int, target_id: int) -> Disc
 
 
 async def _target_rows(
-    db: AsyncSession, viewer_id: int, target_ids: list[int], *, skip_completion_gate: bool = False
+    db: AsyncSession,
+    viewer_id: int,
+    target_ids: list[int],
+    *,
+    completion_waiver: CompletionWaiver | None = None,
+    skip_completion_gate: bool = False,
 ) -> dict[int, dict[str, Any]]:
     if not target_ids:
         return {}
@@ -1117,6 +1166,7 @@ async def _target_rows(
         viewer,
         await _is_vip(db, viewer_id),
         VisibilityScene.PROFILE,
+        completion_waiver=completion_waiver,
         skip_completion_gate=skip_completion_gate,
     )
     params = {
@@ -1283,7 +1333,12 @@ async def visitor_count(db: AsyncSession, viewer_id: int, target_id: int) -> dic
 
 
 async def _ensure_target(
-    db: AsyncSession, viewer_id: int, target_id: int, *, skip_completion_gate: bool | None = None
+    db: AsyncSession,
+    viewer_id: int,
+    target_id: int,
+    *,
+    completion_waiver: CompletionWaiver | None = None,
+    skip_completion_gate: bool | None = None,
 ) -> None:
     """Raise 404 when the target is not visible to the viewer.
 
@@ -1295,7 +1350,9 @@ async def _ensure_target(
         skip_completion_gate = _skip_discovery_gates()
     if viewer_id == target_id:
         raise HTTPException(422, detail="不能对自己执行此操作")
-    if target_id not in await _target_rows(db, viewer_id, [target_id], skip_completion_gate=skip_completion_gate):
+    if target_id not in await _target_rows(
+        db, viewer_id, [target_id], completion_waiver=completion_waiver, skip_completion_gate=skip_completion_gate
+    ):
         raise HTTPException(404, detail="目标用户不存在或当前不可见")
 
 
@@ -1473,6 +1530,8 @@ async def create_application(db: AsyncSession, viewer_id: int, target_id: int, r
     try:
         result = await db.execute(text("INSERT INTO match_apply (from_user_id, to_user_id, message, status, expire_at) VALUES (:from_id, :to_id, :message, 0, :expire_at)"), {"from_id": viewer_id, "to_id": target_id, "message": request.message, "expire_at": expire_at})
         await db.execute(text("INSERT IGNORE INTO user_swipe_record (user_id, target_user_id, action, scene) VALUES (:user_id, :target_id, 3, 'recommend')"), {"user_id": viewer_id, "target_id": target_id})
+        # 会员自己发起的认识申请同时是红娘的一条「申请牵线」，落待牵线，由申请人的服务红娘介入撮合。
+        await record_member_application_introduction(db, int(result.lastrowid), viewer_id, target_id)
         await _notify(db, target_id, "match_application", "收到新的认识申请", request.message or "有人申请认识你", viewer_id, result.lastrowid)
         await db.commit()
     except Exception:
@@ -1592,6 +1651,15 @@ async def respond_application(db: AsyncSession, viewer_id: int, application_id: 
             raise _forbidden("REALNAME_REQUIRED", "请先完成实名认证后再回应认识申请")
     status = 1 if accepted else 2
     await db.execute(text("UPDATE match_apply SET status = :status, responded_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"status": status, "id": application_id})
+    # 同意直接牵线成功；拒绝回待牵线并标注回应，留给红娘联系跟进。
+    await sync_member_application_introduction(
+        db,
+        int(row["from_user_id"]),
+        viewer_id,
+        application_id=application_id,
+        succeeded=accepted,
+        failure_reason=None if accepted else (request.reason if request is not None else None),
+    )
     if accepted:
         for left, right in ((row["from_user_id"], row["to_user_id"]), (row["to_user_id"], row["from_user_id"])):
             await db.execute(text("INSERT INTO user_match (user_id, target_user_id, status) VALUES (:left, :right, 1) ON DUPLICATE KEY UPDATE status = 1, updated_at = UTC_TIMESTAMP()"), {"left": left, "right": right})
@@ -1644,6 +1712,7 @@ async def _expire_pending_applications(db: AsyncSession) -> None:
     await db.execute(text("""UPDATE match_apply
         SET status = 3, updated_at = UTC_TIMESTAMP()
         WHERE status = 0 AND expire_at IS NOT NULL AND expire_at <= UTC_TIMESTAMP()"""))
+    # 认识申请过期仍是「未回应」；不替红娘判定失败，也不重置正在跟进的牵线。
 
 
 async def create_superlike(db: AsyncSession, viewer_id: int, target_id: int, idempotency_key: str) -> SuperLikeResponse:

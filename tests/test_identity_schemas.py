@@ -31,3 +31,18 @@ def test_matchmaker_application_normalizes_legacy_frontend_details() -> None:
     assert application.application_details.wechat == "matchmaker_demo"
     assert application.application_details.specialties == ["高知青年", "同城牵线"]
     assert application.application_details.success_cases[0].description == "脱敏案例"
+
+
+def test_matchmaker_application_caps_case_description_at_fifty_characters() -> None:
+    def apply_with(description: str) -> MatchmakerApplicationCreate:
+        return MatchmakerApplicationCreate(
+            application_type="service_matchmaker",
+            real_name="张三",
+            phone="13800138000",
+            intro="有多年婚恋咨询和沟通经验",
+            success_cases=[{"description": description, "images": []}],
+        )
+
+    assert apply_with("案" * 50).application_details.success_cases[0].description
+    with pytest.raises(ValidationError):
+        apply_with("案" * 51)

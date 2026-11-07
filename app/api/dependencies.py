@@ -466,6 +466,11 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
         return "matchmaker.account.manage"
     if "/members" in path:
         return "matchmaker.member.manage" if method != "GET" else "matchmaker.member.read"
+    # 兼容入口 DELETE /admin/love-users/{id} 转发到与 /admin/matchmaker/members/{id} 完全
+    # 相同的删除实现，权限码必须同口径；否则该路径既不在关键词映射里也没有声明，
+    # 会落入 get_current_matchmaker_admin 的 fail-closed 分支变成任何角色都调不通的死路由。
+    if "/love-users" in path:
+        return "matchmaker.member.manage" if method != "GET" else "matchmaker.member.read"
     if "/match-records" in path:
         return "matchmaker.service.manage" if method != "GET" else "matchmaker.service.read"
     if "/matchmakers" in path:

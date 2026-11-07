@@ -72,6 +72,7 @@ scripts/*
 # 微信支付 real 模式预检与安全暂停脚本：backend-ci.yml 的 admin Ruff 门禁引用
 !scripts/verify_wechat_pay_preflight.py
 !scripts/pause_real_pay.py
+!scripts/verify_remote_workspace_leads.py
 # 0.01 元测试商品/回调冒烟脚本（M6-C-01），仅测试环境使用
 !scripts/payment_smoke_0_01.py
 # 属地刷新上线预检（A12），只读检查数据资产与 users 列

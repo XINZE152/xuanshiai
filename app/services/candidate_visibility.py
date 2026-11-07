@@ -71,6 +71,18 @@ class SqlPredicate:
     policy_revision: str = POLICY_REVISION
 
 
+@dataclass(frozen=True, slots=True)
+class CompletionWaiver:
+    """服务红娘代管会员时只豁免「资料完整度 100」这一条门槛，其余可见性规则不变。
+
+    代管关系与工作台 _member_scope_predicate 同口径：organization_id 为空按
+    matchmaker_id（普通红娘自己名下），有值按门店范围（超级红娘）。
+    """
+
+    matchmaker_id: int
+    organization_id: int | None = None
+
+
 def evaluate_visibility(
     viewer: ViewerContext, candidate: CandidateContext
 ) -> VisibilityDecision:
@@ -217,11 +229,31 @@ class CandidateVisibilityService:
         candidate_alias: str = "u",
         privacy_alias: str = "pr",
         completion_alias: str = "c",
+        completion_waiver: CompletionWaiver | None = None,
         skip_completion_gate: bool = False,
     ) -> SqlPredicate:
         for alias in (candidate_alias, privacy_alias, completion_alias):
             if not _SQL_ALIAS.fullmatch(alias):
                 raise ValueError("invalid SQL alias")
+        params: dict[str, int] = {
+            "visibility_viewer_id": viewer.user_id,
+            "visibility_realname_status": viewer.realname_status or 0,
+        }
+        completion_clause = f"COALESCE({completion_alias}.score, 0) >= 100"
+        if completion_waiver is not None:
+            if completion_waiver.organization_id is None:
+                params["visibility_waiver_matchmaker_id"] = completion_waiver.matchmaker_id
+                waiver_relation = "waiver_ra.matchmaker_id = :visibility_waiver_matchmaker_id"
+            else:
+                params["visibility_waiver_organization_id"] = completion_waiver.organization_id
+                waiver_relation = "waiver_ra.organization_id = :visibility_waiver_organization_id"
+            completion_clause = (
+                "("
+                f"COALESCE({completion_alias}.score, 0) >= 100 "
+                "OR EXISTS (SELECT 1 FROM resource_assignment waiver_ra "
+                f"WHERE waiver_ra.user_id = {candidate_alias}.id "
+                f"AND waiver_ra.status = 1 AND {waiver_relation}))"
+            )
         parts: list[str] = [
             f"{candidate_alias}.id <> :visibility_viewer_id",
             f"{candidate_alias}.status = 1",
@@ -263,13 +295,10 @@ class CandidateVisibilityService:
             "AND bl.target_user_id = :visibility_viewer_id))",
         ]
         if not skip_completion_gate:
-            parts.insert(2, f"COALESCE({completion_alias}.score, 0) >= 100")
+            parts.insert(2, completion_clause)
         clause = " AND ".join(parts)
         return SqlPredicate(
             clause=clause,
-            params={
-                "visibility_viewer_id": viewer.user_id,
-                "visibility_realname_status": viewer.realname_status or 0,
-            },
+            params=params,
             scene=scene,
         )

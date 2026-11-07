@@ -78,3 +78,42 @@ def region_display(province_code: str | None, city_code: str | None, district_co
     names = [region_name(code) for code in (province, city, district)]
     names = [name for name in names if name and name not in {"市辖区", "县"}]
     return " ".join(dict.fromkeys(names)) or None
+
+
+def _match_region(nodes: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    return next((node for node in nodes if str(node.get("name")) == name), None)
+
+
+def _padded_region_code(code: str) -> str:
+    """Tree codes are 2/4/6 digits; storage keeps them padded to six digits."""
+    return code.ljust(6, "0")
+
+
+def region_codes_from_text(value: str | None) -> tuple[str | None, str | None, str | None]:
+    """把「江苏省 南京市 鼓楼区」这类逐级名称串解析为六位省市区编码。
+
+    每一级只在上一级的子节点里按全名精确匹配，匹配不到就停在那一级：解析不出
+    来的编码宁可留空，也不猜一个相近的区划。直辖市的下级名「市辖区」同样能匹配，
+    与 region_display 的展示口径对得上。
+    """
+    if not value:
+        return None, None, None
+    parts = [part for part in str(value).split() if part]
+    if not parts:
+        return None, None, None
+    province = _match_region(_REGIONS, parts[0])
+    if province is None:
+        return None, None, None
+    province_code = _padded_region_code(str(province.get("code")))
+    if len(parts) < 2:
+        return province_code, None, None
+    city = _match_region(province.get("children", []), parts[1])
+    if city is None:
+        return province_code, None, None
+    city_code = _padded_region_code(str(city.get("code")))
+    if len(parts) < 3:
+        return province_code, city_code, None
+    district = _match_region(city.get("children", []), parts[2])
+    if district is None:
+        return province_code, city_code, None
+    return province_code, city_code, _padded_region_code(str(district.get("code")))

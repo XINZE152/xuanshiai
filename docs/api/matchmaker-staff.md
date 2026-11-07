@@ -1,10 +1,10 @@
 # 总店红娘 → 红娘管理 后台 API
 
-> **归属页面**：总店红娘 → 红娘管理（含菜单权限、工作报表、海报、平台免登、字典、通用上传）  
+> **归属页面**：总店红娘 → 红娘管理（含菜单权限、工作报表、海报、平台免登、前台预览、字典、通用上传）  
 > **后端统一前缀**：`/api/v1`（下文 URL 省略此前缀）  
 > **鉴权**：独立红娘后台 Token，`Authorization: Bearer <access-token>`，鉴权函数 `get_current_matchmaker_admin`；未登录 / 失效返回 `401`。  
 > **权限点**：
-> - 红娘管理主接口（列表 / 用户候选 / 新增 / 教程 / 详情 / 编辑 / 删除 / 锁定 / 展示 / 菜单树 / 权限 / 报表 / 海报 / 平台免登）：`matchmaker.manage`
+> - 红娘管理主接口（列表 / 用户候选 / 新增 / 教程 / 详情 / 编辑 / 删除 / 锁定 / 展示 / 菜单树 / 权限 / 报表 / 海报 / 平台免登 / 前台预览）：`matchmaker.manage`
 > - 字典接口（`/admin/dict/*`，分成级别字典、门店字典）：`matchmaker.read`
 > - 通用上传（`/admin/common/upload`）：`matchmaker.manage`
 >
@@ -354,6 +354,7 @@ Content-Type: application/json
 - 调用顺序：建议先用 2.2 `user-candidates` 检索候选，确认是否已有可绑定用户，再构造本请求。  
 - 幂等：非幂等（重复提交会新建重复红娘或触发 409）。前端提交按钮需防重复点击。  
 - 状态流转：新建后 `locked=false, visible=true`（缺省）；后续由 2.8 / 2.9 切换。  
+- 落库副作用：除 `users` / `user_role` / `user_matchmaker_apply` / `matchmaker_profile` / `organization_member` 外，同步补写一条 `matchmaker_workspace_profile`（`level='NORMAL'`，`organization_id` 取本次所选门店，未选门店为 `NULL`，`status=1`），小程序「红娘管理中心 → 修改红娘 / 同店同事」才选得到这个新建红娘（2026-10-26 变更，见「三、变更记录」）。`level` 不由建档接口决定：`SUPER` 会把工作台数据范围从「只看自己」放大到「看整个门店」，仍只由平台配置。
 - 边界场景：见「绑定语义」的 409 / 404 规则。
 
 **错误**
@@ -600,6 +601,7 @@ Content-Type: application/json
 - 前置条件：登录态 + `matchmaker.manage`；`matchmaker_id` 存在；至少传一个可更新字段。  
 - 调用顺序：编辑页 `GET 详情` 回填 → 用户修改 → `PUT` 提交。  
 - 幂等：`PUT` 为全量可选更新，重复提交相同内容结果一致；但连续不同提交以最后一次为准。  
+- 落库副作用：请求体里出现 `display_name` 或 `store_id` 时，同批同步 `matchmaker_workspace_profile` 的 `display_name`（取新的 `users.nickname`）与 `organization_id`（取新的 `store_matchmaker` 绑定，取消门店时为 `NULL`），保证小程序「修改红娘」不会显示旧名字或按旧门店范围取人；只改其他字段（如 `phone`、`wechat`）不触发该同步（2026-10-26 变更）。  
 - 边界场景：改 `phone` 若与已存在用户冲突 → 409（同 2.3 绑定语义）。
 
 **错误**
@@ -1545,11 +1547,110 @@ Content-Type: image/png
 
 ---
 
+### 2.20 `GET /admin/matchmakers/{matchmaker_id}/frontend-preview` — 预览前台（小程序红娘管理中心首页）
+
+**基本信息**
+- 用途：后台「红娘管理」列表点「红娘平台」时，右侧抽屉按**该红娘**的工作台身份渲染小程序首页数据，只读预览，不建会话、不发 Token。  
+- URL：`GET /api/v1/admin/matchmakers/{matchmaker_id}/frontend-preview`  
+- Method：GET  
+- 登录：必需  
+- 权限：`matchmaker.manage`  
+- Content-Type：无请求体  
+- 成功：200  
+
+**请求参数（path）**：`matchmaker_id`（int，`≥ 1`，必填）——即列表行的红娘用户 ID。
+
+**请求示例**
+
+```
+GET /api/v1/admin/matchmakers/22/frontend-preview
+Authorization: Bearer <access-token>
+```
+
+非法示例：`matchmaker_id=0` → 422；不在当前账号数据范围内的红娘 → 404。
+
+**返回参数**
+
+| 字段 | 类型 | 必返 | 含义 |
+| --- | --- | --- | --- |
+| `matchmaker_id` | int | 是 | 被预览的红娘 ID |
+| `workspace_level` | string | 是 | 工作台级别：`NORMAL` / `SUPER` |
+| `workspace_scope` | string | 是 | 数据范围：`SELF`（只看本人名下）/ `ORGANIZATION`（看绑定门店） |
+| `dashboard.identity.greeting` | string | 是 | 欢迎卡眉标问候语，固定 `你好` |
+| `dashboard.identity.name` | string | 是 | 欢迎卡主标题，取工作台档案名（无档案时回落 `users.nickname`，再回落 `服务红娘`） |
+| `dashboard.identity.avatar` | string\|null | 否 | 欢迎卡头像，取 `users.avatar`，与红娘主页头像是同一列；可能为裸相对路径（`/storage/uploads/...`），前端需按接口域名归一化；未设置头像时为 `null`，客户端保留占位 |
+| `dashboard.identity.role_name` | string | 是 | 角色徽标：`SUPER` 为 `超级服务红娘`，其余 `服务红娘` |
+| `dashboard.store_metrics` | array | 是 | 8 项门店指标，顺序固定，与小程序首页同源 |
+| `dashboard.store_metrics[].key` | string | 是 | 指标键：`pending_review` / `served_members` / `online_commission` / `offline_performance` / `pending_introduction` / `introduction_succeeded` / `meeting_requests` / `pending_meeting` |
+| `dashboard.store_metrics[].label` | string | 是 | 指标名称 |
+| `dashboard.store_metrics[].value` | string | 是 | 指标值，一律字符串；金额为数据库原值，不做千分位格式化 |
+| `dashboard.store_metrics[].action` | string | 是 | 点击后跳转的模块名，前端按它路由 |
+| `dashboard.store_metrics[].value_prefix` | string\|null | 否 | 金额前缀（`￥`），非金额指标为 `null` |
+| `dashboard.store_metrics[].badge` | string\|null | 否 | 角标，目前仅 `pending_review` 在今日新增 > 0 时返回 `今日+N`，否则 `null` |
+
+**返回示例**（示例数字仅为说明字段形态，实际以该红娘名下数据为准）
+
+```json
+{
+  "matchmaker_id": 22,
+  "workspace_level": "NORMAL",
+  "workspace_scope": "SELF",
+  "dashboard": {
+    "identity": { "greeting": "你好", "name": "周舒窈", "avatar": "/storage/uploads/matchmaker-avatar.png", "role_name": "服务红娘" },
+    "store_metrics": [
+      { "key": "pending_review", "label": "资料待审", "value": "4", "action": "资料待审", "value_prefix": null, "badge": "今日+2" },
+      { "key": "served_members", "label": "我服务的", "value": "17", "action": "我服务的", "value_prefix": null, "badge": null },
+      { "key": "online_commission", "label": "线上分成", "value": "0.00", "action": "分成明细", "value_prefix": "￥", "badge": null },
+      { "key": "offline_performance", "label": "线下业绩", "value": "0", "action": "财务明细", "value_prefix": "￥", "badge": null },
+      { "key": "pending_introduction", "label": "待我牵线", "value": "1", "action": "牵线记录", "value_prefix": null, "badge": null },
+      { "key": "introduction_succeeded", "label": "牵线成功", "value": "6", "action": "牵线记录", "value_prefix": null, "badge": null },
+      { "key": "meeting_requests", "label": "约见申请", "value": "2", "action": "约见申请", "value_prefix": null, "badge": null },
+      { "key": "pending_meeting", "label": "待见面", "value": "1", "action": "约见申请", "value_prefix": null, "badge": null }
+    ]
+  }
+}
+```
+
+**使用方法与业务规则**
+- 前置条件：登录态 + `matchmaker.manage`；`matchmaker_id` 在当前账号数据范围内（`_assert_staff_scope` 与红娘详情同一道闸门，越权一律 404，不泄露存在性）。  
+- 调用顺序：后台打开「预览前台」抽屉时请求一次；抽屉内「刷新数据」按钮重复请求。  
+- 身份来源：服务端用 `require_workspace_for_user(db, matchmaker_id)` 以**被查红娘**的 `user_id` 构造工作台身份（普通红娘 `SELF`；`SUPER` 且不挂门店 = 总店超级红娘，范围是平台全部；`SUPER` 且挂门店 = 该门店），与会员本人登录后拿到的身份同口径。  
+- 欢迎卡头像：`dashboard.identity.avatar` 与红娘主页头像是同一列（`users.avatar`，由「我的账号 → 红娘主页」或后台红娘编辑写入），服务端不拼域名，客户端各自按接口域名归一化；为 `null` 时保留「人」字占位。  
+- 只读：不写任何表，不签发 Token，红娘本人无感知；指标 SQL 与会员侧 `GET /api/v1/matchmakers/workspace/dashboard` 复用同一函数 `workspace_dashboard`，因此预览数字 = 真机数字。  
+- 约见申请口径：待处理 = 申请仍在跟进（`SUBMITTED/CONTACTED/ACCEPTED`）**且尚未安排约见**（无对应 `meeting_record`）；已安排约见的只计入 `pending_meeting`（`SCHEDULED/REMINDED/CHECKED_IN`），不重复计数。  
+- 线上分成：`commission_entry` 按 `beneficiary_id = 该红娘` 汇总、排除 `REVERSED`，**即使 `workspace_scope=ORGANIZATION` 也只算本人名下**，与门店类指标范围不同，这是刻意口径。  
+- 边界场景：后台「红娘管理」列表来自 `matchmaker_profile`，小程序工作台身份来自 `matchmaker_workspace_profile`，历史缺行按 `NORMAL`/`SELF` 取（不 403，只是范围收成自己名下）；2026-10-26 建档/审核同步（见 v1.1）已保证新建红娘两边一致，后台「角色」下拉（超级/普通红娘）同时驱动工作台 `level`。  
+- 小程序首页在四项业务指标全为 0 时会用本地演示数覆盖，本接口**不带演示兜底**，返回真实值，预览以真实数据为准。
+
+**错误**
+
+| HTTP | 触发条件 | 前端处理建议 |
+| --- | --- | --- |
+| 401 | 未登录 / Token 失效 | 跳登录页 |
+| 403 | 缺 `matchmaker.manage`；或该红娘无 `service_matchmaker` 有效角色（工作台未开通） | 抽屉内提示后端返回的中文文案，给「重新加载」 |
+| 404 | `matchmaker_id` 不存在或不在当前数据范围 | 刷新列表后再试 |
+| 422 | `matchmaker_id < 1` 或非整数 | 修正入参 |
+
+**文档完成自检清单**
+- [x] 有请求参数表，且每个参数都写了业务含义
+- [x] 有完整请求示例（GET 无请求体时已明确标注）
+- [x] 有返回参数表，每个字段都写了业务含义
+- [x] 有成功返回示例
+- [x] 有"使用方法与业务规则"小节
+- [x] 有错误码表：HTTP 状态码、触发条件、前端处理建议
+- [x] 至少一个非法参数示例
+
+---
+
 ## 三、变更记录
 
 | 日期 | 版本 | 变更 | 影响 |
 | --- | --- | --- | --- |
 | 2026-09-11 | v1.0 | 首次按 `PROJECT_RULES.md` 2.1.1 统一模板编写红娘管理 19 个接口完整契约 | — |
+| 2026-10-26 | v1.1 | **变更前**：`POST /admin/matchmakers`（建档）与 `PATCH /admin/matchmaker/applications/{id}`（审核通过）只写后台侧三张表（`user_role` / `user_matchmaker_apply` / `matchmaker_profile`，选门店时再写 `organization_member`），从不写 `matchmaker_workspace_profile`；而小程序「红娘管理中心 → 修改红娘 / 同店同事」的可选名单只读 `matchmaker_workspace_profile`。结果是后台「红娘管理」里的人（示例库 21 钱多多（示例）、22 周舒窈）在小程序一个都选不到，两边像两套红娘。<br>**变更后**：新增服务层 `app/services/matchmaker_workspace.py:sync_workspace_profile(db, user_id, *, overwrite)`，以后台权威数据（`users.nickname` + `organization_member` 的 `store_matchmaker` 有效绑定）幂等补写工作台档案：建档 `overwrite=True` 同步名称与门店；`PUT /admin/matchmakers/{id}` 仅在改 `display_name` / `store_id` 时同步；申请审核通过 `overwrite=False`，只补行、不覆盖红娘在工作台自设的名称与门店。三种写法都只在新行时落 `level='NORMAL'`，**永不修改已存在行的 `level`**。存量缺行由 `python scripts/backfill_matchmaker_workspace_profile.py [--apply]` 回补（默认 dry-run，已有行不动）。<br>**影响范围**：三个接口的 URL、Method、请求字段、返回字段和状态码都没变，只是各自多写/多更新一张 `matchmaker_workspace_profile`；表结构无变更（零 DDL）。前端不会因此拿到不同响应，但小程序端会开始看到后台建出来的红娘。 |
+| 2026-10-26 | v1.2 | **变更前**：后台「红娘平台」按钮调 `POST .../platform-token` 拿到 `jump_url=/matchmaker/workbench?token=…` 后 `window.open`，该相对地址在后台站点内没有对应页面，点了等于开一个空白页；后台也无法看到红娘在小程序首页上的真实数字，只能靠会员口述。<br>**变更后**：新增 `GET /admin/matchmakers/{matchmaker_id}/frontend-preview`（2.20），按**被查红娘**的工作台身份返回小程序「红娘管理中心」首页数据（`identity` + 8 项 `store_metrics`），后台右侧「预览前台」抽屉直接渲染。服务层 `require_workspace_for_user(db, user_id)` / `workspace_access_for_user(db, user_id)` 由会员侧 `require_workspace(db, current)` / `workspace_access(db, current)` 抽出（原函数改为传 `current.user_id` 直接委托，行为不变），后台复用同一份身份解析与 `workspace_dashboard`，两侧数字同源。同时把 `meeting_requests` 的 SQL 从「该范围内全部约见申请」改为「仍在跟进且尚未安排约见」（`status IN ('SUBMITTED','CONTACTED','ACCEPTED')` 且无对应 `meeting_record`），与小程序工作台此前客户端算出的口径一致。<br>**影响范围**：新增接口，旧接口 URL/字段/状态码零变更；`platform-token` 保留但前端已不再调用。会员侧 `/workspace/dashboard` 的 `meeting_requests` 数字会变小（已安排约见的申请不再重复计入待处理），`pending_meeting` 不变；表结构无变更（零 DDL）。回归测试 `tests/test_matchmaker_front_preview.py`。 |
+| 2026-10-26 | v1.3 | **变更前**：`matchmaker_workspace_profile` 里 `level='SUPER'` 且 `organization_id IS NULL` 被当成坏状态——`workspace_access_for_user` 直接判定「超级服务红娘尚未绑定有效组织范围」并让工作台全部接口 403；后台「红娘管理」的「角色」（`matchmaker_profile.role_tag`）与工作台 `level` 各写各的，建档/编辑从不改 `level`，后台把人设成超级红娘对小程序数据范围没有任何影响。<br>**变更后**：按后台「红娘管理」页须知收口——`SUPER` 且不挂门店 = **总店-超级红娘**，数据范围为平台全部（`_scope_predicate` 返回 `1 = 1`，`_member_scope_predicate` 仍要求 `EXISTS resource_assignment.status=1`，不把全站注册用户算成「我服务的」；`list_workspace_colleagues` 返回平台全部有效红娘）；`SUPER` 且挂门店 = 该门店；`NORMAL` = 自己名下。`sync_workspace_profile(db, user_id, *, overwrite, level=None)` 新增 `level` 形参，`create_staff` / `update_staff` 按 `role_tag` 传 `super→SUPER`、`normal→NORMAL`（未知值不写），SQL 用 `COALESCE(:level,'NORMAL')` 建行、只在显式传参时 `level = VALUES(level)`，申请审核通过不传 `level`，因此审核既不会升降级也不会覆盖工作台自设名称与门店。<br>**影响范围**：会员侧 `/workspace/*` 与后台 2.20 `frontend-preview` 对「`SUPER`+不挂门店」账号从 403 变为可访问且范围平台全部；已挂门店的 `SUPER` 账号、`NORMAL` 账号行为不变。后台建档/编辑的 URL、请求字段、返回字段、状态码零变更（`role_tag` 本就是已有入参）。表结构无变更（零 DDL）。回归测试 `tests/test_matchmaker_workspace_profile_sync.py`（`level` 跟随角色下拉、不传时保持原值、审核通过不写 `level`）与 `tests/test_matchmaker_staff_admin*.py`、`tests/test_matchmaker_workspace_contracts.py`、`tests/test_matchmaker_crm_data_scope.py`、`tests/test_legacy_matchmaker_scope_d10.py`。 |
+| 2026-10-28 | v1.4 | **变更前**：工作台欢迎卡左上圆形槽位在小程序和后台「预览前台」两侧都写死成「人」字，红娘在「我的账号 → 红娘主页」设置的头像只出现在主页和公开红娘卡片上，首页看不到。<br>**变更后**：`MatchmakerWorkspaceIdentity` 新增可选字段 `avatar`，由 `require_workspace_for_user` 在同一条身份 SQL 里带出 `users.avatar`（与 `get_workspace_homepage` 读的红娘主页头像同一列，不新增查询、不落新表），`workspace_dashboard` 原样透传。字段向后兼容：旧客户端按不到 `avatar` 就继续显示「人」占位，无需升级。<br>**影响范围**：会员侧 `GET /api/v1/matchmakers/workspace/dashboard` 与本接口 2.20 的 `dashboard.identity` 多一个字段，其余 URL、请求参数、状态码、指标口径零变更；零 DDL。配套前端改动：小程序 `MatchmakerManagementCenter` 与后台 `MatchmakerFrontPreviewDrawer` 改为渲染该头像（相对路径按接口域名归一化，无头像时保留「人」字）。回归测试 `tests/test_matchmaker_front_preview.py`（头像随身份带出、无头像时为 `null`）。 |
 
 ---
 

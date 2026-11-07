@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser
+from app.core.config import settings
 from app.schemas.organization import (
     PartnerJoinCreate,
     PartnerMembershipResponse,
@@ -151,6 +152,47 @@ async def assign_resource(db: AsyncSession, admin: CurrentUser, request: Resourc
     result = await db.execute(text("""SELECT id, user_id, organization_id, matchmaker_id,
         source, status, effective_at, ended_at FROM resource_assignment WHERE id = :id"""), {"id": assignment_id})
     return ResourceAssignmentResponse(**dict(result.mappings().one()))
+
+
+async def auto_assign_new_member(db: AsyncSession, user_id: int, basic_profile_done: bool) -> bool:
+    """自然注册的会员填完基础信息，就自动进公海门店并挂上资料待审。
+
+    红娘工作台的可见范围由 resource_assignment 决定：没有生效归属的会员在任何红娘的待审列表里都不存在。
+    这里补的是「让门店超级红娘看得到」这一步，不替会员指定具体红娘，指定仍走人工分派。
+    """
+    organization_id = settings.member_auto_assign_organization_id
+    if organization_id is None or not basic_profile_done:
+        return False
+    # 服务红娘自己也在填资料，不该被当成新会员推进待审池。
+    staff = await db.scalar(text("""SELECT 1 FROM user_role WHERE user_id = :user_id
+        AND role_code = 'service_matchmaker' AND status = 1 LIMIT 1"""), {"user_id": user_id})
+    if staff:
+        return False
+    # 已有生效归属（后台分派、线索入库、红娘录入）一律不动，不覆盖人工指定的人。
+    assigned = await db.scalar(text("""SELECT 1 FROM resource_assignment
+        WHERE user_id = :user_id AND status = 1 LIMIT 1"""), {"user_id": user_id})
+    if assigned:
+        return False
+    store = await db.scalar(text("""SELECT 1 FROM organization WHERE id = :id
+        AND org_type = 'store' AND status = 1 LIMIT 1"""), {"id": organization_id})
+    if not store:
+        return False
+    result = await db.execute(text("""INSERT INTO resource_assignment
+        (user_id, organization_id, matchmaker_id, source, status, assigned_by)
+        VALUES (:user_id, :organization_id, NULL, 'self_registered', 1, NULL)"""), {
+        "user_id": user_id, "organization_id": organization_id,
+    })
+    assignment_id = int(result.lastrowid)
+    # INSERT IGNORE：红娘已经判过的 PASSED/REJECTED 不会因为会员事后补资料又被打回待审。
+    await db.execute(text("""INSERT IGNORE INTO matchmaker_member_review (user_id, status, reviewed_by)
+        VALUES (:user_id, 'PENDING', NULL)"""), {"user_id": user_id})
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id, reason)
+        VALUES (NULL, 'member.auto_assign', 'resource_assignment', :assignment_id, :reason)"""), {
+        "assignment_id": assignment_id,
+        "reason": f"基础信息填写完成，自动分派门店 {organization_id}",
+    })
+    return True
 
 
 async def create_touch(db: AsyncSession, current: CurrentUser, request: PromotionTouchCreate) -> PromotionTouchResponse:

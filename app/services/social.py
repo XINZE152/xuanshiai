@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -1584,11 +1585,31 @@ def _request_response(row: Any) -> ChatSessionRequestResponse:
             payload = json.loads(payload)
         except json.JSONDecodeError:
             payload = None
+    if row.get("request_type") in {"PHONE", "WECHAT"}:
+        # Do not deliver a contact to either party before the recipient consents.
+        value = payload.get("contact_value") if isinstance(payload, dict) else None
+        payload = {"contact_value": value} if row.get("status") == "ACCEPTED" and isinstance(value, str) else None
     return ChatSessionRequestResponse(**{**dict(row), "payload": payload})
+
+
+async def _contact_request_payload(db: AsyncSession, user_id: int, request: ChatSessionRequestCreate) -> dict | None:
+    if request.request_type == "PHONE":
+        result = await db.execute(text("SELECT phone FROM users WHERE id = :id"), {"id": user_id})
+        phone = result.scalar()
+        if not isinstance(phone, str) or not re.fullmatch(r"1[3-9]\d{9}", phone):
+            raise HTTPException(422, detail="请先绑定有效的手机号")
+        return {"contact_value": phone}
+    if request.request_type == "WECHAT":
+        value = (request.payload or {}).get("contact_value")
+        if not isinstance(value, str) or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{5,19}", value.strip()):
+            raise HTTPException(422, detail="请输入正确的微信号（6–20位，以字母开头）")
+        return {"contact_value": value.strip()}
+    return request.payload
 
 
 async def create_chat_session_request(db: AsyncSession, user_id: int, session_id: int, request: ChatSessionRequestCreate) -> ChatSessionRequestResponse:
     _, target_id = await _session(db, user_id, session_id)
+    payload = await _contact_request_payload(db, user_id, request)
     existing = await db.execute(text("""SELECT id FROM chat_session_request WHERE session_id = :session_id
         AND requester_id = :user_id AND request_type = :request_type AND status = 'PENDING'
         AND (expire_at IS NULL OR expire_at > UTC_TIMESTAMP()) LIMIT 1"""),
@@ -1600,7 +1621,7 @@ async def create_chat_session_request(db: AsyncSession, user_id: int, session_id
         (session_id, requester_id, responder_id, request_type, payload, expire_at)
         VALUES (:session_id, :requester_id, :responder_id, :request_type, :payload, :expire_at)"""),
         {"session_id": session_id, "requester_id": user_id, "responder_id": target_id,
-         "request_type": request.request_type, "payload": json.dumps(request.payload, ensure_ascii=False) if request.payload else None,
+         "request_type": request.request_type, "payload": json.dumps(payload, ensure_ascii=False) if payload else None,
          "expire_at": expire_at})
     await emit_notification(
         db, recipient_user_id=target_id, actor_user_id=user_id,
