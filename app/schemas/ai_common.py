@@ -212,6 +212,7 @@ class AiCapabilitiesResponse(BaseModel):
     master: bool = Field(description="AI 总闸；为 false 时其余字段恒为 false")
     profile: bool = Field(description="AI 画像 / 用心度 / 资料卡")
     search: bool = Field(description="AI 搜索与自然语言筛选")
+    compatibility: bool = Field(description="资料合拍参考（compatibility shadow）")
     voice: bool = Field(description="语音播报 / 语音输入")
     advisor: bool = Field(description="AI 军师")
     avatar: bool = Field(description="AI 分身")
