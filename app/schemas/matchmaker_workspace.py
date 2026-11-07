@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.schemas.customer_lead_admin import LeadIntentionGrade
+
 
 WorkspaceLevel = Literal["NORMAL", "SUPER"]
 WorkspaceScope = Literal["SELF", "ORGANIZATION"]
@@ -71,7 +73,7 @@ class WorkspaceLeadCreate(BaseModel):
     phone: str | None = Field(default=None, max_length=32)
     wechat: str | None = Field(default=None, max_length=128)
     source: str = Field(min_length=1, max_length=64)
-    intention_level: Literal[1, 2, 3] = 1
+    intention_level: LeadIntentionGrade = 1
     remark: str | None = Field(default=None, max_length=2000)
 
     @field_validator("phone", "wechat", mode="before")
@@ -92,7 +94,7 @@ class WorkspaceLeadUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     phone: str | None = Field(default=None, max_length=32)
     wechat: str | None = Field(default=None, max_length=128)
-    intention_level: Literal[1, 2, 3] | None = None
+    intention_level: LeadIntentionGrade | None = None
     status: LeadStatus | None = None
     remark: str | None = Field(default=None, max_length=2000)
     next_follow_at: datetime | None = None
@@ -117,7 +119,7 @@ class WorkspaceLead(BaseModel):
     phone: str | None
     wechat: str | None
     source: str
-    intention_level: Literal[1, 2, 3]
+    intention_level: LeadIntentionGrade
     status: LeadStatus
     next_follow_at: datetime | None
     created_at: datetime
@@ -140,7 +142,7 @@ class WorkspaceLeadPage(BaseModel):
 class WorkspaceLeadFollowUpCreate(BaseModel):
     method: FollowUpMethod
     content: str = Field(min_length=1, max_length=2000)
-    intention_level: Literal[1, 2, 3] | None = None
+    intention_level: LeadIntentionGrade | None = None
     next_follow_at: datetime | None = None
 
 
@@ -149,7 +151,7 @@ class WorkspaceLeadFollowUp(BaseModel):
     lead_id: int
     method: FollowUpMethod
     content: str
-    intention_level: Literal[1, 2, 3] | None
+    intention_level: LeadIntentionGrade | None
     next_follow_at: datetime | None
     created_at: datetime
 

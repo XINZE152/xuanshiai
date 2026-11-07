@@ -70,7 +70,9 @@
 
 所有接口需已通过准入。GET Query：`page/page_size`，可选 `status=NEW|CONTACTED|INTENDED|CONVERTED|LOST|CLOSED`、`search`（最多 64 字）。
 
-创建 Body：`name`（1–128）、`phone`（最多 32）或 `wechat`（最多 128，二者至少其一）、`source`（1–64）、`intention_level`（1–3，默认 1）、可选 `remark`（最多 2000）。跟进 Body：`method=PHONE|WECHAT|VISIT|OTHER`、`content`（1–2000）、可选 `intention_level/next_follow_at`。弃海/恢复 Body：`reason`（1–500）。PATCH 只接受上述可编辑字段，至少一个字段。
+创建 Body：`name`（1–128）、`phone`（最多 32）或 `wechat`（最多 128，二者至少其一）、`source`（1–64）、`intention_level`（**A-G 七档 1–7**，默认 1）、可选 `remark`（最多 2000）。跟进 Body：`method=PHONE|WECHAT|VISIT|OTHER`、`content`（1–2000）、可选 `intention_level`（同 A-G 七档 1–7）/`next_follow_at`。弃海/恢复 Body：`reason`（1–500）。PATCH 只接受上述可编辑字段，至少一个字段。
+
+`intention_level` 七档口径（与后台 `admin/customer-leads` 完全一致，2026-10-27 迁移 `20261027_05` 由旧「1低/2中/3高」扩档）：`1` A 未接、`2` B 初步沟通、`3` C 深入沟通未缔结、`4` D 待确定到店、`5` E 已确定到店、`6` F 预约需二邀、`7` G 已到店未签约。存量数据已按「中→4」「高→6」回填，因此列表/详情/跟进返回的取值可能大于 3，前端需按七档渲染；越界值（0、8）返回 `422`。**会员侧 `user_profile.intention_level` 仍是 1低/2中/3高 的独立口径，两者不要混用。**
 
 线索返回字段：`id/name/phone/wechat/source/intention_level/status/next_follow_at/created_at/updated_at`；跟进额外返回 `lead_id/method/content`。写入均落 `business_audit_log`。**联系方式唯一性**：同手机号或同微信号（去首尾空白后比较，空串视为未提供）在"有效"线索（状态非 `LOST/CLOSED`）中全局唯一；创建、PATCH 修改联系方式、恢复弃海前均会查重，命中返回 `409`（提示占用线索 ID），数据库层由 `active_phone/active_wechat` 生成列唯一索引兜底；弃海、已关闭线索不占用联系方式，可用同一联系方式重新录入或恢复。已成交、关闭或已弃海线索不能再次弃海。普通红娘可以恢复自己弃海的线索；超级红娘可以恢复组织范围弃海线索；恢复时若联系方式已被其它有效线索占用返回 `409`（`该客源的联系方式已被其他有效线索占用，无法恢复`）。
 

@@ -13,6 +13,11 @@ LeadStatus = Literal["NEW", "CONTACTED", "INTENDED", "CONVERTED", "LOST", "CLOSE
 LeadAuditStatus = Literal["active", "pending", "rejected"]
 # 客源性别（A13）：0未知 1男 2女，与 users.gender 同语义
 LeadGender = Literal[0, 1, 2]
+# 客户意向 A-G 七档（migrations/customer_lead_intention_grades/20261027_05）：
+# 1 A未接 2 B初步沟通 3 C深入沟通未缔结 4 D待确定到店 5 E已确定到店 6 F预约需二邀 7 G已到店未签约。
+# 读写 customer_lead / customer_lead_follow_up 的 intention_level 必须复用本别名：
+# 2026-11-07 工作台列表 500 就是因为消费方还留着旧的 Literal[1, 2, 3]。
+LeadIntentionGrade = Literal[1, 2, 3, 4, 5, 6, 7]
 
 
 def _strip_contact(value: object) -> object:
@@ -61,7 +66,7 @@ class CustomerLeadCreate(_LeadProfileFields):
     phone: str | None = Field(default=None, max_length=32)
     wechat: str | None = Field(default=None, max_length=128)
     source: str = Field(min_length=1, max_length=64)
-    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] = 1
+    intention_level: LeadIntentionGrade = 1
     gender: LeadGender = Field(default=0, description="性别 0未知 1男 2女（A13）")
     remark: str | None = Field(default=None, max_length=2000)
     promoter_id: int | None = Field(default=None, ge=1, description="推广红娘用户ID")
@@ -89,7 +94,7 @@ class CustomerLeadUpdate(_LeadProfileFields):
     wechat: str | None = Field(default=None, max_length=128)
     # 客源来源在创建时必填，编辑时同样允许修改（此前只在 Create 里，编辑被静默丢弃）。
     source: str | None = Field(default=None, min_length=1, max_length=64)
-    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] | None = None
+    intention_level: LeadIntentionGrade | None = None
     gender: LeadGender | None = None
     status: LeadStatus | None = None
     remark: str | None = Field(default=None, max_length=2000)
@@ -133,7 +138,7 @@ class CustomerLeadAssignment(BaseModel):
 class CustomerLeadFollowUpCreate(BaseModel):
     method: Literal["PHONE", "WECHAT", "VISIT", "OTHER"]
     content: str = Field(min_length=1, max_length=2000)
-    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] | None = None
+    intention_level: LeadIntentionGrade | None = None
     next_follow_at: datetime | None = None
 
 
@@ -159,7 +164,7 @@ class CustomerLead(_LeadProfileFields):
     phone: str | None
     wechat: str | None
     source: str
-    intention_level: Literal[1, 2, 3, 4, 5, 6, 7]
+    intention_level: LeadIntentionGrade
     gender: LeadGender = 0
     # age 只读：由服务层从 birth_date 派生（无 birth_date 时回退 raw age 列），不接受写入。
     age: int | None = Field(default=None, description="年龄（由出生日期派生，只读）")
@@ -265,7 +270,7 @@ class CustomerLeadImportRow(BaseModel):
     phone: str | None = Field(default=None, max_length=32)
     wechat: str | None = Field(default=None, max_length=128)
     source: str = Field(min_length=1, max_length=64)
-    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] = 1
+    intention_level: LeadIntentionGrade = 1
     gender: LeadGender = Field(default=0, description="性别 0未知 1男 2女（A13）")
     remark: str | None = Field(default=None, max_length=2000)
 

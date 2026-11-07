@@ -162,6 +162,10 @@ jobs:
           app/services/region/http_client.py app/services/region/online_ip.py
           app/services/region/online_phone.py
           app/services/customer_lead_admin.py app/services/finance.py
+          # 2026-11-07 客源意向 A-G 七档：工作台契约漏跟扩档导致 workbench/leads 500。
+          app/schemas/customer_lead_admin.py app/schemas/lead_ai_extract.py
+          app/schemas/matchmaker_workspace.py app/services/matchmaker_workspace.py
+          tests/test_workspace_lead_intention_grades_20261107.py
           app/services/idempotency.py app/services/matchmaker_member_admin.py
           app/services/promoter_staff_admin.py app/services/user_columns.py
           app/services/message_admin.py
@@ -210,7 +214,8 @@ jobs:
           tests/test_region_refresh_20261101.py
           tests/test_region_online_20261104.py
           tests/test_member_lifecycle_gap_fill_20261024.py
-          tests/test_phone_region_invalidation_20261104.py -q
+          tests/test_phone_region_invalidation_20261104.py
+          tests/test_workspace_lead_intention_grades_20261107.py -q
 
   # 画像会话契约（master 活动槽抢占与复用、会话状态终态守卫、journey/start 响应
   # 字段）：全部为不依赖 DB 的内存假库单元契约。test_master_session.py 与
