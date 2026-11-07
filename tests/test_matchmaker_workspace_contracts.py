@@ -68,11 +68,20 @@ def test_leads_http_list_serializes_all_seven_levels_without_local_backend(monke
     rows = [{
         "id": level, "name": "测试客源", "phone": None, "wechat": None,
         "source": "测试", "intention_level": level, "status": "NEW",
+        "matchmaker_id": None, "organization_id": None, "converted_user_id": None,
+        "remark": None, "created_by": 21,
         "next_follow_at": None, "created_at": "2026-11-03T12:00:00",
         "updated_at": "2026-11-03T12:00:00",
     } for level in range(1, 8)]
+    # 工作台客源列表现在复用后台 list_leads：一次 information_schema 列探测（.all()）、
+    # 一次 COUNT（.scalar()）、一次数据查询（.mappings().all()），三种取法都要替身支持。
+    fake_result = SimpleNamespace(
+        mappings=lambda: SimpleNamespace(all=lambda: rows),
+        all=lambda: [(key,) for key in rows[0]],
+        scalar=lambda: len(rows),
+    )
     db = SimpleNamespace(
-        execute=AsyncMock(return_value=SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: rows))),
+        execute=AsyncMock(return_value=fake_result),
         scalar=AsyncMock(return_value=len(rows)),
     )
     actor = WorkspaceActor(user_id=21, display_name="测试红娘", level="NORMAL", organization_id=1)

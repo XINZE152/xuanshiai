@@ -118,7 +118,6 @@ BUSINESS_TABLES = {
             `next_follow_at` datetime DEFAULT NULL,
             `converted_user_id` bigint unsigned DEFAULT NULL,
             `remark` varchar(2000) DEFAULT NULL,
-            `real_name` varchar(64) DEFAULT NULL COMMENT '真实姓名（资料，非实名核验）',
             `birth_date` date DEFAULT NULL COMMENT '出生日期；age 由此派生',
             `weight` int DEFAULT NULL COMMENT '体重kg',
             `income` varchar(32) DEFAULT NULL COMMENT '年收入档位',
