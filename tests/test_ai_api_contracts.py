@@ -25,6 +25,29 @@ def test_compatibility_get_declares_sync_and_async_responses() -> None:
     )
 
 
+def test_ai_capabilities_schema_declares_compatibility_field() -> None:
+    """`compatibility` 是 2026-11-07 BE-01 新增字段：前端据此在点击前隐藏合拍度入口。
+
+    字段集合按精确等值断言，新增/删除能力字段都必须显式改这里（契约变更留痕）。
+    """
+    openapi = app.openapi()
+    operation = openapi["paths"]["/api/v1/ai/capabilities"]["get"]
+    schema_ref = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+    assert schema_ref.endswith("/AiCapabilitiesResponse")
+
+    component = openapi["components"]["schemas"]["AiCapabilitiesResponse"]
+    assert set(component["properties"]) == {
+        "master",
+        "profile",
+        "search",
+        "compatibility",
+        "voice",
+        "advisor",
+        "avatar",
+    }
+    assert "compatibility" in component["required"]
+
+
 def test_registered_ai_tasks_have_explicit_feature_gates() -> None:
     expected = {
         "profile_extract": "PROFILE",

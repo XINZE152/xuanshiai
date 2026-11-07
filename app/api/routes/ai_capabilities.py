@@ -39,6 +39,7 @@ async def get_ai_capabilities(
         master=master,
         profile=_usable(AiFeature.PROFILE),
         search=_usable(AiFeature.SEARCH),
+        compatibility=_usable(AiFeature.COMPATIBILITY_SHADOW),
         voice=_usable(AiFeature.VOICE),
         advisor=_usable(AiFeature.ADVISOR),
         avatar=_usable(AiFeature.AVATAR),
