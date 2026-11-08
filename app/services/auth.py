@@ -379,11 +379,19 @@ async def ensure_default_user_role(db: AsyncSession, user_id: int) -> None:
         ON DUPLICATE KEY UPDATE status = 1"""), {"user_id": user_id})
 
 
-async def touch_login(db: AsyncSession, user_id: int, extra_set: str = "") -> None:
+async def touch_login(
+    db: AsyncSession,
+    user_id: int,
+    extra_set: str = "",
+    extra_params: dict[str, Any] | None = None,
+) -> None:
     """登录时刷新 last_login_at，并在 users.login_num 列已迁移时自增登录次数（A12）。
 
     login_num 为补列项：迁移未执行的环境（information_schema 查不到该列）静默跳过自增，
     不抛 Unknown column。登录为写路径，这里一次轻量探测保证跨环境兼容。
+
+    ``extra_set`` 里的命名占位符必须由 ``extra_params`` 提供，否则 SQLAlchemy 在
+    参数构造阶段抛 InvalidRequestError（缺失键不等于值为 None，COALESCE 挽不回）。
     """
     has_login_num = (await db.execute(text("""SELECT 1 FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'login_num'"""))).first()
@@ -392,7 +400,10 @@ async def touch_login(db: AsyncSession, user_id: int, extra_set: str = "") -> No
         set_clause = f"{extra_set}, {set_clause}"
     if has_login_num:
         set_clause = f"login_num = login_num + 1, {set_clause}"
-    await db.execute(text(f"UPDATE users SET {set_clause} WHERE id = :id"), {"id": user_id})
+    await db.execute(
+        text(f"UPDATE users SET {set_clause} WHERE id = :id"),
+        {"id": user_id, **(extra_params or {})},
+    )
 
 
 async def login_phone(db: AsyncSession, request: PhoneLoginRequest, ip: str | None, user_agent: str | None) -> dict[str, Any]:
@@ -419,7 +430,12 @@ async def login_wechat(db: AsyncSession, request: WechatLoginRequest, ip: str | 
             raise HTTPException(403, detail="账号当前不可用")
         if row:
             user_id = row["id"]
-            await touch_login(db, user_id, extra_set="nickname = COALESCE(:nickname, nickname), avatar = COALESCE(:avatar, avatar)")
+            await touch_login(
+                db,
+                user_id,
+                extra_set="nickname = COALESCE(:nickname, nickname), avatar = COALESCE(:avatar, avatar)",
+                extra_params={"nickname": request.nickname, "avatar": request.avatar},
+            )
             phone = row["phone"]
         else:
             if not await platform_registration_open(db):
