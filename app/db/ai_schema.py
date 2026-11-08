@@ -23,7 +23,10 @@ only registers the helper that performs the additive columns.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Contract v1.1 — fixed portrait dimension vocabulary.  Stored as VARCHAR(64) on
 # candidate/draft_field/revision_field but centralised here so the schema helper,
@@ -859,6 +862,13 @@ AI_TABLES = {
             `consent_snapshot_id` varchar(96) NOT NULL,
             `built_at` datetime NOT NULL,
             PRIMARY KEY (`projection_id`),
+            -- 与 migrations/ai/20260905_02_memory_projection_up.sql 同义：并发重建时
+            -- 靠唯一键把后到者压成 IntegrityError，写入侧据此回读先到者的行
+            -- （app/services/ai/memory/projections.py 的 IntegrityError 分支）。
+            -- 全新库的表由这里建出，reviewed migration 的 CREATE TABLE IF NOT EXISTS
+            -- 是空操作，所以这两个唯一键必须在这里就声明。
+            UNIQUE KEY `uk_ai_memory_projection_version` (`owner_user_id`, `function_key`, `purpose`, `data_category`, `projection_version`),
+            UNIQUE KEY `uk_ai_memory_projection_input` (`owner_user_id`, `function_key`, `purpose`, `data_category`, `projection_input_hash`),
             KEY `idx_ai_memory_projection_owner_scope` (`owner_user_id`, `function_key`, `purpose`, `data_category`, `status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆投影'
     """,
@@ -1398,3 +1408,68 @@ def ensure_ai_consent_unique_key(cursor: Any) -> None:
             "ADD UNIQUE KEY `uk_ai_consent_user_scope_version` "
             "(`user_id`, `scope`, `version`, `granted_at`)"
         )
+
+
+# 投影表的并发护栏：列组合 → 索引名（与 reviewed migration 同名）。
+AI_MEMORY_PROJECTION_UNIQUE_KEYS: dict[str, tuple[str, ...]] = {
+    "uk_ai_memory_projection_version": (
+        "owner_user_id",
+        "function_key",
+        "purpose",
+        "data_category",
+        "projection_version",
+    ),
+    "uk_ai_memory_projection_input": (
+        "owner_user_id",
+        "function_key",
+        "purpose",
+        "data_category",
+        "projection_input_hash",
+    ),
+}
+
+
+def ensure_ai_memory_projection_unique_keys(cursor: Any) -> None:
+    """幂等补齐 ``ai_memory_projection`` 的两个唯一约束。
+
+    这两条唯一键是写入侧的并发护栏：``app/services/ai/memory/projections.py`` 先
+    ``SELECT MAX(projection_version)`` 再 INSERT，而 ``FOR UPDATE`` 在该维度还没有
+    任何投影行时锁不住任何东西——只能靠唯一键把后到的并发写压成 IntegrityError，
+    再由写入侧回读先到者的行。缺键时并发会写出重复投影，读取端因此看到两份版本。
+
+    全新库的这张表由本文件的 ``CREATE TABLE IF NOT EXISTS`` 建出，
+    ``migrations/ai/20260905_02_memory_projection_up.sql`` 里同名的 CREATE 是空操作，
+    所以补键必须发生在 bootstrap 侧（历史库同理）。
+
+    判重按“列组合”而不是“索引名”，避免重复命名漂移；已有等价唯一键时跳过。
+    老库若已有重复行，ADD UNIQUE 会抛 1062——这里只记 warning 不中断，
+    由 ``scripts/schema_contract.py check-db`` 在后面如实报缺索引。
+    """
+    try:
+        cursor.execute(
+            "SELECT index_name AS index_name, "
+            "GROUP_CONCAT(column_name ORDER BY seq_in_index) AS cols "
+            "FROM information_schema.statistics "
+            "WHERE table_schema = DATABASE() AND table_name = 'ai_memory_projection' "
+            "AND non_unique = 0 "
+            "GROUP BY index_name"
+        )
+        existing = {
+            tuple(str(row["cols"]).split(",")): str(row["index_name"])
+            for row in cursor.fetchall()
+        }
+    except Exception:  # noqa: BLE001, S112 - legacy bootstrap is best effort
+        return
+    for index_name, columns in AI_MEMORY_PROJECTION_UNIQUE_KEYS.items():
+        if columns in existing:
+            continue
+        column_sql = ", ".join(f"`{column}`" for column in columns)
+        try:
+            cursor.execute(
+                f"ALTER TABLE `ai_memory_projection` "
+                f"ADD UNIQUE KEY `{index_name}` ({column_sql})"
+            )
+        except Exception as exc:  # noqa: BLE001 - 重复数据会挡住补键，交给契约检查暴露
+            logger.warning(
+                "⚠️ 无法补建唯一键 ai_memory_projection.%s：%s", index_name, exc
+            )
