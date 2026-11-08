@@ -123,7 +123,7 @@ jobs:
           tests/test_ai_compatibility_visibility_diagnostics.py
           tests/test_ai_schema_and_provider.py tests/test_ai_voice_audio_access.py
           tests/test_ai_assistant_quota_refund.py tests/test_ai_thoughtfulness.py
-          tests/test_ai_mock_fallback.py
+          tests/test_ai_mock_fallback.py tests/test_ai_search.py
           tests/test_voice_auth.py tests/test_voice_cleanup.py
           tests/test_voice_providers_aliyun.py tests/test_voice_ws.py
       - name: AI and voice unit contracts
@@ -141,6 +141,7 @@ jobs:
           tests/test_ai_assistant_quota_refund.py
           tests/test_ai_thoughtfulness.py
           tests/test_ai_mock_fallback.py
+          tests/test_ai_search.py
           tests/test_voice_auth.py
           tests/test_voice_ws.py
           tests/test_voice_providers_aliyun.py

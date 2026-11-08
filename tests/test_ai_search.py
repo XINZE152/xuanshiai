@@ -1372,6 +1372,65 @@ async def test_confirm_requires_all_hard_confirmed(search_store) -> None:
 
 
 @pytest.mark.asyncio
+async def test_revoked_search_parse_consent_makes_draft_unconfirmable(search_store) -> None:
+    """AIT-11：撤回 `search_parse` 后旧草稿不可继续确认，真实错误码是 409 不是 403。
+
+    撤回级联由 `app/services/ai/consents.py` 用一条按 `user_id` 的批量 UPDATE 实现
+    （草稿 `expired` + 快照 `invalidated`），`confirm` 端不重复校验授权；本例先用
+    源码锁定该 SQL 的关键要素（漂移即失败），再复现其效果，覆盖 §6.3/§6.6 口径。
+    """
+    from pathlib import Path
+
+    from app.services.ai.search import SearchConsentRequired, SearchDraftNotConfirmed
+
+    source = (
+        Path(__file__).resolve().parents[1] / "app" / "services" / "ai" / "consents.py"
+    ).read_text(encoding="utf-8")
+    anchor = source.find("UPDATE ai_search_draft SET status = 'expired'")
+    assert anchor > 0, "撤回 search_parse 未批量过期搜索草稿"
+    assert 'elif scope == "search_parse":' in source[:anchor], "过期草稿未限定在 search_parse 分支"
+    assert "UPDATE ai_search_snapshot SET status = 'invalidated'" in source[anchor:], (
+        "撤回时未同步作废搜索快照"
+    )
+
+    await search_store.seed_consent()
+    await search_store.seed_revision()
+    db = search_store.session
+    draft = await create_search_draft(
+        db, 10, "想找26到32岁住杭州本科以上的人", "zhiyu_chat", "zh-CN", "ait11-create-1"
+    )
+    search_store.drafts[draft.draft_id]["status"] = "awaiting_confirmation"
+    await _run_parse(search_store, draft.draft_id)
+    for row in search_store.conditions[draft.draft_id]:
+        if row["field_key"] in {"age", "city_code", "education_level"}:
+            row["user_action"] = "confirmed"
+
+    snapshot = await confirm_search_draft(db, draft.draft_id, 10, 0, "ait11-confirm-ok")
+    assert snapshot.snapshot_id in search_store.snapshots
+
+    # 复现 revoke_consent 的效果：草稿转 expired（同时 expires_at 已过）、授权撤回。
+    search_store.drafts[draft.draft_id]["status"] = "expired"
+    search_store.drafts[draft.draft_id]["expires_at"] = _now() - timedelta(minutes=1)
+    for grant in search_store.consents:
+        if grant["scope"] == "search_parse":
+            grant["revoked_at"] = _now()
+
+    with pytest.raises(SearchDraftNotConfirmed) as stale:
+        await confirm_search_draft(db, draft.draft_id, 10, 0, "ait11-confirm-revoked")
+    assert stale.value.code == "RESULT_STALE"
+    assert stale.value.status_code == 409
+    assert "草稿已过期" in str(stale.value)
+    # 失败的一次 confirm 不得产出新快照。
+    assert len(search_store.snapshots) == 1
+    assert list(search_store.snapshots) == [snapshot.snapshot_id]
+
+    with pytest.raises(SearchConsentRequired):
+        await create_search_draft(
+            db, 10, "想找30岁以上在杭州的人", "zhiyu_chat", "zh-CN", "ait11-create-2"
+        )
+
+
+@pytest.mark.asyncio
 async def test_confirm_creates_snapshot_and_execute_task(search_store) -> None:
     await search_store.seed_consent()
     await search_store.seed_revision()

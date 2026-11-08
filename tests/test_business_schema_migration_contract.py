@@ -20,6 +20,7 @@ from scripts.manage_business_migration import (
     _database_config_for_target,
     _manifest,
     _run,
+    _statements,
 )
 
 
@@ -224,3 +225,30 @@ def test_q74_remind_migration_creates_author_only_table() -> None:
     assert "CREATE TABLE IF NOT EXISTS `community_post_remind`" in up
     assert "uk_community_post_remind_post_user" in up
     assert "DROP TABLE IF EXISTS `community_post_remind`" in down
+
+
+def test_all_manifest_verify_files_satisfy_runner_contract() -> None:
+    """全部版本的 verify/verify_previous 必须满足 runner 的可执行契约。
+
+    `_verify` 要求单条查询，且「返回 0 行 = 通过」。此前只有
+    20261027_02/03 被 `test_gap_migrations_cover_all_bootstrap_only_columns`
+    覆盖，新增版本因此能带着两条语句或恒返回一行的聚合查询进主干，
+    使 `up` 链在中途版本中止。本例把断言扩到 manifest 全量版本。
+    """
+    for entry in _manifest_data()["versions"]:
+        for direction in ("verify", "verify_previous"):
+            path = MIGRATION_ROOT / str(entry[direction])
+            statements = _statements(path)
+            label = f"{entry['version']}.{direction}"
+            assert len(statements) == 1, f"{label} 必须是单条查询，实际 {len(statements)} 条"
+            body = " ".join(statements).lower()
+            if direction == "verify":
+                # 缺失态检测：只有对象不存在时才返回行。
+                assert "is null" in body or "not exists" in body, (
+                    f"{label} 缺少失败导向结构（LEFT JOIN ... IS NULL 或 NOT EXISTS），"
+                    "会在迁移成功时返回行而判为失败"
+                )
+            elif "count(*)" in body:
+                # 无 GROUP BY 的聚合恒返回 1 行，回滚校验永远过不了。
+                assert "group by" in body, f"{label} 的 COUNT(*) 缺少 GROUP BY，恒返回 1 行"
+
