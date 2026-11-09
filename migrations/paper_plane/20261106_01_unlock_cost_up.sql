@@ -2,10 +2,13 @@
 -- Idempotent: drop the old check (if present) and re-add the widened one.
 SET @unlock_cost_check_exists = (
     SELECT COUNT(*)
-    FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS
-    WHERE CONSTRAINT_SCHEMA = DATABASE()
-      AND CONSTRAINT_NAME = 'ck_paper_plane_unlock_cost'
-      AND TABLE_NAME = 'paper_plane_profile_unlock'
+    FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS cc
+    JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+      ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA
+     AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+    WHERE cc.CONSTRAINT_SCHEMA = DATABASE()
+      AND tc.TABLE_NAME = 'paper_plane_profile_unlock'
+      AND cc.CONSTRAINT_NAME = 'ck_paper_plane_unlock_cost'
 );
 SET @drop_unlock_cost_check = IF(
     @unlock_cost_check_exists > 0,

@@ -58,10 +58,12 @@ def test_manifest_checksums_are_lf_normalised() -> None:
         "20261030_02_payment_reconcile",
         "20261030_03_payment_entitlement_keys",
         "20261030_04_user_points_biz_key",
+        "20261101_01_short_video_comment_reply",
         "20261102_01_user_feedback",
         "20261104_01_good_news",
         "20261106_01_profile_completion_grandfather",
         "20261106_02_community_post_remind",
+        "20261109_01_profile_completion_missing_rows",
     ]
     for entry in manifest["versions"]:
         for direction in ("up", "down", "verify", "verify_previous"):

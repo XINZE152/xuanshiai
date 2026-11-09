@@ -115,7 +115,7 @@
       "up": "20260905_02_memory_projection_up.sql",
       "down": "20260905_02_memory_projection_down.sql",
       "sha256": {
-        "up": "dcdf257a2360c13f540f77878a25460385bccf1279e93723909caeda4e745ff8",
+        "up": "9a8eb7b62e85926d0eb284460bc3dc9a7cef546a8ca799d3aab120a238ec72cc",
         "down": "17268c0fb026a70613e69f5e6e191869d99d6a0842031be1143477afa12fe8df"
       }
     },

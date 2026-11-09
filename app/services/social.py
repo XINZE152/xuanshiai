@@ -1226,6 +1226,20 @@ async def moderate_content(
         "source_report_id": source_report_id if hide else None,
         "expected_report_id": expected_report_id,
     }
+    post_author_id: int | None = None
+    post_previous_status: int | None = None
+    if target_type == "post" and not hide:
+        previous = await db.execute(
+            text(
+                "SELECT user_id, moderation_status FROM community_post "
+                "WHERE id = :target_id"
+            ),
+            {"target_id": target_id},
+        )
+        row = previous.mappings().first()
+        if row is not None:
+            post_author_id = int(row["user_id"])
+            post_previous_status = int(row.get("moderation_status") or 0)
     if target_type == "post":
         result = await db.execute(
             text(
@@ -1281,6 +1295,28 @@ async def moderate_content(
             raise HTTPException(404, detail="社区媒体不存在")
     else:
         raise HTTPException(422, detail="不支持的内容类型")
+
+    if target_type == "post" and not hide and post_previous_status == 0:
+        remind_rows = (
+            await db.execute(
+                text(
+                    """SELECT user_id FROM community_post_remind
+                       WHERE post_id = :post_id ORDER BY id"""
+                ),
+                {"post_id": target_id},
+            )
+        ).mappings().all()
+        for item in remind_rows:
+            await emit_notification(
+                db,
+                recipient_user_id=int(item["user_id"]),
+                actor_user_id=post_author_id,
+                event_type="community_post_remind",
+                title="有人提醒你看一条动态",
+                content="你被提醒查看一条新动态",
+                target_type="community_post",
+                target_id=target_id,
+            )
 
     if actor_id is not None:
         await db.execute(

@@ -412,6 +412,7 @@ class DatabaseManager:
                 "hometown_completed": "`hometown_completed` tinyint NOT NULL DEFAULT '0'",
                 "mbti_completed": "`mbti_completed` tinyint NOT NULL DEFAULT '0'",
                 "single_pledge_completed": "`single_pledge_completed` tinyint NOT NULL DEFAULT '0'",
+                "completion_grandfathered": "`completion_grandfathered` tinyint NOT NULL DEFAULT '0' COMMENT '1=保留旧完整度规则直到下次主动编辑'",
             },
             "user_privacy": {
                 "profile_visibility": "`profile_visibility` varchar(16) NOT NULL DEFAULT 'all' COMMENT '资料可见性：all/friends/only_me'",
@@ -3490,6 +3491,7 @@ class DatabaseManager:
             AI_TABLES,
             ensure_ai_compatibility_engine_columns,
             ensure_ai_legacy_columns,
+            ensure_ai_memory_projection_unique_keys,
             ensure_ai_profile_entry_columns,
             ensure_ai_profile_journey_columns,
             ensure_ai_profile_session_columns,
@@ -3602,10 +3604,14 @@ class DatabaseManager:
         # NOT EXISTS 直接创建（与 reviewed migration 同源）。
         ensure_ai_profile_journey_columns(cursor)
         # Task 2 additive AI fields are safe to backfill during bootstrap;
-        # constraint/index changes remain in the reviewed migration runner.
+        # constraint/index changes remain in the reviewed migration runner
+        # —— 但投影表的两个唯一键是例外：reviewed migration 里同名的
+        # CREATE TABLE IF NOT EXISTS 在“表已由 bootstrap 建出”时是空操作，
+        # 迁移永远补不上这两个键，必须在这里补齐（见 ai_schema 函数注释）。
         ensure_ai_legacy_columns(cursor)
         ensure_derivation_task10_columns(cursor)
         ensure_ai_retention_indexes(cursor)
+        ensure_ai_memory_projection_unique_keys(cursor)
         ensure_derivation_retention_indexes(cursor)
 
         self._backfill_comment_roots(cursor)
