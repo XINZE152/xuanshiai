@@ -100,6 +100,7 @@ def _manifest() -> dict[str, Any]:
 
 
 def _statements(path: Path) -> list[str]:
+    """Read a SQL migration file into individual statements."""
     chunks: list[str] = []
     current: list[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():

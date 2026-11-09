@@ -110,7 +110,7 @@ jobs:
       - name: Ruff (AI and voice scope)
         run: >-
           uv run --no-sync ruff check
-          app/api/routes/ai_advisor.py app/api/routes/ai_compatibility.py app/api/routes/voice.py
+          app/api/routes/ai_advisor.py app/api/routes/ai_roleplay.py app/api/routes/ai_profile_metrics.py app/api/routes/ai_compatibility.py app/api/routes/voice.py
           app/api/routes/voice_moxiang.py app/api/routes/voice_ws.py
           app/core/config.py app/core/security.py app/main.py
           app/schemas/ai_advisor.py app/schemas/ai.py
@@ -118,7 +118,7 @@ jobs:
           app/services/voice/audio_access.py app/services/voice/gateway.py
           app/services/voice/providers.py app/services/voice/realtime/context.py
           app/services/voice/realtime/moxiang_bridge.py
-          tests/test_ai_advisor.py tests/test_ai_advisor_output_locale.py
+          tests/test_ai_advisor.py tests/test_ai_advisor_output_locale.py tests/test_ai_roleplay.py
           tests/test_ai_api_contracts.py tests/test_ai_config_hardening.py
           tests/test_ai_compatibility_visibility_diagnostics.py
           tests/test_ai_schema_and_provider.py tests/test_ai_voice_audio_access.py
@@ -133,6 +133,7 @@ jobs:
           uv run --no-sync pytest
           tests/test_ai_advisor.py
           tests/test_ai_advisor_output_locale.py
+          tests/test_ai_roleplay.py
           tests/test_ai_schema_and_provider.py
           tests/test_ai_api_contracts.py
           tests/test_ai_config_hardening.py

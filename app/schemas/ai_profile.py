@@ -716,3 +716,33 @@ class ContinuousTurnsResponse(BaseModel):
 
 class ContinuousConfirmRequest(BaseModel):
     expected_revision: int = Field(..., ge=0)
+
+
+# 画像指标历史响应模型（一期并行改动：知遇AI报告与数据报表）
+class ProfileMetricDimension(BaseModel):
+    """单一维度的覆盖度指标。"""
+    key: str
+    percent: float = Field(ge=0, le=100)
+    evidence_count: int = Field(ge=0)
+
+
+class ProfileMetricPoint(BaseModel):
+    """单个版本的指标快照点。"""
+    revision_id: int
+    revision_no: int
+    published_at: str | None = None
+    overall_percent: float | None = Field(default=None, ge=0, le=100)
+    confirmed_field_count: int | None = Field(default=None, ge=0)
+    entry_count: int | None = Field(default=None, ge=0)
+    dimensions: list[ProfileMetricDimension] = Field(default_factory=list)
+
+
+class ProfileMetricHistoryResponse(BaseModel):
+    """画像指标历史曲线数据。"""
+    subject: ProfileSubject
+    points: list[ProfileMetricPoint] = Field(default_factory=list, description="按 published_at 升序")
+    has_more: bool = False
+    notice: str = Field(
+        default="理解覆盖度仅供参考，不代表人格分或完成度。数值来自已确认画像数据。",
+        description="口径说明"
+    )

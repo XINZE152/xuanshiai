@@ -9,6 +9,8 @@ from app.api.routes import (
     ai_recommend,
     ai_profile,
     ai_profile_card,
+    ai_profile_metrics,
+    ai_roleplay,
     ai_search,
     ai_tasks,
     ai_moxiang,
@@ -236,11 +238,13 @@ api_router.include_router(ai_consents.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_capabilities.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_profile.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_profile_card.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_roleplay.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_search.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_compatibility.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_recommend.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_moxiang.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_memory.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_profile_metrics.router, prefix="/ai", tags=["AI"])
 api_router.include_router(voice.router, prefix="/voice", tags=["语音"])
 api_router.include_router(voice_ws.router, prefix="/voice", tags=["语音"])
 api_router.include_router(
