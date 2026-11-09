@@ -150,7 +150,14 @@ python database_setup_marriage.py
 
 ### 聊天消息幂等键迁移
 
-生产/预发布环境保持 `AUTO_INIT_DB=false`，发布前对已选定并备份的目标库执行 `migrations/chat/20260923_01_chat_message_idempotency_up.sql`，再执行对应 `verify.sql` 并按 `migrations/chat/README.md` 核验；不得在未确认目标环境前执行。开发/测试初始化会通过 `database_setup_marriage.py` 幂等补齐该列与唯一键。回滚步骤见同目录 `README.md`，down 会删除新列中已写入的幂等键。
+生产/预发布环境保持 `AUTO_INIT_DB=false`。chat 域已有 manifest 与通用 runner，发布前在已备份的目标库执行：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/manage_domain_migration.py up --domain chat --target test
+.\.venv\Scripts\python.exe scripts\manage_domain_migration.py verify --domain chat --target test
+```
+
+开发/测试初始化会通过 `database_setup_marriage.py` 幂等补齐同一列和唯一键。回滚步骤见同目录 `README.md`，down 会删除新列中已写入的幂等键。
 
 ### 业务 schema 缺口迁移 runner
 
@@ -179,6 +186,26 @@ $env:BUSINESS_MIGRATION_ALLOW_DOWN = "true"
 
 至此 `database_setup_marriage.py` 中 `_ensure_required_columns` 的 101 个隐藏补列全部有对应迁移；
 `verify_previous` 用于确认 down 之后这些列确实消失。
+
+### paper_plane / chat 域迁移 runner
+
+paper_plane 与 chat 没有独立业务 runner 历史。`scripts/manage_domain_migration.py` 按各自
+`migrations/<domain>/manifest.json` 执行 up/down/verify，并把每次尝试写入 `domain_schema_migration`
+（`domain + version` 主键）。`verify_mode=empty` 要求 verify 返回 0 行；`verify_mode=info` 只执行并打印行数
+（chat 现有 verify 是多条信息性查询）。
+
+```powershell
+# 只跑某个版本（推荐增量发布）
+.\.venv\Scripts\python.exe scripts\manage_domain_migration.py up --domain paper_plane --target test --version 20261109_01_unlock_cost_default
+.\.venv\Scripts\python.exe scripts\manage_domain_migration.py verify --domain paper_plane --target test --version 20261109_01_unlock_cost_default
+
+# chat
+.\.venv\Scripts\python.exe scripts\manage_domain_migration.py up --domain chat --target test
+.\.venv\Scripts\python.exe scripts\manage_domain_migration.py status --domain chat --target test
+```
+
+runner 拒绝 `DELIMITER`，因此 down 必须是逐条可执行的 SQL；Q45 的 down 已按此规则改写。生产仍保持
+`AUTO_INIT_DB=false`，不在应用启动时自动跑迁移。
 
 ### Schema 契约与 baseline
 

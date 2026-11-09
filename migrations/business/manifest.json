@@ -120,6 +120,19 @@
       }
     },
     {
+      "version": "20261101_01_short_video_comment_reply",
+      "up": "20261101_01_short_video_comment_reply_up.sql",
+      "down": "20261101_01_short_video_comment_reply_down.sql",
+      "verify": "20261101_01_short_video_comment_reply_verify.sql",
+      "verify_previous": "20261101_01_short_video_comment_reply_verify_previous.sql",
+      "sha256": {
+        "up": "4710378b8defe3d796c9c5ac1337c4e5e56ca8d7f66510209e63f57b67e7f84e",
+        "down": "efded5c1de8a1adba59b4a14a196256ebeba946690fb101ff53801043a724f45",
+        "verify": "469910ec35290621475b0425328289ecaa2d76e4fb580d6e49eecbbdbc981530",
+        "verify_previous": "cdb17dbd40212b2925da0575b3cfd78e6317e5cfca33543df5804af992bcb15b"
+      }
+    },
+    {
       "version": "20261102_01_user_feedback",
       "up": "20261102_01_user_feedback_up.sql",
       "down": "20261102_01_user_feedback_down.sql",
