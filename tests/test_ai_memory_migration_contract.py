@@ -303,16 +303,30 @@ def test_verify_tolerates_bootstrap_index_names() -> None:
 
 
 def test_bootstrap_projection_declares_concurrency_unique_keys() -> None:
-    """投影表两个唯一键必须写在 bootstrap 的 CREATE TABLE 里。
+    """投影表只用版本唯一键做并发护栏，输入哈希不得建唯一键。
 
     写入侧（``app/services/ai/memory/projections.py``）先取 MAX(version) 再 INSERT，
-    ``FOR UPDATE`` 在该维度还没有投影行时锁不住任何行，只能靠唯一键把并发写压成
-    IntegrityError 再回读先到者。缺键会导致并发写出重复投影。
+    ``FOR UPDATE`` 在该维度还没有投影行时锁不住任何行，靠版本唯一键把同版本并发写
+    压成 IntegrityError 再回读先到者。
+
+    但不能对 ``projection_input_hash`` 建唯一键：同一内容在换授权代
+    （``consent_snapshot_id`` / ``policy_revision`` 变化）时必须新建版本，哈希唯一
+    会让合法重建撞 1062（集成用例
+    ``test_same_hash_projection_rebinds_current_authorization``）。
     """
-    from app.db.ai_schema import AI_TABLES
+    from app.db.ai_schema import AI_MEMORY_PROJECTION_LEGACY_UNIQUE_KEYS, AI_TABLES
 
     ddl = AI_TABLES["ai_memory_projection"]
     version_cols = "(`owner_user_id`, `function_key`, `purpose`, `data_category`, `projection_version`)"
     input_cols = "(`owner_user_id`, `function_key`, `purpose`, `data_category`, `projection_input_hash`)"
     assert f"UNIQUE KEY `uk_ai_memory_projection_version` {version_cols}" in ddl
-    assert f"UNIQUE KEY `uk_ai_memory_projection_input` {input_cols}" in ddl
+    assert f"UNIQUE KEY `uk_ai_memory_projection_input` {input_cols}" not in ddl
+    assert (
+        "owner_user_id",
+        "function_key",
+        "purpose",
+        "data_category",
+        "projection_input_hash",
+    ) in AI_MEMORY_PROJECTION_LEGACY_UNIQUE_KEYS
+    reviewed = _read(MIGRATION_ROOT / "20260905_02_memory_projection_up.sql")
+    assert f"UNIQUE KEY `uk_ai_memory_projection_input` {input_cols}" not in reviewed

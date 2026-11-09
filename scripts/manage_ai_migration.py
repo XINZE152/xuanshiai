@@ -454,8 +454,9 @@ def _verify(
             projection_indexes = _index_names(cursor, "ai_memory_projection")
             if "uk_ai_memory_projection_version" not in projection_indexes:
                 raise MigrationError("projection version unique key missing")
-            if "uk_ai_memory_projection_input" not in projection_indexes:
-                raise MigrationError("projection input hash unique key missing")
+            # 不再要求 (维度 + projection_input_hash) 唯一键：同一内容换授权代
+            # （consent_snapshot_id / policy_revision 变化）时必须新建版本，
+            # 该唯一键会让合法新版本抛 1062。仅版本唯一键是并发护栏。
             if _column_nullable(cursor, "ai_memory_projection", "entries_json") != "NO":
                 raise MigrationError("ai_memory_projection.entries_json must be NOT NULL")
     else:

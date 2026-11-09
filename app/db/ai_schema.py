@@ -862,13 +862,13 @@ AI_TABLES = {
             `consent_snapshot_id` varchar(96) NOT NULL,
             `built_at` datetime NOT NULL,
             PRIMARY KEY (`projection_id`),
-            -- 与 migrations/ai/20260905_02_memory_projection_up.sql 同义：并发重建时
-            -- 靠唯一键把后到者压成 IntegrityError，写入侧据此回读先到者的行
+            -- 并发护栏只用版本唯一键：写入先取 MAX(projection_version) 再 INSERT，
+            -- 同版本并发写由该键压成 IntegrityError，写入侧据此回读先到者的行
             -- （app/services/ai/memory/projections.py 的 IntegrityError 分支）。
-            -- 全新库的表由这里建出，reviewed migration 的 CREATE TABLE IF NOT EXISTS
-            -- 是空操作，所以这两个唯一键必须在这里就声明。
+            -- 不能给 projection_input_hash 加唯一键：同内容在换授权代
+            -- （consent_snapshot_id / policy_revision 变化）时必须新建版本，
+            -- 哈希唯一会把这些合法新版本挡成 1062。
             UNIQUE KEY `uk_ai_memory_projection_version` (`owner_user_id`, `function_key`, `purpose`, `data_category`, `projection_version`),
-            UNIQUE KEY `uk_ai_memory_projection_input` (`owner_user_id`, `function_key`, `purpose`, `data_category`, `projection_input_hash`),
             KEY `idx_ai_memory_projection_owner_scope` (`owner_user_id`, `function_key`, `purpose`, `data_category`, `status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI记忆投影'
     """,
@@ -1419,23 +1419,30 @@ AI_MEMORY_PROJECTION_UNIQUE_KEYS: dict[str, tuple[str, ...]] = {
         "data_category",
         "projection_version",
     ),
-    "uk_ai_memory_projection_input": (
+}
+
+# 历史版本曾按 (维度 + projection_input_hash) 建唯一键，与 projections.py
+# “同内容换授权代必须新建版本”（Never rebind payload created under another
+# consent generation）直接冲突：合法新版本会被压成 1062。该键已在源码与迁移里
+# 移除，这里按列组合识别并清理，兼容早期 bootstrap 已补出该键的库。
+AI_MEMORY_PROJECTION_LEGACY_UNIQUE_KEYS: tuple[tuple[str, ...], ...] = (
+    (
         "owner_user_id",
         "function_key",
         "purpose",
         "data_category",
         "projection_input_hash",
     ),
-}
+)
 
 
 def ensure_ai_memory_projection_unique_keys(cursor: Any) -> None:
-    """幂等补齐 ``ai_memory_projection`` 的两个唯一约束。
+    """幂等补齐 ``ai_memory_projection`` 的并发护栏唯一键。
 
-    这两条唯一键是写入侧的并发护栏：``app/services/ai/memory/projections.py`` 先
-    ``SELECT MAX(projection_version)`` 再 INSERT，而 ``FOR UPDATE`` 在该维度还没有
-    任何投影行时锁不住任何东西——只能靠唯一键把后到的并发写压成 IntegrityError，
-    再由写入侧回读先到者的行。缺键时并发会写出重复投影，读取端因此看到两份版本。
+    写入侧 ``app/services/ai/memory/projections.py`` 先 ``SELECT
+    MAX(projection_version)`` 再 INSERT，而 ``FOR UPDATE`` 在该维度还没有任何投影
+    行时锁不住任何东西——只能靠版本唯一键把后到的并发写压成 IntegrityError，再由
+    写入侧回读先到者的行。缺键时并发会写出重复投影，读取端因此看到两份版本。
 
     全新库的这张表由本文件的 ``CREATE TABLE IF NOT EXISTS`` 建出，
     ``migrations/ai/20260905_02_memory_projection_up.sql`` 里同名的 CREATE 是空操作，
@@ -1472,4 +1479,18 @@ def ensure_ai_memory_projection_unique_keys(cursor: Any) -> None:
         except Exception as exc:  # noqa: BLE001 - 重复数据会挡住补键，交给契约检查暴露
             logger.warning(
                 "⚠️ 无法补建唯一键 ai_memory_projection.%s：%s", index_name, exc
+            )
+    for legacy_columns in AI_MEMORY_PROJECTION_LEGACY_UNIQUE_KEYS:
+        legacy_index = existing.get(legacy_columns)
+        if legacy_index is None:
+            continue
+        try:
+            cursor.execute(
+                f"ALTER TABLE `ai_memory_projection` DROP INDEX `{legacy_index}`"
+            )
+        except Exception as exc:  # noqa: BLE001 - 清理失败不阻断 bootstrap
+            logger.warning(
+                "⚠️ 无法清理历史唯一键 ai_memory_projection.%s：%s",
+                legacy_index,
+                exc,
             )
