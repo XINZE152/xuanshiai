@@ -170,6 +170,19 @@
         "verify": "7ec91752f26f7a657cba3ce86fa8d0741a3847b2bf1fdc9fc5c76fad9166cf39",
         "verify_previous": "e2ef098e209256431da345dfa1e8cbf01c4dedf49bbf305bc19390559735ae38"
       }
+    },
+    {
+      "version": "20261109_01_profile_completion_missing_rows",
+      "up": "20261109_01_profile_completion_missing_rows_up.sql",
+      "down": "20261109_01_profile_completion_missing_rows_down.sql",
+      "verify": "20261109_01_profile_completion_missing_rows_verify.sql",
+      "verify_previous": "20261109_01_profile_completion_missing_rows_verify_previous.sql",
+      "sha256": {
+        "up": "ccfb5d98699a39ee8a6831205798be5044fc29f7f16188b3b1e4c4be13cbf204",
+        "down": "512da333a90c0b6045f3c6aa754010d66810a2d174f394fec12c8135cf31bdce",
+        "verify": "e8becac9785cf62fc8577b753215563b937903ba17ac73df4c49ba1932c0d58b",
+        "verify_previous": "d61bbe7bcba4a38e5536d76ce9ddf196864998812d1e4b574478156e778cc1e1"
+      }
     }
   ]
 }

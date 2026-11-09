@@ -412,6 +412,7 @@ class DatabaseManager:
                 "hometown_completed": "`hometown_completed` tinyint NOT NULL DEFAULT '0'",
                 "mbti_completed": "`mbti_completed` tinyint NOT NULL DEFAULT '0'",
                 "single_pledge_completed": "`single_pledge_completed` tinyint NOT NULL DEFAULT '0'",
+                "completion_grandfathered": "`completion_grandfathered` tinyint NOT NULL DEFAULT '0' COMMENT '1=保留旧完整度规则直到下次主动编辑'",
             },
             "user_privacy": {
                 "profile_visibility": "`profile_visibility` varchar(16) NOT NULL DEFAULT 'all' COMMENT '资料可见性：all/friends/only_me'",

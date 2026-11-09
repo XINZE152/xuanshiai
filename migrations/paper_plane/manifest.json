@@ -16,6 +16,13 @@
       "up": "20261106_01_unlock_cost_up.sql",
       "down": "20261106_01_unlock_cost_down.sql",
       "verify": "20261106_01_unlock_cost_verify.sql"
+    },
+    {
+      "version": "20261109_01_unlock_cost_default",
+      "up": "20261109_01_unlock_cost_default_up.sql",
+      "down": "20261109_01_unlock_cost_default_down.sql",
+      "verify": "20261109_01_unlock_cost_default_verify.sql",
+      "verify_previous": "20261109_01_unlock_cost_default_verify_previous.sql"
     }
   ]
 }
