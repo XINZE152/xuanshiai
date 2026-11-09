@@ -67,6 +67,8 @@ scripts/*
 !scripts/migrate_admin_public_media.py
 # 7.2 迁移差集检查脚本必须随仓库发布，团队成员与 CI 均可直接执行
 !scripts/check_migrations.py
+# P0 发布前 schema 预检：schema-contract/backend-ci 引用，必须随仓库发布
+!scripts/check_release_schema.py
 # 业务迁移执行器：tests/test_business_schema_migration_contract.py 直接导入
 !scripts/manage_business_migration.py
 # 微信支付 real 模式预检与安全暂停脚本：backend-ci.yml 的 admin Ruff 门禁引用
