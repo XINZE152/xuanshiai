@@ -29,6 +29,16 @@ MANIFEST_PATH = MIGRATION_ROOT / "manifest.json"
 MIGRATION_LOCK = "xuanshiai_ai_schema_migration_v1"
 IGNORABLE_MYSQL_ERRORS = {1050, 1060, 1061, 1091}
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+# 同一约束存在两套命名：reviewed migration 里的名字 vs bootstrap
+# （app/db/ai_schema.py）里的名字。全新库的表由 bootstrap 建出，迁移文件里的
+# CREATE TABLE IF NOT EXISTS 是空操作，所以两套名字都要接受，否则校验器在
+# “刚 bootstrap 完的全新库”上永远不可能通过。
+MEMORY_EVENT_IDEM_INDEX_NAMES = frozenset(
+    {"uk_ai_memory_event_owner_idem", "uk_ai_memory_event_owner_idempotency"}
+)
+PROJECTION_GRANT_UNIQUE_INDEX_NAMES = frozenset(
+    {"uk_ai_memory_projection_grant_tuple", "uk_ai_memory_projection_grant_scope"}
+)
 
 
 class MigrationError(RuntimeError):
@@ -377,8 +387,15 @@ def _verify(
             event_indexes = _index_names(cursor, "ai_memory_event")
             if "uk_ai_memory_event_owner_seq" not in event_indexes:
                 raise MigrationError("memory event owner+server_seq unique key missing")
-            if "uk_ai_memory_event_owner_idem" not in event_indexes:
-                raise MigrationError("memory event owner+idempotency unique key missing")
+            # 同一个唯一约束存在两套命名：bootstrap（app/db/ai_schema.py:731）用
+            # uk_ai_memory_event_owner_idempotency，本迁移文件用 ..._owner_idem。
+            # 全新库的表由 bootstrap 建出，up 里 CREATE TABLE IF NOT EXISTS 是空操作，
+            # 迁移写的那套名字不会落地，所以两种命名都必须接受。
+            if not MEMORY_EVENT_IDEM_INDEX_NAMES & event_indexes:
+                raise MigrationError(
+                    "memory event owner+idempotency unique key missing "
+                    f"(expected one of {sorted(MEMORY_EVENT_IDEM_INDEX_NAMES)})"
+                )
             claim_indexes = _index_names(cursor, "ai_memory_claim")
             if "uk_ai_memory_claim_canonical" not in claim_indexes:
                 raise MigrationError("memory claim canonical unique key missing")
@@ -426,13 +443,20 @@ def _verify(
             if missing_projection_columns:
                 raise MigrationError(f"memory projection schema incomplete: {missing_projection_columns}")
             grant_indexes = _index_names(cursor, "ai_memory_projection_grant")
-            if "uk_ai_memory_projection_grant_tuple" not in grant_indexes:
-                raise MigrationError("projection grant tuple unique key missing")
+            # 同一唯一约束的两套命名：bootstrap 用 ..._grant_scope，
+            # 本迁移用 ..._grant_tuple（列组合相同，都是 owner+function+purpose+category）。
+            # 全新库的表由 bootstrap 建出，迁移里的名字不会落地，两种都要接受。
+            if not PROJECTION_GRANT_UNIQUE_INDEX_NAMES & grant_indexes:
+                raise MigrationError(
+                    "projection grant tuple unique key missing "
+                    f"(expected one of {sorted(PROJECTION_GRANT_UNIQUE_INDEX_NAMES)})"
+                )
             projection_indexes = _index_names(cursor, "ai_memory_projection")
             if "uk_ai_memory_projection_version" not in projection_indexes:
                 raise MigrationError("projection version unique key missing")
-            if "uk_ai_memory_projection_input" not in projection_indexes:
-                raise MigrationError("projection input hash unique key missing")
+            # 不再要求 (维度 + projection_input_hash) 唯一键：同一内容换授权代
+            # （consent_snapshot_id / policy_revision 变化）时必须新建版本，
+            # 该唯一键会让合法新版本抛 1062。仅版本唯一键是并发护栏。
             if _column_nullable(cursor, "ai_memory_projection", "entries_json") != "NO":
                 raise MigrationError("ai_memory_projection.entries_json must be NOT NULL")
     else:
