@@ -50,6 +50,7 @@ class MemberListItem(BaseModel):
     company: str | None = None
     match_status: int | None = None
     auth_status: int | None = None
+    profile_review_status: int = 0
     intention_level: int | None = None
     last_follow_at: datetime | None = None
     next_follow_at: datetime | None = None

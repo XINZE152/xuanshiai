@@ -74,6 +74,7 @@ class MatchmakerMemberUpdate(BaseModel):
     )
     intention_level: Literal[1, 2, 3] | None = Field(default=None, description="客户意向：1低、2中、3高")
     auth_status: Literal[0, 1, 2, 3] | None = Field(default=None, description="认证审核状态：0待审、1审核中、2通过、3未通过")
+    profile_review_status: Literal[0, 1, 2, 3] | None = Field(default=None, description="资料审核：0待审核、1未通过、2已通过、3已到店核验")
     wechat_added: Literal[0, 1, 2] | None = Field(default=None, description="加微信结果：0未添加、1已加上、2没加上")
     # 超级管理里的两个推荐位开关。库里是 tinyint(0/1)，用 bool 收口更贴合界面语义。
     promoted: bool | None = Field(default=None, description="置顶推荐：true 置顶中 / false 未置顶")

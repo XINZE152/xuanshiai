@@ -39,6 +39,7 @@ from app.schemas.matchmaker import (
 )
 from app.services.notifications import emit_notification
 from app.services.social import ensure_users_can_interact
+from app.services.matchmaker_staff_admin import STAFF_BASE, STAFF_SUCCESS_COUNT
 
 
 def _datetime(value: Any) -> datetime:
@@ -108,6 +109,8 @@ async def list_matchmakers(
     available: bool | None = None,
     admin: CurrentMatchmakerAdmin | None = None,
 ) -> MatchmakerPage:
+    if ranking:
+        return await _list_public_ranking(db, page, page_size)
     order = "success_count DESC, rating_score DESC, app.reviewed_at DESC, app.id DESC" if ranking else "app.reviewed_at DESC, app.id DESC"
     params = {"limit": page_size, "offset": (page - 1) * page_size}
     filters = ["app.application_type = 'service_matchmaker'", "app.status = 1"]
@@ -168,11 +171,42 @@ async def list_matchmakers(
     return MatchmakerPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
+async def _list_public_ranking(db: AsyncSession, page: int, page_size: int) -> MatchmakerPage:
+    """Public projection of the admin staff roster; never expose admin fields."""
+    params = {"limit": page_size, "offset": (page - 1) * page_size}
+    base = f"{STAFF_BASE} WHERE p.deleted_at IS NULL"
+    result = await db.execute(text(f"""SELECT u.id AS user_id, u.nickname, u.avatar,
+        ma.intro, ma.slogan, ma.application_details,
+        {STAFF_SUCCESS_COUNT} AS success_count,
+        COALESCE((SELECT AVG(score) FROM matchmaker_rating WHERE matchmaker_id = u.id), 0) AS rating_score,
+        (SELECT COUNT(*) FROM matchmaker_rating WHERE matchmaker_id = u.id) AS rating_count,
+        (SELECT MAX(status) FROM user_role WHERE user_id = u.id AND role_code = 'service_matchmaker') AS role_status
+        {base}
+        ORDER BY success_count DESC, rating_score DESC, ma.reviewed_at DESC, ma.id DESC
+        LIMIT :limit OFFSET :offset"""), params)
+    count = await db.execute(text(f"SELECT COUNT(*) {base}"))
+    total = int(count.scalar() or 0)
+    return MatchmakerPage(items=[_card(row) for row in result.mappings().all()], page=page,
+                         page_size=page_size, total=total, has_more=page * page_size < total)
+
+
 async def get_matchmaker(
     db: AsyncSession,
     matchmaker_id: int,
     admin: CurrentMatchmakerAdmin | None = None,
 ) -> MatchmakerCard:
+    if admin is None:
+        result = await db.execute(text(f"""SELECT u.id AS user_id, u.nickname, u.avatar,
+            ma.intro, ma.slogan, ma.application_details, {STAFF_SUCCESS_COUNT} AS success_count,
+            COALESCE((SELECT AVG(score) FROM matchmaker_rating WHERE matchmaker_id = u.id), 0) AS rating_score,
+            (SELECT COUNT(*) FROM matchmaker_rating WHERE matchmaker_id = u.id) AS rating_count,
+            (SELECT MAX(status) FROM user_role WHERE user_id = u.id AND role_code = 'service_matchmaker') AS role_status
+            {STAFF_BASE} WHERE p.deleted_at IS NULL AND u.id = :matchmaker_id"""),
+            {"matchmaker_id": matchmaker_id})
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(404, detail="服务红娘不存在或暂不可用")
+        return _card(row)
     params: dict[str, object] = {"matchmaker_id": matchmaker_id}
     scope_sql = ""
     if admin is not None:

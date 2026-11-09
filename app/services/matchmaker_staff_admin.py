@@ -88,17 +88,20 @@ def _item(row: dict) -> MatchmakerStaffItem:
     )
 
 
+STAFF_SUCCESS_COUNT = "(SELECT COUNT(*) FROM matchmaker_service s WHERE s.matchmaker_id = u.id AND s.status = 2)"
+STAFF_BASE = """FROM users u JOIN user_matchmaker_apply ma ON ma.user_id = u.id AND ma.application_type = 'service_matchmaker' AND ma.status = 1
+    LEFT JOIN matchmaker_profile p ON p.user_id = u.id"""
+
 SELECT_STAFF = """SELECT u.id, u.avatar, u.nickname, u.phone, u.created_at, u.updated_at,
     p.wechat, p.wechat_qr, p.role_tag, p.visible, p.locked, p.description, p.slogan, p.sort, p.contact_editable, p.lock_at, p.commission_level_id,
     l.name commission_level_name, l.rate_percent,
     a.id account_id, a.username,
     o.id store_id, COALESCE(o.display_name, o.name) store_name,
-    (SELECT COUNT(*) FROM matchmaker_service s WHERE s.matchmaker_id = u.id AND s.status = 2) success_count,
+    {success_count} success_count,
     (SELECT COUNT(*) FROM matchmaker_menu_permission mmp WHERE mmp.matchmaker_user_id = u.id) menu_permission_count,
     (CASE WHEN {configured_state} THEN 1 ELSE 0 END) menu_permission_configured,
     (SELECT COALESCE(SUM(e.amount), 0) FROM commission_entry e WHERE e.beneficiary_type = 'service_matchmaker' AND e.beneficiary_id = u.id AND e.status <> 'REVERSED') commission_amount
-    FROM users u JOIN user_matchmaker_apply ma ON ma.user_id = u.id AND ma.application_type = 'service_matchmaker' AND ma.status = 1
-    LEFT JOIN matchmaker_profile p ON p.user_id = u.id
+    {staff_base}
     LEFT JOIN commission_level l ON l.id = p.commission_level_id
     LEFT JOIN matchmaker_admin_account a ON a.matchmaker_user_id = u.id
     LEFT JOIN organization_member om ON om.user_id = u.id AND om.role_code = 'store_matchmaker' AND om.status = 1
@@ -132,7 +135,7 @@ async def _has_permission_state_table(db: AsyncSession) -> bool:
 
 async def _staff_select(db: AsyncSession) -> str:
     configured = _PERMISSION_CONFIGURED_SQL if await _has_permission_state_table(db) else "0"
-    return SELECT_STAFF.format(configured_state=configured)
+    return SELECT_STAFF.format(configured_state=configured, success_count=STAFF_SUCCESS_COUNT, staff_base=STAFF_BASE)
 
 
 async def search_user_candidates(db: AsyncSession, keyword: str, limit: int = 10) -> list[MatchmakerUserCandidate]:

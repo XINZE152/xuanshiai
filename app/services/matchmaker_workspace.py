@@ -1508,7 +1508,7 @@ def _append_workspace_member_filters(where: list[str], params: dict[str, object]
         "heightRange": {"under160": "p.height < 160", "160-169": "p.height BETWEEN 160 AND 169", "170-179": "p.height BETWEEN 170 AND 179", "over180": "p.height >= 180"},
         "income": {"under10": "p.income < 100000", "10-20": "p.income >= 100000 AND p.income < 200000", "30-50": "p.income >= 300000 AND p.income < 500000", "50-100": "p.income >= 500000 AND p.income < 1000000", "over100": "p.income >= 1000000"},
     }
-    allowed = set(exact) | set(choices) | {"education", "hometown", "residence", "household", "weight", "mine"}
+    allowed = set(exact) | set(choices) | {"education", "hometown", "residence", "household", "weight", "mine", "online_vip", "offline_vip"}
     if any(key not in allowed or len(value) > 128 for key, value in values.items()):
         raise HTTPException(422, detail="不支持的筛选条件")
     for key, value in values.items():
@@ -1546,6 +1546,15 @@ def _append_workspace_member_filters(where: list[str], params: dict[str, object]
                 raise HTTPException(422, detail=f"无效的筛选条件：{key}")
             else:
                 where.append(f"({choices[key][value]})")
+        elif key == "online_vip":
+            if value != "1":
+                raise HTTPException(422, detail="无效的筛选条件：online_vip")
+            where.append("EXISTS (SELECT 1 FROM user_membership vip WHERE vip.user_id = u.id AND vip.status <> 3)")
+        elif key == "offline_vip":
+            if value != "1":
+                raise HTTPException(422, detail="无效的筛选条件：offline_vip")
+            # 与管理员端 /admin/offline-vips 同源，包含服务到期记录，排除软删除记录。
+            where.append("EXISTS (SELECT 1 FROM offline_vip vip WHERE vip.user_id = u.id AND vip.deleted_at IS NULL)")
         elif key == "mine":
             if value != "1":
                 raise HTTPException(422, detail="无效的筛选条件：mine")
@@ -1617,9 +1626,14 @@ async def list_workspace_members(
     review_status: str | None,
     search: str | None,
     filters: str | None = None,
+    all_members: bool = False,
+    abandoned: bool = False,
 ) -> WorkspaceMemberPage:
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
-    if review_status == "REJECTED" and actor.organization_id is not None:
+    if all_members:
+        # 资料待审“全部”对工作台红娘展示 CRM 的全部未软删会员；写操作仍独立校验归属。
+        where = ["u.deleted_at IS NULL"]
+    elif review_status == "REJECTED" and actor.organization_id is not None:
         params["pool_organization_id"] = actor.organization_id
         where = ["EXISTS (SELECT 1 FROM resource_assignment pool_ra WHERE pool_ra.user_id = u.id AND pool_ra.status = 1 AND pool_ra.organization_id = :pool_organization_id AND pool_ra.id = (SELECT MAX(pool_latest.id) FROM resource_assignment pool_latest WHERE pool_latest.user_id = u.id AND pool_latest.status = 1))"]
     else:
@@ -1627,9 +1641,12 @@ async def list_workspace_members(
     if review_status:
         where.append("COALESCE(mr.status, 'PENDING') = :review_status")
         params["review_status"] = review_status
+    if abandoned:
+        where.append("EXISTS (SELECT 1 FROM member_abandonment ma WHERE ma.user_id = u.id AND ma.restored_at IS NULL)")
     if search:
         where.append(
             "(u.nickname LIKE CONCAT('%', :search, '%') OR CAST(u.id AS CHAR) LIKE CONCAT('%', :search, '%')"
+            " OR ua.real_name LIKE CONCAT('%', :search, '%')"
             " OR REPLACE(COALESCE(u.phone, ''), '-', '') LIKE CONCAT('%', REPLACE(:search, '-', ''), '%'))"
         )
         params["search"] = search
@@ -1642,8 +1659,7 @@ async def list_workspace_members(
         LEFT JOIN user_profile_completion pc ON pc.user_id = u.id
         LEFT JOIN matchmaker_member_review mr ON mr.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(next_follow_at) AS next_follow_at FROM member_follow_up GROUP BY user_id) mf ON mf.user_id = u.id
-        LEFT JOIN (SELECT user_id, MAX(id) AS max_assignment_id FROM resource_assignment WHERE status = 1 GROUP BY user_id) la ON la.user_id = u.id
-        LEFT JOIN resource_assignment ra ON ra.id = la.max_assignment_id
+        LEFT JOIN (SELECT user_id, MAX(matchmaker_id) AS matchmaker_id, MAX(organization_id) AS organization_id FROM resource_assignment WHERE status = 1 GROUP BY user_id) ra ON ra.user_id = u.id
         LEFT JOIN matchmaker_workspace_profile wp ON wp.user_id = ra.matchmaker_id AND wp.status = 1
         LEFT JOIN users mu ON mu.id = ra.matchmaker_id"""
     rows = await db.execute(
@@ -1661,6 +1677,8 @@ async def list_workspace_members(
             COALESCE(wp.display_name, mu.nickname) AS matchmaker_name,
             COALESCE(pc.score, 0) AS profile_completion_score,
             COALESCE(mr.status, 'PENDING') AS review_status, mr.reason AS review_reason,
+            EXISTS (SELECT 1 FROM member_abandonment ma WHERE ma.user_id = u.id AND ma.restored_at IS NULL) AS abandoned,
+            (SELECT ma.reason FROM member_abandonment ma WHERE ma.user_id = u.id AND ma.restored_at IS NULL ORDER BY ma.id DESC LIMIT 1) AS abandoned_reason,
             mr.reviewed_at, mf.next_follow_at, u.created_at {base}
             WHERE {clause} ORDER BY u.id DESC LIMIT :limit OFFSET :offset"""
         ),
@@ -1674,6 +1692,7 @@ async def list_workspace_members(
         page_size=page_size,
         total=total,
         has_more=_page(total, page, page_size),
+        member_pool_version=1,
     )
 
 
@@ -1712,6 +1731,56 @@ def _member_education(row: dict[str, Any]) -> str | None:
         if label is not None:
             return label
     return str(auth_education) if auth_education else None
+
+
+async def _abandonment_operator(db: AsyncSession, actor: WorkspaceActor) -> int:
+    account = await db.scalar(text("SELECT id FROM matchmaker_admin_account WHERE matchmaker_user_id = :uid AND status = 1 ORDER BY id LIMIT 1"), {"uid": actor.user_id})
+    if account is None:
+        raise HTTPException(403, detail="红娘账号未关联有效的后台账号，无法操作会员弃海")
+    return int(account)
+
+
+async def abandon_workspace_member(db: AsyncSession, actor: WorkspaceActor, member_id: int, reason: str) -> None:
+    require_review_authority(actor)
+    reason = reason.strip()
+    if not reason:
+        raise HTTPException(422, detail="请填写弃海原因")
+    operator = await _abandonment_operator(db, actor)
+    params: dict[str, object] = {"member_id": member_id}
+    scope = _member_scope_predicate(actor, params)
+    row = await db.scalar(text(f"SELECT u.id FROM users u WHERE u.id = :member_id AND u.deleted_at IS NULL AND {scope} FOR UPDATE"), params)
+    if row is None:
+        raise HTTPException(404, detail="会员不存在或不在工作范围")
+    active = await db.scalar(text("SELECT id FROM member_abandonment WHERE user_id = :member_id AND restored_at IS NULL LIMIT 1"), params)
+    if active is not None:
+        raise HTTPException(409, detail="该会员已在弃海池")
+    await db.execute(text("INSERT INTO member_abandonment (user_id, reason, abandon_type, abandoned_by) VALUES (:member_id, :reason, 'manual', :operator)"), {"member_id": member_id, "reason": reason, "operator": operator})
+    await _audit(db, actor.user_id, "matchmaker_workspace.member.abandon", "user", member_id, reason)
+    await db.commit()
+
+
+async def pickup_workspace_abandoned_member(db: AsyncSession, actor: WorkspaceActor, member_id: int) -> WorkspaceMemberPickupResult:
+    operator = await _abandonment_operator(db, actor)
+    params: dict[str, object] = {"member_id": member_id}
+    if actor.organization_id is not None:
+        params["pool_org"] = actor.organization_id
+        scope = "EXISTS (SELECT 1 FROM resource_assignment ra WHERE ra.user_id = u.id AND ra.status = 1 AND ra.organization_id = :pool_org)"
+    else:
+        scope = _member_scope_predicate(actor, params)
+    # 未分派会员也可以从弃海池捞取；已分派会员仍受既有工作范围限制。
+    scope = f"({scope} OR NOT EXISTS (SELECT 1 FROM resource_assignment unassigned_ra WHERE unassigned_ra.user_id = u.id AND unassigned_ra.status = 1))"
+    locked = await db.scalar(text(f"SELECT u.id FROM users u WHERE u.id = :member_id AND u.deleted_at IS NULL AND {scope} FOR UPDATE"), params)
+    if locked is None:
+        raise HTTPException(404, detail="会员不存在或不在当前弃海范围")
+    active = await db.scalar(text("SELECT id FROM member_abandonment WHERE user_id = :member_id AND restored_at IS NULL ORDER BY id DESC LIMIT 1 FOR UPDATE"), {"member_id": member_id})
+    if active is None:
+        raise HTTPException(409, detail="该会员已被捞取或不在弃海池")
+    await db.execute(text("UPDATE member_abandonment SET restored_by = :operator, restored_at = UTC_TIMESTAMP(), restore_reason = '红娘捞取', assigned_matchmaker_id = :actor_id WHERE id = :id"), {"operator": operator, "actor_id": actor.user_id, "id": active})
+    await db.execute(text("UPDATE resource_assignment SET status = 2, ended_at = UTC_TIMESTAMP(), end_reason = 'reassigned' WHERE user_id = :member_id AND status = 1"), {"member_id": member_id})
+    await db.execute(text("INSERT INTO resource_assignment (user_id, organization_id, matchmaker_id, source, status, assigned_by) VALUES (:member_id, :organization_id, :actor_id, 'abandon_restore', 1, :actor_id)"), {"member_id": member_id, "organization_id": actor.organization_id, "actor_id": actor.user_id})
+    await _audit(db, actor.user_id, "matchmaker_workspace.member.pickup", "user", member_id, "红娘捞取会员弃海记录")
+    await db.commit()
+    return WorkspaceMemberPickupResult(member_id=member_id, matchmaker_id=actor.user_id)
 
 
 async def pickup_workspace_member(db: AsyncSession, actor: WorkspaceActor, member_id: int) -> WorkspaceMemberPickupResult:

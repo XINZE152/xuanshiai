@@ -86,6 +86,8 @@ from app.schemas.matchmaker_workspace import (
 )
 from app.services.matchmaker_workspace import (
     pickup_workspace_member,
+    pickup_workspace_abandoned_member,
+    abandon_workspace_member,
     abandon_workspace_lead,
     add_workspace_lead_follow_up,
     assign_workspace_lead,
@@ -362,11 +364,13 @@ async def workbench_members(
     page_size: int = Query(20, ge=1, le=100),
     review_status: str | None = Query(None, pattern="^(PENDING|PASSED|REJECTED)$"),
     search: str | None = Query(None, max_length=64),
-    filters: str | None = Query(None, max_length=4096),
+    filters: str | None = Query(None, max_length=4096, description='资料筛选 JSON；online_vip=1 查询线上订阅会员，offline_vip=1 查询线下签约会员；值均为字符串，与其他条件取交集'),
+    member_pool: str | None = Query(None, pattern="^all$", description="all 查看 CRM 全部未软删会员；不传沿用现有工作范围"),
+    abandoned: bool = Query(False, description="仅查询会员弃海池中的有效记录"),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceMemberPage:
-    return await list_workspace_members(db, await require_workspace(db, current), page, page_size, review_status, search, filters)
+    return await list_workspace_members(db, await require_workspace(db, current), page, page_size, review_status, search, filters, all_members=member_pool == 'all', abandoned=abandoned)
 
 
 @router.get(
@@ -427,6 +431,26 @@ async def pickup_workbench_member(
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceMemberPickupResult:
     return await pickup_workspace_member(db, await require_workspace(db, current), member_id)
+
+
+@router.post("/workbench/members/{member_id}/abandonment", summary="将会员放入会员弃海池")
+async def abandon_workbench_member_record(
+    member_id: int = Path(..., ge=1),
+    body: WorkspaceAbandonRequest = ...,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await abandon_workspace_member(db, await require_workspace(db, current), member_id, body.reason)
+    return {"member_id": member_id, "abandoned": True}
+
+
+@router.post("/workbench/members/{member_id}/abandonment/pickup", response_model=WorkspaceMemberPickupResult, summary="从会员弃海池捞回会员")
+async def pickup_workbench_member_record(
+    member_id: int = Path(..., ge=1),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceMemberPickupResult:
+    return await pickup_workspace_abandoned_member(db, await require_workspace(db, current), member_id)
 
 
 @router.patch("/workbench/members/{member_id}/public-profile-review", response_model=WorkspaceMember, summary="审核会员公开资料")

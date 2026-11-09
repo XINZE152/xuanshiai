@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 WorkspaceLevel = Literal["NORMAL", "SUPER"]
 WorkspaceScope = Literal["SELF", "ORGANIZATION"]
-ReviewStatus = Literal["PENDING", "PASSED", "REJECTED"]
+ReviewStatus = Literal["PENDING", "PASSED", "REJECTED", "STORE_VERIFIED"]
 LeadStatus = Literal["NEW", "CONTACTED", "INTENDED", "CONVERTED", "LOST", "CLOSED"]
 LeadIntentionLevel = Literal[1, 2, 3, 4, 5, 6, 7]
 FollowUpMethod = Literal["PHONE", "WECHAT", "VISIT", "OTHER"]
@@ -307,6 +307,8 @@ class WorkspaceMember(BaseModel):
     profile_completion_score: float
     review_status: ReviewStatus
     review_reason: str | None
+    abandoned: bool = False
+    abandoned_reason: str | None = None
     reviewed_at: datetime | None
     next_follow_at: datetime | None
     created_at: datetime
@@ -318,7 +320,9 @@ class WorkspaceMemberPage(BaseModel):
     page_size: int
     total: int
     has_more: bool
-    filter_version: int = 1
+    filter_version: int = Field(default=3, description="资料筛选版本：2 支持线上VIP，3 支持线下VIP及姓名搜索")
+    member_pool_version: int = 1
+    abandonment_pool_version: int = 1
 
 
 class WorkspaceMemberReviewUpdate(BaseModel):

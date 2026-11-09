@@ -484,6 +484,7 @@ async def _member_query(
 
     base = f"""FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
         LEFT JOIN user_auth ua ON ua.user_id = u.id
+        LEFT JOIN matchmaker_member_review mr ON mr.user_id = u.id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(end_at) AS vip_end_at FROM user_membership WHERE status = 1 GROUP BY user_id) v ON v.user_id = u.id
         LEFT JOIN {_ASSIGNMENT_DISPLAY_DERIVED} a ON a.user_id = u.id
@@ -506,7 +507,9 @@ async def _member_query(
         {profile_expr('marriage_plan')} AS marriage_plan,
         {auth_expr('education')} AS education, {auth_expr('school')} AS school,
         {auth_expr('job')} AS job, {auth_expr('company')} AS company,
-        COALESCE({auth_expr('auth_status')}, 0) AS auth_status, {profile_expr('intention_level')} AS intention_level, f.last_follow_at, f.next_follow_at,
+        COALESCE({auth_expr('auth_status')}, 0) AS auth_status,
+        CASE COALESCE(mr.status, 'PENDING') WHEN 'REJECTED' THEN 1 WHEN 'PASSED' THEN 2 WHEN 'STORE_VERIFIED' THEN 3 ELSE 0 END AS profile_review_status,
+        {profile_expr('intention_level')} AS intention_level, f.last_follow_at, f.next_follow_at,
         v.vip_end_at, a.matchmaker_id, COALESCE(pr.match_status, 1) AS match_status,
         {user_expr('source')} AS source, {user_expr('region')} AS region,
         COALESCE({user_expr('cert_status')}, 0) AS cert_status,
@@ -548,6 +551,7 @@ async def members(
     gender: int | None = Query(None, ge=1, le=2),
     status: int | None = Query(None, ge=1, le=3),
     vip: bool | None = Query(None),
+    profile_review_status: int | None = Query(None, ge=0, le=3, description="资料审核：0待审核、1未通过、2已通过、3已到店核验"),
     auth_status: str | None = Query(
         None,
         pattern=r"^[0-4](,[0-4]){0,4}$",
@@ -614,7 +618,7 @@ async def members(
     db: AsyncSession = Depends(get_db),
 ) -> MemberPage:
     values = {
-        "gender": gender, "status": status, "vip": vip, "auth_status": auth_status,
+        "gender": gender, "status": status, "vip": vip, "auth_status": auth_status, "profile_review_status": profile_review_status,
         "assigned": assigned, "follow_state": follow_state, "search": search,
         "search_type": search_type, "source": source, "source__is_null": source__is_null,
         "activity_id": activity_id, "region": region,
