@@ -69,6 +69,8 @@ scripts/*
 !scripts/check_migrations.py
 # P0 发布前 schema 预检：schema-contract/backend-ci 引用，必须随仓库发布
 !scripts/check_release_schema.py
+# paper_plane/chat 域迁移执行器：P3 起必须随仓库发布
+!scripts/manage_domain_migration.py
 # 业务迁移执行器：tests/test_business_schema_migration_contract.py 直接导入
 !scripts/manage_business_migration.py
 # 微信支付 real 模式预检与安全暂停脚本：backend-ci.yml 的 admin Ruff 门禁引用

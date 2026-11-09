@@ -5,6 +5,7 @@ from __future__ import annotations
 from scripts.schema_contract import (
     bootstrap_only_columns,
     diff,
+    diff_constraints,
     normalize_type,
     parse_code_schema,
 )
@@ -83,3 +84,36 @@ def test_diff_flags_missing_tables_only_for_expected_ones() -> None:
     expected = {"users": {"columns": {}, "indexes": [], "has_primary_key": True, "source": "code"}}
     report = diff(expected, {})
     assert report["missing_tables"] == ["users"]
+
+
+def test_diff_constraints_reports_default_and_check_mismatches() -> None:
+    report = diff_constraints(
+        {
+            "defaults": {"paper_plane_profile_unlock": {"points_cost": "80"}},
+            "checks": {},
+        }
+    )
+    assert report["default_mismatches"] == [
+        "paper_plane_profile_unlock.points_cost: expected 50, got 80"
+    ]
+    assert report["missing_checks"] == [
+        "paper_plane_profile_unlock.ck_paper_plane_unlock_cost"
+    ]
+
+
+def test_diff_constraints_accepts_widened_check() -> None:
+    report = diff_constraints(
+        {
+            "defaults": {"paper_plane_profile_unlock": {"points_cost": "50"}},
+            "checks": {
+                "paper_plane_profile_unlock": {
+                    "ck_paper_plane_unlock_cost": "(`points_cost` in (50,80))"
+                }
+            },
+        }
+    )
+    assert report == {
+        "default_mismatches": [],
+        "missing_checks": [],
+        "check_mismatches": [],
+    }

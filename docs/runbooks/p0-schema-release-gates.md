@@ -29,17 +29,19 @@ WHERE c.user_id IS NULL
    python scripts/check_migrations.py
    ```
    期望：`migration check: OK ...`，退出码 0。
-3. 执行 Q45 迁移（paper_plane 域当前没有自动 runner，按手工 SQL 执行）：
+3. 执行 Q45 迁移（paper_plane 域已有通用 runner，推荐增量执行）：
    ```bash
-   mysql -h<host> -P<port> -u<user> -p <db> < migrations/paper_plane/20261106_01_unlock_cost_up.sql
-   mysql -h<host> -P<port> -u<user> -p <db> < migrations/paper_plane/20261109_01_unlock_cost_default_up.sql
+   python scripts/manage_domain_migration.py up --domain paper_plane --target test \
+     --version 20261109_01_unlock_cost_default
+   python scripts/manage_domain_migration.py verify --domain paper_plane --target test \
+     --version 20261109_01_unlock_cost_default
    ```
-   然后执行两个 verify（返回 0 行即通过）：
+   手工 SQL 兜底（runner 不可用时）：
    ```bash
-   mysql ... < migrations/paper_plane/20261106_01_unlock_cost_verify.sql
+   mysql -h<host> -P<port> -u<user> -p <db> < migrations/paper_plane/20261109_01_unlock_cost_default_up.sql
    mysql ... < migrations/paper_plane/20261109_01_unlock_cost_default_verify.sql
    ```
-   说明：`20261106_01` 的 up/verify 已修正为 `CHECK_CONSTRAINTS` + `TABLE_CONSTRAINTS` 联表；旧 SQL 在 MySQL 8 会报 1054。`20261109_01` 负责把默认值补到 50。
+   说明：`20261109_01` 会同时确保默认值为 50、约束放行 50/80；`20261106_01` 的 up/verify 已修正为 `CHECK_CONSTRAINTS` + `TABLE_CONSTRAINTS` 联表，旧 SQL 在 MySQL 8 会报 1054。
 4. 执行 Q23 business 迁移：
    - 生产/测试若使用 `scripts/manage_business_migration.py`，该 runner 会按 manifest 顺序执行**全部** business 版本。确认历史版本均已执行后再用：
      ```bash
@@ -57,6 +59,7 @@ WHERE c.user_id IS NULL
    ```
 5. Q63/Q74 的 schema 只校验、不重复建表（测试服 2026-11-07 已人工建表）：
    ```bash
+   python scripts/manage_domain_migration.py verify --domain chat --target test
    python scripts/check_release_schema.py --target test
    ```
    生产使用显式 URL（必须含 host 与 port）：
