@@ -14,10 +14,11 @@ from app.services.notifications import _PREFERENCE_BY_EVENT
 
 
 class _Result:
-    def __init__(self, *, rows=None, row=None, lastrowid=None):
+    def __init__(self, *, rows=None, row=None, lastrowid=None, rowcount=1):
         self._rows = rows or ([] if row is None else [row])
         self._row = row
         self.lastrowid = lastrowid
+        self.rowcount = rowcount
 
     def mappings(self):
         return self
@@ -173,6 +174,54 @@ async def test_create_post_writes_reminders_and_notifies(monkeypatch) -> None:
 
 async def _async_none():
     return None
+
+
+@pytest.mark.asyncio
+async def test_pending_post_approval_notifies_reminders_once(monkeypatch) -> None:
+    from app.services import social as social_service
+
+    notifications = []
+
+    async def fake_notify(*_args, **kwargs):
+        notifications.append(kwargs)
+        return True
+
+    monkeypatch.setattr(social_service, "emit_notification", fake_notify)
+
+    class _ApproveDb:
+        def __init__(self, previous_status: int):
+            self.previous_status = previous_status
+            self.calls = []
+
+        async def execute(self, statement, params=None):
+            sql = " ".join(str(statement).split())
+            self.calls.append(sql)
+            if sql.startswith("SELECT user_id, moderation_status FROM community_post"):
+                return _Result(row={"user_id": 7, "moderation_status": self.previous_status})
+            if sql.startswith("UPDATE community_post"):
+                return _Result(rowcount=1)
+            if "SELECT user_id FROM community_post_remind" in sql:
+                return _Result(rows=[{"user_id": 8}, {"user_id": 9}])
+            return _Result()
+
+    db = _ApproveDb(previous_status=0)
+    await social_service.moderate_content(
+        db, target_type="post", target_id=20, hide=False, actor_id=99
+    )
+    assert [item["recipient_user_id"] for item in notifications] == [8, 9]
+    assert all(item["event_type"] == "community_post_remind" for item in notifications)
+    assert all(item["target_id"] == 20 for item in notifications)
+
+    notifications.clear()
+    already_approved = _ApproveDb(previous_status=1)
+    await social_service.moderate_content(
+        already_approved, target_type="post", target_id=20, hide=False, actor_id=99
+    )
+    assert notifications == []
+    assert not any(
+        "SELECT user_id FROM community_post_remind" in sql
+        for sql in already_approved.calls
+    )
 
 
 def _post_row():

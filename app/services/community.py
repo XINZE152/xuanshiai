@@ -1607,7 +1607,7 @@ async def list_my_activities(
 async def list_banners(db: AsyncSession, position: str = "community") -> list[CommunityBannerResponse]:
     result = await db.execute(
         text(
-            """SELECT id, title, image_url, link_type, link_value, sort, position
+            """SELECT id, title, image_url, link_type, link_value, sort, position, start_at, end_at
             FROM config_banner
             WHERE is_active = 1 AND position = :position
               AND (start_at IS NULL OR start_at <= UTC_TIMESTAMP())
@@ -1625,6 +1625,8 @@ async def list_banners(db: AsyncSession, position: str = "community") -> list[Co
             link_value=row.get("link_value"),
             sort=int(row.get("sort") or 0),
             position=row.get("position") or position,
+            start_at=row.get("start_at"),
+            end_at=row.get("end_at"),
         )
         for row in result.mappings().all()
     ]
