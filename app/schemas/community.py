@@ -207,6 +207,8 @@ class CommunityBannerResponse(BaseModel):
     link_value: str | None
     sort: int
     position: str
+    start_at: datetime | None = None
+    end_at: datetime | None = None
 
 
 class CommunityQuotaItem(BaseModel):
