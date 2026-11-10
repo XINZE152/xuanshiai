@@ -38,6 +38,82 @@ _MANDATORY_EVENT_TYPES = frozenset({
     "community_moderation_result",
 })
 
+# 通知语义分类：列表筛选、未读汇总和前端 Tab 共用这一份映射。
+# 未登记的类型一律归入 ``system``，保证新增事件不会从列表里消失。
+NOTIFICATION_CATEGORY_BY_TYPE: dict[str, str] = {
+    "like": "like",
+    "superlike": "like",
+    "comment": "comment",
+    "reply": "comment",
+    "follow": "follow",
+    "message": "message",
+    "message_recalled": "message",
+    "chat_session_request": "message",
+    "chat_session_request_result": "message",
+    "match": "match",
+    "match_application": "match",
+    "match_application_accepted": "match",
+    "match_application_rejected": "match",
+    "apply": "match",
+    "activity": "activity",
+    "community_post_remind": "activity",
+    "system": "system",
+    "report_result": "system",
+    "appeal_result": "system",
+    "community_moderation_submitted": "system",
+    "community_moderation_result": "system",
+    "good_news_review": "system",
+    "matchmaker_application_reviewed": "system",
+    "matchmaker_service_updated": "system",
+    "matchmaker_service_admin_updated": "system",
+}
+NOTIFICATION_CATEGORIES: tuple[str, ...] = (
+    "like",
+    "comment",
+    "follow",
+    "message",
+    "match",
+    "activity",
+    "system",
+)
+
+
+def notification_category(event_type: str | None) -> str:
+    """Return the stable semantic category for one stored notification type."""
+
+    return NOTIFICATION_CATEGORY_BY_TYPE.get(str(event_type or ""), "system")
+
+
+def aggregate_unread_by_category(by_type: dict[str, int]) -> dict[str, int]:
+    """Aggregate per-type unread counts into the stable category buckets."""
+
+    by_category = {category: 0 for category in NOTIFICATION_CATEGORIES}
+    for event_type, count in by_type.items():
+        by_category[notification_category(event_type)] += int(count)
+    return by_category
+
+
+def notification_category_filter(category: str) -> tuple[str, list[str]]:
+    """Return ``(operator, types)`` for a category filter.
+
+    ``system`` is open-ended: every type that is not explicitly mapped to
+    another category belongs to it, so new event types keep showing up.
+    """
+
+    if category not in NOTIFICATION_CATEGORIES:
+        raise ValueError(f"unknown notification category: {category}")
+    if category == "system":
+        return "NOT IN", [
+            event_type
+            for event_type, mapped in NOTIFICATION_CATEGORY_BY_TYPE.items()
+            if mapped != "system"
+        ]
+    return "IN", [
+        event_type
+        for event_type, mapped in NOTIFICATION_CATEGORY_BY_TYPE.items()
+        if mapped == category
+    ]
+
 
 def _bounded(value: str | None, length: int) -> str | None:
     return value[:length] if value is not None else None

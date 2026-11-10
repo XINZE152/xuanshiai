@@ -326,7 +326,14 @@ class PaperPlaneResponse(BaseModel):
     reply_count: int
     voice_url: str | None = None
     voice_duration_sec: int | None = None
+    picked: bool = Field(default=False, description="当前查看者今天是否已捡过这条纸飞机")
     created_at: datetime
+
+
+class PaperPlaneCatchResponse(BaseModel):
+    plane_id: int
+    already_picked: bool = Field(description="今天是否此前已经捡过；true 表示本次为幂等重放")
+    picked_today: int = Field(ge=0, description="今天已捡的不同纸飞机数量")
 
 
 class PaperPlaneReplyCreate(BaseModel):

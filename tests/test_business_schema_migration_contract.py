@@ -64,6 +64,7 @@ def test_manifest_checksums_are_lf_normalised() -> None:
         "20261106_01_profile_completion_grandfather",
         "20261106_02_community_post_remind",
         "20261109_01_profile_completion_missing_rows",
+        "20261110_01_point_redeem_order_count",
     ]
     for entry in manifest["versions"]:
         for direction in ("up", "down", "verify", "verify_previous"):

@@ -196,6 +196,19 @@
         "verify": "e8becac9785cf62fc8577b753215563b937903ba17ac73df4c49ba1932c0d58b",
         "verify_previous": "d61bbe7bcba4a38e5536d76ce9ddf196864998812d1e4b574478156e778cc1e1"
       }
+    },
+    {
+      "version": "20261110_01_point_redeem_order_count",
+      "up": "20261110_01_point_redeem_order_count_up.sql",
+      "down": "20261110_01_point_redeem_order_count_down.sql",
+      "verify": "20261110_01_point_redeem_order_count_verify.sql",
+      "verify_previous": "20261110_01_point_redeem_order_count_verify_previous.sql",
+      "sha256": {
+        "up": "e3ebc3e5574936207e3f2629c179abd9905cc62d85eda7cb22b79eff37299050",
+        "down": "382b5715a733d5bbafae3a30d62f061d1ef496f3681a56107a3fcf8249249830",
+        "verify": "42a0ee83ee94aa3c58507507dcc2d1566038cb6989301a2c5d6527bca49476de",
+        "verify_previous": "14fd0a048032d3fc7b4cffa1118a1b4eeb1022005e4758803305a7ae856470ca"
+      }
     }
   ]
 }
