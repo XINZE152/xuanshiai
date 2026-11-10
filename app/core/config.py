@@ -452,6 +452,8 @@ class Settings(BaseSettings):
     ai_search_suggest_daily_limit: int = Field(default=5, gt=0, le=50)
     ai_profile_session_expire_days: int = Field(default=7, gt=0)
     ai_search_draft_expire_hours: int = Field(default=24, gt=0)
+    # 安全自动确认：仅当全部已知条件置信度不低于该阈值时才允许跳过确认卡。
+    ai_search_auto_confirm_min_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     ai_compatibility_snapshot_ttl_minutes: int = Field(default=10, gt=0)
     # WP-C1：llm 精算快照 TTL（默认 7 天）——命中期内二次查看不再触发精算。
     ai_compatibility_llm_ttl_minutes: int = Field(default=10080, gt=0)

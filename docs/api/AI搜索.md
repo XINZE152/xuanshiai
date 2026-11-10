@@ -122,7 +122,7 @@ Content-Type: application/json
 ### 使用方法与业务规则
 
 - 前置条件：已登录、已同意 `search_parse` 授权、开关开启。
-- 调用顺序：创建草稿 → 轮询任务（解析完成后草稿转 `awaiting_confirmation`）→ `GET` 草稿查看条件 → `PATCH` 确认/修改/删除 → `POST confirm`。
+- 调用顺序：创建草稿 → 轮询任务（解析完成后草稿转 `awaiting_confirmation`）→ `GET` 草稿查看条件 → （可选）`auto_confirm_ready=true` 时直接 `POST confirm?auto_confirm_pending=true`；否则 `PATCH` 确认/修改/删除后 `POST confirm` → 读取快照结果。
 - 幂等：同 key 同 query_text 回放第一次结果；query_text 不同返回 `409 TASK_IDEMPOTENCY_CONFLICT`。
 - 限流：每分钟 5 次/用户，超限 `429 AI_QUOTA_EXCEEDED`。
 - 边界：解析失败保留原文，草稿转 `failed`；客户端可回退手工筛选（旧 `/discovery/search`）。
@@ -150,6 +150,8 @@ Content-Type: application/json
 | `conditions` | array | 是 | 空数组表示解析无结果 | AST 条件列表（见下） | 见下 |
 | `unknown` | array | 是 | 空数组表示无未知项 | 未注册/off-allowlist 原文（要求用户澄清） | `["pure_free"]` |
 | `conflicts` | array | 是 | 空数组表示无冲突 | 区间倒置冲突描述（age/height/income） | `["age 区间倒置：下限大于上限"]` |
+| `auto_confirm_ready` | boolean | 是 | 非 `awaiting_confirmation` 时固定 `false` | 是否可安全跳过确认卡：无 unknown、无 conflicts、至少 1 条 hard、全部已知条件置信度 ≥ 阈值 | `true` |
+| `auto_confirm_blockers` | array[string] | 是 | 可自动确认时为空数组 | 不可自动确认原因：`no_condition`、`no_hard_condition`、`conflict`、`invalid_condition`、`unknown:<field>`、`low_confidence:<field>` | `["low_confidence:age"]` |
 | `expires_at` | string(datetime) | 否 | `null` 未设置 | 草稿过期时间 | `2026-08-08T08:00:00Z` |
 
 `conditions[]` 元素展开：
@@ -179,11 +181,13 @@ Content-Type: application/json
   ],
   "unknown": [],
   "conflicts": [],
+  "auto_confirm_ready": true,
+  "auto_confirm_blockers": [],
   "expires_at": "2026-08-08T08:00:00Z"
 }
 ```
 
-无数据示例：`{"draft_id":"sd_...","status":"awaiting_confirmation","condition_revision":0,"conditions":[],"unknown":[],"conflicts":[],"expires_at":null}`
+无数据示例：`{"draft_id":"sd_...","status":"awaiting_confirmation","condition_revision":0,"conditions":[],"unknown":[],"conflicts":[],"auto_confirm_ready":false,"auto_confirm_blockers":["no_condition"],"expires_at":null}`
 
 ---
 
@@ -260,6 +264,7 @@ Content-Type: application/json
 | --- | --- | --- | --- | --- | --- |
 | `draft_id` | path | string | 是 | 1-64 位 hex | 草稿 ID |
 | `expected_condition_revision` | query | integer | 是 | `>=0` | 乐观锁；不匹配返回 `409 DRAFT_VERSION_CONFLICT` |
+| `auto_confirm_pending` | query | boolean | 否 | 默认 `false` | 为 `true` 时，仅在 `auto_confirm_ready=true` 的安全场景自动确认全部已知条件；否则返回 `422 AI_CONFIRMATION_REQUIRED` 并附 `blockers` |
 | `Idempotency-Key` | header | string | 是 | 8-128 位 ASCII | 幂等键；同 key 同摘要回放同一快照与任务 |
 
 ### 返回参数
@@ -293,8 +298,20 @@ Content-Type: application/json
 ### 使用方法与业务规则
 
 - 前置：草稿处于 `awaiting_confirmation` 且**全部**未删除 hard 条件已 `confirmed`；存在未确认 hard 条件 → `409 RESULT_STALE`；存在未解决区间冲突 → `409 RESULT_STALE`；已确认条件含 allowlist 外字段 → `422 AI_POLICY_DENIED`；已确认条件 operator 非法 → `400 AI_INPUT_INVALID`。**编译失败不创建候选任务。**
-- 幂等：同 key 同摘要回放第一次快照与任务；摘要不同 `409 TASK_IDEMPOTENCY_CONFLICT`。
+- 自动确认（2026-11-10）：`auto_confirm_pending=true` 时，服务端先按 `auto_confirm_ready` 判定；满足全部安全条件则在**同一事务**内把 pending/edited 条件置为 `confirmed`、递增 `condition_revision`，再创建快照与任务。不满足时返回 `422 AI_CONFIRMATION_REQUIRED`，`detail.blockers` 与草稿的 `auto_confirm_blockers` 同源，不创建快照。默认 `false` 完全保持旧客户端行为。
+- 自动确认安全条件：草稿为 `awaiting_confirmation`、无 `conflicts`、无 `unknown`、至少 1 条 hard、全部已知条件 `confidence >= AI_SEARCH_AUTO_CONFIRM_MIN_CONFIDENCE`（默认 0.8）。自动确认与手动确认一样消耗一次搜索配额。
+- 幂等：同 key 同摘要回放第一次快照与任务；`auto_confirm_pending` 参与摘要，同 key 不同值 `409 TASK_IDEMPOTENCY_CONFLICT`。
 - 快照不可变：`snapshot_hash`/`policy_revision`/`consent_snapshot`/五维 revision vector 在同一事务写入。
+
+**错误码**
+
+| HTTP | code | 场景 | 前端处理 |
+| --- | --- | --- | --- |
+| 400 | `AI_INPUT_INVALID` | 缺 `expected_condition_revision`、Idempotency-Key 非法 | 提示并重新拉草稿 |
+| 409 | `RESULT_STALE` | 草稿过期/非待确认/revision 冲突/区间冲突 | 重新拉草稿或回退确认卡 |
+| 422 | `AI_POLICY_DENIED` | 已确认条件含 allowlist 外字段 | 展示策略拒绝 |
+| 422 | `AI_CONFIRMATION_REQUIRED` | `auto_confirm_pending=true` 但安全条件不满足；`detail.blockers` 给出原因 | 展示确认卡与 blockers |
+| 503 | `AI_FEATURE_DISABLED` | AI 搜索未开闸 | 空态/置灰 |
 
 ---
 
@@ -474,3 +491,12 @@ awaiting_confirmation → expired（超过 expires_at；过期仍可读摘要但
 3. 向量存储、索引与 ANN 检索组件须单独评审（延迟、成本、删除传播、保留期），未批准前 `ai_search_enabled` 保持关闭。
 4. 旧 `user_feature_vector.interest_vector` 不作为 embedding 使用；一期不接 ANN（统一方案 §10.4）。
 5. 语义召回对 `matched_condition_count`/`reason_codes` 的证据语义不改变；结果仍必须逐条通过可见性门禁。
+
+---
+
+## 10. 2026-11-10 变更记录：安全自动确认
+
+- `GET /api/v1/ai/search-drafts/{draft_id}` 新增只读字段 `auto_confirm_ready`、`auto_confirm_blockers`，由服务端统一判定，前端不得复制规则。
+- `POST /api/v1/ai/search-drafts/{draft_id}/confirm` 新增可选 query `auto_confirm_pending`；为 `true` 且安全条件满足时，服务端在同一事务内把 pending/edited 条件置为 `confirmed` 后创建快照与任务；不满足返回 `422 AI_CONFIRMATION_REQUIRED`，`detail.blockers` 说明原因。
+- 安全阈值由 `AI_SEARCH_AUTO_CONFIRM_MIN_CONFIDENCE` 控制，默认 `0.8`。自动确认与手动确认一样消耗一次搜索配额。
+- 旧客户端不传 `auto_confirm_pending` 时行为完全不变；该参数参与 Idempotency 摘要，同 key 不同值返回 `409 TASK_IDEMPOTENCY_CONFLICT`。

@@ -124,6 +124,9 @@ class SearchDraftRead(BaseModel):
     conditions: list[SearchConditionRead] = Field(default_factory=list)
     unknown: list[str] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
+    # 安全自动确认判定：前端在 awaiting_confirmation 且 ready=true 时可隐藏确认卡。
+    auto_confirm_ready: bool = False
+    auto_confirm_blockers: list[str] = Field(default_factory=list)
     expires_at: datetime | None = None
 
 

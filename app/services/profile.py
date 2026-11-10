@@ -122,6 +122,10 @@ COMPLETION_RULES: tuple[tuple[str, str, int], ...] = (
     ("drinking", "饮酒习惯", 1),
 )
 
+# 27 项权重表即 profile-v5 的正式内容；上线后冻结，任何调整必须新版本并回填。
+COMPLETION_RULES_VERSION = "profile-v5"
+COMPLETION_RULES_TOTAL = 100
+
 # 会员端「资料填写」里「基础信息」那一栏的必选项，对齐 xuanshiai-vue/pages/user/edit.uvue 的基础信息编辑器。
 # 昵称注册时就有；头像、相册、自我介绍、兴趣标签、择偶要求、认证分属其他卡片，
 # 公司、微信号、MBTI 是选填项，都不作为进入资料待审的门槛。
@@ -821,7 +825,9 @@ async def update_nickname(
     )
 
 
-async def recalculate_completion_state(db: AsyncSession, user_id: int) -> tuple[float, dict[str, bool]]:
+async def recalculate_completion_state(
+    db: AsyncSession, user_id: int, *, clear_grandfathered: bool = True
+) -> tuple[float, dict[str, bool]]:
     # 锁序统一：先锁 users 行，再写 user_profile_completion。
     # 「我的」页并行请求 /users/me/completion 与 /users/me/overview（后者内部
     # 也调用本函数）会各自 UPSERT user_profile_completion 再 UPDATE users；
@@ -836,7 +842,11 @@ async def recalculate_completion_state(db: AsyncSession, user_id: int) -> tuple[
     row = result.mappings().first()
     if not row:
         raise HTTPException(404, detail="用户不存在")
-    completed = _completion_state(row)
+    # grandfather 只豁免门禁，不再覆盖展示分；但保留旧相册门槛，避免老用户
+    # 因历史规则差异再次掉分。回填脚本用 clear_grandfathered=False 保留标记。
+    grandfathered = bool(row.get("completion_grandfathered"))
+    preserve_grandfathered = grandfathered and not clear_grandfathered
+    completed = _completion_state(row, legacy=preserve_grandfathered)
     score = _completion_score(completed)
     columns = {
         "gender_completed": completed["gender"],
@@ -859,23 +869,40 @@ async def recalculate_completion_state(db: AsyncSession, user_id: int) -> tuple[
         "single_pledge_completed": completed["single_pledge"],
     }
     assignments = ", ".join(f"{key} = :{key}" for key in (*columns, "score"))
+    if preserve_grandfathered:
+        # 回填/读取重算保留 grandfather 标记与历史来源版本，避免 Q23 down 失效。
+        assignments += ", calculated_at = UTC_TIMESTAMP()"
+    else:
+        assignments += (
+            ", completion_grandfathered = 0, "
+            "algorithm_version = :rules_version, calculated_at = UTC_TIMESTAMP()"
+        )
     await db.execute(
         text(f"""INSERT INTO user_profile_completion (user_id, {', '.join(columns)}, score, completion_grandfathered, algorithm_version, calculated_at)
-                   VALUES (:user_id, {', '.join(f':{key}' for key in columns)}, :score, 0, 'profile-v5', UTC_TIMESTAMP())
-                   ON DUPLICATE KEY UPDATE {assignments}, completion_grandfathered = 0, algorithm_version = 'profile-v5', calculated_at = UTC_TIMESTAMP()"""),
-        {"user_id": user_id, **{key: int(value) for key, value in columns.items()}, "score": score},
+                   VALUES (:user_id, {', '.join(f':{key}' for key in columns)}, :score, 0, :rules_version, UTC_TIMESTAMP())
+                   ON DUPLICATE KEY UPDATE {assignments}"""),
+        {
+            "user_id": user_id,
+            **{key: int(value) for key, value in columns.items()},
+            "score": score,
+            "rules_version": COMPLETION_RULES_VERSION,
+        },
     )
     await db.execute(text("UPDATE users SET data_complete_rate = :score WHERE id = :id"), {"score": score, "id": user_id})
     return score, completed
 
 
-async def recalculate_completion(db: AsyncSession, user_id: int) -> float:
-    score, _ = await recalculate_completion_state(db, user_id)
+async def recalculate_completion(
+    db: AsyncSession, user_id: int, *, clear_grandfathered: bool = True
+) -> float:
+    score, _ = await recalculate_completion_state(
+        db, user_id, clear_grandfathered=clear_grandfathered
+    )
     return score
 
 
 async def _ensure_completion_current(db: AsyncSession, user_id: int) -> None:
-    """Reads never recalculate a grandfathered row; active edits clear the flag via recalculate."""
+    """Recompute the canonical score; grandfather rows keep the flag but not a stale score."""
     result = await db.execute(
         text(
             """SELECT completion_grandfathered FROM user_profile_completion
@@ -884,9 +911,8 @@ async def _ensure_completion_current(db: AsyncSession, user_id: int) -> None:
         {"user_id": user_id},
     )
     row = result.mappings().first()
-    if row is not None and bool(row.get("completion_grandfathered")):
-        return
-    await recalculate_completion(db, user_id)
+    grandfathered = row is not None and bool(row.get("completion_grandfathered"))
+    await recalculate_completion(db, user_id, clear_grandfathered=not grandfathered)
     await db.commit()
 
 
@@ -896,21 +922,22 @@ async def get_completion(db: AsyncSession, user_id: int) -> CompletionResponse:
     row = result.mappings().one()
     grandfathered = bool(row.get("completion_grandfathered"))
     completed = _completion_state(row, legacy=grandfathered)
-    score = float(row["completion_score"]) if grandfathered else _completion_score(completed)
+    score = _completion_score(completed)
     items = [
         CompletionItemResponse(key=key, label=label, weight=weight, completed=completed[key])
         for key, label, weight in COMPLETION_RULES
     ]
     missing = [item.label for item in items if not item.completed]
+    access_ok = score >= COMPLETION_RULES_TOTAL or grandfathered
     return CompletionResponse(
-        rules_version="profile-v5",
+        rules_version=COMPLETION_RULES_VERSION,
         total_items=len(COMPLETION_RULES),
         score=score,
         missing_items=missing,
         items=items,
-        can_browse=score >= 100,
-        can_apply=score >= 100 and row["realname_status"] == 2,
-        can_chat=score >= 100 and row["realname_status"] == 2,
+        can_browse=access_ok,
+        can_apply=access_ok and row["realname_status"] == 2,
+        can_chat=access_ok and row["realname_status"] == 2,
     )
 
 
