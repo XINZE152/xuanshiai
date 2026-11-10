@@ -38,6 +38,7 @@ from app.schemas.ai_search import (
     SearchResultPageRead,
 )
 from app.services.ai.search import (
+    SearchConfirmationRequired,
     SearchInputInvalid,
     SearchPolicyDenied,
     SearchQuotaExceeded,
@@ -50,6 +51,7 @@ from app.services.ai.search import (
     confirm_search_draft,
     create_search_draft,
     delete_search_snapshot,
+    evaluate_auto_confirm,
     get_search_suggestions,
     materialize_search_snapshot,
     parse_search_draft,
@@ -1460,6 +1462,106 @@ async def test_confirm_creates_snapshot_and_execute_task(search_store) -> None:
     )
     stored = search_store.snapshots[snapshot.snapshot_id]
     assert stored["snapshot_hash"]
+
+
+def _auto_condition(**overrides: Any) -> SearchCondition:
+    payload: dict[str, Any] = {
+        "field_key": "age",
+        "operator": "gte",
+        "value": 18,
+        "kind": "hard",
+        "confidence": 0.98,
+    }
+    payload.update(overrides)
+    return SearchCondition.model_validate(payload)
+
+
+def test_evaluate_auto_confirm_accepts_safe_conditions() -> None:
+    rows = [_condition_row("sd_auto", 0, 0, _auto_condition())]
+    ready, blockers = evaluate_auto_confirm(rows)
+    assert ready is True
+    assert blockers == []
+
+
+def test_evaluate_auto_confirm_blocks_uncertain_conditions() -> None:
+    low = _condition_row(
+        "sd_auto", 0, 0, _auto_condition(field_key="age", confidence=0.2)
+    )
+    unknown = _condition_row(
+        "sd_auto", 0, 1, _auto_condition(field_key="zodiac", operator="eq", value="龙")
+    )
+    ready, blockers = evaluate_auto_confirm([low, unknown])
+    assert ready is False
+    assert "low_confidence:age" in blockers
+    assert any(item.startswith("unknown:") for item in blockers)
+
+    soft_only = _condition_row(
+        "sd_auto", 0, 0, _auto_condition(field_key="interest_tags", operator="contains", kind="soft")
+    )
+    ready, blockers = evaluate_auto_confirm([soft_only])
+    assert ready is False
+    assert "no_hard_condition" in blockers
+
+    conflict = [
+        _condition_row(
+            "sd_auto", 0, 0, _auto_condition(operator="between", value={"min": 30, "max": 40})
+        ),
+        _condition_row("sd_auto", 0, 1, _auto_condition(operator="gte", value=50)),
+    ]
+    ready, blockers = evaluate_auto_confirm(conflict)
+    assert ready is False
+    assert "conflict" in blockers
+
+
+@pytest.mark.asyncio
+async def test_auto_confirm_creates_snapshot_and_confirms_pending(search_store) -> None:
+    await search_store.seed_consent()
+    await search_store.seed_revision()
+    db = search_store.session
+    draft = await search_store.seed_draft(conditions=[_auto_condition()])
+
+    snapshot = await confirm_search_draft(
+        db,
+        draft["draft_id"],
+        10,
+        0,
+        "auto-confirm-ok",
+        auto_confirm_pending=True,
+    )
+
+    assert snapshot.snapshot_id in search_store.snapshots
+    assert snapshot.task_id
+    assert search_store.drafts[draft["draft_id"]]["status"] == "confirmed"
+    assert all(
+        row["user_action"] == "confirmed"
+        for row in search_store.conditions[draft["draft_id"]]
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_confirm_requires_manual_confirmation_when_unsafe(search_store) -> None:
+    await search_store.seed_consent()
+    await search_store.seed_revision()
+    db = search_store.session
+    draft = await search_store.seed_draft(
+        conditions=[_auto_condition(confidence=0.2)]
+    )
+
+    with pytest.raises(SearchConfirmationRequired) as raised:
+        await confirm_search_draft(
+            db,
+            draft["draft_id"],
+            10,
+            0,
+            "auto-confirm-unsafe",
+            auto_confirm_pending=True,
+        )
+
+    assert raised.value.status_code == 422
+    assert raised.value.code == "AI_CONFIRMATION_REQUIRED"
+    assert raised.value.blockers
+    assert search_store.snapshots == {}
+    assert search_store.conditions[draft["draft_id"]][0]["user_action"] == "pending"
 
 
 @pytest.mark.asyncio
