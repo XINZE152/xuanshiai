@@ -21,6 +21,12 @@ def test_constant_is_50_and_constructor_rejects_old_price() -> None:
         raise AssertionError("80-point constructor must be rejected")
 
 
+def test_route_summary_does_not_advertise_old_price() -> None:
+    source = (ROOT / "app/api/routes/paper_plane_unlock.py").read_text(encoding="utf-8")
+    assert "以 50 积分解锁" in source
+    assert "以 80 积分" not in source
+
+
 def test_migration_manifest_registers_widened_cost_check() -> None:
     manifest = json.loads((ROOT / "migrations/paper_plane/manifest.json").read_text(encoding="utf-8"))
     entry = next(item for item in manifest["versions"] if item["version"] == "20261106_01_unlock_cost")
