@@ -17,6 +17,10 @@ class DiscoveryFilters(BaseModel):
     province_code: str | None = Field(default=None, max_length=32)
     city_code: str | None = Field(default=None, max_length=32)
     district_code: str | None = Field(default=None, max_length=32)
+    hometown_province_code: str | None = Field(default=None, max_length=32)
+    hometown_city_code: str | None = Field(default=None, max_length=32)
+    hometown_district_code: str | None = Field(default=None, max_length=32)
+    certified_only: bool = Field(default=False, description="仅展示实名认证通过的用户")
     marriage_status: int | None = Field(default=None, ge=1, le=3)
     mbti: list[MbtiType] | None = Field(
         default=None, max_length=16, description="MBTI 人格类型多选；空列表等价于不筛选"
@@ -127,6 +131,10 @@ class FilterOptionsResponse(BaseModel):
     cities: list[str]
     mbti_types: list[dict[str, str]] = Field(
         default_factory=list, description="MBTI 筛选维度；value 用于 filters.mbti"
+    )
+    certification_options: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="认证筛选维度；value=realname 对应 filters.certified_only",
     )
 
 

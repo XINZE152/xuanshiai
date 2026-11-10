@@ -1,5 +1,7 @@
 """Relationships, chat, notifications and safety routes."""
 
+from typing import Literal
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -186,8 +188,8 @@ async def recall(message_id: int = Path(..., ge=1), current: CurrentUser = Depen
 
 
 @router.get("/notifications", response_model=NotificationPage, summary="查看消息通知")
-async def notifications(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=50), notification_type: str | None = Query(None, max_length=64), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> NotificationPage:
-    return await list_notifications(db, current.id, page, page_size, notification_type)
+async def notifications(page: int = Query(1, ge=1, le=1000), page_size: int = Query(20, ge=1, le=50), notification_type: str | None = Query(None, max_length=64), category: Literal["like", "comment", "follow", "message", "match", "activity", "system"] | None = Query(None), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> NotificationPage:
+    return await list_notifications(db, current.id, page, page_size, notification_type, category)
 
 
 @router.get("/notifications/unread-summary", response_model=NotificationUnreadSummary, summary="查询分类未读汇总")

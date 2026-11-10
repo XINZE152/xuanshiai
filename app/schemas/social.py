@@ -141,11 +141,15 @@ class ChatSessionRequestResponse(BaseModel):
 class NotificationUnreadSummary(BaseModel):
     total: int
     categories: dict[str, int]
+    by_category: dict[str, int] = Field(
+        default_factory=dict, description="按语义分类（like/comment/...）的未读数"
+    )
 
 
 class NotificationItem(BaseModel):
     id: int
     notification_type: str
+    category: str = "system"
     title: str | None
     content: str
     payload: dict | None

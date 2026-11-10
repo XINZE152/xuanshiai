@@ -531,6 +531,17 @@ def _filter_sql(filters: DiscoveryFilters, params: dict[str, Any]) -> list[str]:
         if value:
             clauses.append(f"{column} = :filter_{field}")
             params[f"filter_{field}"] = value
+    for field, column in (
+        ("hometown_province_code", "p.hometown_province_code"),
+        ("hometown_city_code", "p.hometown_city_code"),
+        ("hometown_district_code", "p.hometown_district_code"),
+    ):
+        value = getattr(filters, field)
+        if value:
+            clauses.append(f"{column} = :filter_{field}")
+            params[f"filter_{field}"] = value
+    if filters.certified_only:
+        clauses.append("COALESCE(ua.realname_status, 0) = 2")
     if filters.marriage_status:
         clauses.append("u.is_married = :filter_marriage")
         params["filter_marriage"] = filters.marriage_status
@@ -830,6 +841,7 @@ async def get_filter_options() -> FilterOptionsResponse:
         ],
         cities=sorted(DISCOVERY_CITY_OPTIONS),
         mbti_types=[{"value": code, "label": label} for code, label in MBTI_TYPE_OPTIONS],
+        certification_options=[{"value": "realname", "label": "实名认证"}],
     )
 
 

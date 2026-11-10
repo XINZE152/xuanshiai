@@ -23,6 +23,13 @@
       "down": "20261109_01_unlock_cost_default_down.sql",
       "verify": "20261109_01_unlock_cost_default_verify.sql",
       "verify_previous": "20261109_01_unlock_cost_default_verify_previous.sql"
+    },
+    {
+      "version": "20261110_01_paper_plane_catch",
+      "up": "20261110_01_paper_plane_catch_up.sql",
+      "down": "20261110_01_paper_plane_catch_down.sql",
+      "verify": "20261110_01_paper_plane_catch_verify.sql",
+      "verify_previous": "20261110_01_paper_plane_catch_verify_previous.sql"
     }
   ]
 }
