@@ -39,7 +39,7 @@ def test_paper_plane_and_chat_manifests_are_executable() -> None:
     module = _load_script()
     paper = module._manifest("paper_plane")
     chat = module._manifest("chat")
-    assert [item["version"] for item in paper][-1] == "20261109_01_unlock_cost_default"
+    assert [item["version"] for item in paper][-1] == "20261110_01_paper_plane_catch"
     assert [item["version"] for item in chat] == [
         "20260923_01_chat_message_idempotency",
         "20261106_01_chat_message_hidden",

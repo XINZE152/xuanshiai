@@ -1170,6 +1170,8 @@ class DatabaseManager:
             ("community_like", "user_id"),
             ("community_media", "user_id"),
             ("paper_plane", "user_id"),
+            ("paper_plane_catch", "user_id"),
+            ("paper_plane_catch", "plane_id"),
             ("paper_plane_reply", "user_id"),
             ("matchmaker_service", "user_id"),
             ("matchmaker_service", "matchmaker_id"),
@@ -1953,6 +1955,7 @@ class DatabaseManager:
                     `product_id` bigint unsigned NOT NULL,
                     `product_code` varchar(64) NOT NULL,
                     `points_cost` int unsigned NOT NULL,
+                    `count` int unsigned NOT NULL DEFAULT '1' COMMENT '兑换数量',
                     `status` tinyint NOT NULL DEFAULT '0',
                     `idempotency_key` varchar(128) NOT NULL,
                     `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
@@ -2551,6 +2554,18 @@ class DatabaseManager:
                     KEY `idx_moderation_status` (`moderation_status`),
                     KEY `idx_created` (`created_at`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='纸飞机（漂流瓶）'
+            """,
+            "paper_plane_catch": """
+                CREATE TABLE IF NOT EXISTS `paper_plane_catch` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL COMMENT '捡取人',
+                    `plane_id` bigint unsigned NOT NULL COMMENT '纸飞机',
+                    `caught_date` date NOT NULL COMMENT 'UTC 日期',
+                    `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_paper_plane_catch_user_plane_date` (`user_id`,`plane_id`,`caught_date`),
+                    KEY `idx_paper_plane_catch_user_date` (`user_id`,`caught_date`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='纸飞机捡取记录（按 UTC 日期去重）'
             """,
             # ============================================
             # 27. 纸飞机回复

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PointsSummary(BaseModel):
@@ -76,6 +76,12 @@ class PointProduct(BaseModel):
 
 class RedeemRequest(BaseModel):
     product_code: str
+    count: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="本次兑换数量，1~10；总价 = 单价 × count",
+    )
 
 
 class RedeemResponse(BaseModel):
@@ -83,5 +89,6 @@ class RedeemResponse(BaseModel):
     product_code: str
     product_name: str
     points_cost: int
+    count: int = 1
     status: int
     balance: int

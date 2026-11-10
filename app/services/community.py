@@ -36,6 +36,7 @@ from app.schemas.community import (
     CommunityTopicJoinResponse,
     CommunityTopicPage,
     CommunityTopicResponse,
+    PaperPlaneCatchResponse,
     PaperPlaneConversationResponse,
     PaperPlaneCreate,
     PaperPlaneMessageCreate,
@@ -1839,6 +1840,7 @@ async def _paper_response(row: dict[str, Any], viewer: int) -> PaperPlaneRespons
         reply_count=int(row.get("reply_count") or 0),
         voice_url=voice_url,
         voice_duration_sec=int(duration) if duration is not None else None,
+        picked=bool(row.get("picked")),
         created_at=row["created_at"],
     )
 
@@ -1984,7 +1986,10 @@ async def list_paper_planes(db: AsyncSession, user_id: int, page: int, page_size
     result = await db.execute(
         text(
             f"""SELECT p.id, p.content, p.images, p.city, p.tags, p.is_anonymous, p.reply_count,
-            p.voice_url, p.voice_duration_sec, p.created_at
+            p.voice_url, p.voice_duration_sec, p.created_at,
+            EXISTS (SELECT 1 FROM paper_plane_catch pc
+                    WHERE pc.user_id = :user_id AND pc.plane_id = p.id
+                      AND pc.caught_date = UTC_DATE()) AS picked
             FROM paper_plane p
             WHERE {own_clause}
               AND p.status = 1
@@ -1999,6 +2004,77 @@ async def list_paper_planes(db: AsyncSession, user_id: int, page: int, page_size
         {"user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size},
     )
     return [await _paper_response(dict(row), viewer=user_id) for row in result.mappings().all()]
+
+
+async def catch_paper_plane(db: AsyncSession, user_id: int, plane_id: int) -> PaperPlaneCatchResponse:
+    """Mark one visible paper plane as caught today.
+
+    The unique key ``(user_id, plane_id, caught_date)`` makes the operation
+    idempotent: re-catching the same plane on the same UTC day returns
+    ``already_picked=true`` without inflating the count.
+    """
+
+    await ensure_user_allowed(db, user_id, "POST_RESTRICTED")
+    visible = (
+        await db.execute(
+            text(
+                """SELECT 1 FROM paper_plane p
+                WHERE p.id = :plane_id
+                  AND p.user_id <> :user_id
+                  AND p.status = 1
+                  AND COALESCE(p.moderation_status, 1) = 1
+                  AND (p.expire_at IS NULL OR p.expire_at > UTC_TIMESTAMP())
+                  AND NOT EXISTS (SELECT 1 FROM user_restriction ban
+                                  WHERE ban.user_id = p.user_id AND ban.restriction_type = 'TOTAL_BAN'
+                                    AND ban.status = 1 AND ban.starts_at <= UTC_TIMESTAMP()
+                                    AND (ban.ends_at IS NULL OR ban.ends_at > UTC_TIMESTAMP()))"""
+            ),
+            {"plane_id": plane_id, "user_id": user_id},
+        )
+    ).first()
+    if visible is None:
+        raise HTTPException(404, detail="纸飞机不存在或已过期")
+    inserted = await db.execute(
+        text(
+            """INSERT IGNORE INTO paper_plane_catch (user_id, plane_id, caught_date)
+            VALUES (:user_id, :plane_id, UTC_DATE())"""
+        ),
+        {"user_id": user_id, "plane_id": plane_id},
+    )
+    picked_today = int(
+        (
+            await db.execute(
+                text(
+                    """SELECT COUNT(DISTINCT plane_id) FROM paper_plane_catch
+                    WHERE user_id = :user_id AND caught_date = UTC_DATE()"""
+                ),
+                {"user_id": user_id},
+            )
+        ).scalar()
+        or 0
+    )
+    await db.commit()
+    return PaperPlaneCatchResponse(
+        plane_id=plane_id,
+        already_picked=int(getattr(inserted, "rowcount", 0) or 0) == 0,
+        picked_today=picked_today,
+    )
+
+
+async def paper_plane_catch_summary(db: AsyncSession, user_id: int) -> PaperPlaneCatchResponse:
+    picked_today = int(
+        (
+            await db.execute(
+                text(
+                    """SELECT COUNT(DISTINCT plane_id) FROM paper_plane_catch
+                    WHERE user_id = :user_id AND caught_date = UTC_DATE()"""
+                ),
+                {"user_id": user_id},
+            )
+        ).scalar()
+        or 0
+    )
+    return PaperPlaneCatchResponse(plane_id=0, already_picked=False, picked_today=picked_today)
 
 
 def _conversation_response(row: dict[str, Any], viewer_id: int) -> PaperPlaneConversationResponse:

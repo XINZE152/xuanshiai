@@ -43,6 +43,7 @@ from app.schemas.community import (
     CommunityTopicJoinResponse,
     CommunityTopicPage,
     CommunityTopicResponse,
+    PaperPlaneCatchResponse,
     PaperPlaneConversationResponse,
     PaperPlaneCreate,
     PaperPlaneMessageCreate,
@@ -63,6 +64,7 @@ from app.services.community_media import (
     upload_community_media,
 )
 from app.services.community import (
+    catch_paper_plane,
     collect_post,
     create_comment,
     create_paper_plane,
@@ -90,6 +92,7 @@ from app.services.community import (
     list_paper_plane_conversations,
     list_paper_plane_messages,
     list_paper_planes,
+    paper_plane_catch_summary,
     list_posts,
     list_report_reasons,
     list_topics,
@@ -707,6 +710,31 @@ async def my_planes(
     db: AsyncSession = Depends(get_db),
 ) -> list[PaperPlaneResponse]:
     return await list_paper_planes(db, current.id, page, page_size, own=True)
+
+
+@router.get(
+    "/paper-planes/catches/summary",
+    response_model=PaperPlaneCatchResponse,
+    summary="查看今天已捡纸飞机数量",
+)
+async def catch_summary(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PaperPlaneCatchResponse:
+    return await paper_plane_catch_summary(db, current.id)
+
+
+@router.post(
+    "/paper-planes/{plane_id}/catch",
+    response_model=PaperPlaneCatchResponse,
+    summary="标记捡到纸飞机",
+)
+async def catch(
+    plane_id: int = Path(..., ge=1),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PaperPlaneCatchResponse:
+    return await catch_paper_plane(db, current.id, plane_id)
 
 
 @router.post(
