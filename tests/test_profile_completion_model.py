@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -121,6 +123,20 @@ def test_album_requires_three_photos_and_legacy_allows_one() -> None:
 def test_completion_rules_total_100() -> None:
     assert sum(weight for _, _, weight in COMPLETION_RULES) == 100
     assert len(COMPLETION_RULES) == 27
+    assert profile.COMPLETION_RULES_TOTAL == 100
+    assert profile.COMPLETION_RULES_VERSION == "profile-v5"
+
+
+def test_completion_rules_digest_is_frozen() -> None:
+    """权重表上线后冻结；改动必须新版本 + 回填，不能静默漂移。"""
+    payload = json.dumps(
+        [[key, label, weight] for key, label, weight in COMPLETION_RULES],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert hashlib.sha256(payload.encode()).hexdigest() == (
+        "24640d5cbc8c4cd1736b6ada375ee13ff4fabdab45cbbb8664b5beb039df55b6"
+    )
 
 
 def test_detailed_fields_are_scored() -> None:
@@ -234,6 +250,40 @@ async def test_grandfathered_read_keeps_stored_score_and_legacy_album() -> None:
 
 
 @pytest.mark.asyncio
+async def test_grandfathered_display_score_is_computed_and_invariant_holds() -> None:
+    """老用户保留访问，但展示分必须按当前项重算，不能再用存量 100 掩盖未填项。"""
+    row = _full_row()
+    row.update(
+        {
+            "company": None,
+            "school": None,
+            "house": None,
+            "car": None,
+            "household": None,
+            "household_province_code": None,
+            "household_city_code": None,
+        }
+    )
+    row["completion_grandfathered"] = 1
+    row["completion_score"] = 100
+    result = MagicMock()
+    result.mappings.return_value.first.return_value = row
+    result.mappings.return_value.one.return_value = row
+    db = AsyncMock()
+    db.execute.return_value = result
+
+    completion = await profile.get_completion(db, 42)
+
+    missing_weight = sum(item.weight for item in completion.items if not item.completed)
+    assert completion.score < 100
+    assert completion.score + missing_weight == 100
+    # 门禁豁免仍保留，避免老用户因新权重被锁死。
+    assert completion.can_browse is True
+    assert completion.can_apply is True
+    assert completion.can_chat is True
+
+
+@pytest.mark.asyncio
 async def test_recalculate_completion_writes_profile_v5() -> None:
     row = _base_row()
     result = MagicMock()
@@ -244,5 +294,28 @@ async def test_recalculate_completion_writes_profile_v5() -> None:
     score = await profile.recalculate_completion(db, 42)
 
     assert score == 0
+    params_seen = [call.args[1] for call in db.execute.await_args_list if len(call.args) > 1]
+    assert any("profile-v5" in str(params) for params in params_seen)
+
+
+@pytest.mark.asyncio
+async def test_recalculate_can_preserve_grandfather_for_backfill() -> None:
+    row = _full_row()
+    row["album_count"] = 1
+    row["completion_grandfathered"] = 1
+    row["completion_score"] = 100
+    result = MagicMock()
+    result.mappings.return_value.first.return_value = row
+    db = AsyncMock()
+    db.execute.return_value = result
+
+    score, completed = await profile.recalculate_completion_state(
+        db, 42, clear_grandfathered=False
+    )
+
+    assert score == 100
+    assert completed["album"] is True
     statements = "\n".join(str(call.args[0]) for call in db.execute.await_args_list)
-    assert "profile-v5" in statements
+    assert "completion_grandfathered = 0" not in statements
+    params_seen = [call.args[1] for call in db.execute.await_args_list if len(call.args) > 1]
+    assert any("profile-v5" in str(params) for params in params_seen)

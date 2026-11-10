@@ -161,7 +161,8 @@ class CandidateVisibilityService:
                           AND (candidate_restriction.ends_at IS NULL
                                OR candidate_restriction.ends_at > UTC_TIMESTAMP())
                     ) AS not_restricted,
-                    COALESCE(candidate_completion.score, 0) >= 100 AS profile_complete,
+                    (COALESCE(candidate_completion.score, 0) >= 100
+                     OR COALESCE(candidate_completion.completion_grandfathered, 0) = 1) AS profile_complete,
                     -- 只拦「拒绝(2) / 隐藏(3)」。审核中(0) 不算违规：公开资料序列化
                     -- 层已只取 review_status = 1，待审图片本身不会外泄。
                     NOT EXISTS (
@@ -239,7 +240,10 @@ class CandidateVisibilityService:
             "visibility_viewer_id": viewer.user_id,
             "visibility_realname_status": viewer.realname_status or 0,
         }
-        completion_clause = f"COALESCE({completion_alias}.score, 0) >= 100"
+        completion_clause = (
+            f"(COALESCE({completion_alias}.score, 0) >= 100 "
+            f"OR COALESCE({completion_alias}.completion_grandfathered, 0) = 1)"
+        )
         if completion_waiver is not None:
             if completion_waiver.organization_id is None:
                 params["visibility_waiver_matchmaker_id"] = completion_waiver.matchmaker_id
@@ -249,10 +253,11 @@ class CandidateVisibilityService:
                 waiver_relation = "waiver_ra.organization_id = :visibility_waiver_organization_id"
             completion_clause = (
                 "("
-                f"COALESCE({completion_alias}.score, 0) >= 100 "
+                f"(COALESCE({completion_alias}.score, 0) >= 100 "
                 "OR EXISTS (SELECT 1 FROM resource_assignment waiver_ra "
                 f"WHERE waiver_ra.user_id = {candidate_alias}.id "
-                f"AND waiver_ra.status = 1 AND {waiver_relation}))"
+                f"AND waiver_ra.status = 1 AND {waiver_relation})) "
+                f"OR COALESCE({completion_alias}.completion_grandfathered, 0) = 1)"
             )
         parts: list[str] = [
             f"{candidate_alias}.id <> :visibility_viewer_id",

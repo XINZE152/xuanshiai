@@ -151,10 +151,21 @@ async def get_browsable_user(
 ) -> CurrentUser:
     """Require the single server-side gate shared by homepage discovery APIs."""
     result = await db.execute(
-        text("SELECT COALESCE(score, 0) FROM user_profile_completion WHERE user_id = :user_id"),
+        text(
+            """SELECT COALESCE(score, 0) AS score,
+                      COALESCE(completion_grandfathered, 0) AS completion_grandfathered
+               FROM user_profile_completion WHERE user_id = :user_id"""
+        ),
         {"user_id": current.id},
     )
-    if not settings.discovery_skip_gates_enabled and float(result.scalar() or 0) < 100:
+    row = result.mappings().first()
+    completion_score = float((row or {}).get("score") or 0)
+    grandfathered = bool((row or {}).get("completion_grandfathered"))
+    if (
+        not settings.discovery_skip_gates_enabled
+        and completion_score < 100
+        and not grandfathered
+    ):
         raise HTTPException(status_code=403, detail="请先完善资料后再进入首页")
     return current
 
