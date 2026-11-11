@@ -313,6 +313,66 @@ Content-Type: application/json
 | 422 | `AI_CONFIRMATION_REQUIRED` | `auto_confirm_pending=true` 但安全条件不满足；`detail.blockers` 给出原因 | 展示确认卡与 blockers |
 | 503 | `AI_FEATURE_DISABLED` | AI 搜索未开闸 | 空态/置灰 |
 
+### 前端接入示例（选项 A，2026-11-11，方案 33 / Q18）
+
+后端自动确认能力已于 2026-11-10 上线（见上文业务规则），**本小节为纯前端接入契约，后端无代码变更**。目标：高置信度解析结果跳过确认卡直达结果页；其余场景回退确认卡，旧客户端（不传 `auto_confirm_pending`）行为完全不变。
+
+**时序**：
+
+```text
+创建草稿 POST /ai/search-drafts
+  → 轮询解析任务至完成，GET /ai/search-drafts/{draft_id}
+  → status == "awaiting_confirmation" 时分支：
+      auto_confirm_ready == true
+        → POST /ai/search-drafts/{draft_id}/confirm
+             ?expected_condition_revision={condition_revision}
+             &auto_confirm_pending=true
+           Header: Idempotency-Key: <每次确认尝试独立生成，8-128 ASCII>
+        → 202：拿 task_id 按 poll_after_ms 轮询任务 → 读结果页（§6）
+        → 422 AI_CONFIRMATION_REQUIRED：回退确认卡（见下）
+      auto_confirm_ready == false
+        → 展示确认卡：conditions + auto_confirm_blockers
+        → 用户逐条确认/修改/删除（PATCH，§3）
+        → 全部 hard 条件 confirmed 后 POST confirm（不带 auto_confirm_pending）
+```
+
+**请求示例（自动确认分支）**：
+
+```http
+POST /api/v1/ai/search-drafts/sd_01JXc5.../confirm?expected_condition_revision=0&auto_confirm_pending=true HTTP/1.1
+Authorization: Bearer <access_token>
+Idempotency-Key: confirm-7f3a9c2e-20261111
+```
+
+成功返回 `202`（结构见上文返回示例），随后按 `poll_after_ms` 轮询任务。
+
+**回退示例（422 响应体）**：
+
+```json
+{
+  "detail": {
+    "code": "AI_CONFIRMATION_REQUIRED",
+    "message": "搜索条件需要用户确认",
+    "request_id": "rq_...",
+    "retryable": false,
+    "retry_after_ms": 0,
+    "blockers": ["low_confidence:age"]
+  }
+}
+```
+
+前端处理：读 `detail.blockers`，重新 `GET` 草稿取最新 `conditions`/`condition_revision`，渲染确认卡并展示 blockers 对应提示；用户手动确认后走普通 `POST confirm`。**不要对同一 422 原样重试自动确认**——安全条件不会自行变好。
+
+**边界与注意事项**：
+
+| 场景 | 行为 | 前端处理 |
+| --- | --- | --- |
+| GET 时 ready=true，POST 时条件已变化 | 服务端按提交时刻重判，可能 `422 AI_CONFIRMATION_REQUIRED` | 回退确认卡，属正常竞态 |
+| 草稿过期/已确认/revision 不符 | `409 RESULT_STALE` 或 `DRAFT_VERSION_CONFLICT` | 重新拉草稿；已 confirmed 的草稿直接读快照结果 |
+| 同一 Idempotency-Key 先自动后手动 | `auto_confirm_pending` 参与幂等摘要 → `409 TASK_IDEMPOTENCY_CONFLICT` | 每次确认尝试（含回退后的手动确认）换新 key |
+| 配额 | 自动确认与手动确认一样消耗一次搜索配额 | 配额不足提示与其他搜索入口一致 |
+| 开关 | AI 搜索未开闸时创建草稿即 `503 AI_FEATURE_DISABLED` | 入口空态/置灰，无需区分自动/手动 |
+
 ---
 
 ## 5. 查询本人可编辑的搜索标签建议

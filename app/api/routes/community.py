@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 import logging
 from typing import Any, Literal, TypeVar
 
-from fastapi import APIRouter, Body, Depends, File, Form, Header, Path, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Path, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -227,8 +227,13 @@ async def post(
 @router.get("/community/posts", response_model=CommunityPostPage, summary="查看动态流")
 async def feed(
     mode: Literal[
-        "latest", "following", "city", "liked_users", "following_and_liked", "mine"
+        "latest", "following", "city", "liked_users", "following_and_liked", "mine", "user"
     ] = Query("latest"),
+    target_user_id: int | None = Query(
+        default=None,
+        ge=1,
+        description="mode=user 时必填，指定动态作者；其他 mode 下传入返回 422",
+    ),
     page: int = Query(1, ge=1, le=1000),
     page_size: int = Query(20, ge=1, le=50),
     city: str | None = Query(default=None, max_length=64),
@@ -243,6 +248,10 @@ async def feed(
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CommunityPostPage:
+    if mode == "user" and target_user_id is None:
+        raise HTTPException(422, detail="mode=user 需要提供 target_user_id")
+    if mode != "user" and target_user_id is not None:
+        raise HTTPException(422, detail="target_user_id 仅在 mode=user 时可用")
     filter_key = None if filter in (None, "all", "hot", "latest") else filter
     sort_key: Literal["latest", "hot"] = "hot" if filter == "hot" or sort == "hot" else "latest"
     return await list_posts(
@@ -255,6 +264,7 @@ async def feed(
         city_code=city_code,
         filter_key=filter_key,
         sort=sort_key,
+        target_user_id=target_user_id,
     )
 
 
