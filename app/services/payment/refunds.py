@@ -89,6 +89,9 @@ class RefundService:
             raise PaymentValidationError("只有支付成功订单才能退款")
         if str(order["channel"] or "wechat") != "wechat":
             raise PaymentValidationError("订单渠道不是微信支付")
+        # D4（方案 33）：积分充值不走系统退款，已消耗积分无法自动追回，统一人工工单。
+        if int(order["type"]) == 7:
+            raise PaymentValidationError("积分充值订单不支持系统退款，请走人工工单处理")
         if str(order["refund_status"] or "NONE").upper() == "FULL":
             raise PaymentValidationError("订单已全额退款")
 

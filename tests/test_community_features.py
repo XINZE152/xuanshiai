@@ -263,6 +263,27 @@ class RollbackFailingSession(ScriptedSession):
         raise RuntimeError("rollback failed")
 
 
+class ApplicationInsertFailingSession(RollbackFailingSession):
+    """申请 INSERT 抛错、其余查询一律空结果，且 rollback 本身也失败。
+
+    原先用 ``RollbackFailingSession(None, database_error)`` 按**调用序号**喂结果，
+    隐含「第一条 execute 就是申请 INSERT」的假设。``create_application`` 后来在
+    INSERT 之前补了「对方实名状态」和「双方是否已有进行中申请」两条查询，序号
+    假设失效：异常落在 try 之外，``_refund_quota_after_database_failure`` 根本没
+    执行，于是退款断言变成空转（rollback 断言同理）。按语句内容定位才不受后续
+    新增前置查询影响。
+    """
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    async def execute(self, statement: object, params: object = None) -> FakeResult:
+        if str(statement).lstrip().upper().startswith("INSERT INTO MATCH_APPLY"):
+            raise self.error
+        return FakeResult([])
+
+
 class IdempotencyMigrationCursor:
     def __init__(self, columns: list[dict[str, object]]) -> None:
         self.columns = columns
@@ -1604,7 +1625,7 @@ async def test_application_rollback_failure_preserves_database_error_and_attempt
 
     with pytest.raises(RuntimeError, match="application insert failed"):
         await discovery_service.create_application(
-            RollbackFailingSession(None, database_error),
+            ApplicationInsertFailingSession(database_error),
             7,
             8,
             ApplicationCreateRequest(message="hello"),

@@ -27,9 +27,32 @@ if __package__ in {None, ""}:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FRONTEND_STATIC = ROOT.parent / "xuanshiai-vue" / "static"
 DEMO_PASSWORD = "password123"
 DEMO_SLUG = "demo"
+
+# 素材后缀按顺序试：仓库里的演示图在某一轮统一压成了 .webp（原本是 .jpg），
+# 写死单一后缀会让脚本和契约测试一起误报「缺少素材」。
+_ASSET_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def _frontend_static_root() -> Path | None:
+    """定位前端仓库的 ``static`` 目录；找不到返回 None。
+
+    原实现写死 ``ROOT.parent / "xuanshiai-vue" / "static"``，隐含「前后端是同级
+    目录」的单仓布局。实际常见的是两处独立 checkout（后端在
+    ``<workspace>/xuanshiai``、前端在别处），此时所有素材判断都指向不存在的
+    目录、批量误报缺图。优先读 ``XUANSHIAI_FRONTEND_ROOT``（指向前端仓库根），
+    其次才试同级目录。
+    """
+    override = os.environ.get("XUANSHIAI_FRONTEND_ROOT")
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override) / "static")
+    candidates.append(ROOT.parent / "xuanshiai-vue" / "static")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
 
 # 已存在的演示会员（补全，不新建）。
 EXISTING_PHONES = (
@@ -506,11 +529,28 @@ def _assert_environment(environment: str | None) -> None:
 
 
 def _asset_source(token: str) -> Path:
+    """素材标记 → 前端仓库里的真实文件。
+
+    - ``anime:001`` → ``static/avatars/matchmaking-anime-001.<后缀>``，后缀按
+      ``_ASSET_SUFFIXES`` 依次试（仓库现存的是 .webp）。
+    - ``portrait:profile-woman-main.webp`` → ``static/portraits/<原文件名>``，
+      标记自带后缀，原样拼。
+
+    一个候选都不存在时返回首个候选，交给调用方的 ``.exists()`` 判定，避免这里
+    静默吞掉缺图。
+    """
+    root = _frontend_static_root() or (ROOT.parent / "xuanshiai-vue" / "static")
     if token.startswith("anime:"):
-        return FRONTEND_STATIC / "avatars" / f"matchmaking-anime-{token.split(':', 1)[1]}.jpg"
-    if token.startswith("portrait:"):
-        return FRONTEND_STATIC / "portraits" / token.split(":", 1)[1]
-    raise ValueError(f"未知素材标记：{token}")
+        stem = f"matchmaking-anime-{token.split(':', 1)[1]}"
+        candidates = [root / "avatars" / f"{stem}{suffix}" for suffix in _ASSET_SUFFIXES]
+    elif token.startswith("portrait:"):
+        candidates = [root / "portraits" / token.split(":", 1)[1]]
+    else:
+        raise ValueError(f"未知素材标记：{token}")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _render_image(source: Path, directory: Path, name: str, *, thumbnail: bool) -> dict[str, Any]:

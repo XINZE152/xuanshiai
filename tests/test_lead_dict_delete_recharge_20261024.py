@@ -122,9 +122,13 @@ async def test_batch_delete_partial_success_single_audit() -> None:
     inserts = [sql for sql, _ in db.writes]
     assert sum("business_audit_log" in s for s in inserts) == 1
     assert sum("UPDATE customer_lead" in s for s in inserts) == 1
-    # 3 不进入删除集合
+    # 3 不进入删除集合：UPDATE 的占位符只应有 del_0 / del_1 两个。
+    # 原先写的是 `"bdel_2" not in del_params`——但本条语句用的是 del_ 前缀，
+    # bdel_* 属于上面 FOR UPDATE 那条，这个断言恒真、等于没断言。
+    # 占位符取值由 _placeholders 统一转成字符串，这里按 int 归一后比集合。
     del_params = next(params for sql, params in db.writes if "UPDATE customer_lead" in sql)
-    assert "bdel_2" not in del_params and del_params["del_0"] == 1 and del_params["del_1"] == 2
+    del_values = {key: int(value) for key, value in del_params.items() if key.startswith("del_")}
+    assert del_values == {"del_0": 1, "del_1": 2}
 
 
 def test_batch_delete_request_bounds() -> None:

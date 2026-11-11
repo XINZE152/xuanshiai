@@ -598,11 +598,18 @@ async def workspace_dashboard(
     )
     meeting_params: dict[str, object] = {}
     meeting_scope = _meeting_scope_predicate(actor, "mr", meeting_params)
-    # 约见申请入口对应全部；待见面包含已接受但尚未排期，以及尚未完成跟进的约会。
+    # 约见申请入口只数「在途且还没排期」的：状态与小程序工作台的
+    # phase == 'PROCESSING' 同口径（SUBMITTED 待联系 / CONTACTED 已联系 /
+    # ACCEPTED 双方已接受），再排掉已经有 meeting_record 的（那已经进入
+    # 「待见面」口径）。两个指标因此不重叠：约见申请是「还没约」，
+    # 待见面是「约了但还没见完/还没回填跟进」。
+    # 之前这里数全部状态，DECLINED / CLOSED 也算进待办角标，红娘永远清不掉。
     meeting_request_count = int(
         await db.scalar(
             text(
                 f"""SELECT COUNT(*) FROM meeting_request mr WHERE {meeting_scope}
+                AND mr.status IN ('SUBMITTED', 'CONTACTED', 'ACCEPTED')
+                AND NOT EXISTS (SELECT 1 FROM meeting_record m WHERE m.request_id = mr.id)
                 """
             ),
             meeting_params,

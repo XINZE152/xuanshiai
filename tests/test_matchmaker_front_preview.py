@@ -186,9 +186,13 @@ def dashboard_db() -> FakeDB:
         if "COUNT(DISTINCT ra.user_id)" in sql:
             return 2
         if "FROM meeting_request mr" in sql:
+            # 两条会议查询都以 `FROM meeting_request mr` 开头，必须先分「待见面」
+            # （带 LEFT JOIN meeting_record 的那条）。原先用于区分它的
+            # `"FROM meeting_record m"` 分支永远匹配不到——实际 SQL 里是
+            # `LEFT JOIN meeting_record m`，于是 pending_meeting 被这条先吃掉、返回 14。
+            if "LEFT JOIN meeting_record m" in sql:
+                return 8
             return 14
-        if "FROM meeting_record m" in sql:
-            return 8
         if "FROM commission_entry" in sql:
             return 509
         return 0

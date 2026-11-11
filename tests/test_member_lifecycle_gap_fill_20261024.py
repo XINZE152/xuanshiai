@@ -29,7 +29,10 @@ def test_points_sort_whitelisted_and_uses_user_points() -> None:
 
 
 def test_route_sort_by_accepts_points_and_integral() -> None:
-    assert "points|integral" in inspect.getsource(crm.members)
+    # 白名单已从内联正则提成 MEMBER_SORT_FIELDS（matchmaker_crm_admin 用它拼
+    # Query 的 pattern），函数源码里不再有 "points|integral" 这段字面量。
+    # 按字段成员断言，比盯源码字符串稳。
+    assert {"points", "integral"} <= set(crm.MEMBER_SORT_FIELDS)
 
 
 # --------------------------------------------------------------------------- #

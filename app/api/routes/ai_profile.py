@@ -30,6 +30,7 @@ import re
 from uuid import uuid4
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query, status
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user
@@ -42,6 +43,7 @@ from app.schemas.ai_profile import (
     ProfileDraftPatchRequest,
     ProfileDraftRead,
     ProfileNarrativeRead,
+    ProfileNarrativeEmotionalInsight,
     ProfileProgress,
     ProfilePublishAccepted,
     ProfileRevisionPage,
@@ -1103,6 +1105,18 @@ async def get_profile_narrative_route(
             str(cleaned.get("key") or ""), cleaned.get("icon")
         )
         dimensions.append(cleaned)
+    # 情感气质透视：仅 personal 且五项齐全时下发。历史成稿（字段被删期间
+    # 写入的 summary_text）没有该键，脏数据也不该让展示接口 500——按无值
+    # 处理，前端整块隐藏。
+    raw_emotional_insight = data.get("emotional_insight")
+    emotional_insight: ProfileNarrativeEmotionalInsight | None = None
+    if subject is ProfileSubject.PERSONAL and isinstance(raw_emotional_insight, dict):
+        try:
+            emotional_insight = ProfileNarrativeEmotionalInsight.model_validate(
+                raw_emotional_insight
+            )
+        except ValidationError:
+            emotional_insight = None
     return ProfileNarrativeRead(
         subject=subject.value,
         status=str(narrative.get("status") or "published"),
@@ -1119,6 +1133,7 @@ async def get_profile_narrative_route(
         recent_change=data.get("recent_change"),
         history_observations=list(data.get("history_observations") or []),
         conclusion=str(data.get("conclusion") or ""),
+        emotional_insight=emotional_insight,
     )
 
 

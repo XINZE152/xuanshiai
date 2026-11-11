@@ -121,7 +121,8 @@ def parse_json(content: str) -> dict[str, Any]:
     顶层数组或标量一律按非法处理，避免调用方 ``data.get(...)`` 抛
     ``AttributeError``。
 
-    解析失败只记录长度与首尾片段，不记录原文，防止用户资料进入日志。
+    解析失败只记录长度、失败原因、截断标记与首尾片段，不记录原文，防止用户
+    资料进入日志。
     """
     text = (content or "").strip()
 
@@ -134,30 +135,50 @@ def parse_json(content: str) -> dict[str, Any]:
             else re.sub(r"```(?:json)?", "", text).strip()
         )
 
-    candidates = [text]
-
     # 2) 截取首个 "{" 到最后一个 "}"，覆盖"JSON 前后有说明文字"的情况
+    candidates = [text]
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end > start and (start, end) != (0, len(text) - 1):
         candidates.append(text[start : end + 1])
 
+    # truncated 是截断启发式：整段以 "{" 开头却没有 "}" 收尾，最典型的成因是
+    # 模型命中 max_tokens 被切断（此时 json 报的是「Unterminated string」
+    # 之类的间接症状，单看 reason 容易误判成模型乱写）。
+    stripped = text.lstrip()
+    truncated = stripped.startswith("{") and not stripped.rstrip().endswith("}")
+
+    def _log_failure(reason: str) -> None:
+        # 只记可判定形态：长度、失败原因、截断标记、首尾 40 字符。不记原文，
+        # 防止用户资料进入日志（这是 parse_json 的既有约束，不得放宽）。
+        logger.warning(
+            "ai_json_parse_failed len=%d reason=%s truncated=%s head=%r tail=%r",
+            len(content or ""),
+            reason,
+            truncated,
+            (content or "")[:40],
+            (content or "")[-40:],
+        )
+
+    last_reason = "no_candidate_parsed"
     for candidate in candidates:
         # 3) 先按原样解析，再尝试去掉尾逗号后解析
         for attempt in (candidate, _TRAILING_COMMA.sub(r"\1", candidate)):
             try:
                 value = json.loads(attempt)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                # 只留 json 模块自己给出的定位（msg + 字符偏移），它不含原文内容，
+                # 足以区分「缺收尾括号」「多余逗号」「控制字符」等具体形态。
+                last_reason = f"{exc.msg}@char{exc.pos}"
                 continue
             if not isinstance(value, dict):
+                # 顶层是数组/标量：调用方随后 data.get(...) 会抛 AttributeError，
+                # 必须在这里拦住。这条分支记 top_level_* 而不是解析原因，
+                # 因为 json 本身是合法的，问题在返回类型不符合约定。
+                _log_failure(f"top_level_{type(value).__name__}")
                 raise HTTPException(503, detail="AI返回格式无效")
             return value
 
-    logger.warning(
-        "ai_json_parse_failed len=%d head=%r tail=%r",
-        len(content or ""),
-        (content or "")[:40],
-        (content or "")[-40:],
-    )
+    _log_failure(last_reason)
     raise HTTPException(503, detail="AI返回格式无效")
 
 

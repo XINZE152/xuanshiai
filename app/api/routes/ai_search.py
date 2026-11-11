@@ -22,6 +22,7 @@ provider trace 或密钥。
 from __future__ import annotations
 
 import re
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -46,6 +47,7 @@ from app.schemas.ai_search import (
 from app.services.ai.flags import AiFeature, AiFeatureDisabledError, require_ai_feature
 from app.services.ai.profile import AIInputError, DraftVersionConflict
 from app.services.ai.search import (
+    SearchConfirmationRequired,
     SearchConsentRequired,
     SearchDraftNotConfirmed,
     SearchDraftNotFound,
@@ -79,7 +81,12 @@ def _request_id() -> str:
 
 
 def _error_response(
-    code: str, message: str, status_code: int, *, retryable: bool = False
+    code: str,
+    message: str,
+    status_code: int,
+    *,
+    retryable: bool = False,
+    extra: dict[str, Any] | None = None,
 ) -> HTTPException:
     detail = AiErrorResponse(
         code=code,
@@ -87,8 +94,10 @@ def _error_response(
         request_id=_request_id(),
         retryable=retryable,
         retry_after_ms=0,
-    )
-    return HTTPException(status_code=status_code, detail=detail.model_dump())
+    ).model_dump()
+    if extra:
+        detail.update(extra)
+    return HTTPException(status_code=status_code, detail=detail)
 
 
 def _require_search_feature() -> None:
@@ -244,8 +253,12 @@ async def confirm_search_draft_route(
     expected_condition_revision: int | None = Query(
         default=None, ge=0, alias="expected_condition_revision"
     ),
+    auto_confirm_pending: bool = Query(
+        default=False,
+        description="为 true 时，安全条件满足则服务端自动确认全部已知条件后再创建快照",
+    ),
 ) -> SearchSnapshotAccepted:
-    """全部 hard 条件确认且无冲突才创建快照；编译失败不创建候选任务。"""
+    """全部 hard 条件确认且无冲突才创建快照；auto 模式仅对安全解析结果生效。"""
     _require_search_feature()
     _check_idempotency_key(idempotency_key)
     if expected_condition_revision is None:
@@ -261,7 +274,15 @@ async def confirm_search_draft_route(
             current.id,
             expected_condition_revision,
             idempotency_key,
+            auto_confirm_pending=auto_confirm_pending,
         )
+    except SearchConfirmationRequired as exc:
+        raise _error_response(
+            exc.code,
+            exc.message,
+            exc.status_code,
+            extra={"blockers": list(exc.blockers)},
+        ) from exc
     except SearchPolicyDenied as exc:
         raise _error_response(exc.code, exc.message, exc.status_code) from exc
     except SearchInputInvalid as exc:

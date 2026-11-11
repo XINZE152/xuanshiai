@@ -82,7 +82,10 @@ def test_balance_sort_whitelisted() -> None:
 def test_members_routes_project_balance_and_allow_sort() -> None:
     source = inspect.getsource(matchmaker_crm_admin)
     assert "{MEMBER_BALANCE_EXPR} AS balance" in source
-    assert "login_num|balance|id" in source
+    # sort_by 白名单按字段集合断言。原先是 `"login_num|balance|id" in source`：
+    # 那种连续子串断言只要白名单中间插一项（本轮加了 points / integral）就会失效，
+    # 而真正要守的契约只是「这三个字段可以排序」。
+    assert {"login_num", "balance", "id"} <= set(matchmaker_crm_admin.MEMBER_SORT_FIELDS)
 
 
 # --------------------------------------------------------------------------- #

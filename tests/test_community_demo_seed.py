@@ -93,8 +93,15 @@ def test_member_seed_roster_is_complete_and_balanced() -> None:
 
 
 def test_member_seed_assets_resolve_to_frontend_files() -> None:
-    from scripts.seed_community_members import MEMBERS, _asset_source
+    from scripts.seed_community_members import MEMBERS, _asset_source, _frontend_static_root
 
+    # 素材属于前端仓库。后端单独 checkout 时这里天然找不到前端 static，报失败只会
+    # 制造噪音；明确跳过并说明怎么指路（XUANSHIAI_FRONTEND_ROOT=<前端仓库根>）。
+    if _frontend_static_root() is None:
+        pytest.skip(
+            "未找到前端仓库 static 目录（同级 xuanshiai-vue 或 XUANSHIAI_FRONTEND_ROOT），"
+            "跳过演示会员素材存在性校验"
+        )
     for member in MEMBERS:
         for token in (member["avatar"], *member["photos"]):
             assert _asset_source(token).exists(), f"缺少素材 {token}"

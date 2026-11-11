@@ -50,7 +50,12 @@ from app.schemas.admin import (
 )
 from app.services.discovery import _ensure_target, _target_rows
 from app.services.media_access import MEDIA_CATEGORY_AUDIO, sign_media_url, strip_media_signature
-from app.services.notifications import emit_notification
+from app.services.notifications import (
+    aggregate_unread_by_category,
+    emit_notification,
+    notification_category,
+    notification_category_filter,
+)
 from app.services.profile import _calculate_age
 from app.services.restrictions import ensure_user_allowed
 from app.services.restrictions import create_restriction
@@ -636,11 +641,30 @@ async def list_notifications(
     page: int,
     page_size: int,
     notification_type: str | None = None,
+    category: str | None = None,
 ) -> NotificationPage:
-    condition = " AND notification_type = :notification_type" if notification_type else ""
+    if notification_type and category:
+        raise HTTPException(422, detail="notification_type 与 category 不能同时使用")
+    conditions: list[str] = []
     params: dict[str, Any] = {"user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size}
     if notification_type:
+        conditions.append("notification_type = :notification_type")
         params["notification_type"] = notification_type
+    elif category:
+        try:
+            operator, types = notification_category_filter(category)
+        except ValueError as exc:
+            raise HTTPException(422, detail=str(exc)) from exc
+        if types:
+            placeholders = []
+            for index, event_type in enumerate(types):
+                key = f"category_type_{index}"
+                placeholders.append(f":{key}")
+                params[key] = event_type
+            conditions.append(f"notification_type {operator} ({', '.join(placeholders)})")
+        elif operator == "IN":
+            conditions.append("1 = 0")
+    condition = " AND " + " AND ".join(conditions) if conditions else ""
     result = await db.execute(text(f"""SELECT id, notification_type, title, content, payload,
         related_user_id, related_id, target_type, target_id, is_read, created_at
         FROM user_notification WHERE user_id = :user_id{condition}
@@ -654,7 +678,8 @@ async def list_notifications(
             except json.JSONDecodeError:
                 payload = None
         items.append(NotificationItem(
-            id=int(row["id"]), notification_type=row["notification_type"], title=row["title"],
+            id=int(row["id"]), notification_type=row["notification_type"],
+            category=notification_category(row["notification_type"]), title=row["title"],
             content=row["content"] or "", payload=payload, related_user_id=row["related_user_id"],
             related_id=row["related_id"], target_type=row.get("target_type"), target_id=row.get("target_id"),
             actor_user_id=row["related_user_id"], action=row["notification_type"],
@@ -1226,6 +1251,20 @@ async def moderate_content(
         "source_report_id": source_report_id if hide else None,
         "expected_report_id": expected_report_id,
     }
+    post_author_id: int | None = None
+    post_previous_status: int | None = None
+    if target_type == "post" and not hide:
+        previous = await db.execute(
+            text(
+                "SELECT user_id, moderation_status FROM community_post "
+                "WHERE id = :target_id"
+            ),
+            {"target_id": target_id},
+        )
+        row = previous.mappings().first()
+        if row is not None:
+            post_author_id = int(row["user_id"])
+            post_previous_status = int(row.get("moderation_status") or 0)
     if target_type == "post":
         result = await db.execute(
             text(
@@ -1281,6 +1320,28 @@ async def moderate_content(
             raise HTTPException(404, detail="社区媒体不存在")
     else:
         raise HTTPException(422, detail="不支持的内容类型")
+
+    if target_type == "post" and not hide and post_previous_status == 0:
+        remind_rows = (
+            await db.execute(
+                text(
+                    """SELECT user_id FROM community_post_remind
+                       WHERE post_id = :post_id ORDER BY id"""
+                ),
+                {"post_id": target_id},
+            )
+        ).mappings().all()
+        for item in remind_rows:
+            await emit_notification(
+                db,
+                recipient_user_id=int(item["user_id"]),
+                actor_user_id=post_author_id,
+                event_type="community_post_remind",
+                title="有人提醒你看一条动态",
+                content="你被提醒查看一条新动态",
+                target_type="community_post",
+                target_id=target_id,
+            )
 
     if actor_id is not None:
         await db.execute(
@@ -1674,5 +1735,9 @@ async def respond_chat_session_request(db: AsyncSession, user_id: int, request_i
 async def notification_unread_summary(db: AsyncSession, user_id: int) -> NotificationUnreadSummary:
     rows = (await db.execute(text("""SELECT notification_type, COUNT(*) AS count FROM user_notification
         WHERE user_id = :user_id AND is_read = 0 GROUP BY notification_type"""), {"user_id": user_id})).mappings().all()
-    categories = {str(row["notification_type"]): int(row["count"]) for row in rows}
-    return NotificationUnreadSummary(total=sum(categories.values()), categories=categories)
+    by_type = {str(row["notification_type"]): int(row["count"]) for row in rows}
+    return NotificationUnreadSummary(
+        total=sum(by_type.values()),
+        categories=by_type,
+        by_category=aggregate_unread_by_category(by_type),
+    )
