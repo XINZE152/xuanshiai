@@ -3,7 +3,8 @@
 - ``POST /support/feedback``：意见箱，幂等 + 每日 10 条上限；
 - ``GET /support/feedback/mine``：仅本人反馈；
 - ``GET /support/help-docs``：读取后台维护的 ``help_doc`` 内容；
-- ``POST /support/contact``：转人工客服，落 ``user_feedback``（category=咨询）。
+- ``POST /support/contact``：转人工客服，落 ``user_feedback``（category=咨询）；
+- ``POST /support/ai-chat``：AI 客服（简单版：知识库检索 + 无关内容拒答）。
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentUser, get_current_user
 from app.db.session import get_db
 from app.schemas.support import (
+    AiChatReply,
+    AiChatRequest,
     ContactRequest,
     FeedbackCreate,
     FeedbackItem,
@@ -21,6 +24,7 @@ from app.schemas.support import (
     HelpDocPage,
 )
 from app.services import support as service
+from app.services import support_ai
 from app.services.sensitive_operations import (
     abort_sensitive_operation,
     begin_sensitive_operation,
@@ -88,6 +92,21 @@ async def help_docs(
     db: AsyncSession = Depends(get_db),
 ) -> HelpDocPage:
     return await service.list_help_docs(db, page, page_size, keyword)
+
+
+@router.post("/ai-chat", response_model=AiChatReply, summary="AI 客服（简单版）")
+async def ai_chat(
+    body: AiChatRequest,
+    _current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AiChatReply:
+    """知识库检索式问答，不调大模型。
+
+    刻意不做限流与落库：这是一次纯计算（读帮助文档 + 字符串匹配），没有外部调用、
+    没有写入、没有成本，加限流只会多一个让用户卡住的分支。真要防刷，交给网关。
+    """
+    docs = await service.list_help_docs(db, 1, support_ai.DOC_LIMIT)
+    return support_ai.answer_support_question(body.content, docs.items)
 
 
 @router.post("/contact", response_model=FeedbackItem, status_code=201, summary="联系人工客服")

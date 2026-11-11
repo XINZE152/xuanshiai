@@ -90,6 +90,38 @@ class HelpDocPage(BaseModel):
     has_more: bool
 
 
+class AiChatRequest(BaseModel):
+    """AI 客服提问。限长 200 字：这不是聊天室，是一句问题。"""
+
+    content: str = Field(min_length=1, max_length=200, description="用户问题")
+
+    @field_validator("content")
+    @classmethod
+    def _reject_blank(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("问题不能为空")
+        return text
+
+
+class AiChatReply(BaseModel):
+    """AI 客服回复。
+
+    ``status`` 只有三种取值，前端按它决定是否显示「联系客服」按钮：
+
+    - ``answered``：命中帮助中心词条，``answer`` 是词条正文；
+    - ``no_answer``：问的是平台的事，但知识库没有答案——``answer`` 是
+      「暂时无法帮助您，等待升级」这类固定话术；
+    - ``off_topic``：与本平台无关的内容，拒答。
+    """
+
+    status: Literal["answered", "no_answer", "off_topic"]
+    answer: str
+    matched_title: str | None = Field(default=None, description="命中的帮助词条标题")
+    escalate: bool = Field(default=False, description="是否建议转人工客服")
+
+
+
 class AdminFeedbackItem(FeedbackItem):
     user_id: int
     nickname: str | None = None
