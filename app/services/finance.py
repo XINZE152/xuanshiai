@@ -431,6 +431,9 @@ async def refund_order(db: AsyncSession, admin: CurrentUser, order_id: int, requ
         raise HTTPException(404, detail="支付订单不存在")
     if order["status"] != 1:
         raise HTTPException(409, detail="只有支付成功订单才能退款")
+    # D4（方案 33）：积分充值不走系统退款（本旧接口不回收积分），统一人工工单。
+    if int(order["type"]) == 7:
+        raise HTTPException(409, detail="积分充值订单不支持系统退款，请走人工工单处理")
     entries = await db.execute(text("""SELECT id, beneficiary_type, beneficiary_id, amount, status
         FROM commission_entry WHERE order_id = :order_id AND status <> 'REVERSED' FOR UPDATE"""), {"order_id": order_id})
     for entry in entries.mappings().all():

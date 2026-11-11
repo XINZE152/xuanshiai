@@ -1,6 +1,6 @@
 """支付履约 Handler 注册入口。
 
-Worker 导入本模块即可完成 type=1~6 的注册；新增类型只需新增 Handler
+Worker 导入本模块即可完成 type=1~7 的注册；新增类型只需新增 Handler
 并在下方 ``register``。
 """
 
@@ -19,6 +19,9 @@ from app.services.payment.fulfillment.matchmaker_service import (
     MatchmakerServiceFulfillmentHandler,
 )
 from app.services.payment.fulfillment.membership import MembershipFulfillmentHandler
+from app.services.payment.fulfillment.points_recharge import (
+    PointsRechargeFulfillmentHandler,
+)
 from app.services.payment.fulfillment.spotlight import SpotlightFulfillmentHandler
 from app.services.payment.fulfillment.virtual_goods import (
     VirtualGoodsFulfillmentHandler,
@@ -30,6 +33,7 @@ register(MatchmakerServiceFulfillmentHandler())
 register(BoostFulfillmentHandler())
 register(ActivityFulfillmentHandler())
 register(VirtualGoodsFulfillmentHandler())
+register(PointsRechargeFulfillmentHandler())
 
 __all__ = [
     "FulfillmentError",
