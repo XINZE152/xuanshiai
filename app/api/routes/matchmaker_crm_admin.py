@@ -48,6 +48,25 @@ _ASSIGNMENT_DISPLAY_DERIVED = (
     "MAX(effective_at) AS assigned_at FROM resource_assignment WHERE status = 1 GROUP BY user_id)"
 )
 
+# 会员列表 sort_by 白名单。单独写成元组再用它拼 Query 的 pattern，而不是把正则
+# 内联进函数签名：白名单每加一项（本轮加了 points / integral）都会让按整段字面量
+# 断言的测试失效，且调用方无法在运行期知道合法取值集合。
+MEMBER_SORT_FIELDS: tuple[str, ...] = (
+    "created_at",
+    "entered_at",
+    "last_login_at",
+    "last_follow_at",
+    "next_follow_at",
+    "assigned_at",
+    "fetched_at",
+    "login_num",
+    "balance",
+    "points",
+    "integral",
+    "id",
+)
+_MEMBER_SORT_PATTERN = "^(" + "|".join(MEMBER_SORT_FIELDS) + ")$"
+
 
 class MemberBatchStatus(BaseModel):
     member_ids: list[int] = Field(min_length=1, max_length=200)
@@ -557,7 +576,7 @@ async def members(
     follow_state: str | None = Query(None, pattern="^(never|due_today|overdue)$"),
     search: str | None = Query(None, max_length=64),
     search_type: str | None = Query(None, pattern="^(smart|phone|wechat|code|id|nickname|realname)$"),
-    sort_by: str = Query("created_at", pattern="^(created_at|entered_at|last_login_at|last_follow_at|next_follow_at|assigned_at|fetched_at|login_num|balance|points|integral|id)$"),
+    sort_by: str = Query("created_at", pattern=_MEMBER_SORT_PATTERN),
     order: str | None = Query(None, pattern="^(latest|earliest|smart)$", description="记录排序；与 sort_by 互斥，同时传时以 order 为准"),
     source: str | None = Query(None, max_length=32),
     source__is_null: bool | None = Query(

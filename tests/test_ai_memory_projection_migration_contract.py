@@ -106,18 +106,23 @@ def test_grant_tuple_unique_and_revocable() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_projection_version_and_input_hash_unique() -> None:
+def test_projection_version_unique_and_input_hash_not_unique() -> None:
     block = _table_blocks(_read(UP_FILE))["ai_memory_projection"]
     assert re.search(
         r"UNIQUE KEY `\w+` \(`owner_user_id`, `function_key`, `purpose`, "
         r"`data_category`, `projection_version`\)",
         block,
     ), "projection version must be unique per owner+function+purpose+category"
-    assert re.search(
-        r"UNIQUE KEY `\w+` \(`owner_user_id`, `function_key`, `purpose`, "
-        r"`data_category`, `projection_input_hash`\)",
+    # 这条断言原先要求 projection_input_hash 上也建唯一键（理由是「同 hash 幂等」），
+    # 方向是反的：幂等在写入侧用「先读同 hash 的当前版本、命中就直接返回」实现
+    # （projections.py），而「同内容换授权代（consent_snapshot_id / policy_revision
+    # 变化）必须新建版本」是 Never rebind payload 规则要求的合法新版本——哈希唯一
+    # 会把它压成 1062。ai_schema.py 因此显式不建该键，并把早期 bootstrap 补出来的
+    # 同列键列进 AI_MEMORY_PROJECTION_LEGACY_UNIQUE_KEYS 主动清理。
+    assert not re.search(
+        r"UNIQUE KEY `\w+` \([^)]*`projection_input_hash`",
         block,
-    ), "same input hash must not create a duplicate version (idempotent build)"
+    ), "input_hash 不得建唯一键：同内容换授权代时必须能新建版本"
 
 
 def test_projection_freeze_contract_columns() -> None:

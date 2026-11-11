@@ -333,6 +333,42 @@ async def lead_import(
 
 
 @declare_permission("customer_lead.manage")
+@router.post("/batch-delete", response_model=CustomerLeadBatchDeleteResult, summary="批量删除客源（幂等 + 二次确认）")
+async def lead_batch_delete(
+    body: CustomerLeadBatchDeleteRequest,
+    idempotency_key: str = Depends(require_sensitive_operation),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CustomerLeadBatchDeleteResult:
+    """A16：软删除多条客源，需 confirm=true + Idempotency-Key；单事务 + 一份汇总审计。
+
+    越权/不存在/已删除的线索归入 failed，不整体报错；同键重放不重复删除。
+    静态路径 /batch-delete 必须先于 /{lead_id} 系列注册——本函数因此在写操作区
+    （{lead_id}/convert 之前）定义，不要挪到文件末尾，否则 POST 会先命中
+    带 int 路径参数的动态路由并以 422 结束。
+    """
+    current.require("customer_lead.manage")
+    scope, scope_params = _lead_scope(current)
+    reservation, replayed = await begin_sensitive_operation(
+        db,
+        actor_id=current.account.id,
+        operation="customer_lead.batch_delete",
+        idempotency_key=idempotency_key,
+        payload={"body": body.model_dump(mode="json")},
+    )
+    if replayed is not None:
+        return CustomerLeadBatchDeleteResult(**replayed)
+    try:
+        deleted, failed = await batch_delete_leads(db, current.account.id, body.lead_ids, scope=scope, scope_params=scope_params)
+    except Exception:
+        await abort_sensitive_operation(db, reservation)
+        raise
+    result = CustomerLeadBatchDeleteResult(deleted=deleted, failed=[CustomerLeadBatchDeleteFailure(**item) for item in failed])
+    await finish_sensitive_operation(db, reservation, result.model_dump(mode="json"))
+    return result
+
+
+@declare_permission("customer_lead.manage")
 @router.post("/{lead_id}/convert", response_model=CustomerLeadConvertResult, summary="客源线索一键入库")
 async def lead_convert(
     lead_id: int = Path(..., ge=1),
@@ -495,40 +531,6 @@ async def lead_restore(lead_id: int = Path(..., ge=1), body: CustomerLeadRestore
     current.require("customer_lead.manage")
     scope, scope_params = _lead_scope(current)
     return await restore_lead(db, current.account.id, lead_id, body.reason, redaction_level_from_permissions(current.permissions), scope=scope, scope_params=scope_params)
-
-
-@declare_permission("customer_lead.manage")
-@router.post("/batch-delete", response_model=CustomerLeadBatchDeleteResult, summary="批量删除客源（幂等 + 二次确认）")
-async def lead_batch_delete(
-    body: CustomerLeadBatchDeleteRequest,
-    idempotency_key: str = Depends(require_sensitive_operation),
-    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
-    db: AsyncSession = Depends(get_db),
-) -> CustomerLeadBatchDeleteResult:
-    """A16：软删除多条客源，需 confirm=true + Idempotency-Key；单事务 + 一份汇总审计。
-
-    越权/不存在/已删除的线索归入 failed，不整体报错；同键重放不重复删除。
-    静态路径 /batch-delete 必须先于 /{lead_id} 系列注册。
-    """
-    current.require("customer_lead.manage")
-    scope, scope_params = _lead_scope(current)
-    reservation, replayed = await begin_sensitive_operation(
-        db,
-        actor_id=current.account.id,
-        operation="customer_lead.batch_delete",
-        idempotency_key=idempotency_key,
-        payload={"body": body.model_dump(mode="json")},
-    )
-    if replayed is not None:
-        return CustomerLeadBatchDeleteResult(**replayed)
-    try:
-        deleted, failed = await batch_delete_leads(db, current.account.id, body.lead_ids, scope=scope, scope_params=scope_params)
-    except Exception:
-        await abort_sensitive_operation(db, reservation)
-        raise
-    result = CustomerLeadBatchDeleteResult(deleted=deleted, failed=[CustomerLeadBatchDeleteFailure(**item) for item in failed])
-    await finish_sensitive_operation(db, reservation, result.model_dump(mode="json"))
-    return result
 
 
 @declare_permission("customer_lead.manage")

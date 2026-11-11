@@ -123,8 +123,12 @@ def test_login_num_is_optional_and_defaults_none() -> None:
 def test_members_routes_project_login_num() -> None:
     source = inspect.getsource(matchmaker_crm_admin)
     assert "{user_expr('login_num')} AS login_num" in source
-    # sort_by 白名单已放开 login_num（及 A12-钱包 balance）。
-    assert "assigned_at|fetched_at|login_num|balance|id" in source
+    # sort_by 白名单已放开 login_num（以及 A12-钱包 balance）。按字段集合断言：
+    # 原先是 `"assigned_at|fetched_at|login_num|balance|id" in source`，白名单中间
+    # 插入 points / integral 之后连续子串就不成立了（白名单本身没坏）。
+    assert {"assigned_at", "fetched_at", "login_num", "balance", "id"} <= set(
+        matchmaker_crm_admin.MEMBER_SORT_FIELDS
+    )
 
 
 # --------------------------------------------------------------------------- #

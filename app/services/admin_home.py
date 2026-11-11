@@ -452,8 +452,14 @@ async def honor(db: AsyncSession, admin: CurrentMatchmakerAdmin) -> DashboardHon
     ``GET /admin/activities`` 的 total 口径一致）。
     """
     params: dict[str, object] = {}
-    match_scope, _ = _scope_condition(admin, "ma.from_user_id")
-    meeting_scope, _ = _scope_condition(admin, "mr.organizer_id")
+    match_scope, match_scope_params = _scope_condition(admin, "ma.from_user_id")
+    meeting_scope, meeting_scope_params = _scope_condition(admin, "mr.organizer_id")
+    # 两个作用域谓词共用一个占位名（:scope_matchmaker_id / :scope_organization_id），
+    # 取的是同一个 admin，所以并进来不会互相覆盖。必须并：SQL 里出现了占位符而
+    # params 没带对应键时，驱动会直接报 "bind parameter not found"，SELF / ORG
+    # 作用域下光荣榜整页 500（ALL 作用域谓词是 "1 = 1"，所以只有它会漏出来）。
+    params.update(match_scope_params)
+    params.update(meeting_scope_params)
     row = (await db.execute(text(f"""SELECT
         (SELECT COUNT(*) FROM match_apply ma WHERE {match_scope}) line_total,
         (SELECT COUNT(*) FROM match_apply ma WHERE ma.status = 1 AND {match_scope}) line_success,

@@ -15,13 +15,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+from tests._workspace_paths import FRONTEND_ENV, find_frontend_root
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+# 找不到时给出与解析顺序一致的兜底路径，让 _read 的断言报出具体缺哪个文件，
+# 而不是在模块导入阶段整片报错、掩盖真正的缺失原因。
+WORKSPACE_ROOT = find_frontend_root(BACKEND_ROOT) or (BACKEND_ROOT.parent / "xuanshiai-vue")
 PRODUCT_MD = WORKSPACE_ROOT / "PRODUCT.md"
 ARCHITECTURE_MD = WORKSPACE_ROOT / "docs" / "architecture" / "ai-memory-kernel-core-v1.md"
 
 
 def _read(path: Path) -> str:
-    assert path.exists(), f"required document is missing: {path}"
+    assert path.exists(), (
+        f"required document is missing: {path}"
+        f"（文档在前端仓库；可在环境变量或后端 .env 中设置 {FRONTEND_ENV}=<前端仓库根>）"
+    )
     return path.read_text(encoding="utf-8")
 
 

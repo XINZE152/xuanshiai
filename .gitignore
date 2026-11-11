@@ -77,6 +77,9 @@ scripts/*
 !scripts/manage_business_migration.py
 # 微信支付 real 模式预检与安全暂停脚本：backend-ci.yml 的 admin Ruff 门禁引用
 !scripts/verify_wechat_pay_preflight.py
+# 墨相师评测用例集是测试数据资产（tests/test_ai_quality_cases.py 直接读取 cases/*.json），
+# 不随仓库发布时该契约测试在干净 clone / CI 上必然失败
+!scripts/moxiang_prompt_loop/
 !scripts/pause_real_pay.py
 !scripts/verify_remote_workspace_leads.py
 # 0.01 元测试商品/回调冒烟脚本（M6-C-01），仅测试环境使用
