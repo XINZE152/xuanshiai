@@ -592,13 +592,14 @@ def _normalize_city_display_name(name: str | None) -> str:
 
 
 def _feed_clauses(
-    mode: Literal["latest", "following", "city", "liked_users", "following_and_liked", "mine", "topic"],
+    mode: Literal["latest", "following", "city", "liked_users", "following_and_liked", "mine", "topic", "user"],
     *,
     city: str | None,
     city_code: str | None,
     topic_id: int | None,
     filter_key: str | None,
     me: dict[str, Any] | None,
+    target_user_id: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     params: dict[str, Any] = {}
     clauses: list[str] = []
@@ -609,6 +610,11 @@ def _feed_clauses(
         )
     elif mode == "mine":
         clauses.append(" AND p.user_id = :user_id")
+    elif mode == "user":
+        if target_user_id is None:
+            raise HTTPException(422, detail="按人查看动态需要提供 target_user_id")
+        params["target_user_id"] = target_user_id
+        clauses.append(" AND p.user_id = :target_user_id")
     elif mode == "liked_users":
         clauses.append(
             " AND EXISTS (SELECT 1 FROM user_favorite f WHERE f.user_id = :user_id AND f.target_user_id = p.user_id AND f.type = 1)"
@@ -708,7 +714,7 @@ async def list_posts(
     db: AsyncSession,
     user_id: int,
     mode: Literal[
-        "latest", "following", "city", "liked_users", "following_and_liked", "mine", "topic"
+        "latest", "following", "city", "liked_users", "following_and_liked", "mine", "topic", "user"
     ] = "latest",
     page: int = 1,
     page_size: int = 20,
@@ -718,6 +724,7 @@ async def list_posts(
     topic_id: int | None = None,
     filter_key: str | None = None,
     sort: Literal["latest", "hot"] = "latest",
+    target_user_id: int | None = None,
 ) -> CommunityPostPage:
     need_me = filter_key in {"mbti", "alumni", "hometown"} or mode == "city"
     me = await _viewer_profile(db, user_id) if need_me else {}
@@ -734,6 +741,7 @@ async def list_posts(
         topic_id=topic_id,
         filter_key=filter_key,
         me=me,
+        target_user_id=target_user_id,
     )
     extra_where = f"{_post_visibility_clause()}{extra_where}"
     order_sql = (
@@ -756,6 +764,10 @@ async def list_posts(
         LEFT JOIN user_privacy pr ON pr.user_id = p.user_id
         WHERE p.status = 1 AND COALESCE(p.moderation_status, 1) = 1
           AND p.deleted_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM user_restriction ban
+                          WHERE ban.user_id = p.user_id AND ban.restriction_type = 'TOTAL_BAN'
+                            AND ban.status = 1 AND ban.starts_at <= UTC_TIMESTAMP()
+                            AND (ban.ends_at IS NULL OR ban.ends_at > UTC_TIMESTAMP()))
           AND NOT EXISTS (
             SELECT 1 FROM user_block b
             WHERE (b.user_id = :user_id AND b.target_user_id = p.user_id)

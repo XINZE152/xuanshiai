@@ -470,7 +470,7 @@ CREDIT_MEMBER_SCOPE_SQL: dict[str, str] = {
 
 # 积分类别 -> user_points.source_type。
 CREDIT_CATEGORY_SOURCES: dict[str, tuple[str, ...]] = {
-    "recharge": ("admin_grant",),
+    "recharge": ("admin_grant", "points_recharge"),
     "gift_exchange": ("gift_exchange",),
     "gift_received": ("gift_received",),
     "gift_sent": ("gift_sent",),
