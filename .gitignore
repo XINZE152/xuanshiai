@@ -67,6 +67,8 @@ scripts/*
 !scripts/migrate_admin_public_media.py
 # 7.2 迁移差集检查脚本必须随仓库发布，团队成员与 CI 均可直接执行
 !scripts/check_migrations.py
+# Q54 资料完整度 profile-v5 一次性回填脚本：部署后需在测试服/生产执行
+!scripts/recalculate_profile_completion.py
 # P0 发布前 schema 预检：schema-contract/backend-ci 引用，必须随仓库发布
 !scripts/check_release_schema.py
 # paper_plane/chat 域迁移执行器：P3 起必须随仓库发布

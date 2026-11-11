@@ -234,6 +234,18 @@ class SearchDraftNotConfirmed(Exception):
         self.message = message
 
 
+class SearchConfirmationRequired(Exception):
+    """422 AI_CONFIRMATION_REQUIRED：自动确认条件不满足，需要用户确认。"""
+
+    code = "AI_CONFIRMATION_REQUIRED"
+    status_code = 422
+
+    def __init__(self, blockers: list[str]) -> None:
+        self.blockers = tuple(blockers)
+        super().__init__("搜索条件需要用户确认")
+        self.message = "搜索条件需要用户确认"
+
+
 # ----------------------------------------------------------------------
 # 领域对象
 # ----------------------------------------------------------------------
@@ -878,6 +890,58 @@ def _draft_conflicts(condition_rows: list[dict[str, Any]]) -> list[str]:
     return list(compile_search_conditions(confirmed).conflicts)
 
 
+def evaluate_auto_confirm(
+    condition_rows: list[dict[str, Any]],
+) -> tuple[bool, list[str]]:
+    """判断草稿能否在没有用户逐条确认的情况下安全执行。
+
+    自动确认只在“全部条件均为 allowlist 内字段、无未知词条、无区间冲突、
+    至少一条 hard 条件、且置信度全部达到阈值”时成立；任何不确定项都回退到
+    人工确认卡，避免把模型猜测当成用户意图执行。
+    """
+    active = [
+        row
+        for row in condition_rows
+        if str(row.get("user_action") or "pending") != "removed"
+    ]
+    if not active:
+        return False, ["no_condition"]
+
+    blockers: list[str] = []
+    known_conditions: list[SearchCondition] = []
+    for row in active:
+        field_key = str(row.get("field_key") or "")
+        if field_key not in FIELD_RULES:
+            blockers.append(f"unknown:{field_key}")
+            continue
+        confidence = float(row.get("confidence") or 0.0)
+        if confidence < settings.ai_search_auto_confirm_min_confidence:
+            blockers.append(f"low_confidence:{field_key}")
+        known_conditions.append(
+            _condition_from_row(row).model_copy(
+                update={"user_action": SearchConditionUserAction.CONFIRMED}
+            )
+        )
+
+    if not any(
+        FIELD_RULES[condition.field_key]["kind"] == "hard"
+        for condition in known_conditions
+    ):
+        blockers.append("no_hard_condition")
+
+    if known_conditions:
+        try:
+            compiled = compile_search_conditions(known_conditions)
+        except (SearchInputInvalid, SearchPolicyDenied):
+            blockers.append("invalid_condition")
+        else:
+            if compiled.conflicts:
+                blockers.append("conflict")
+
+    unique = list(dict.fromkeys(blockers))
+    return (not unique, unique)
+
+
 async def _find_write_task(
     db: AsyncSession, owner_user_id: int, task_type: str, idempotency_key: str
 ) -> AiTaskRecord | None:
@@ -928,9 +992,18 @@ def _hash_draft_request(
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _hash_confirm_request(draft_id: str, condition_revision: int) -> str:
+def _hash_confirm_request(
+    draft_id: str, condition_revision: int, auto_confirm_pending: bool = False
+) -> str:
+    payload_dict: dict[str, Any] = {
+        "draft_id": draft_id,
+        "condition_revision": int(condition_revision),
+    }
+    # 保持旧客户端的 hash 不变；只有显式自动确认才改变请求指纹。
+    if auto_confirm_pending:
+        payload_dict["auto_confirm_pending"] = True
     payload = json.dumps(
-        {"draft_id": draft_id, "condition_revision": int(condition_revision)},
+        payload_dict,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -1310,9 +1383,14 @@ async def load_search_draft(
             if str(condition_row.get("user_action") or "pending") != "removed":
                 unknown.append(str(condition_row["field_key"]))
         conditions.append(_condition_read_from_row(condition_row))
+    status = SearchDraftStatus(str(row["status"]))
+    if status == SearchDraftStatus.AWAITING_CONFIRMATION:
+        auto_confirm_ready, auto_confirm_blockers = evaluate_auto_confirm(condition_rows)
+    else:
+        auto_confirm_ready, auto_confirm_blockers = False, []
     return SearchDraftRead(
         draft_id=str(row["draft_id"]),
-        status=SearchDraftStatus(str(row["status"])),
+        status=status,
         condition_revision=int(row.get("condition_revision") or 0),
         condition_schema_version=str(
             row.get("condition_schema_version") or SEARCH_SCHEMA_VERSION
@@ -1320,6 +1398,8 @@ async def load_search_draft(
         conditions=conditions,
         unknown=unknown,
         conflicts=_draft_conflicts(condition_rows),
+        auto_confirm_ready=auto_confirm_ready,
+        auto_confirm_blockers=auto_confirm_blockers,
         expires_at=row.get("expires_at"),
     )
 
@@ -1440,14 +1520,20 @@ async def confirm_search_draft(
     owner_user_id: int,
     expected_condition_revision: int,
     idempotency_key: str,
+    *,
+    auto_confirm_pending: bool = False,
 ) -> SearchSnapshot:
     """用户确认全部 hard 条件且解决 conflicts 后才创建快照与候选查询任务。
 
-    未确认（仍 ``awaiting_confirmation`` 且无已确认条件）或非确认状态草稿 →
-    ``SearchDraftNotConfirmed``；编译失败不创建候选任务；同 key 同 payload 回放
+    ``auto_confirm_pending=True`` 时，仅在 ``evaluate_auto_confirm`` 判定安全后
+    由服务端原子确认全部已知条件；否则返回 ``SearchConfirmationRequired``，让
+    前端继续展示确认卡。未确认草稿或非确认状态草稿仍返回
+    ``SearchDraftNotConfirmed``；编译失败不创建候选任务；同 key 同载荷回放
     既有任务与快照。不 commit。
     """
-    request_hash = _hash_confirm_request(draft_id, int(expected_condition_revision))
+    request_hash = _hash_confirm_request(
+        draft_id, int(expected_condition_revision), auto_confirm_pending
+    )
     existing_task = await _find_write_task(
         db, owner_user_id, SEARCH_EXECUTE_TASK_TYPE, idempotency_key
     )
@@ -1494,6 +1580,22 @@ async def confirm_search_draft(
         raise DraftVersionConflict()
 
     condition_rows = await _load_condition_rows(db, draft_id)
+    if auto_confirm_pending:
+        auto_ready, blockers = evaluate_auto_confirm(condition_rows)
+        if not auto_ready:
+            raise SearchConfirmationRequired(blockers)
+        applied = 0
+        for row in condition_rows:
+            action = str(row.get("user_action") or "pending")
+            if action in ("removed", "confirmed"):
+                continue
+            await _update_condition_action(
+                db, draft_id, int(row["condition_no"]), "confirmed"
+            )
+            applied += 1
+        if applied:
+            await _bump_condition_revision(db, draft_id)
+            condition_rows = await _load_condition_rows(db, draft_id)
     condition_objects = [_condition_from_row(row) for row in condition_rows]
     compiled = compile_search_conditions(condition_objects)
     if compiled.conflicts:

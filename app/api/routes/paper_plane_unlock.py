@@ -63,7 +63,7 @@ async def profile_unlock_status(
     "/paper-plane/profile-unlocks/{target_user_id}",
     response_model=PaperPlaneProfileUnlockResponse,
     status_code=200,
-    summary="以 80 积分解锁纸飞机目标用户资料",
+    summary="以 50 积分解锁纸飞机目标用户资料",
 )
 async def unlock_profile(
     target_user_id: int = Path(..., ge=1),

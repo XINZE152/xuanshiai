@@ -165,6 +165,7 @@ CARD_FROM = """
 async def _viewer_context(db: AsyncSession, user_id: int) -> dict[str, Any]:
     result = await db.execute(
         text("""SELECT u.gender, u.birthday, COALESCE(c.score, 0) AS completion_score,
+                      COALESCE(c.completion_grandfathered, 0) AS completion_grandfathered,
                       u.phone, p.height, p.education_level, p.income, p.mbti, p.interest_tags,
                p.personality_tags, p.tags, p.residence_city_code,
                COALESCE(ua.realname_status, 0) AS realname_status,
@@ -191,6 +192,13 @@ async def _is_vip(db: AsyncSession, user_id: int) -> bool:
 def _skip_discovery_gates() -> bool:
     """测试环境专用：是否放开发现链路的异性过滤与资料完整度门禁。"""
     return settings.discovery_skip_gates_enabled
+
+
+def _viewer_completion_ok(viewer: dict[str, Any]) -> bool:
+    """完整度门禁：满 100 或 Q23 grandfather 豁免；展示分不受 grandfather 影响。"""
+    return float(viewer.get("completion_score") or 0) >= 100 or bool(
+        viewer.get("completion_grandfathered")
+    )
 
 
 def _visibility_predicate(
@@ -756,7 +764,7 @@ async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: Discover
     if not await platform_browse_open(db):
         raise HTTPException(403, detail=await platform_maintenance_message(db))
     viewer = await _viewer_context(db, viewer_id)
-    if not _skip_discovery_gates() and viewer["completion_score"] < 100:
+    if not _skip_discovery_gates() and not _viewer_completion_ok(viewer):
         raise HTTPException(403, detail="请先完善资料后再进入推荐")
     _, viewer_is_vip, candidate_page = await _candidate_query_page(
         db, viewer_id, filters, plaza=plaza
@@ -791,7 +799,7 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         page_size=query.page_size,
     )
     viewer = await _viewer_context(db, viewer_id)
-    if not _skip_discovery_gates() and viewer["completion_score"] < 100:
+    if not _skip_discovery_gates() and not _viewer_completion_ok(viewer):
         raise HTTPException(403, detail="请先完善资料后再搜索用户")
     _, viewer_is_vip, candidate_page = await _candidate_query_page(
         db,
@@ -1113,7 +1121,7 @@ async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> Publ
     # 「Ta的理想型」与 profile 同门禁：未解锁（full=False）不查库、不下发。
     preference = await _public_preference(db, target_id) if full else None
     await db.commit()
-    return PublicProfileResponse(user_id=target_id, card=card, profile=profile, is_vip_viewer=vip, browse_quota_remaining=quota, can_apply=viewer["completion_score"] >= 100, preference=preference)
+    return PublicProfileResponse(user_id=target_id, card=card, profile=profile, is_vip_viewer=vip, browse_quota_remaining=quota, can_apply=_viewer_completion_ok(viewer), preference=preference)
 
 
 async def preview_card(db: AsyncSession, viewer_id: int, target_id: int) -> DiscoveryCardPreviewResponse:
@@ -1515,7 +1523,7 @@ async def create_application(db: AsyncSession, viewer_id: int, target_id: int, r
     await _ensure_target(db, viewer_id, target_id)
     await _expire_pending_applications(db)
     viewer = await _viewer_context(db, viewer_id)
-    if not _skip_discovery_gates() and viewer["completion_score"] < 100:
+    if not _skip_discovery_gates() and not _viewer_completion_ok(viewer):
         raise _forbidden("PROFILE_INCOMPLETE", "请先完善资料后再申请认识")
     if not viewer.get("phone"):
         raise _forbidden("PHONE_REQUIRED", "请先绑定手机号")
@@ -1731,6 +1739,7 @@ async def create_superlike(db: AsyncSession, viewer_id: int, target_id: int, ide
     await _lock_user_pair(db, viewer_id, target_id)
     await _ensure_target(db, viewer_id, target_id)
     viewer_result = await db.execute(text("""SELECT u.phone, COALESCE(c.score, 0) AS completion_score,
+        COALESCE(c.completion_grandfathered, 0) AS completion_grandfathered,
         COALESCE(ua.realname_status, 0) AS realname_status
         FROM users u LEFT JOIN user_profile_completion c ON c.user_id = u.id
         LEFT JOIN user_auth ua ON ua.user_id = u.id
@@ -1738,7 +1747,7 @@ async def create_superlike(db: AsyncSession, viewer_id: int, target_id: int, ide
     viewer = viewer_result.mappings().first()
     if not viewer or not viewer["phone"]:
         raise HTTPException(403, detail="请先绑定手机号")
-    if not _skip_discovery_gates() and float(viewer["completion_score"] or 0) < 100:
+    if not _skip_discovery_gates() and not _viewer_completion_ok(viewer):
         raise HTTPException(403, detail="请先完善资料后再爆灯")
     if int(viewer["realname_status"] or 0) != 2:
         raise HTTPException(403, detail="请先完成实名认证后再爆灯")

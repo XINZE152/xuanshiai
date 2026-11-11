@@ -103,8 +103,9 @@ async def claim_task(db: AsyncSession, user_id: int, task_code: str) -> ClaimTas
         if row and row[0] == 2:
             return ClaimTaskResponse(task_code=task_code, claimed=True, points=0, balance=await _balance(db, user_id))
         if task_code == "profile_complete":
-            complete = (await db.execute(text("SELECT score FROM user_profile_completion WHERE user_id=:id"), {"id": user_id})).scalar()
-            if float(complete or 0) < 100:
+            completion_row = (await db.execute(text("SELECT score, completion_grandfathered FROM user_profile_completion WHERE user_id=:id"), {"id": user_id})).mappings().first()
+            complete = float((completion_row or {}).get("score") or 0)
+            if complete < 100 and not bool((completion_row or {}).get("completion_grandfathered")):
                 raise HTTPException(409, detail="资料尚未完成")
         else:
             verified = (await db.execute(text("SELECT realname_status FROM user_auth WHERE user_id=:id"), {"id": user_id})).scalar()
