@@ -373,11 +373,115 @@ async def test_narrative_canonical_weights_passthrough(
     assert result.ideal_weights[0].percent == 88
 
 
-def _narrative_request() -> Any:
+def _narrative_payload_with_emotional_insight(insight_json: str) -> str:
+    """在完整合法的个人画像叙事 JSON 中注入 emotional_insight 片段。"""
+    return _narrative_payload_with_alias_weights().replace(
+        '"history_observations": []',
+        f'"history_observations": [], "emotional_insight": {insight_json}',
+    )
+
+
+@pytest.mark.asyncio
+async def test_narrative_emotional_insight_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """中文依恋别名归一为四型编码，超长文案按场景约定截断后通过校验。"""
+    settings = _settings_with_dots_key()
+    monkeypatch.setattr("app.services.ai.providers.settings", settings)
+    payload = _narrative_payload_with_emotional_insight(
+        '{"attachment_style": "安全型",'
+        ' "attachment_summary": "' + "沉" * 80 + '",'
+        ' "highlights": ["温和包容", "尊重边界"],'
+        ' "boundaries": "需要独处空间",'
+        ' "master_message": "' + "寄" * 100 + '"}'
+    )
+    provider = DotsAIProvider(client=_make_mock_client(payload))
+    result = await provider.generate_narrative(_narrative_request("personal"))
+
+    insight = result.emotional_insight
+    assert insight is not None
+    # 「安全型」→ secure，与前端 moxiang-badge.uts 的四型映射表同口径
+    assert insight.attachment_style == "secure"
+    assert len(insight.attachment_summary) == 60
+    assert insight.highlights == ("温和包容", "尊重边界")
+    # 单个字符串的 boundaries 归一为长度 1 的列表，满足 1 条下限
+    assert insight.boundaries == ("需要独处空间",)
+    assert len(insight.master_message) == 80
+
+
+@pytest.mark.asyncio
+async def test_narrative_emotional_insight_incomplete_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """五子字段缺任一项时整块置 None：前端按整块隐藏，不允许半成品画像。"""
+    settings = _settings_with_dots_key()
+    monkeypatch.setattr("app.services.ai.providers.settings", settings)
+    payload = _narrative_payload_with_emotional_insight(
+        '{"attachment_style": "anxious",'
+        ' "attachment_summary": "需要更多确认才安心",'
+        ' "highlights": ["细腻"],'  # 仅 1 条，不满足 2 条下限
+        ' "boundaries": ["需要明确回应"],'
+        ' "master_message": "慢慢来"}'
+    )
+    provider = DotsAIProvider(client=_make_mock_client(payload))
+    result = await provider.generate_narrative(_narrative_request("personal"))
+    assert result.emotional_insight is None
+
+
+@pytest.mark.asyncio
+async def test_narrative_emotional_insight_unknown_style_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未知依恋编码整块丢弃，避免裸枚举码漏进前端微标。"""
+    settings = _settings_with_dots_key()
+    monkeypatch.setattr("app.services.ai.providers.settings", settings)
+    payload = _narrative_payload_with_emotional_insight(
+        '{"attachment_style": "dismissive",'
+        ' "attachment_summary": "习惯自己消化情绪",'
+        ' "highlights": ["独立", "不粘人"],'
+        ' "boundaries": ["需要个人节奏"],'
+        ' "master_message": "各自安好亦可同行"}'
+    )
+    provider = DotsAIProvider(client=_make_mock_client(payload))
+    result = await provider.generate_narrative(_narrative_request("personal"))
+    assert result.emotional_insight is None
+
+
+@pytest.mark.asyncio
+async def test_narrative_emotional_insight_survives_missing_ideal_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """模型漏给 ideal_weights 时仍须归一整块情感透视。
+
+    旧实现的 ``if not isinstance(weights, list): return data`` 提前返回，会把
+    情感透视归一整段跳过，导致成稿永远缺这一块。
+    """
+    import json
+
+    settings = _settings_with_dots_key()
+    monkeypatch.setattr("app.services.ai.providers.settings", settings)
+    raw = _narrative_payload_with_emotional_insight(
+        '{"attachment_style": "avoidant",'
+        ' "attachment_summary": "需要空间来消化情绪",'
+        ' "highlights": ["尊重距离", "不急不躁"],'
+        ' "boundaries": ["不接受逼问"],'
+        ' "master_message": "留白处见真心"}'
+    )
+    stripped = json.loads(raw)
+    del stripped["ideal_weights"]
+    provider = DotsAIProvider(
+        client=_make_mock_client(json.dumps(stripped, ensure_ascii=False))
+    )
+    result = await provider.generate_narrative(_narrative_request("personal"))
+    assert result.emotional_insight is not None
+    assert result.emotional_insight.attachment_style == "avoidant"
+
+
+def _narrative_request(subject: str = "ideal_partner") -> Any:
     from app.services.ai.base import NarrativeRequest
 
     return NarrativeRequest(
-        subject="ideal_partner",
+        subject=subject,
         current_fields=({"field_key": "age", "value": {"min": 26, "max": 33},
                          "display_value": "26-33岁"},),
         previous_fields=(),

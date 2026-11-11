@@ -592,6 +592,21 @@ class ProfileNarrativeHistoryObservation(BaseModel):
     observation: str
 
 
+class ProfileNarrativeEmotionalInsight(BaseModel):
+    """个人情感气质透视（仅 ``personal`` 主体有值）。
+
+    对齐 PRODUCT.md「情感气质透视（Emotional Insight）」：四型依恋风格、
+    依恋诠释、相处闪光点、相处安全边界、知遇寄语。前端按整块渲染，
+    任一子字段缺失即整块隐藏，因此生成侧要求五项齐全。
+    """
+
+    attachment_style: str
+    attachment_summary: str
+    highlights: list[str] = []
+    boundaries: list[str] = []
+    master_message: str = ""
+
+
 class ProfileNarrativeRead(BaseModel):
     """GET /ai/profiles/{subject}/narrative 响应。
 
@@ -614,6 +629,9 @@ class ProfileNarrativeRead(BaseModel):
     history_observations: list[ProfileNarrativeHistoryObservation] = []
     # 写在最后：整份画像的概括性收束（旧画像无此字段时为空串）。
     conclusion: str = ""
+    # 个人情感气质透视；仅 personal 主体且五项齐全时非空，理想型画像与
+    # 旧数据一律为 None（前端据此整块隐藏）。
+    emotional_insight: ProfileNarrativeEmotionalInsight | None = None
 
 
 class ProfilePreviewRequest(BaseModel):

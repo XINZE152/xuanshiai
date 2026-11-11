@@ -36,6 +36,7 @@ from app.services.ai.base import (
     ModerationRequest,
     ModerationResult,
     NarrativeDimension,
+    NarrativeEmotionalInsight,
     NarrativeHistoryObservation,
     NarrativeIdealWeight,
     NarrativeRecentChange,
@@ -288,6 +289,13 @@ _NARRATIVE_FIXTURE_PERSONAL = NarrativeResult(
         ),
     ),
     conclusion="总的来说，你要的并不复杂——一份能彼此回应的关系，和一段能一起慢慢走远的路。",
+    emotional_insight=NarrativeEmotionalInsight(
+        attachment_style="secure",
+        attachment_summary="情绪沉着，期待细水长流的坦诚回应",
+        highlights=("温和包容，注重承诺践行", "尊重彼此边界，善于倾听"),
+        boundaries=("需要独处充电空间", "反感冷暴力或言行不一"),
+        master_message="知遇有言：心安处方能久长，愿遇一人懂你留白，亦惜你深情。",
+    ),
 )
 
 _NARRATIVE_FIXTURE_IDEAL_PARTNER = NarrativeResult(
@@ -828,6 +836,74 @@ def sanitize_narrative_dimension_icon(key: str, icon: Any) -> str:
     return fallback
 
 
+_ATTACHMENT_STYLE_ALIASES: dict[str, str] = {
+    "secure": "secure",
+    "anxious": "anxious",
+    "avoidant": "avoidant",
+    "fearful": "fearful",
+    "安全型": "secure",
+    "安全": "secure",
+    "焦虑型": "anxious",
+    "焦虑": "anxious",
+    "回避型": "avoidant",
+    "回避": "avoidant",
+    "恐惧型": "fearful",
+    "恐惧回避型": "fearful",
+    "混乱型": "fearful",
+}
+
+
+def _as_text_list(raw: Any, limit: int) -> list[str]:
+    """把模型偶发输出的单字符串/数组统一成去空截断的字符串列表。"""
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [text[:60]] if text else []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    items: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            items.append(item.strip()[:60])
+    return items[:limit]
+
+
+def _normalize_emotional_insight(raw: Any) -> dict[str, Any] | None:
+    """把模型输出的情感气质透视归一为 :class:`NarrativeEmotionalInsight` 形状。
+
+    产品口径（PRODUCT.md「情感气质透视」）要求五个子字段齐全，缺任一项该
+    整块能力就没有展示价值：此时返回 ``None`` 让前端整块隐藏，**不**用半成品
+    拼凑（前端会把不完整的依恋结论当作正式画像展示）。
+
+    模型常见漂移：``attachment_style`` 写中文（"安全型"/"回避"）、
+    ``highlights``/``boundaries`` 写成单个字符串、文案超长。
+    """
+    if not isinstance(raw, dict):
+        return None
+    style_raw = str(raw.get("attachment_style") or "").strip()
+    mapped_style = _ATTACHMENT_STYLE_ALIASES.get(
+        style_raw.lower()
+    ) or _ATTACHMENT_STYLE_ALIASES.get(style_raw)
+    summary = str(raw.get("attachment_summary") or "").strip()[:60]
+    highlights = _as_text_list(raw.get("highlights"), 4)
+    boundaries = _as_text_list(raw.get("boundaries"), 3)
+    master_message = str(raw.get("master_message") or "").strip()[:80]
+    if (
+        mapped_style in {"secure", "anxious", "avoidant", "fearful"}
+        and summary
+        and len(highlights) >= 2
+        and len(boundaries) >= 1
+        and master_message
+    ):
+        return {
+            "attachment_style": mapped_style,
+            "attachment_summary": summary,
+            "highlights": highlights,
+            "boundaries": boundaries,
+            "master_message": master_message,
+        }
+    return None
+
+
 def _normalize_narrative_payload(data: Any) -> Any:
     """把模型对叙事 JSON 的常见漂移写法归一为 schema 期望的形状。
 
@@ -865,27 +941,32 @@ def _normalize_narrative_payload(data: Any) -> Any:
             fixed.append(item)
         data["history_observations"] = fixed
     weights = data.get("ideal_weights")
-    if not isinstance(weights, list):
-        return data
-    normalized: list[Any] = []
-    for item in weights:
-        if (
-            isinstance(item, dict)
-            and "key" not in item
-            and isinstance(item.get("dimension"), str)
-            and item.get("weight") is not None
-        ):
-            label = item["dimension"]
-            normalized.append(
-                {
-                    "key": _IDEAL_WEIGHT_KEY_BY_LABEL.get(label, label),
-                    "label": label,
-                    "percent": item["weight"],
-                }
-            )
-        else:
-            normalized.append(item)
-    data["ideal_weights"] = normalized
+    if isinstance(weights, list):
+        normalized: list[Any] = []
+        for item in weights:
+            if (
+                isinstance(item, dict)
+                and "key" not in item
+                and isinstance(item.get("dimension"), str)
+                and item.get("weight") is not None
+            ):
+                label = item["dimension"]
+                normalized.append(
+                    {
+                        "key": _IDEAL_WEIGHT_KEY_BY_LABEL.get(label, label),
+                        "label": label,
+                        "percent": item["weight"],
+                    }
+                )
+            else:
+                normalized.append(item)
+        data["ideal_weights"] = normalized
+    # 注意：emotional_insight 必须在 ideal_weights 处理之后无条件执行。
+    # 旧实现把 `if not isinstance(weights, list): return data` 放在此处提前
+    # 返回，会连带跳过情感透视归一整段（模型漏吐 ideal_weights 时必然命中）。
+    data["emotional_insight"] = _normalize_emotional_insight(
+        data.get("emotional_insight")
+    )
     return data
 
 
