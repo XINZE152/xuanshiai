@@ -86,6 +86,9 @@ scripts/*
 !scripts/payment_smoke_0_01.py
 # 属地刷新上线预检（A12），只读检查数据资产与 users 列
 !scripts/region_preflight.py
+# Q51 超时抓包对账：注入 X-Request-ID 记录客户端耗时，线上排障与验收都要用它，
+# 必须随仓库发布，否则每个人都要重写一遍
+!scripts/probe_request_trace.py
 artifacts/
 
 # Local runtime logs
