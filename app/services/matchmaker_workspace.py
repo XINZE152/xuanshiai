@@ -2147,32 +2147,70 @@ async def list_match_candidates(
     member_id: int,
     page: int,
     page_size: int,
+    filters: str | None = None,
 ) -> WorkspaceMatchCandidatePage:
     await _require_scoped_member(db, actor, member_id)
     gender = await db.scalar(text("SELECT gender FROM users WHERE id = :member_id"), {"member_id": member_id})
     params: dict[str, object] = {"member_id": member_id, "limit": page_size, "offset": (page - 1) * page_size}
-    scope = _member_scope_predicate(actor, params)
-    gender_clause = "" if gender not in (1, 2) else "AND u.gender <> :gender"
-    if gender in (1, 2):
+    where = [
+        "u.id <> :member_id",
+        "u.status = 1",
+        "u.deleted_at IS NULL",
+        "COALESCE(mr.status, 'PENDING') = 'PASSED'",
+        # 页面「温馨提示」的口径：停止相亲(4)、已经脱单(5) 不进匹配结果。
+        "COALESCE(pr.match_status, 1) NOT IN (4, 5)",
+    ]
+    # 择偶要求与小程序推荐流同一套谓词：该项为空即不限；资料缺失（年龄/身高/学历/收入为 NULL）
+    # 按不满足处理，保证红娘看到的候选和会员自己在推荐流里看到的是同一批人。
+    overrides: dict[str, str] = {}
+    if filters:
+        _append_workspace_member_filters(where, params, actor, filters)
+        overrides = json.loads(filters)
+    if gender in (1, 2) and "gender" not in overrides:
         params["gender"] = gender
+        where.append("u.gender <> :gender")
+    preference_predicates = {
+        "ageRange": [
+            "(vp.age_min IS NULL OR TIMESTAMPDIFF(YEAR, u.birthday, CURDATE()) >= vp.age_min)",
+            "(vp.age_max IS NULL OR TIMESTAMPDIFF(YEAR, u.birthday, CURDATE()) <= vp.age_max)",
+        ],
+        "heightRange": [
+            "(vp.height_min IS NULL OR p.height >= vp.height_min)",
+            "(vp.height_max IS NULL OR p.height <= vp.height_max)",
+        ],
+        "education": ["(vp.education_min IS NULL OR p.education_level >= vp.education_min)"],
+        "income": ["(vp.income_min IS NULL OR p.income >= vp.income_min)"],
+        "marital": ["(vp.marriage_status IS NULL OR vp.marriage_status = 0 OR u.is_married = vp.marriage_status)"],
+        "residence": [
+            "(vp.preferred_province_code IS NULL OR p.residence_province_code = vp.preferred_province_code)",
+            "(vp.preferred_city_codes IS NULL OR JSON_LENGTH(vp.preferred_city_codes) = 0 OR JSON_CONTAINS(vp.preferred_city_codes, JSON_QUOTE(p.residence_city_code)))",
+        ],
+    }
+    for key, predicates in preference_predicates.items():
+        if key not in overrides:
+            where.extend(predicates)
+    clause = " AND ".join(where)
     base = """FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
+        LEFT JOIN user_auth ua ON ua.user_id = u.id
+        LEFT JOIN user_privacy pr ON pr.user_id = u.id
+        LEFT JOIN user_partner_preference vp ON vp.user_id = :member_id
         LEFT JOIN matchmaker_member_review mr ON mr.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(id) AS max_assignment_id FROM resource_assignment WHERE status = 1 GROUP BY user_id) ca ON ca.user_id = u.id
         LEFT JOIN resource_assignment cra ON cra.id = ca.max_assignment_id
         LEFT JOIN matchmaker_workspace_profile cwp ON cwp.user_id = cra.matchmaker_id AND cwp.status = 1
-        LEFT JOIN users cmu ON cmu.id = cra.matchmaker_id"""
-    where = f"u.id <> :member_id AND u.status = 1 AND {scope} AND COALESCE(mr.status, 'PENDING') = 'PASSED' {gender_clause}"
+        LEFT JOIN users cmu ON cmu.id = cra.matchmaker_id
+        LEFT JOIN (SELECT user_id, MAX(matchmaker_id) AS matchmaker_id FROM resource_assignment WHERE status = 1 GROUP BY user_id) ra ON ra.user_id = u.id"""
     rows = await db.execute(
         text(
             f"""SELECT u.id AS user_id, COALESCE(u.nickname, '未命名会员') AS nickname,
-            u.avatar, u.gender, u.birthday, p.residence,
-            COALESCE(cwp.display_name, cmu.nickname) AS matchmaker_name {base} WHERE {where}
+            u.avatar, u.gender, u.birthday, p.residence, p.height, u.is_married,
+            COALESCE(cwp.display_name, cmu.nickname) AS matchmaker_name {base} WHERE {clause}
             ORDER BY u.id DESC LIMIT :limit OFFSET :offset"""
         ),
         params,
     )
     count_params = {key: value for key, value in params.items() if key not in {"limit", "offset"}}
-    total = int(await db.scalar(text(f"SELECT COUNT(*) {base} WHERE {where}"), count_params) or 0)
+    total = int(await db.scalar(text(f"SELECT COUNT(*) {base} WHERE {clause}"), count_params) or 0)
     pref_row = (
         await db.execute(
             text(

@@ -690,10 +690,11 @@ async def workbench_match_candidates(
     member_id: int = Path(..., ge=1),
     page: int = Query(1, ge=1, le=1000),
     page_size: int = Query(20, ge=1, le=100),
+    filters: str | None = Query(None, max_length=4096, description='资料筛选 JSON，与 /workbench/members 同口径；候选始终先按该会员择偶要求缩小'),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceMatchCandidatePage:
-    return await list_match_candidates(db, await require_workspace(db, current), member_id, page, page_size)
+    return await list_match_candidates(db, await require_workspace(db, current), member_id, page, page_size, filters)
 
 
 @router.get(

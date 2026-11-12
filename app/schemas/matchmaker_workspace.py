@@ -406,6 +406,8 @@ class WorkspaceMatchCandidate(BaseModel):
     gender: Literal[1, 2] | None
     birthday: date | None
     residence: str | None
+    height: int | None = None
+    is_married: int | None = None
     matchmaker_name: str | None = None
 
 
@@ -427,6 +429,7 @@ class WorkspaceMatchCandidatePage(BaseModel):
     total: int
     has_more: bool
     preference: MemberPartnerPreference | None = None
+    filter_version: int = Field(default=1, description="匹配候选筛选版本：1 按择偶要求缩小并支持资料筛选 filters；旧后端不下发该字段")
 
 
 class WorkspaceMatchHistoryItem(BaseModel):
