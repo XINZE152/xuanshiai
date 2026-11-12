@@ -80,6 +80,16 @@ async def sweep_match_timeouts(db: AsyncSession) -> dict[str, Any]:
     )
     affected = int(result.rowcount or 0)
 
+    # 已关联的会员申请仍需按既有规则结束，避免超时后继续接受回应。
+    await db.execute(
+        text("""UPDATE match_apply ma JOIN matchmaker_introduction mi
+            ON mi.note IN (CONCAT('admin-entry:', ma.id), CONCAT('discovery-apply:', ma.id))
+            SET ma.status = 2, ma.responded_at = COALESCE(ma.responded_at, UTC_TIMESTAMP()),
+                ma.updated_at = UTC_TIMESTAMP()
+            WHERE mi.id IN :ids AND mi.status = 'FAILED' AND ma.status = 0""").bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    )
+
     for rid in ids:
         await db.execute(
             text(

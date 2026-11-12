@@ -121,6 +121,7 @@ async def test_sweep_marks_timeout_and_audits(monkeypatch: pytest.MonkeyPatch) -
     assert "DATE_SUB(UTC_TIMESTAMP(), INTERVAL :hours HOUR)" in select_sql
     update_sql = next(s for s in db.statements if s.lstrip().upper().startswith("UPDATE"))
     assert "status = 'FAILED'" in update_sql and "status IN ('PENDING', 'IN_PROGRESS')" in update_sql
+    assert any('UPDATE match_apply ma JOIN matchmaker_introduction' in sql for sql in db.statements)
     # 每条命中各写一行审计，actor 为 NULL（系统任务）
     audits = [s for s in db.statements if "match_record.timeout_fail" in s]
     assert len(audits) == 2
