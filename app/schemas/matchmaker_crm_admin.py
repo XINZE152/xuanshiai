@@ -58,6 +58,7 @@ class MemberListItem(BaseModel):
     source: str | None = None
     region: str | None = None
     cert_status: int | None = None
+    store_verified: int | None = None  # 2026-11-11 审核状态「已到店核验」
     wechat_added: int | None = None
     promoted: int | None = None
     newcomer: int | None = None

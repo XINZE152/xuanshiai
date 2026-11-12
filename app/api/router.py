@@ -104,6 +104,7 @@ from app.api.routes import (
     users,
     user_cancellation_admin as user_cancellation_router,
     admin_ticket as admin_ticket_router,
+    admin_ref as admin_ref_router,
     voice,
     voice_moxiang,
     voice_ws,
@@ -212,6 +213,7 @@ api_router.include_router(meeting.admin_router, tags=["管理后台"])
 api_router.include_router(promotion_order_admin.router, tags=["管理后台"])
 api_router.include_router(user_cancellation_router.router, tags=["管理后台"])
 api_router.include_router(admin_ticket_router.router, tags=["管理后台"])
+api_router.include_router(admin_ref_router.router, tags=["管理后台"])
 api_router.include_router(admin_user_feedback.router, tags=["管理后台"])
 api_router.include_router(finance.admin_router, tags=["管理后台"])
 # A4/A5/A7/A8/A10：后台运营工具（素材库 / 二维码 / 话术库 / 相亲卡 / 互动内容 / 联盟活动）

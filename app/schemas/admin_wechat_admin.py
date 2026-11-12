@@ -149,7 +149,9 @@ class WechatReplyRuleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     match_type: str = Field(default="keyword", pattern="^(keyword|subscribe|default)$")
     keyword: str | None = Field(default=None, max_length=128)
-    reply_type: str = Field(default="text", pattern="^(text|image|news)$")
+    """关键词匹配方式：contain 包含 / equal 等于（仅 keyword 类型有效）。"""
+    match_mode: str = Field(default="contain", pattern="^(contain|equal)$")
+    reply_type: str = Field(default="text", pattern="^(text|image|news|link)$")
     content: str = Field(min_length=1, max_length=4000)
     status: int = Field(default=1, ge=0, le=1)
     sort: int = Field(default=0, ge=0, le=9999)
@@ -165,7 +167,8 @@ class WechatReplyRuleUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     match_type: str | None = Field(default=None, pattern="^(keyword|subscribe|default)$")
     keyword: str | None = Field(default=None, max_length=128)
-    reply_type: str | None = Field(default=None, pattern="^(text|image|news)$")
+    match_mode: str | None = Field(default=None, pattern="^(contain|equal)$")
+    reply_type: str | None = Field(default=None, pattern="^(text|image|news|link)$")
     content: str | None = Field(default=None, min_length=1, max_length=4000)
     status: int | None = Field(default=None, ge=0, le=1)
     sort: int | None = Field(default=None, ge=0, le=9999)
@@ -182,6 +185,7 @@ class WechatReplyRuleItem(BaseModel):
     name: str
     match_type: str
     keyword: str | None = None
+    match_mode: str = "contain"
     reply_type: str
     content: str
     status: int
@@ -209,6 +213,13 @@ class WechatTemplateSyncResult(BaseModel):
     created: int
     updated: int
     synced_at: datetime
+
+
+class WechatQrcodeResult(BaseModel):
+    """公众号带参二维码：``qrcode_url`` 可直接 <img> 展示。"""
+
+    qrcode_url: str
+    scene_str: str
 
 
 # ─────────────────────────── 发送 ───────────────────────────

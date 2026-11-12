@@ -191,6 +191,16 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
         result = await db.execute(text(sql), {**scope_params, **lead_scope_params, **(params or {})})
         return [{"label": str(row["label"]), "value": int(row["value"] or 0)} for row in result.mappings().all()]
 
+    async def ranked(sql: str, params: dict[str, object] | None = None) -> list[dict]:
+        """排行专用：在 label/value 之外带出会员 id 与头像，前端据此渲染真实头像。"""
+        result = await db.execute(text(sql), {**scope_params, **lead_scope_params, **(params or {})})
+        return [{
+            "label": str(row["label"]),
+            "value": int(row["value"] or 0),
+            "member_id": int(row["member_id"] or 0),
+            "avatar": str(row["avatar"] or ""),
+        } for row in result.mappings().all()]
+
     ordinary_user = "EXISTS (SELECT 1 FROM user_role ordinary_role WHERE ordinary_role.user_id = {column} AND ordinary_role.role_code = 'user' AND ordinary_role.status = 1)"
     ordinary_users = ordinary_user.format(column="users.id")
     async def users_group(expression: str, joins: str = "", order: str = "value DESC, label") -> list[dict]:
@@ -229,7 +239,7 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
         FROM user_browse_history history JOIN users ON users.id = history.user_id
         WHERE history.created_at >= :start AND history.created_at < :end AND users.status = 1 AND {ordinary_user.format(column='users.id')} AND {user_scope}
         GROUP BY CASE WHEN history.user_id = history.target_user_id THEN '查看自己' ELSE '查看会员资料' END ORDER BY value DESC""", {"start": start, "end": end})
-    popularity = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
+    popularity = await ranked(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value, target.id member_id, COALESCE(target.avatar, '') avatar
         FROM user_browse_history history JOIN users viewer ON viewer.id = history.user_id JOIN users target ON target.id = history.target_user_id
         WHERE history.created_at >= :start AND history.created_at < :end AND viewer.status = 1 AND {ordinary_user.format(column='viewer.id')} AND target.status = 1 AND {ordinary_user.format(column='target.id')} AND {user_scope.replace('users.id', 'viewer.id')}
         GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 8""", {"start": start, "end": end})
@@ -239,22 +249,22 @@ async def member_statistics(db: AsyncSession, admin: CurrentMatchmakerAdmin, fro
         WHERE history.created_at >= :start AND history.created_at < :end AND users.status = 1
           AND {ordinary_user.format(column='users.id')} AND {user_scope}
         GROUP BY DATE(history.created_at) ORDER BY DATE(history.created_at) DESC""", {"start": start, "end": end})
-    popular_female = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
+    popular_female = await ranked(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value, target.id member_id, COALESCE(target.avatar, '') avatar
         FROM user_browse_history history JOIN users viewer ON viewer.id = history.user_id JOIN users target ON target.id = history.target_user_id
         WHERE history.created_at >= :start AND history.created_at < :end AND target.gender = 2 AND target.status = 1
           AND {ordinary_user.format(column='target.id')} AND {ordinary_user.format(column='viewer.id')} AND {user_scope.replace('users.id', 'viewer.id')}
         GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 10""", {"start": start, "end": end})
-    popular_male = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
+    popular_male = await ranked(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value, target.id member_id, COALESCE(target.avatar, '') avatar
         FROM user_browse_history history JOIN users viewer ON viewer.id = history.user_id JOIN users target ON target.id = history.target_user_id
         WHERE history.created_at >= :start AND history.created_at < :end AND target.gender = 1 AND target.status = 1
           AND {ordinary_user.format(column='target.id')} AND {ordinary_user.format(column='viewer.id')} AND {user_scope.replace('users.id', 'viewer.id')}
         GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 10""", {"start": start, "end": end})
-    apply_female = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
+    apply_female = await ranked(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value, target.id member_id, COALESCE(target.avatar, '') avatar
         FROM match_apply application JOIN users target ON target.id = application.to_user_id
         WHERE application.created_at >= :start AND application.created_at < :end AND target.gender = 2 AND target.status = 1
           AND application.status IN (0, 1) AND {ordinary_user.format(column='target.id')}
         GROUP BY target.id, target.nickname ORDER BY value DESC, target.id LIMIT 10""", {"start": start, "end": end})
-    apply_male = await grouped(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value
+    apply_male = await ranked(f"""SELECT COALESCE(NULLIF(target.nickname, ''), CONCAT('会员', target.id)) label, COUNT(*) value, target.id member_id, COALESCE(target.avatar, '') avatar
         FROM match_apply application JOIN users target ON target.id = application.to_user_id
         WHERE application.created_at >= :start AND application.created_at < :end AND target.gender = 1 AND target.status = 1
           AND application.status IN (0, 1) AND {ordinary_user.format(column='target.id')}

@@ -92,6 +92,24 @@ STAFF_SUCCESS_COUNT = "(SELECT COUNT(*) FROM matchmaker_service s WHERE s.matchm
 STAFF_BASE = """FROM users u JOIN user_matchmaker_apply ma ON ma.user_id = u.id AND ma.application_type = 'service_matchmaker' AND ma.status = 1
     LEFT JOIN matchmaker_profile p ON p.user_id = u.id"""
 
+
+async def _ensure_profile(db: AsyncSession, user_id: int) -> None:
+    """历史红娘只有申请单没有档案行时补一条默认档案。
+
+    matchmaker_profile 是锁定 / 前台展示 / 红娘角色 / 分成级别的唯一落库位置；
+    缺行时 UPDATE ... WHERE user_id=? 命中 0 行，接口照样 200，前端看起来就是
+    「点了没反应 / 提交后还是普通红娘」。这里统一幂等补行。
+    """
+    await db.execute(
+        text(
+            "INSERT INTO matchmaker_profile (user_id, role_tag, visible, contact_editable) "
+            "VALUES (:id, 'normal', 1, 1) "
+            "ON DUPLICATE KEY UPDATE user_id = user_id"
+        ),
+        {"id": user_id},
+    )
+
+
 SELECT_STAFF = """SELECT u.id, u.avatar, u.nickname, u.phone, u.created_at, u.updated_at,
     p.wechat, p.wechat_qr, p.role_tag, p.visible, p.locked, p.description, p.slogan, p.sort, p.contact_editable, p.lock_at, p.commission_level_id,
     l.name commission_level_name, l.rate_percent,
@@ -378,8 +396,17 @@ async def update_staff(
     db: AsyncSession, matchmaker_id: int, body: MatchmakerStaffUpdate
 ) -> MatchmakerStaffDetail:
     await get_staff(db, matchmaker_id)
+    await _ensure_profile(db, matchmaker_id)
     await _validate_refs(db, body)
     values = body.model_dump(exclude_unset=True)
+    # 手机号有唯一约束：撞号时直接给 409 业务提示，避免前端只看到 500。
+    if values.get("phone"):
+        taken = await db.scalar(
+            text("SELECT 1 FROM users WHERE phone=:phone AND id<>:id"),
+            {"phone": values["phone"], "id": matchmaker_id},
+        )
+        if taken:
+            raise HTTPException(409, detail="该手机号已被其他账号使用")
     user_fields = {"display_name": "nickname", "avatar": "avatar", "phone": "phone"}
     for source, target in user_fields.items():
         if source in values:
@@ -458,6 +485,7 @@ async def set_lock(
     db: AsyncSession, matchmaker_id: int, body: MatchmakerLockUpdate
 ) -> MatchmakerStaffDetail:
     await get_staff(db, matchmaker_id)
+    await _ensure_profile(db, matchmaker_id)
     await db.execute(
         text("UPDATE matchmaker_profile SET locked=:locked WHERE user_id=:id"),
         {"locked": int(body.locked), "id": matchmaker_id},
@@ -480,6 +508,7 @@ async def set_visibility(
     db: AsyncSession, matchmaker_id: int, body: MatchmakerVisibilityUpdate
 ) -> MatchmakerStaffDetail:
     await get_staff(db, matchmaker_id)
+    await _ensure_profile(db, matchmaker_id)
     await db.execute(
         text("UPDATE matchmaker_profile SET visible=:visible WHERE user_id=:id"),
         {"visible": int(body.visible), "id": matchmaker_id},

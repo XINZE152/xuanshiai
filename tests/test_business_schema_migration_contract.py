@@ -254,4 +254,3 @@ def test_all_manifest_verify_files_satisfy_runner_contract() -> None:
             elif "count(*)" in body:
                 # 无 GROUP BY 的聚合恒返回 1 行，回滚校验永远过不了。
                 assert "group by" in body, f"{label} 的 COUNT(*) 缺少 GROUP BY，恒返回 1 行"
-

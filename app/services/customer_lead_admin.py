@@ -24,6 +24,7 @@ from app.schemas.auth import PreferenceUpdateRequest
 
 from app.schemas.customer_lead_admin import (
     CustomerLead, CustomerLeadAbandonment, CustomerLeadAssignment,
+    LeadFollowTemplate, LeadReportCountItem, LeadReportOverview,
     CustomerLeadCreate, CustomerLeadCreateResult, CustomerLeadFollowUp,
     CustomerLeadBatchImportResult, CustomerLeadConvertRequest, CustomerLeadFollowUpCreate, CustomerLeadImportRow, CustomerLeadImportSummary,
     CustomerLeadOption, CustomerLeadOptions,
@@ -52,7 +53,8 @@ from app.services.member_follow_up_admin import (
 )
 
 LEAD_SELECT = """SELECT id, name, phone, wechat, source, intention_level, status, audit_status, matchmaker_id,
-    organization_id, promoter_id, next_follow_at, converted_user_id, remark, created_by, created_at, updated_at
+    organization_id, promoter_id, next_follow_at, converted_user_id, remark, created_by, created_at, updated_at,
+    wechat_added, assigned_at
     FROM customer_lead"""
 
 _LEAD_FROM_RE = re.compile(r"\bFROM customer_lead\b")
@@ -1156,23 +1158,47 @@ async def matchmaker_follow_stats(
         where.append("cl.matchmaker_id = :matchmaker_id")
         params["matchmaker_id"] = matchmaker_id
     clause = " AND ".join(where)
+    # 跟进条数：直接按跟进表聚合（不进客户表 JOIN，避免一人多跟进把客源数放大）
+    follow_rows = (await db.execute(text(f"""SELECT cl.matchmaker_id AS matchmaker_id,
+        COUNT(fu.id) AS total_count,
+        SUM(fu.created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')) AS month_count
+        FROM customer_lead cl
+        JOIN customer_lead_follow_up fu ON fu.lead_id = cl.id
+        WHERE {clause}
+        GROUP BY cl.matchmaker_id"""), params)).mappings().all()
+    follow_map = {int(r["matchmaker_id"]): (int(r["total_count"] or 0), int(r["month_count"] or 0)) for r in follow_rows}
+    # 名下客源 / 从未跟进 / 超 N 天未跟进：每个客源取「最后一次跟进时间」，无跟进时回退录入时间
     rows = (await db.execute(text(f"""SELECT cl.matchmaker_id AS matchmaker_id,
         COALESCE(NULLIF(u.nickname, ''), u.phone, CONCAT('红娘', cl.matchmaker_id)) AS matchmaker_name,
-        COUNT(DISTINCT cl.id) AS lead_count,
-        COUNT(fu.id) AS total_count,
-        SUM(fu.created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')) AS month_count,
-        COUNT(DISTINCT CASE WHEN NOT EXISTS (SELECT 1 FROM customer_lead_follow_up fx WHERE fx.lead_id = cl.id) THEN cl.id END) AS unfollowed_count
+        COUNT(*) AS lead_count,
+        SUM(CASE WHEN lf.last_at IS NULL THEN 1 ELSE 0 END) AS unfollowed_count,
+        SUM(CASE WHEN COALESCE(lf.last_at, cl.created_at) < DATE_SUB(NOW(), INTERVAL 3 DAY) THEN 1 ELSE 0 END) AS overdue_3d,
+        SUM(CASE WHEN COALESCE(lf.last_at, cl.created_at) < DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS overdue_7d,
+        SUM(CASE WHEN COALESCE(lf.last_at, cl.created_at) < DATE_SUB(NOW(), INTERVAL 15 DAY) THEN 1 ELSE 0 END) AS overdue_15d,
+        SUM(CASE WHEN COALESCE(lf.last_at, cl.created_at) < DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS overdue_30d
         FROM customer_lead cl
-        LEFT JOIN customer_lead_follow_up fu ON fu.lead_id = cl.id
+        LEFT JOIN (SELECT lead_id, MAX(created_at) AS last_at FROM customer_lead_follow_up GROUP BY lead_id) lf
+               ON lf.lead_id = cl.id
         LEFT JOIN users u ON u.id = cl.matchmaker_id
         WHERE {clause}
         GROUP BY cl.matchmaker_id, matchmaker_name
-        ORDER BY total_count DESC, lead_count DESC"""), params)).mappings().all()
-    return [MatchmakerFollowStat(
-        matchmaker_id=int(r["matchmaker_id"]), matchmaker_name=str(r["matchmaker_name"] or ""),
-        total_count=int(r["total_count"] or 0), month_count=int(r["month_count"] or 0),
-        unfollowed_count=int(r["unfollowed_count"] or 0),
-    ) for r in rows]
+        ORDER BY lead_count DESC"""), params)).mappings().all()
+    out: list[MatchmakerFollowStat] = []
+    for r in rows:
+        mid = int(r["matchmaker_id"])
+        total_count, month_count = follow_map.get(mid, (0, 0))
+        out.append(MatchmakerFollowStat(
+            matchmaker_id=mid, matchmaker_name=str(r["matchmaker_name"] or ""),
+            total_count=total_count, month_count=month_count,
+            unfollowed_count=int(r["unfollowed_count"] or 0),
+            lead_count=int(r["lead_count"] or 0),
+            overdue_3d=int(r["overdue_3d"] or 0),
+            overdue_7d=int(r["overdue_7d"] or 0),
+            overdue_15d=int(r["overdue_15d"] or 0),
+            overdue_30d=int(r["overdue_30d"] or 0),
+        ))
+    out.sort(key=lambda item: (item.total_count, item.lead_count), reverse=True)
+    return out
 
 
 async def promoter_acquisition_stats(
@@ -1376,8 +1402,13 @@ async def list_abandonments(
         where.append("ab.restored_at IS NULL")
     _merge_scope(where, params, scope, scope_params)
     rows = await db.execute(text(f"""SELECT ab.id, ab.lead_id, ab.reason, ab.abandoned_by, ab.abandoned_at,
-        ab.restored_by, ab.restored_at, ab.restore_reason
+        ab.restored_by, ab.restored_at, ab.restore_reason,
+        COALESCE(NULLIF(au.nickname, ''), au.phone, CONCAT('账号 #', ab.abandoned_by)) AS abandoned_by_name,
+        CASE WHEN ab.restored_by IS NULL THEN NULL
+             ELSE COALESCE(NULLIF(ru.nickname, ''), ru.phone, CONCAT('账号 #', ab.restored_by)) END AS restored_by_name
         FROM customer_lead_abandonment ab JOIN customer_lead cl ON cl.id = ab.lead_id
+        LEFT JOIN users au ON au.id = ab.abandoned_by
+        LEFT JOIN users ru ON ru.id = ab.restored_by
         WHERE {' AND '.join(where)} ORDER BY ab.id DESC"""), params)
     return [CustomerLeadAbandonment(**dict(row)) for row in rows.mappings().all()]
 
@@ -1646,3 +1677,150 @@ async def lead_options(
             FROM organization WHERE org_type = 'store' AND status = 1 ORDER BY id"""))).mappings().all()
     ]
     return CustomerLeadOptions(sources=sources, matchmakers=matchmakers, promoters=promoters, stores=stores)
+
+
+# ─────────────── 2026-11-11 跟进模板 / 数据报表 ───────────────
+
+
+async def list_follow_templates(db: AsyncSession) -> list[LeadFollowTemplate]:
+    """跟进内容模板列表（按 sort_order 升序，供「从模板选择」与「管理模板」）。"""
+    rows = (await db.execute(text(
+        "SELECT id, name, content, sort_order FROM lead_follow_template ORDER BY sort_order ASC, id ASC"
+    ))).mappings().all()
+    return [LeadFollowTemplate(**dict(r)) for r in rows]
+
+
+async def create_follow_template(db: AsyncSession, name: str, content: str) -> LeadFollowTemplate:
+    """新增模板：排序值接在最大值之后，避免每次都要手动调整顺序。"""
+    max_order = (await db.execute(text("SELECT COALESCE(MAX(sort_order), 0) FROM lead_follow_template"))).scalar() or 0
+    result = await db.execute(text(
+        "INSERT INTO lead_follow_template (name, content, sort_order) VALUES (:name, :content, :sort_order)"
+    ), {"name": name, "content": content, "sort_order": int(max_order) + 10})
+    await db.commit()
+    new_id = int(result.lastrowid)
+    rows = (await db.execute(text(
+        "SELECT id, name, content, sort_order FROM lead_follow_template WHERE id = :id"
+    ), {"id": new_id})).mappings().all()
+    return LeadFollowTemplate(**dict(rows[0]))
+
+
+async def update_follow_template(db: AsyncSession, template_id: int, name: str | None, content: str | None) -> LeadFollowTemplate:
+    exists = (await db.execute(text("SELECT 1 FROM lead_follow_template WHERE id = :id"), {"id": template_id})).scalar()
+    if not exists:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    sets, params = [], {"id": template_id}
+    if name is not None:
+        sets.append("name = :name"); params["name"] = name
+    if content is not None:
+        sets.append("content = :content"); params["content"] = content
+    if sets:
+        await db.execute(text(f"UPDATE lead_follow_template SET {', '.join(sets)} WHERE id = :id"), params)
+        await db.commit()
+    rows = (await db.execute(text(
+        "SELECT id, name, content, sort_order FROM lead_follow_template WHERE id = :id"
+    ), {"id": template_id})).mappings().all()
+    return LeadFollowTemplate(**dict(rows[0]))
+
+
+async def delete_follow_template(db: AsyncSession, template_id: int) -> None:
+    result = await db.execute(text("DELETE FROM lead_follow_template WHERE id = :id"), {"id": template_id})
+    await db.commit()
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="模板不存在")
+
+
+async def move_follow_template(db: AsyncSession, template_id: int, direction: str) -> list[LeadFollowTemplate]:
+    """上移/下移：与相邻模板交换 sort_order（不重排全部行，避免并发写打架）。"""
+    rows = (await db.execute(text(
+        "SELECT id, sort_order FROM lead_follow_template ORDER BY sort_order ASC, id ASC"
+    ))).mappings().all()
+    ids = [int(r["id"]) for r in rows]
+    if template_id not in ids:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    idx = ids.index(template_id)
+    target = idx - 1 if direction == "up" else idx + 1
+    if 0 <= target < len(ids):
+        a, b = rows[idx], rows[target]
+        await db.execute(text("UPDATE lead_follow_template SET sort_order = :o WHERE id = :i"),
+                         {"o": int(b["sort_order"]), "i": int(a["id"])})
+        await db.execute(text("UPDATE lead_follow_template SET sort_order = :o WHERE id = :i"),
+                         {"o": int(a["sort_order"]), "i": int(b["id"])})
+        await db.commit()
+    return await list_follow_templates(db)
+
+
+async def lead_report_overview(
+    db: AsyncSession,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    scope: str | None = None,
+    scope_params: dict[str, Any] | None = None,
+) -> LeadReportOverview:
+    """线索库数据报表：意向/来源/状态分布、月度增量、分派统计一次取全。
+
+    与前端口径一致：全部基于未删除线索；日期区间只作用于「增量 / 分派」两个按时间维度的页签，
+    意向/来源/状态是当前存量快照。
+    """
+    if scope_params is None:
+        scope_params = {}
+    columns = await _lead_columns(db)
+    where = ["1=1"]
+    params: dict[str, Any] = {}
+    if "deleted_at" in columns:
+        where.append("cl.deleted_at IS NULL")
+    if scope:
+        where.append(f"({scope})")
+        params.update(scope_params)
+    clause = " AND ".join(where)
+
+    def _date_clause(field: str) -> str:
+        extra = ""
+        if start_date:
+            extra += f" AND DATE({field}) >= :start_date"
+            params["start_date"] = start_date
+        if end_date:
+            extra += f" AND DATE({field}) <= :end_date"
+            params["end_date"] = end_date
+        return extra
+
+    total = int((await db.execute(text(f"SELECT COUNT(*) FROM customer_lead cl WHERE {clause}"), params)).scalar() or 0)
+
+    intent_rows = (await db.execute(text(
+        f"SELECT intention_level AS lv, COUNT(*) AS n FROM customer_lead cl WHERE {clause} GROUP BY intention_level"
+    ), params)).mappings().all()
+    intent_map = {int(r["lv"] or 1): int(r["n"]) for r in intent_rows}
+    intent = [LeadReportCountItem(label=LEAD_INTENTION_GRADES.get(lv, f"{lv}类"), value=intent_map.get(lv, 0))
+              for lv in LEAD_INTENTION_GRADES]
+
+    source_rows = (await db.execute(text(
+        f"SELECT COALESCE(NULLIF(source, ''), '未填写来源') AS label, COUNT(*) AS n FROM customer_lead cl "
+        f"WHERE {clause} GROUP BY label ORDER BY n DESC"
+    ), params)).mappings().all()
+    source = [LeadReportCountItem(label=str(r["label"]), value=int(r["n"])) for r in source_rows]
+
+    status_rows = (await db.execute(text(
+        f"SELECT status AS label, COUNT(*) AS n FROM customer_lead cl WHERE {clause} GROUP BY status"
+    ), params)).mappings().all()
+    status_map = {str(r["label"]): int(r["n"]) for r in status_rows}
+    status = [LeadReportCountItem(label=label, value=status_map.get(code, 0))
+              for code, label in (("NEW", "找对象中"), ("CONTACTED", "接触中"), ("INTENDED", "恋爱中"),
+                                  ("CONVERTED", "已到门店"), ("CLOSED", "已结婚"), ("LOST", "已弃海"))]
+
+    month_rows = (await db.execute(text(
+        f"SELECT DATE_FORMAT(created_at, '%Y-%m') AS label, COUNT(*) AS n FROM customer_lead cl "
+        f"WHERE {clause}{_date_clause('cl.created_at')} GROUP BY label ORDER BY label ASC"
+    ), params)).mappings().all()
+    monthly = [LeadReportCountItem(label=str(r["label"]), value=int(r["n"])) for r in month_rows]
+
+    assign_rows = (await db.execute(text(
+        f"SELECT COALESCE(NULLIF(u.nickname, ''), u.phone, CONCAT('红娘', cl.matchmaker_id)) AS label, "
+        f"cl.matchmaker_id AS mid, COUNT(*) AS n FROM customer_lead cl "
+        f"LEFT JOIN users u ON u.id = cl.matchmaker_id WHERE {clause} AND cl.matchmaker_id IS NOT NULL"
+        f"{_date_clause('cl.assigned_at')} GROUP BY cl.matchmaker_id, label ORDER BY n DESC"
+    ), params)).mappings().all()
+    assignee = [LeadReportCountItem(label=str(r["label"]), value=int(r["n"]), extra=str(r["mid"])) for r in assign_rows]
+
+    follow = await matchmaker_follow_stats(db, scope=scope, scope_params=scope_params)
+    return LeadReportOverview(total=total, intent=intent, source=source, status=status,
+                              monthly=monthly, assignee=assignee, follow=follow)

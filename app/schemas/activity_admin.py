@@ -59,6 +59,12 @@ class ActivityAdminCreate(BaseModel):
     custom_share: bool = False
     manager_ids: str | None = Field(default=None, max_length=255)
     notify_phones: str | None = Field(default=None, max_length=128)
+    # ── 报名要求（原站逐字段开关）与名单展示设置 ──
+    signup_fields: dict[str, bool] | None = Field(
+        default=None, description="报名表可选字段开关：height/marriage/company/income/education/avatar/id_card"
+    )
+    allow_view_unregistered: bool = Field(default=False, description="未报名是否允许查看活动名单")
+    show_signup_list: bool = Field(default=False, description="是否在活动页面展示已报名名单")
 
     @model_validator(mode="after")
     def validate_times(self) -> "ActivityAdminCreate":
@@ -114,6 +120,9 @@ class ActivityAdminUpdate(BaseModel):
     custom_share: bool | None = None
     manager_ids: str | None = Field(default=None, max_length=255)
     notify_phones: str | None = Field(default=None, max_length=128)
+    signup_fields: dict[str, bool] | None = None
+    allow_view_unregistered: bool | None = None
+    show_signup_list: bool | None = None
     audit_status: Literal["pending", "approved", "rejected"] | None = None
     online: bool | None = None
 
@@ -172,6 +181,9 @@ class ActivityAdminItem(BaseModel):
     custom_share: bool = False
     manager_ids: str | None = None
     notify_phones: str | None = None
+    signup_fields: dict[str, bool] | None = None
+    allow_view_unregistered: bool = False
+    show_signup_list: bool = False
     online: bool = True
     audit_status: str = "approved"
     male_count: int = 0
@@ -282,3 +294,10 @@ class ActivitySignupStatusUpdate(BaseModel):
     status: Literal[1, 2, 3]
     reason: str | None = Field(default=None, max_length=255)
 
+
+
+class ActivitySignupBulkCreate(BaseModel):
+    """把会员资料库里的会员批量加入某个活动的报名名单。"""
+
+    activity_id: int = Field(ge=1)
+    user_ids: list[int] = Field(min_length=1, max_length=200)

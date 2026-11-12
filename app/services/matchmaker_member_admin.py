@@ -139,7 +139,7 @@ async def update_member(
         # 后台保存表单常把未改动的手机号一并提交；只有真的换号才让旧属地失效。
         if await should_reset_phone_region(db, phone_changed=phone != current_phone):
             user_values["phone_region"] = None
-    auth_values = {key: values.pop(key) for key in ("education", "school", "job", "company", "auth_status") if key in values}
+    auth_values = {key: values.pop(key) for key in ("education", "school", "job", "company", "auth_status", "store_verified") if key in values}
     match_status = values.pop("match_status", None) if "match_status" in values else None
     profile_columns: set[str] = set()
     if values:

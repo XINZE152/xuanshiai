@@ -58,3 +58,10 @@ class MemberBehaviorPage(BaseModel):
     page_size: int
     total: int
     has_more: bool
+
+
+class ReportStatusUpdate(BaseModel):
+    """网友举报处理状态更新。"""
+
+    status: int = Field(ge=0, le=1, description="0 待处理 1 已处理")
+    result: str | None = Field(default=None, max_length=255, description="处理说明，留空默认「已处理」")

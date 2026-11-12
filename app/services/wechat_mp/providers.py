@@ -43,6 +43,9 @@ class DisabledWechatMpProvider:
     async def fetch_miniprogram_code(self, path: str, scene: str) -> bytes:
         raise HTTPException(status_code=503, detail="公众号凭据未配置")
 
+    async def create_qrcode(self, scene_str: str) -> str:
+        raise HTTPException(status_code=503, detail="公众号凭据未配置")
+
 
 class MockWechatMpProvider:
     """仅 development/testing：不发真实请求，返回可对账的假结果。"""
@@ -77,6 +80,10 @@ class MockWechatMpProvider:
     async def fetch_miniprogram_code(self, path: str, scene: str) -> bytes:
         self._guard()
         raise HTTPException(status_code=503, detail="Mock 公众号不生成小程序码")
+
+    async def create_qrcode(self, scene_str: str) -> str:
+        self._guard()
+        return f"https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=mock-{scene_str}"
 
 
 class HttpWechatMpProvider:
@@ -243,6 +250,27 @@ class HttpWechatMpProvider:
         if "image" not in response.headers.get("content-type", ""):
             raise HTTPException(503, detail="小程序码生成失败")
         return response.content
+
+    async def create_qrcode(self, scene_str: str) -> str:
+        """调用 ``cgi-bin/qrcode/create`` 创建带参二维码（永久字符场景值）。
+
+        返回 ``showqrcode`` 换图地址，前端可直接 <img> 展示。
+        """
+        token = await self._access_token()
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(
+                f"{_API_BASE}/cgi-bin/qrcode/create",
+                params={"access_token": token},
+                json={
+                    "action_name": "QR_STR_SCENE",
+                    "action_info": {"scene": {"scene_str": scene_str}},
+                },
+            )
+        payload = response.json()
+        ticket = payload.get("ticket")
+        if payload.get("errcode") or not ticket:
+            raise HTTPException(503, detail="公众号二维码生成失败")
+        return f"https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket={ticket}"
 
 
 def ensure_wechat_mp_configured() -> None:

@@ -22,6 +22,7 @@ from app.schemas.activity_admin import (
     ActivityOption,
     ActivitySignupAdminItem,
     ActivitySignupAdminPage,
+    ActivitySignupBulkCreate,
     ActivitySignupStatistics,
     ActivitySignupUpdate,
     ActivityStatusUpdate,
@@ -41,6 +42,22 @@ def _bool(value: Any) -> bool:
         return bool(int(value))
     except (TypeError, ValueError):
         return bool(value)
+
+
+def _parse_json(value: Any) -> Any:
+    """MySQL JSON 列在驱动层可能是 str / bytes / 已解析对象，统一还原成 Python 对象。"""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", "ignore")
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _num(value: Any) -> float:
@@ -105,6 +122,9 @@ def _activity_item(row: Any) -> ActivityAdminItem:
         custom_share=_bool(m.get("custom_share")),
         manager_ids=m.get("manager_ids"),
         notify_phones=m.get("notify_phones"),
+        signup_fields=_parse_json(m.get("signup_fields")),
+        allow_view_unregistered=_bool(m.get("allow_view_unregistered")),
+        show_signup_list=_bool(m.get("show_signup_list")),
         online=_bool(m.get("online") if m.get("online") is not None else 1),
         audit_status=m.get("audit_status") or "approved",
         male_count=int(m.get("male_count") or 0),
@@ -236,7 +256,10 @@ async def create_activity(
 ) -> ActivityAdminItem:
     current.require("community.activity.manage")
     payload = body.model_dump()
-    payload = {k: (int(v) if isinstance(v, bool) else v) for k, v in payload.items()}
+    payload = {
+        k: (int(v) if isinstance(v, bool) else (json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else v))
+        for k, v in payload.items()
+    }
     payload["created_by"] = current.account.id
     columns = ", ".join(payload.keys())
     placeholders = ", ".join(f":{key}" for key in payload)
@@ -295,6 +318,52 @@ async def signups(
         total=total,
         has_more=page * page_size < total,
     )
+
+
+@signup_router.post("/bulk", summary="批量把会员加入活动报名名单")
+async def bulk_signup(
+    body: ActivitySignupBulkCreate,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """后台「名单展示」里从会员资料库挑人，直接写入报名名单。
+
+    已在本活动名单里的会员会被幂等复活（清空 deleted_at、状态置为已报名），
+    不会重复插入。返回 added（实际命中人数）与 skipped（用户不存在/已停用）。
+    """
+    current.require("community.activity.manage")
+    await _get_activity(db, body.activity_id)
+    added = 0
+    skipped: list[int] = []
+    for uid in body.user_ids:
+        row = (
+            await db.execute(
+                text("SELECT nickname, phone, avatar, gender FROM users WHERE id=:id AND status=1"),
+                {"id": uid},
+            )
+        ).mappings().first()
+        if not row:
+            skipped.append(uid)
+            continue
+        await db.execute(
+            text(
+                "INSERT INTO activity_signup "
+                "(activity_id,user_id,real_name,phone,avatar,gender,status,pay_status) "
+                "VALUES (:activity_id,:user_id,:name,:phone,:avatar,:gender,1,'free') "
+                "ON DUPLICATE KEY UPDATE status=1, deleted_at=NULL, updated_at=UTC_TIMESTAMP()"
+            ),
+            {
+                "activity_id": body.activity_id,
+                "user_id": uid,
+                "name": row["nickname"],
+                "phone": row["phone"],
+                "avatar": row["avatar"],
+                "gender": row["gender"],
+            },
+        )
+        added += 1
+    await db.commit()
+    return {"activity_id": body.activity_id, "added": added, "skipped": skipped}
 
 
 @router.get("/{activity_id}/link", response_model=ActivityLinkInfo, summary="活动链接与二维码")
@@ -364,7 +433,10 @@ async def update_activity(
 ) -> ActivityAdminItem:
     current.require("community.activity.manage")
     await _get_activity(db, activity_id)
-    values = {k: (int(v) if isinstance(v, bool) else v) for k, v in body.model_dump(exclude_unset=True).items()}
+    values = {
+        k: (int(v) if isinstance(v, bool) else (json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else v))
+        for k, v in body.model_dump(exclude_unset=True).items()
+    }
     updates = ", ".join(f"{key} = :{key}" for key in values)
     await db.execute(
         text(f"UPDATE offline_activity SET {updates}, updated_at = UTC_TIMESTAMP() WHERE id = :id"),

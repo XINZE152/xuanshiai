@@ -60,3 +60,6 @@ class WechatMpProvider(Protocol):
 
     async def fetch_miniprogram_code(self, path: str, scene: str) -> bytes:
         """生成小程序码 PNG（A5 ``type=miniprogram`` 使用）；未配置时 503。"""
+
+    async def create_qrcode(self, scene_str: str) -> str:
+        """创建公众号带参二维码，返回可直接展示的 showqrcode 图片地址。"""

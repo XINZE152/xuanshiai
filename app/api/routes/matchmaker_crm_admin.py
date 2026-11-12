@@ -532,6 +532,7 @@ async def _member_query(
         v.vip_end_at, a.matchmaker_id, COALESCE(pr.match_status, 1) AS match_status,
         {user_expr('source')} AS source, {user_expr('region')} AS region,
         COALESCE({user_expr('cert_status')}, 0) AS cert_status,
+        COALESCE({auth_expr('store_verified')}, 0) AS store_verified,
         COALESCE({user_expr('wechat_added')}, 0) AS wechat_added,
         COALESCE({user_expr('promoted')}, 0) AS promoted,
         COALESCE({user_expr('newcomer')}, 0) AS newcomer,

@@ -100,7 +100,6 @@ BUSINESS_TABLES = {
         CREATE TABLE IF NOT EXISTS `customer_lead` (
             `id` bigint unsigned NOT NULL AUTO_INCREMENT,
             `name` varchar(128) NOT NULL,
-            `real_name` varchar(64) DEFAULT NULL COMMENT '客源真实姓名（选填）',
             `phone` varchar(32) DEFAULT NULL,
             `wechat` varchar(128) DEFAULT NULL,
             `source` varchar(64) NOT NULL,
@@ -118,6 +117,7 @@ BUSINESS_TABLES = {
             `next_follow_at` datetime DEFAULT NULL,
             `converted_user_id` bigint unsigned DEFAULT NULL,
             `remark` varchar(2000) DEFAULT NULL,
+            `real_name` varchar(64) DEFAULT NULL COMMENT '真实姓名（资料，非实名核验）',
             `birth_date` date DEFAULT NULL COMMENT '出生日期；age 由此派生',
             `weight` int DEFAULT NULL COMMENT '体重kg',
             `income` varchar(32) DEFAULT NULL COMMENT '年收入档位',
@@ -2090,7 +2090,8 @@ BUSINESS_TABLES = {
             `name` varchar(64) NOT NULL COMMENT '规则名称',
             `match_type` varchar(16) NOT NULL DEFAULT 'keyword' COMMENT 'keyword 关键词 / subscribe 关注 / default 默认',
             `keyword` varchar(128) DEFAULT NULL COMMENT '关键词（逗号分隔），subscribe/default 为空',
-            `reply_type` varchar(16) NOT NULL DEFAULT 'text' COMMENT 'text 文本 / image 图片 / news 图文',
+            `match_mode` varchar(16) NOT NULL DEFAULT 'contain' COMMENT 'contain 包含 / equal 等于',
+            `reply_type` varchar(16) NOT NULL DEFAULT 'text' COMMENT 'text 文本 / image 图片 / news 图文 / link 链接',
             `content` text NOT NULL COMMENT '回复内容（text 为正文，image/news 为素材 URL 列表说明）',
             `status` tinyint NOT NULL DEFAULT 1 COMMENT '1启用 0停用',
             `sort` int NOT NULL DEFAULT 0,
@@ -2395,5 +2396,88 @@ BUSINESS_TABLES = {
             KEY `idx_user_feedback_status` (`status`, `created_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
           COMMENT='C 端用户反馈/意见箱'
+    """,
+    "ref_teacher": """
+        CREATE TABLE IF NOT EXISTS `ref_teacher` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `ref_id` bigint unsigned NOT NULL COMMENT '原站讲师 ID',
+            `name` varchar(64) NOT NULL COMMENT '讲师名',
+            `avatar_url` varchar(500) DEFAULT NULL COMMENT '头像 /refsite/...',
+            `intro` text DEFAULT NULL COMMENT '讲师介绍',
+            `course_count` int NOT NULL DEFAULT 0 COMMENT '课程数',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_ref_teacher_ref_id` (`ref_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='婚创学苑讲师（原站镜像）'
+    """,
+    "ref_product": """
+        CREATE TABLE IF NOT EXISTS `ref_product` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `ref_id` bigint unsigned NOT NULL COMMENT '原站插件 ID',
+            `name` varchar(128) NOT NULL COMMENT '插件名',
+            `category` varchar(32) DEFAULT NULL COMMENT 'Module / Tool',
+            `intro` text DEFAULT NULL COMMENT '简介',
+            `detail` mediumtext DEFAULT NULL COMMENT '详情 HTML',
+            `cover_url` varchar(500) DEFAULT NULL COMMENT '封面 /refsite/...',
+            `album_url` varchar(500) DEFAULT NULL COMMENT '详情大图 /refsite/...',
+            `price` decimal(12,2) DEFAULT NULL COMMENT '原站标价',
+            `purchased` tinyint NOT NULL DEFAULT 0 COMMENT '当前租户是否已授权',
+            `sort` int NOT NULL DEFAULT 0 COMMENT '排序',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_ref_product_ref_id` (`ref_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='应用中心插件（原站镜像）'
+    """,
+    "ref_guide": """
+        CREATE TABLE IF NOT EXISTS `ref_guide` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `ref_id` bigint unsigned NOT NULL COMMENT '原站课程 ID',
+            `title` varchar(255) NOT NULL COMMENT '标题',
+            `guide_type` varchar(16) NOT NULL COMMENT 'Video / Article / FileToGet / Attachment / Link',
+            `category_name` varchar(64) DEFAULT NULL COMMENT '栏目（用好系统/婚恋创业/资料下载...）',
+            `teacher_ref_id` bigint unsigned DEFAULT NULL COMMENT '讲师 ref_teacher.ref_id',
+            `teacher_name` varchar(64) DEFAULT NULL COMMENT '讲师名快照',
+            `url` varchar(1000) DEFAULT NULL COMMENT '资源地址：视频完整 URL / 文件 /refsite/... / 外链',
+            `cover_url` varchar(500) DEFAULT NULL COMMENT '封面 /refsite/...',
+            `content` mediumtext DEFAULT NULL COMMENT '文章正文 HTML（Article）',
+            `duration` int NOT NULL DEFAULT 0 COMMENT '视频秒数',
+            `likes` int NOT NULL DEFAULT 0,
+            `view_times` int NOT NULL DEFAULT 0,
+            `is_top` tinyint NOT NULL DEFAULT 0,
+            `title_bold` tinyint NOT NULL DEFAULT 0,
+            `title_color` varchar(32) DEFAULT NULL,
+            `on_shelf` tinyint NOT NULL DEFAULT 1,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_ref_guide_ref_id` (`ref_id`),
+            KEY `idx_ref_guide_cat` (`category_name`, `guide_type`, `on_shelf`),
+            KEY `idx_ref_guide_teacher` (`teacher_ref_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='婚创学苑/红娘课堂课程（原站镜像）'
+    """,
+    "ref_instruction": """
+        CREATE TABLE IF NOT EXISTS `ref_instruction` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `ref_id` bigint unsigned NOT NULL COMMENT '原站手册 ID',
+            `title` varchar(255) NOT NULL COMMENT '手册标题',
+            `content` mediumtext DEFAULT NULL COMMENT '正文 HTML',
+            `sort` int NOT NULL DEFAULT 0,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_ref_instruction_ref_id` (`ref_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用好系统手册（原站镜像）'
+    """,
+    "ref_material": """
+        CREATE TABLE IF NOT EXISTS `ref_material` (
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `ref_id` bigint unsigned NOT NULL COMMENT '原站素材 ID',
+            `title` varchar(255) DEFAULT NULL COMMENT '素材标题',
+            `category_name` varchar(64) NOT NULL COMMENT '分类（红娘朋友圈/平台轮播图...）',
+            `sub_category_name` varchar(64) DEFAULT NULL COMMENT '子分类',
+            `img_url` varchar(500) NOT NULL COMMENT '图片 /refsite/...',
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_ref_material_ref_id` (`ref_id`),
+            KEY `idx_ref_material_cat` (`category_name`, `sub_category_name`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='云端图库素材（原站镜像）'
     """,
 }

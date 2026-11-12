@@ -95,4 +95,3 @@ def test_database_url_must_be_complete() -> None:
         assert "mysql://" in str(exc)
     else:
         raise AssertionError("incomplete --database-url must be rejected")
-

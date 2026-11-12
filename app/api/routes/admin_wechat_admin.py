@@ -23,6 +23,7 @@ from app.schemas.admin_wechat_admin import (
     WechatMenu,
     WechatMenuPublish,
     WechatMessagePage,
+    WechatQrcodeResult,
     WechatReplyRuleCreate,
     WechatReplyRuleItem,
     WechatReplyRuleUpdate,
@@ -70,11 +71,12 @@ async def wechat_fans(
     keyword: str | None = Query(None, max_length=64),
     group_id: int | None = Query(None, ge=1),
     subscribe_status: int | None = Query(None, ge=0, le=1),
+    subscribe_date: str | None = Query(None, max_length=10, description="按关注日期筛选（YYYY-MM-DD）"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> WechatFanPage:
     current.require("platform.wechat.read")
-    return await service.list_fans(db, page, page_size, keyword, group_id, subscribe_status)
+    return await service.list_fans(db, page, page_size, keyword, group_id, subscribe_status, subscribe_date)
 
 
 @declare_permission("platform.wechat.write")
@@ -131,6 +133,16 @@ async def wechat_group_delete(
 ) -> None:
     current.require("platform.wechat.write")
     await service.delete_group(db, current.account.id, group_id)
+
+
+@declare_permission("platform.wechat.write")
+@router.post("/qrcode", response_model=WechatQrcodeResult, summary="生成公众号带参二维码")
+async def wechat_qrcode_create(
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> WechatQrcodeResult:
+    current.require("platform.wechat.write")
+    return await service.create_qrcode(db, current.account.id)
 
 
 @declare_permission("platform.wechat.read")

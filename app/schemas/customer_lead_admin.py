@@ -207,6 +207,9 @@ class CustomerLead(_LeadProfileFields):
     created_by: int
     created_at: datetime
     updated_at: datetime
+    # 2026-11-11：列表「来源/注册/最后/分派时间」列与详情「加上了吗」下拉需要
+    assigned_at: datetime | None = None
+    wechat_added: int = 0
 
 
 class CustomerLeadConvertRequest(BaseModel):
@@ -295,6 +298,9 @@ class CustomerLeadAbandonment(BaseModel):
     restored_by: int | None
     restored_at: datetime | None
     restore_reason: str | None
+    # 2026-11-11：弃海记录页要显示「放弃人 / 捞取人」姓名而不是账号 ID
+    abandoned_by_name: str | None = None
+    restored_by_name: str | None = None
 
 
 class CustomerLeadImportRow(BaseModel):
@@ -387,6 +393,11 @@ class MatchmakerFollowStat(BaseModel):
     total_count: int = 0
     month_count: int = 0
     unfollowed_count: int = 0
+    lead_count: int = 0
+    overdue_3d: int = 0
+    overdue_7d: int = 0
+    overdue_15d: int = 0
+    overdue_30d: int = 0
 
 
 class CustomerLeadPromoterStat(BaseModel):
@@ -418,3 +429,45 @@ class LeadPreferenceResponse(BaseModel):
     converted_user_id: int | None = None
     editable: bool = False
     preference: PreferenceResponse | None = None
+
+
+# ─────────────── 2026-11-11 客源跟进模板 / 数据报表 ───────────────
+
+
+class LeadFollowTemplate(BaseModel):
+    """跟进内容模板（后台「从模板选择」与「管理模板」抽屉）。"""
+
+    id: int
+    name: str
+    content: str
+    sort_order: int = 0
+
+
+class LeadFollowTemplateCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class LeadFollowTemplateUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
+class LeadReportCountItem(BaseModel):
+    """报表通用「标签 + 数量」行；extra 放可下钻的 id（分派人 user_id 等）。"""
+
+    label: str
+    value: int = 0
+    extra: str | None = None
+
+
+class LeadReportOverview(BaseModel):
+    """线索库数据报表一次取全（7 个页签）：意向 / 来源 / 状态 / 月度增量 / 分派 / 跟进。"""
+
+    total: int = 0
+    intent: list[LeadReportCountItem] = []
+    source: list[LeadReportCountItem] = []
+    status: list[LeadReportCountItem] = []
+    monthly: list[LeadReportCountItem] = []
+    assignee: list[LeadReportCountItem] = []
+    follow: list[MatchmakerFollowStat] = []
