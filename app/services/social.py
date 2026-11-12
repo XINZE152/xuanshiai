@@ -749,9 +749,32 @@ async def _ensure_message_privacy(db: AsyncSession, sender_id: int, recipient_id
 
 
 async def list_blocks(db: AsyncSession, user_id: int) -> list[SocialUser]:
-    result = await db.execute(text("SELECT target_user_id FROM user_block WHERE user_id = :user_id ORDER BY created_at DESC"), {"user_id": user_id})
-    targets = await _target_rows(db, user_id, [int(row[0]) for row in result])
-    return [_social_user(targets[target_id]) for target_id in targets]
+    """黑名单列表：已发生的屏蔽关系，直接读 user_block + users，不套推荐门禁。
+
+    不能复用 ``_target_rows``：它的可见性谓词里有一条「排除双方存在 block 关系的
+    用户」（candidate_visibility 的 ``NOT EXISTS user_block``），与本接口要返回的
+    正是这些人自相矛盾，结果恒为空；再叠加完整度门禁（score >= 100）与资料隐私
+    门禁（show_profile / profile_visibility / who_can_see_me），被屏蔽者只要资料
+    不完整或设了隐私同样被过滤，表现为「屏蔽成功但列表 0 人」。
+    黑名单是用户自己的关系记录，不是推荐曝光位，与浏览记录/访客/收藏同理，
+    不应套推荐链路的门禁。字段保持与 SocialUser / 前端 mapBlockedUser 兼容。
+    """
+    result = await db.execute(
+        text(
+            """SELECT u.id AS user_id, u.nickname, u.avatar,
+                      COALESCE((SELECT um.thumbnail_url FROM user_media um
+                                WHERE um.user_id = u.id AND um.media_type = 'avatar'
+                                  AND um.deleted_at IS NULL
+                                ORDER BY um.id DESC LIMIT 1), u.avatar) AS avatar_thumb,
+                      u.gender, u.birthday
+               FROM user_block b
+               JOIN users u ON u.id = b.target_user_id
+               WHERE b.user_id = :user_id
+               ORDER BY b.created_at DESC, b.id DESC"""
+        ),
+        {"user_id": user_id},
+    )
+    return [_social_user(dict(row)) for row in result.mappings().all()]
 
 
 async def set_block(db: AsyncSession, user_id: int, target_id: int, request: BlockRequest, enabled: bool) -> None:
