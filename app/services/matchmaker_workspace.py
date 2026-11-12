@@ -2250,11 +2250,27 @@ async def list_match_history(
     )
 
 
+async def _require_note_member(db: AsyncSession, actor: WorkspaceActor, member_id: int) -> None:
+    """总店超级红娘可管理全部会员；其他红娘只可管理自己名下的会员。"""
+    params: dict[str, object] = {"member_id": member_id}
+    if actor.level == "SUPER" and actor.organization_id is None:
+        scope = "1 = 1"
+    else:
+        params["matchmaker_id"] = actor.user_id
+        scope = "EXISTS (SELECT 1 FROM resource_assignment ra WHERE ra.user_id = u.id AND ra.status = 1 AND ra.matchmaker_id = :matchmaker_id)"
+    exists = await db.scalar(
+        text(f"SELECT 1 FROM users u WHERE u.id = :member_id AND u.deleted_at IS NULL AND {scope} LIMIT 1"),
+        params,
+    )
+    if not exists:
+        raise HTTPException(404, detail="会员不存在或不在当前工作范围")
+
+
 async def get_workspace_member_note(
     db: AsyncSession, actor: WorkspaceActor, member_id: int
 ) -> WorkspaceMemberNote:
     """红娘说：读取会员的公开评价（工作台范围内）。"""
-    await _require_scoped_member(db, actor, member_id)
+    await _require_note_member(db, actor, member_id)
     row = (
         await db.execute(
             text("SELECT matchmaker_note AS note, updated_at FROM user_profile WHERE user_id = :member_id"),
@@ -2272,7 +2288,7 @@ async def update_workspace_member_note(
     db: AsyncSession, actor: WorkspaceActor, member_id: int, request: WorkspaceMemberNoteUpdate
 ) -> WorkspaceMemberNote:
     """红娘说：保存会员的公开评价，留审计痕迹。"""
-    await _require_scoped_member(db, actor, member_id)
+    await _require_note_member(db, actor, member_id)
     note = request.note.strip()
     await db.execute(
         text(
