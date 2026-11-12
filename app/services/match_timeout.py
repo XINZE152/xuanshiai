@@ -1,13 +1,12 @@
 """牵线超时自动失败扫描（tools_match_timeout 配置域的消费方）。
 
 需求（对标站齿轮抽屉）：每天 0 点把「待牵线 / 牵线中」且自发起时间起超过 ``hours``
-小时仍未完成的牵线记录，自动置为「牵线失败」（``match_apply.status = 2``），
+小时仍未完成的牵线记录，自动置为「牵线失败」（``matchmaker_introduction.status = 'FAILED'``），
 操作人记为「后台-管理员-admin」（自动任务，``business_audit_log.actor_user_id`` 为空），
 失败原因写「超出时间未完成牵线，次数已退回」。
 
 实现口径（与真实数据模型对齐，2026-10-28 核验）：
-- ``match_apply`` 只有 status（0 待处理 / 1 同意 / 2 拒绝=牵线失败 / 3 已过期），
-  「待牵线 / 牵线中」都是 status=0，仅按是否已归属服务红娘区分展示，故超时扫描只取 status=0。
+- 扫描统一牵线表中的 PENDING 和 IN_PROGRESS；会员申请回应仍由 match_apply 管理。
 - 后端不存在「牵线服务次数」的持久余额（发起牵线走每日 Redis 额度，拒绝 / 后台标记失败
   均不做余额入账），因此这里**不伪造次数退回**——仅置失败 + 写审计。审计文案沿用产品口径
   「超出时间未完成牵线，次数已退回」，实际不含余额入账，详见 docs/api 文档。
@@ -60,9 +59,9 @@ async def sweep_match_timeouts(db: AsyncSession) -> dict[str, Any]:
     rows = (
         await db.execute(
             text(
-                "SELECT a.id FROM match_apply a"
-                " WHERE a.status = 0"
-                " AND a.created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL :hours HOUR)"
+                "SELECT a.id FROM matchmaker_introduction a"
+                " WHERE a.status IN ('PENDING', 'IN_PROGRESS')"
+                " AND a.created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL :hours HOUR) FOR UPDATE"
             ),
             {"hours": hours},
         )
@@ -73,11 +72,11 @@ async def sweep_match_timeouts(db: AsyncSession) -> dict[str, Any]:
 
     result = await db.execute(
         text(
-            "UPDATE match_apply"
-            " SET status = 2, responded_at = COALESCE(responded_at, UTC_TIMESTAMP()), updated_at = UTC_TIMESTAMP()"
-            " WHERE id IN :ids AND status = 0"
+            "UPDATE matchmaker_introduction"
+            " SET status = 'FAILED', failure_reason = :reason, updated_at = UTC_TIMESTAMP()"
+            " WHERE id IN :ids AND status IN ('PENDING', 'IN_PROGRESS')"
         ).bindparams(bindparam("ids", expanding=True)),
-        {"ids": ids},
+        {"ids": ids, "reason": TIMEOUT_REASON},
     )
     affected = int(result.rowcount or 0)
 
@@ -86,7 +85,7 @@ async def sweep_match_timeouts(db: AsyncSession) -> dict[str, Any]:
             text(
                 "INSERT INTO business_audit_log"
                 " (actor_user_id, action, resource_type, resource_id, reason)"
-                " VALUES (NULL, 'match_record.timeout_fail', 'match_apply', :id, :reason)"
+                " VALUES (NULL, 'match_record.timeout_fail', 'matchmaker_introduction', :id, :reason)"
             ),
             {"id": rid, "reason": TIMEOUT_REASON},
         )

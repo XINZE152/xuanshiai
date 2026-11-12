@@ -231,6 +231,7 @@ class MatchRecordResponse(BaseModel):
 
 
 class MatchRecordItem(MatchRecordResponse):
+    introduction_status: Literal["PENDING", "IN_PROGRESS", "SUCCEEDED", "FAILED", "CLOSED"] | None = None
     from_nickname: str | None = None
     to_nickname: str | None = None
     matchmaker_id: int | None = None
@@ -273,7 +274,7 @@ class MatchRecordPage(BaseModel):
 
 
 class MatchRecordStatistics(BaseModel):
-    """顶部统计卡口径：待牵线=未分派红娘的待处理，牵线中=已分派红娘的待处理。"""
+    """顶部统计卡直接按同一牵线记录的阶段统计。"""
 
     total: int
     pending: int

@@ -201,6 +201,17 @@ def test_application_response_is_independent_of_introduction_stage(application_s
     assert result.response_reason == ("暂不考虑" if application_status == 2 else None)
 
 
+def test_rejected_application_displays_failed_stage_and_response_reason():
+    row = dict(id=12, status="FAILED", failure_reason="暂不考虑", note="discovery-apply:501",
+               created_at=datetime(2026, 11, 2), updated_at=datetime(2026, 11, 2),
+               from_user_id=1, from_nickname="甲", from_avatar=None, from_gender=1,
+               to_user_id=2, to_nickname="乙", to_avatar=None, to_gender=2, application_status=2)
+    result = _introduction_from_row(row)
+    assert result.status == "FAILED"
+    assert result.application_response == "REJECTED"
+    assert result.response_reason == "暂不考虑"
+
+
 def test_http_contact_view_and_result_contract(monkeypatch):
     from fastapi.testclient import TestClient
     from app.api.dependencies import CurrentUser, get_current_user

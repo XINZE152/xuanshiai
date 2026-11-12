@@ -486,6 +486,8 @@
 
 ## 四、会员服务·红娘牵线
 
+> **2026-11-12 统一口径**：本节 4.1–4.5 中关于后台以 `match_apply` 作为牵线事实表及按归属拆分待牵线/牵线中的历史描述已被《牵线记录统一》覆盖。后台和工作台均以 `matchmaker_introduction` 为牵线事实表；`match_apply` 保留会员申请回应。历史回填通过 `admin-entry:<原申请ID>` 保留关联。
+
 入口：`/api/v1/admin/matchmaker/match-records`（权限：读 `matchmaker.service.read`、写 `matchmaker.service.manage`）
 数据源：`match_apply` + `users`×2（红娘由 `resource_assignment` 派生）。自 2026-10-27 起，新增和改状态会**同步一条 `matchmaker_introduction`**，让红娘工作台牵线中心与小程序资料待审的「牵线记录」看到同一批记录，详见 4.5。
 

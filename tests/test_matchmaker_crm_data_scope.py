@@ -42,6 +42,8 @@ NEW_MEMBER_FILTER_DEFAULTS: dict[str, object] = {
     "constellation": None, "zodiac": None,
     # A9/B3：弃海筛选（true仅弃海 / false排除弃海）。
     "abandoned": None,
+    "profile_review_status": None, "source__is_null": None, "activity_id": None,
+    "weight_min": None, "weight_max": None, "next_follow_start": None, "next_follow_end": None,
 }
 
 
@@ -433,9 +435,9 @@ async def test_match_records_filter_by_date_and_matchmaker() -> None:
     assert "a.created_at >= :date_from" in rows_sql
     # 结束日按「含当日」处理，补到次日 00:00 前
     assert "a.created_at < DATE_ADD(:date_to, INTERVAL 1 DAY)" in rows_sql
-    assert "ra.matchmaker_id = :matchmaker_id" in rows_sql
+    assert "COALESCE(NULLIF(a.matchmaker_id, 0), ra.matchmaker_id) = :matchmaker_id" in rows_sql
     assert rows_params["date_from"] == "2026-01-01" and rows_params["matchmaker_id"] == 5
     # COUNT 必须同样带 join，否则按红娘筛选时计数报错
     assert "resource_assignment" in count_sql
-    assert "ra.matchmaker_id = :matchmaker_id" in count_sql
+    assert "COALESCE(NULLIF(a.matchmaker_id, 0), ra.matchmaker_id) = :matchmaker_id" in count_sql
     assert count_params["matchmaker_id"] == 5

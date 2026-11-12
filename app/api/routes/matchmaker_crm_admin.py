@@ -1,6 +1,7 @@
 """Member CRM endpoints protected by the independent matchmaker admin session."""
 
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
@@ -34,7 +35,7 @@ from app.services.member_crm_filter import (
     build_member_filter,
     member_sort_sql,
 )
-from app.services.matchmaker_workspace import sync_admin_match_record_introduction
+from app.services.matchmaker_workspace import _match_record_follow_up_owner
 
 router = APIRouter(prefix="/admin/matchmaker")
 
@@ -128,7 +129,7 @@ class MemberWechatBindingResult(BaseModel):
 # 牵线记录列表与统计共用的 FROM 子句：ra 既要供 SELECT 展示归属红娘，
 # 也要供 WHERE 按红娘筛选，COUNT 查询复用同一 base，否则按红娘筛选时计数缺 join。
 _MATCH_RECORD_BASE = (
-    "FROM match_apply a JOIN users fu ON fu.id = a.from_user_id JOIN users tu ON tu.id = a.to_user_id"
+    "FROM matchmaker_introduction a JOIN users fu ON fu.id = a.from_user_id JOIN users tu ON tu.id = a.to_user_id"
     " LEFT JOIN (SELECT user_id, MAX(matchmaker_id) AS matchmaker_id FROM resource_assignment"
     " WHERE status = 1 GROUP BY user_id) ra ON ra.user_id = a.from_user_id"
 )
@@ -139,20 +140,21 @@ _MATCH_RECORD_LIST_FROM = (
     _MATCH_RECORD_BASE
     + " LEFT JOIN user_auth uaf ON uaf.user_id = a.from_user_id"
     " LEFT JOIN user_auth uat ON uat.user_id = a.to_user_id"
-    " LEFT JOIN users mm ON mm.id = ra.matchmaker_id"
+    " LEFT JOIN users mm ON mm.id = COALESCE(NULLIF(a.matchmaker_id, 0), ra.matchmaker_id)"
     " LEFT JOIN user_profile fp ON fp.user_id = a.from_user_id"
     " LEFT JOIN user_profile tp ON tp.user_id = a.to_user_id"
 )
 
-# 顶部统计卡的筛选口径。status: 0 待处理 / 1 成功 / 2 失败 / 3 已关闭。
-# 「待牵线」与「牵线中」按是否已归属服务红娘拆分。
+# 顶部统计卡按工作台同一牵线阶段分类。
 _STATUS_GROUP_SQL: dict[str, str] = {
-    "pending": "a.status = 0 AND ra.matchmaker_id IS NULL",
-    "matching": "a.status = 0 AND ra.matchmaker_id IS NOT NULL",
-    "success": "a.status = 1",
-    "fail": "a.status = 2",
-    "closed": "a.status = 3",
+    "pending": "a.status = 'PENDING'",
+    "matching": "a.status = 'IN_PROGRESS'",
+    "success": "a.status = 'SUCCEEDED'",
+    "fail": "a.status = 'FAILED'",
+    "closed": "a.status = 'CLOSED'",
 }
+
+_MATCH_STATUS_NUMBER = "CASE a.status WHEN 'SUCCEEDED' THEN 1 WHEN 'FAILED' THEN 2 WHEN 'CLOSED' THEN 3 ELSE 0 END"
 
 # 搜索方式（search_type）：值为服务端白名单内的固定 SQL 片段，不拼接用户输入；
 # 未传或未知取值退化为 smart（双方昵称/手机/会员编号），而非静默返回全量。
@@ -208,7 +210,7 @@ async def match_records(
     status_group: str | None = Query(
         None,
         pattern="^(pending|matching|success|fail|closed)$",
-        description="顶部统计卡筛选：待牵线=待处理且未分派红娘 / 牵线中=待处理且已分派红娘 / 成功 / 失败 / 已关闭",
+        description="顶部统计卡筛选：待牵线 / 牵线中 / 成功 / 失败 / 已关闭",
     ),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
@@ -228,7 +230,7 @@ async def match_records(
         matchmaker_id = operator_id
     if matchmaker_id is not None:
         # 归属红娘取自 resource_assignment 的生效记录（派生表 ra，见下方 base）
-        where.append("ra.matchmaker_id = :matchmaker_id")
+        where.append("COALESCE(NULLIF(a.matchmaker_id, 0), ra.matchmaker_id) = :matchmaker_id")
         params["matchmaker_id"] = matchmaker_id
     if status_group:
         where.append(_STATUS_GROUP_SQL[status_group])
@@ -238,9 +240,10 @@ async def match_records(
     # 列表在共用 base 上补 1:1 LEFT JOIN（双方实名认证 uaf/uat、归属红娘昵称 mm），
     # 派生列全部真值、无新建表；旧库缺关联时 LEFT JOIN 自然降级为 NULL，不拖垮整页。
     # COUNT/统计仍走不带这些 JOIN 的 base，保持口径与性能。
-    rows = await db.execute(text(f"""SELECT a.id, a.from_user_id, a.to_user_id, a.status, a.created_at, a.responded_at,
+    rows = await db.execute(text(f"""SELECT a.id, a.from_user_id, a.to_user_id, {_MATCH_STATUS_NUMBER} AS status, a.status AS introduction_status, a.created_at,
+        CASE WHEN a.status IN ('SUCCEEDED','FAILED','CLOSED') THEN a.updated_at ELSE NULL END AS responded_at,
         fu.nickname AS from_nickname, tu.nickname AS to_nickname,
-        ra.matchmaker_id,
+        COALESCE(NULLIF(a.matchmaker_id, 0), ra.matchmaker_id) AS matchmaker_id,
         fu.gender AS from_gender, tu.gender AS to_gender,
         TIMESTAMPDIFF(YEAR, fu.birthday, UTC_DATE()) AS from_age,
         TIMESTAMPDIFF(YEAR, tu.birthday, UTC_DATE()) AS to_age,
@@ -285,16 +288,16 @@ async def match_record_statistics(
     if matchmaker_id is None and isinstance(operator_id, int):
         matchmaker_id = operator_id
     if matchmaker_id is not None:
-        where.append("ra.matchmaker_id = :matchmaker_id")
+        where.append("COALESCE(NULLIF(a.matchmaker_id, 0), ra.matchmaker_id) = :matchmaker_id")
         params["matchmaker_id"] = matchmaker_id
     where.append(current.scope_exists_clause(params, correlation="scope_assignment.user_id = a.from_user_id"))
     clause = " AND ".join(where)
     row = (await db.execute(text(f"""SELECT
-        SUM(a.status = 0 AND ra.matchmaker_id IS NULL) AS pending,
-        SUM(a.status = 0 AND ra.matchmaker_id IS NOT NULL) AS matching,
-        SUM(a.status = 1) AS success,
-        SUM(a.status = 2) AS fail,
-        SUM(a.status = 3) AS closed,
+        SUM(a.status = 'PENDING') AS pending,
+        SUM(a.status = 'IN_PROGRESS') AS matching,
+        SUM(a.status = 'SUCCEEDED') AS success,
+        SUM(a.status = 'FAILED') AS fail,
+        SUM(a.status = 'CLOSED') AS closed,
         COUNT(*) AS total
         {_MATCH_RECORD_BASE} WHERE {clause}"""), params)).mappings().one()
     return MatchRecordStatistics(
@@ -318,17 +321,21 @@ async def update_match_record(
     params: dict[str, object] = {"id": record_id}
     scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = a.from_user_id")
     row = (await db.execute(text(
-        f"SELECT a.id, a.from_user_id, a.to_user_id, a.status FROM match_apply a WHERE a.id = :id AND ({scope}) FOR UPDATE"
+        f"SELECT a.id, a.from_user_id, a.to_user_id, a.status, a.note FROM matchmaker_introduction a WHERE a.id = :id AND ({scope}) FOR UPDATE"
     ), params)).mappings().first()
     if not row:
         raise HTTPException(404, detail="牵线记录不存在")
-    if int(row["status"]) != 0 and body.status != 3:
+    if row["status"] not in ("PENDING", "IN_PROGRESS") and body.status != 3:
         raise HTTPException(409, detail="该牵线记录已结束，不可再次变更状态")
-    await db.execute(text("""UPDATE match_apply
-        SET status = :status,
-            responded_at = CASE WHEN :status = 0 THEN responded_at ELSE COALESCE(responded_at, UTC_TIMESTAMP()) END,
-            updated_at = UTC_TIMESTAMP()
-        WHERE id = :id"""), {"status": body.status, "id": record_id})
+    target_status = {0: "PENDING", 1: "SUCCEEDED", 2: "FAILED", 3: "CLOSED"}[body.status]
+    await db.execute(text("""UPDATE matchmaker_introduction
+        SET status = :status, failure_reason = :reason, updated_at = UTC_TIMESTAMP()
+        WHERE id = :id"""), {"status": target_status, "reason": body.reason if body.status in (2, 3) else None, "id": record_id})
+    legacy_link = re.fullmatch(r"(?:admin-entry|discovery-apply):(\d+)", str(row.get("note") or ""))
+    if legacy_link and body.status in (1, 2, 3):
+        await db.execute(text("""UPDATE match_apply SET status = :status,
+            responded_at = COALESCE(responded_at, UTC_TIMESTAMP()), updated_at = UTC_TIMESTAMP()
+            WHERE id = :id AND status = 0"""), {"status": body.status, "id": int(legacy_link.group(1))})
     if body.status == 1:
         await db.execute(text("""INSERT INTO user_match (user_id, target_user_id, status)
             VALUES (:left, :right, 1), (:right, :left, 1)
@@ -336,19 +343,12 @@ async def update_match_record(
             {"left": int(row["from_user_id"]), "right": int(row["to_user_id"])})
     await db.execute(text("""INSERT INTO business_audit_log
         (actor_user_id, action, resource_type, resource_id, reason)
-        VALUES (:actor, 'match_record.status', 'match_apply', :id, :reason)"""),
+        VALUES (:actor, 'match_record.status', 'matchmaker_introduction', :id, :reason)"""),
         {"actor": current.account.id, "id": record_id, "reason": body.reason})
-    await sync_admin_match_record_introduction(
-        db,
-        record_id,
-        int(row["from_user_id"]),
-        int(row["to_user_id"]),
-        body.status,
-        failure_reason=body.reason,
-    )
     await db.commit()
-    updated = (await db.execute(text(f"""SELECT a.id, a.from_user_id, a.to_user_id, a.status, a.created_at, a.responded_at,
-        fu.nickname AS from_nickname, tu.nickname AS to_nickname, ra.matchmaker_id
+    updated = (await db.execute(text(f"""SELECT a.id, a.from_user_id, a.to_user_id, {_MATCH_STATUS_NUMBER} AS status,
+        a.status AS introduction_status, a.created_at, CASE WHEN a.status IN ('SUCCEEDED','FAILED','CLOSED') THEN a.updated_at ELSE NULL END AS responded_at,
+        fu.nickname AS from_nickname, tu.nickname AS to_nickname, COALESCE(NULLIF(a.matchmaker_id, 0), ra.matchmaker_id) AS matchmaker_id
         {_MATCH_RECORD_BASE} WHERE a.id = :id"""), {"id": record_id})).mappings().first()
     return MatchRecordItem(**dict(updated))
 
@@ -364,30 +364,30 @@ async def create_match_record(
     if body.complete_time < body.create_time:
         raise HTTPException(status_code=422, detail="牵线完成时间不能早于申请时间")
     ids = {"from_id": body.from_love_user_id, "to_id": body.to_love_user_id}
-    members = await db.execute(text("SELECT id FROM users WHERE id IN (:from_id, :to_id)"), ids)
+    member_scope = current.scope_exists_clause(ids, correlation="scope_assignment.user_id = u.id")
+    members = await db.execute(text(f"SELECT u.id FROM users u WHERE u.id IN (:from_id, :to_id) AND u.deleted_at IS NULL AND ({member_scope})"), ids)
     if len(members.all()) != 2:
         raise HTTPException(status_code=404, detail="会员不存在")
-    existing = await db.execute(text("SELECT id FROM match_apply WHERE from_user_id=:from_id AND to_user_id=:to_id AND created_at=:created_at LIMIT 1"), {**ids, "created_at": body.create_time})
+    existing = await db.execute(text("SELECT id FROM matchmaker_introduction WHERE from_user_id=:from_id AND to_user_id=:to_id AND created_at=:created_at LIMIT 1"), {**ids, "created_at": body.create_time})
     if existing.scalar():
         raise HTTPException(status_code=409, detail="该牵线记录已存在")
-    result = await db.execute(text("""INSERT INTO match_apply
-        (from_user_id, to_user_id, message, status, responded_at, expire_at, created_at, updated_at)
-        VALUES (:from_id, :to_id, '后台添加牵线记录', :status, :responded_at, NULL, :created_at, UTC_TIMESTAMP())"""), {
-        **ids, "status": body.line_status, "created_at": body.create_time, "responded_at": body.complete_time,
+    owner = await _match_record_follow_up_owner(db, body.from_love_user_id, body.to_love_user_id)
+    matchmaker_id, organization_id = owner if owner is not None else (0, None)
+    result = await db.execute(text("""INSERT INTO matchmaker_introduction
+        (from_user_id, to_user_id, matchmaker_id, organization_id, status, note, created_at, updated_at)
+        VALUES (:from_id, :to_id, :matchmaker_id, :organization_id, :status, NULL, :created_at, :completed_at)"""), {
+        **ids, "matchmaker_id": matchmaker_id, "organization_id": organization_id,
+        "status": "SUCCEEDED" if body.line_status == 1 else "FAILED", "created_at": body.create_time, "completed_at": body.complete_time,
     })
     record_id = int(result.lastrowid)
+    await db.execute(text("""INSERT INTO business_audit_log
+        (actor_user_id, action, resource_type, resource_id, reason)
+        VALUES (:actor, 'match_record.create', 'matchmaker_introduction', :id, NULL)"""),
+        {"actor": current.account.id, "id": record_id})
     if body.line_status == 1:
         await db.execute(text("""INSERT INTO user_match (user_id, target_user_id, status)
             VALUES (:left, :right, 1), (:right, :left, 1)
             ON DUPLICATE KEY UPDATE status = 1, updated_at = UTC_TIMESTAMP()"""), {"left": body.from_love_user_id, "right": body.to_love_user_id})
-    await sync_admin_match_record_introduction(
-        db,
-        record_id,
-        body.from_love_user_id,
-        body.to_love_user_id,
-        body.line_status,
-        created_at=body.create_time,
-    )
     await db.commit()
     return MatchRecordResponse(id=record_id, from_user_id=body.from_love_user_id, to_user_id=body.to_love_user_id, status=body.line_status, created_at=body.create_time, responded_at=body.complete_time)
 
@@ -406,7 +406,7 @@ async def match_record_delete(
 ) -> MemberDeleteResult:
     """对标站牵线记录行「删除」按钮。
 
-    match_apply 无 deleted_at 列，故为物理删除（仅删该牵线行，不动 user_match 关注关系，
+    牵线表无 deleted_at 列，故为物理删除（仅删该牵线行，不动申请记录或 user_match 关注关系，
     与 PATCH 标记失败/关闭互不干涉）。敏感写范式：Idempotency-Key 头 + confirm=true 查询参 + 作用域收口。
     """
     current.require("matchmaker.member.manage")
@@ -423,15 +423,21 @@ async def match_record_delete(
     scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = a.from_user_id")
     try:
         row = (await db.execute(text(
-            f"SELECT a.id FROM match_apply a WHERE a.id = :record_id AND ({scope}) FOR UPDATE"
+            f"SELECT a.id, a.note FROM matchmaker_introduction a WHERE a.id = :record_id AND ({scope}) FOR UPDATE"
         ), params)).mappings().first()
         if row is None:
             await abort_sensitive_operation(db, reservation)
             raise HTTPException(404, detail="牵线记录不存在或无权限")
-        await db.execute(text("DELETE FROM match_apply WHERE id = :record_id"), {"record_id": record_id})
+        await db.execute(text("DELETE FROM matchmaker_introduction WHERE id = :record_id"), {"record_id": record_id})
+        legacy_link = re.fullmatch(r"(?:admin-entry|discovery-apply):(\d+)", str(row.get("note") or ""))
+        if legacy_link:
+            await db.execute(text("""INSERT INTO business_audit_log
+                (actor_user_id, action, resource_type, resource_id, reason)
+                VALUES (:actor, 'match_record.unified_deleted', 'match_apply', :id, :reason)"""),
+                {"actor": current.account.id, "id": int(legacy_link.group(1)), "reason": reason[:255]})
         await db.execute(text(
             "INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id, reason)"
-            " VALUES (:actor, 'match_record.delete', 'match_apply', :id, :reason)"),
+            " VALUES (:actor, 'match_record.delete', 'matchmaker_introduction', :id, :reason)"),
             {"actor": current.account.id, "id": record_id, "reason": reason[:255]},
         )
         await db.commit()

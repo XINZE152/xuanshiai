@@ -116,14 +116,15 @@ async def test_sweep_marks_timeout_and_audits(monkeypatch: pytest.MonkeyPatch) -
 
     assert out == {"enabled": True, "hours": 1, "affected": 2}
     select_sql = db.statements[0]
-    assert "a.status = 0" in select_sql
+    assert "a.status IN ('PENDING', 'IN_PROGRESS')" in select_sql
+    assert "FROM matchmaker_introduction" in select_sql
     assert "DATE_SUB(UTC_TIMESTAMP(), INTERVAL :hours HOUR)" in select_sql
     update_sql = next(s for s in db.statements if s.lstrip().upper().startswith("UPDATE"))
-    assert "status = 2" in update_sql and "AND status = 0" in update_sql
+    assert "status = 'FAILED'" in update_sql and "status IN ('PENDING', 'IN_PROGRESS')" in update_sql
     # 每条命中各写一行审计，actor 为 NULL（系统任务）
     audits = [s for s in db.statements if "match_record.timeout_fail" in s]
     assert len(audits) == 2
-    reason_params = [p for p in db.params if p.get("reason") == sweep.TIMEOUT_REASON]
+    reason_params = [p for p in db.params if p.get("reason") == sweep.TIMEOUT_REASON and "id" in p]
     assert len(reason_params) == 2
     assert db.committed is True
 

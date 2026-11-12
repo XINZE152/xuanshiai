@@ -911,7 +911,7 @@ def _introduction_from_row(row: object) -> WorkspaceIntroduction:
         created_at=values["created_at"],
         updated_at=values["updated_at"],
         application_response={1: "ACCEPTED", 2: "REJECTED"}.get(values.get("application_status"), "UNANSWERED"),
-        response_reason=values.get("failure_reason") if values.get("application_status") == 2 and values["status"] == "PENDING" else None,
+        response_reason=values.get("failure_reason") if values.get("application_status") == 2 else None,
         from_phone_viewed=bool(values.get("from_phone_viewed")),
         to_phone_viewed=bool(values.get("to_phone_viewed")),
         from_user=WorkspaceIntroductionPerson(
@@ -2217,7 +2217,7 @@ async def list_match_history(
     资源权限仍只按会员归属判定（_require_scoped_member）：会员在本红娘服务范围内，
     就能看到 TA 名下的全部牵线记录，包括其他红娘为 TA 牵的线。
     """
-    await _require_scoped_member(db, actor, member_id)
+    await _require_owned_or_head_office_member(db, actor, member_id)
     params = {"member_id": member_id, "limit": page_size, "offset": (page - 1) * page_size}
     counterpart = "CASE WHEN mi.from_user_id = :member_id THEN mi.to_user_id ELSE mi.from_user_id END"
     rows = await db.execute(
@@ -3413,14 +3413,8 @@ async def create_workspace_introduction(
     db: AsyncSession, actor: WorkspaceActor, body: WorkspaceIntroductionCreate
 ) -> WorkspaceIntroductionCreated:
     """添加待牵线记录：双方须在工作范围内，不允许录入终态绕过跟进。"""
-    member_params: dict[str, object] = {"a": body.from_user_id, "b": body.to_user_id}
-    member_clause = _member_scope_predicate(actor, member_params)
-    found = await db.execute(
-        text(f"SELECT id FROM users u WHERE u.id IN (:a, :b) AND {member_clause}"),
-        member_params,
-    )
-    if len(found.all()) != 2:
-        raise HTTPException(404, detail="牵线双方必须都是服务范围内的会员")
+    await _require_owned_or_head_office_member(db, actor, body.from_user_id)
+    await _require_owned_or_head_office_member(db, actor, body.to_user_id)
     note = f"workbench-entry:{actor.user_id}:{body.from_user_id}-{body.to_user_id}:{body.applied_at or 'now'}"
     duplicate = await db.execute(
         text("SELECT id FROM matchmaker_introduction WHERE matchmaker_id = :mid AND note = :note LIMIT 1"),
@@ -3492,9 +3486,8 @@ async def record_member_application_introduction(
     调用方（create_application）持有事务，这里不 commit，牵线记录和申请一起成功或一起回滚。
     """
     owner = await _application_follow_up_owner(db, from_user_id)
-    if owner is None:
-        return
-    matchmaker_id, organization_id = owner
+    # 无归属时保留记录供总店处理，避免申请存在于后台却不出现在牵线事实表。
+    matchmaker_id, organization_id = owner if owner is not None else (UNASSIGNED_MATCHMAKER_ID, None)
     note = f"discovery-apply:{application_id}"
     if await db.scalar(
         text("SELECT 1 FROM matchmaker_introduction WHERE note = :note LIMIT 1"), {"note": note}
@@ -3512,8 +3505,8 @@ async def sync_member_application_introduction(
     db: AsyncSession, from_user_id: int, to_user_id: int, *, application_id: int,
     succeeded: bool, failure_reason: str | None = None
 ) -> None:
-    """同意直接成功；拒绝回待牵线。只处理这一条认识申请，不能改动同一对会员的其他牵线。"""
-    status = "SUCCEEDED" if succeeded else "PENDING"
+    """会员同意则牵线成功，拒绝则牵线失败；只处理这条认识申请。"""
+    status = "SUCCEEDED" if succeeded else "FAILED"
     reason = None if succeeded else (failure_reason or "对方暂时婉拒了你的申请")[:500]
     allowed = "('PENDING', 'IN_PROGRESS', 'FAILED')" if succeeded else "('PENDING', 'IN_PROGRESS')"
     await db.execute(
@@ -3526,7 +3519,7 @@ async def sync_member_application_introduction(
         # 用审计ID分隔跟进轮次，避免秒级时间戳令拒绝前的查看记录误算为本轮查看。
         await db.execute(text("""INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id)
             SELECT :actor_id, 'matchmaker_workspace.introduction.response.rejected', 'matchmaker_introduction', id
-            FROM matchmaker_introduction WHERE note IN (:note, :admin_note) AND from_user_id = :f AND to_user_id = :t AND status = 'PENDING'"""),
+            FROM matchmaker_introduction WHERE note IN (:note, :admin_note) AND from_user_id = :f AND to_user_id = :t AND status = 'FAILED'"""),
             {"actor_id": to_user_id, "note": f"discovery-apply:{application_id}", "admin_note": f"admin-entry:{application_id}", "f": from_user_id, "t": to_user_id})
 
 

@@ -420,7 +420,7 @@ async def workbench_offline_income(
 async def workbench_introductions(
     page: int = Query(1, ge=1, le=1000),
     page_size: int = Query(20, ge=1, le=100),
-    status: str | None = Query(None, pattern="^(PENDING|IN_PROGRESS|SUCCEEDED|FAILED)$"),
+    status: str | None = Query(None, pattern="^(PENDING|IN_PROGRESS|SUCCEEDED|FAILED|CLOSED)$"),
     search: str | None = Query(None, max_length=64),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

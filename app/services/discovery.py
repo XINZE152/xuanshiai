@@ -1671,7 +1671,7 @@ async def respond_application(db: AsyncSession, viewer_id: int, application_id: 
             raise _forbidden("REALNAME_REQUIRED", "请先完成实名认证后再回应认识申请")
     status = 1 if accepted else 2
     await db.execute(text("UPDATE match_apply SET status = :status, responded_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"status": status, "id": application_id})
-    # 同意直接牵线成功；拒绝回待牵线并标注回应，留给红娘联系跟进。
+    # 同意直接牵线成功；拒绝记为牵线失败，同时保留会员回应原因。
     await sync_member_application_introduction(
         db,
         int(row["from_user_id"]),

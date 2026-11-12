@@ -16,7 +16,7 @@ ReviewStatus = Literal["PENDING", "PASSED", "REJECTED", "STORE_VERIFIED"]
 LeadStatus = Literal["NEW", "CONTACTED", "INTENDED", "CONVERTED", "LOST", "CLOSED"]
 LeadIntentionLevel = Literal[1, 2, 3, 4, 5, 6, 7]
 FollowUpMethod = Literal["PHONE", "WECHAT", "VISIT", "OTHER"]
-IntroductionStatus = Literal["PENDING", "IN_PROGRESS", "SUCCEEDED", "FAILED"]
+IntroductionStatus = Literal["PENDING", "IN_PROGRESS", "SUCCEEDED", "FAILED", "CLOSED"]
 
 
 class MatchmakerWorkspaceAccess(BaseModel):

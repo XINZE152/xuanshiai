@@ -471,11 +471,11 @@ async def honor(db: AsyncSession, admin: CurrentMatchmakerAdmin) -> DashboardHon
     params.update(match_scope_params)
     params.update(meeting_scope_params)
     row = (await db.execute(text(f"""SELECT
-        (SELECT COUNT(*) FROM match_apply ma WHERE {match_scope}) line_total,
-        (SELECT COUNT(*) FROM match_apply ma WHERE ma.status = 1 AND {match_scope}) line_success,
+        (SELECT COUNT(*) FROM matchmaker_introduction ma WHERE {match_scope}) line_total,
+        (SELECT COUNT(*) FROM matchmaker_introduction ma WHERE ma.status = 'SUCCEEDED' AND {match_scope}) line_success,
         (SELECT COUNT(DISTINCT party.uid) FROM (
-            SELECT ma.from_user_id uid FROM match_apply ma WHERE ma.status = 1 AND {match_scope}
-            UNION ALL SELECT ma.to_user_id FROM match_apply ma WHERE ma.status = 1 AND {match_scope}
+            SELECT ma.from_user_id uid FROM matchmaker_introduction ma WHERE ma.status = 'SUCCEEDED' AND {match_scope}
+            UNION ALL SELECT ma.to_user_id FROM matchmaker_introduction ma WHERE ma.status = 'SUCCEEDED' AND {match_scope}
         ) party) no_single,
         (SELECT COUNT(*) FROM meeting_record mr WHERE {meeting_scope}) meeting_arranged,
         (SELECT COUNT(*) FROM offline_activity) activity_held"""), params)).mappings().one()

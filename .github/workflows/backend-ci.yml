@@ -95,6 +95,18 @@ jobs:
         run: uv run --no-sync ruff check tests/test_workspace_follow_up_images.py
       - name: Test workspace follow-up images
         run: uv run --no-sync pytest tests/test_workspace_follow_up_images.py -q
+      - name: Ruff (introduction workflow)
+        run: uv run --no-sync ruff check tests/test_member_application_introduction.py tests/test_introduction_workflow.py
+      - name: Test introduction workflow
+        run: uv run --no-sync pytest tests/test_member_application_introduction.py tests/test_introduction_workflow.py -q
+      - name: Ruff (introduction backfill)
+        run: uv run --no-sync ruff check tests/test_introduction_backfill.py app/services/introduction_backfill.py scripts/backfill_unified_introductions.py
+      - name: Test introduction backfill
+        run: uv run --no-sync pytest tests/test_introduction_backfill.py -q
+      - name: Ruff (unified introduction contracts)
+        run: uv run --no-sync ruff check tests/test_introduction_unified.py tests/test_match_timeout_sweep_20261028.py
+      - name: Test unified introduction contracts
+        run: uv run --no-sync pytest tests/test_introduction_unified.py tests/test_match_timeout_sweep_20261028.py -q
       - name: Workspace member filter contracts
         run: uv run --no-sync pytest tests/test_workspace_member_filter_scope.py -q
       - name: Ruff (public matchmaker ranking)

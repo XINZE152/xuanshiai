@@ -2,7 +2,7 @@
 
 口径（2026-10-23 定）：
 - 谁发起申请就挂谁的服务红娘；申请人只归属到门店、没指定具体红娘时挂承接门店（matchmaker_id 用 0 占位）；
-- 申请落库即「待牵线」，被认识方同意=牵线成功、拒绝=待牵线，超时未回应仍待跟进；
+- 申请落库即「待牵线」，被认识方同意=牵线成功、拒绝=牵线失败，超时未回应仍待跟进；
 - 只同步对应申请ID，避免改动同一对会员的其他记录。
 全部用 StubDB 按 SQL 文本分派，不依赖 MySQL。
 """
@@ -120,18 +120,20 @@ async def test_unassigned_applicant_falls_back_to_the_catch_all_store() -> None:
 
 
 @pytest.mark.asyncio
-async def test_nobody_would_see_it_so_nothing_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_unassigned_application_remains_visible_to_head_office(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "member_auto_assign_organization_id", None)
     db = StubDB()
     await record_member_application_introduction(db, APPLICATION_ID, APPLICANT_ID, TARGET_ID)
-    assert db.writes == []
+    assert db.insert_params["m"] == UNASSIGNED_MATCHMAKER_ID
+    assert db.insert_params["org"] is None
 
 
 @pytest.mark.asyncio
-async def test_service_matchmaker_applicant_is_not_a_member() -> None:
+async def test_service_matchmaker_application_is_retained_for_head_office() -> None:
     db = StubDB(staff=True)
     await record_member_application_introduction(db, APPLICATION_ID, APPLICANT_ID, TARGET_ID)
-    assert db.writes == []
+    assert db.insert_params["m"] == UNASSIGNED_MATCHMAKER_ID
+    assert db.insert_params["org"] is None
 
 
 @pytest.mark.asyncio
@@ -152,13 +154,13 @@ async def test_acceptance_marks_the_introduction_succeeded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rejection_returns_pending_with_response_reason() -> None:
+async def test_rejection_returns_failed_with_response_reason() -> None:
     db = StubDB()
     await sync_member_application_introduction(
         db, APPLICANT_ID, TARGET_ID, application_id=APPLICATION_ID, succeeded=False, failure_reason="暂不考虑"
     )
     _, params = db.write_for("UPDATE matchmaker_introduction")
-    assert params["status"] == "PENDING"
+    assert params["status"] == "FAILED"
     assert params["reason"] == "暂不考虑"
 
 
