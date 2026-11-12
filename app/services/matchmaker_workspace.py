@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import uuid
 from dataclasses import dataclass
@@ -68,6 +69,9 @@ from app.schemas.matchmaker_workspace import (
     WorkspaceAssignRequest,
     WorkspaceCommissionEntry,
     WorkspaceCommissionEntryPage,
+    WorkspaceCommissionEvent,
+    WorkspaceCommissionLevel,
+    WorkspaceCommissionStandards,
     WorkspaceOfflineIncome,
     WorkspaceOfflineIncomePage,
     WorkspaceGoodNewsCreated,
@@ -247,6 +251,18 @@ def require_review_authority(actor: WorkspaceActor) -> WorkspaceActor:
     if actor.level != "SUPER":
         raise HTTPException(403, detail="仅总店红娘可审核会员公开资料")
     return actor
+
+
+def require_head_office_authority(actor: WorkspaceActor) -> None:
+    if actor.level != "SUPER" or actor.organization_id is not None:
+        raise HTTPException(403, detail="仅总店超级红娘可修改红娘或移入弃海")
+
+
+async def _require_head_office_member(db: AsyncSession, actor: WorkspaceActor, member_id: int) -> None:
+    require_head_office_authority(actor)
+    exists = await db.scalar(text("SELECT 1 FROM users WHERE id = :member_id AND deleted_at IS NULL"), {"member_id": member_id})
+    if not exists:
+        raise HTTPException(404, detail="会员不存在")
 
 
 def _scope_predicate(actor: WorkspaceActor, alias: str, params: dict[str, object]) -> str:
@@ -741,6 +757,92 @@ async def list_workspace_commission_entries(
         total=total,
         has_more=_page(total, page, page_size),
         total_amount=_money_text(total_amount),
+    )
+
+
+_COMMISSION_LEVEL_COLUMNS = """code, name, promotion_condition, platform_extra_amount"""
+
+
+async def get_workspace_commission_standards(
+    db: AsyncSession, actor: WorkspaceActor
+) -> WorkspaceCommissionStandards:
+    """「分成级别」页面：级别总览与按项目分成标准一律只读自后台配置，前端不得写死。
+
+    - 级别行取 `commission_level` 生效行（后台「分成配置」页维护同一份数据）。
+    - 本人级别取 `matchmaker_profile.commission_level_id`；后台未指派时返回 null。
+    - 按项目分成取 `commission_rule` 中 service_matchmaker 的最新版本，同名多版本只留最新。
+    """
+    level_rows = (
+        await db.execute(
+            text(
+                f"""SELECT {_COMMISSION_LEVEL_COLUMNS}
+                FROM commission_level WHERE status = 1 ORDER BY sort, id"""
+            )
+        )
+    ).mappings().all()
+    current_row = (
+        await db.execute(
+            text(
+                """SELECT profile.commission_level_id AS level_id,
+                level.code, level.name, level.promotion_condition, level.platform_extra_amount
+                FROM matchmaker_profile profile
+                LEFT JOIN commission_level level ON level.id = profile.commission_level_id AND level.status = 1
+                WHERE profile.user_id = :user_id AND profile.deleted_at IS NULL"""
+            ),
+            {"user_id": actor.user_id},
+        )
+    ).mappings().first()
+    event_rows = (
+        await db.execute(
+            text(
+                """SELECT rule.name, rule.mode, rule.fixed_amount, rule.rate_percent
+                FROM commission_rule rule
+                JOIN (
+                    SELECT name, MAX(version) AS version FROM commission_rule
+                    WHERE beneficiary_type = 'service_matchmaker' AND status = 1
+                    GROUP BY name
+                ) latest ON latest.name = rule.name AND latest.version = rule.version
+                WHERE rule.beneficiary_type = 'service_matchmaker' AND rule.status = 1
+                ORDER BY rule.priority, rule.id"""
+            )
+        )
+    ).mappings().all()
+
+    levels = [
+        WorkspaceCommissionLevel(
+            code=str(row["code"]),
+            name=str(row["name"]),
+            promotion_condition=str(row["promotion_condition"])
+            if row["promotion_condition"]
+            else None,
+            platform_extra_amount=_money_text(row["platform_extra_amount"]),
+        )
+        for row in level_rows
+    ]
+    current_level: WorkspaceCommissionLevel | None = None
+    # 只认生效级别：档案指向已停用行时按未指派处理，返回 null 而不是空名称。
+    if current_row is not None and current_row["level_id"] is not None and current_row["name"]:
+        current_level = WorkspaceCommissionLevel(
+            code=str(current_row["code"] or ""),
+            name=str(current_row["name"] or ""),
+            promotion_condition=str(current_row["promotion_condition"])
+            if current_row["promotion_condition"]
+            else None,
+            platform_extra_amount=_money_text(current_row["platform_extra_amount"]),
+        )
+    events = [
+        WorkspaceCommissionEvent(
+            name=str(row["name"]),
+            mode="fixed" if str(row["mode"]) == "fixed" else "rate",
+            amount=_money_text(row["fixed_amount"]) if row["fixed_amount"] is not None else None,
+            rate_percent=f"{Decimal(str(row['rate_percent'] or 0)):.2f}"
+            if row["rate_percent"] is not None
+            else None,
+        )
+        for row in event_rows
+    ]
+    return WorkspaceCommissionStandards(
+        levels=levels, current_level=current_level, events=events
     )
 
 
@@ -1748,14 +1850,13 @@ async def _abandonment_operator(db: AsyncSession, actor: WorkspaceActor) -> int:
 
 
 async def abandon_workspace_member(db: AsyncSession, actor: WorkspaceActor, member_id: int, reason: str) -> None:
-    require_review_authority(actor)
+    require_head_office_authority(actor)
     reason = reason.strip()
     if not reason:
         raise HTTPException(422, detail="请填写弃海原因")
     operator = await _abandonment_operator(db, actor)
     params: dict[str, object] = {"member_id": member_id}
-    scope = _member_scope_predicate(actor, params)
-    row = await db.scalar(text(f"SELECT u.id FROM users u WHERE u.id = :member_id AND u.deleted_at IS NULL AND {scope} FOR UPDATE"), params)
+    row = await db.scalar(text("SELECT u.id FROM users u WHERE u.id = :member_id AND u.deleted_at IS NULL FOR UPDATE"), params)
     if row is None:
         raise HTTPException(404, detail="会员不存在或不在工作范围")
     active = await db.scalar(text("SELECT id FROM member_abandonment WHERE user_id = :member_id AND restored_at IS NULL LIMIT 1"), params)
@@ -1900,7 +2001,7 @@ async def list_member_follow_ups(
     params = {"member_id": member_id, "limit": page_size, "offset": (page - 1) * page_size}
     rows = await db.execute(
         text(
-            """SELECT id, user_id, method, content, next_follow_at, created_at
+            """SELECT id, user_id, method, content, next_follow_at, created_at, images
             FROM member_follow_up WHERE user_id = :member_id
             ORDER BY id DESC LIMIT :limit OFFSET :offset"""
         ),
@@ -1911,12 +2012,87 @@ async def list_member_follow_ups(
         or 0
     )
     return WorkspaceMemberFollowUpPage(
-        items=[WorkspaceMemberFollowUp(**dict(row)) for row in rows.mappings().all()],
+        items=[_workspace_follow_up(row, member_id) for row in rows.mappings().all()],
         page=page,
         page_size=page_size,
         total=total,
         has_more=_page(total, page, page_size),
     )
+
+
+def _workspace_follow_up(row: Any, member_id: int) -> WorkspaceMemberFollowUp:
+    from app.services.member_follow_up_admin import _parse_follow_up_images
+
+    data = dict(row)
+    images = _parse_follow_up_images(data.pop("images", None))
+    data["images"] = [
+        f"/matchmaker/workbench/members/{member_id}/follow-ups/{data['id']}/images/{index}"
+        for index in range(len(images))
+    ]
+    return WorkspaceMemberFollowUp(**data)
+
+
+async def add_member_follow_up_image(
+    db: AsyncSession, actor: WorkspaceActor, member_id: int, follow_up_id: int, image: UploadFile, upload_key: str
+) -> None:
+    from app.services.member_follow_up_admin import (
+        FOLLOW_UP_IMAGE_MAX_BYTES, FOLLOW_UP_MAX_IMAGES, _fu_image_outputs,
+        _fu_read_limited, _fu_write_bytes, _parse_follow_up_images,
+    )
+
+    await _require_scoped_member(db, actor, member_id)
+    data = await _fu_read_limited(image, FOLLOW_UP_IMAGE_MAX_BYTES)
+    webp, _ = await asyncio.to_thread(_fu_image_outputs, data)
+    row = (await db.execute(
+        text("""SELECT images, created_by FROM member_follow_up WHERE id = :id AND user_id = :uid
+            AND EXISTS (SELECT 1 FROM business_audit_log a WHERE a.resource_id = member_follow_up.id
+                AND a.resource_type = 'member_follow_up' AND a.action = 'matchmaker_workspace.member.follow_up.create'
+                AND a.actor_user_id = :actor) FOR UPDATE"""),
+        {"id": follow_up_id, "uid": member_id, "actor": actor.user_id},
+    )).mappings().first()
+    if row is None or int(row["created_by"]) != actor.user_id:
+        raise HTTPException(404, detail="跟进记录不存在或不可修改")
+    images = _parse_follow_up_images(row["images"])
+    image_id = hashlib.sha256(f"{follow_up_id}:{upload_key}".encode()).hexdigest()[:32]
+    target = Path(settings.upload_dir) / str(member_id) / f"follow-up-img-{image_id}.webp"
+    url = f"/storage/uploads/{member_id}/{target.name}"
+    if url in images:
+        return
+    if len(images) >= FOLLOW_UP_MAX_IMAGES:
+        raise HTTPException(422, detail="图片最多9张")
+    try:
+        await _fu_write_bytes(target, webp)
+        images.append(url)
+        await db.execute(text("UPDATE member_follow_up SET images = :images WHERE id = :id"),
+                         {"images": json.dumps(images, ensure_ascii=False), "id": follow_up_id})
+        await _audit(db, actor.user_id, "matchmaker_workspace.member.follow_up.image", "member_follow_up", follow_up_id)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        target.unlink(missing_ok=True)
+        raise
+
+
+async def get_member_follow_up_image(
+    db: AsyncSession, actor: WorkspaceActor, member_id: int, follow_up_id: int, index: int
+) -> Path:
+    from app.services.member_follow_up_admin import _parse_follow_up_images
+
+    await _require_scoped_member(db, actor, member_id)
+    row = (await db.execute(text("SELECT images FROM member_follow_up WHERE id = :id AND user_id = :uid"),
+                            {"id": follow_up_id, "uid": member_id})).mappings().first()
+    images = _parse_follow_up_images(row["images"]) if row else []
+    if index < 0 or index >= len(images):
+        raise HTTPException(404, detail="图片不存在")
+    expected_prefix = f"/storage/uploads/{member_id}/"
+    value = images[index]
+    filename = value.removeprefix(expected_prefix)
+    if not value.startswith(expected_prefix) or not re.fullmatch(r"follow-up-img-[a-f0-9]{32}\.webp", filename):
+        raise HTTPException(404, detail="图片不存在")
+    path = Path(settings.upload_dir) / str(member_id) / filename
+    if not path.is_file():
+        raise HTTPException(404, detail="图片不存在")
+    return path
 
 
 async def get_member_contact(
@@ -2081,7 +2257,7 @@ async def get_workspace_member_note(
     await _require_scoped_member(db, actor, member_id)
     row = (
         await db.execute(
-            text("SELECT note, updated_at FROM matchmaker_admin_member_note WHERE user_id = :member_id"),
+            text("SELECT matchmaker_note AS note, updated_at FROM user_profile WHERE user_id = :member_id"),
             {"member_id": member_id},
         )
     ).mappings().first()
@@ -2100,9 +2276,9 @@ async def update_workspace_member_note(
     note = request.note.strip()
     await db.execute(
         text(
-            """INSERT INTO matchmaker_admin_member_note (user_id, note, updated_by)
-            VALUES (:member_id, :note, :actor_id)
-            ON DUPLICATE KEY UPDATE note = VALUES(note), updated_by = VALUES(updated_by)"""
+            """INSERT INTO user_profile (user_id, matchmaker_note)
+            VALUES (:member_id, :note)
+            ON DUPLICATE KEY UPDATE matchmaker_note = VALUES(matchmaker_note), updated_at = UTC_TIMESTAMP()"""
         ),
         {"member_id": member_id, "note": note, "actor_id": actor.user_id},
     )
@@ -2115,7 +2291,7 @@ async def list_member_matchmakers(
     db: AsyncSession, actor: WorkspaceActor, member_id: int
 ) -> list[WorkspaceLeadFollower]:
     """修改红娘：返回当前工作范围内可选的服务红娘（含当前跟进人标记）。"""
-    await _require_scoped_member(db, actor, member_id)
+    await _require_head_office_member(db, actor, member_id)
     colleagues = await list_workspace_colleagues(db, actor)
     current_id = await db.scalar(
         text(
@@ -2171,7 +2347,7 @@ async def assign_workspace_member_matchmaker(
     db: AsyncSession, actor: WorkspaceActor, member_id: int, request: WorkspaceMemberMatchmakerUpdate
 ) -> WorkspaceMember:
     """修改红娘：换绑会员的跟进服务红娘；置 null 表示改为待分派并结束现有归属。"""
-    await _require_scoped_member(db, actor, member_id)
+    await _require_head_office_member(db, actor, member_id)
     target_id = request.matchmaker_id
     if target_id is not None:
         valid = await db.scalar(
@@ -2221,7 +2397,7 @@ async def assign_workspace_member_matchmaker(
         f"跟进红娘改为 {target_name}",
     )
     await db.commit()
-    page = await list_workspace_members(db, actor, 1, 1000, None, None)
+    page = await list_workspace_members(db, actor, 1, 1000, None, str(member_id), all_members=True)
     for item in page.items:
         if item.user_id == member_id:
             return item

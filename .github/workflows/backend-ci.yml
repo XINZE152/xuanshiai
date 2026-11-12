@@ -91,6 +91,10 @@ jobs:
           app/services/user_columns.py tests/test_region_preflight_20261104.py
       - name: Ruff (workspace member filters)
         run: uv run --no-sync ruff check tests/test_workspace_member_filter_scope.py
+      - name: Ruff (workspace follow-up images)
+        run: uv run --no-sync ruff check tests/test_workspace_follow_up_images.py
+      - name: Test workspace follow-up images
+        run: uv run --no-sync pytest tests/test_workspace_follow_up_images.py -q
       - name: Workspace member filter contracts
         run: uv run --no-sync pytest tests/test_workspace_member_filter_scope.py -q
       - name: Ruff (public matchmaker ranking)
@@ -199,9 +203,9 @@ jobs:
       - name: Install backend and dev dependencies
         run: uv sync --locked --extra dev
       - name: Ruff workspace lead contracts
-        run: uv run --no-sync ruff check app/schemas/matchmaker_workspace.py app/services/meeting.py app/services/meeting_ownership.py app/services/matchmaker_workspace.py app/services/workspace_good_news.py app/api/routes/matchmaker_workspace.py scripts/verify_remote_workspace_leads.py tests/test_matchmaker_workspace_contracts.py tests/test_workspace_meeting_workflow.py tests/test_matchmaker_workbench_good_news.py tests/test_workspace_good_news_flow.py
+        run: uv run --no-sync ruff check app/schemas/matchmaker_workspace.py app/services/meeting.py app/services/meeting_ownership.py app/services/matchmaker_workspace.py app/services/workspace_good_news.py app/api/routes/matchmaker_workspace.py scripts/verify_remote_workspace_leads.py tests/test_matchmaker_workspace_contracts.py tests/test_matchmaker_workspace_commission_standards.py tests/test_workspace_meeting_workflow.py tests/test_matchmaker_workbench_good_news.py tests/test_workspace_good_news_flow.py
       - name: Test workspace lead contracts
-        run: uv run --no-sync pytest tests/test_matchmaker_workspace_contracts.py tests/test_workspace_meeting_workflow.py tests/test_matchmaker_workbench_good_news.py tests/test_workspace_good_news_flow.py -q
+        run: uv run --no-sync pytest tests/test_matchmaker_workspace_contracts.py tests/test_matchmaker_workspace_commission_standards.py tests/test_workspace_meeting_workflow.py tests/test_matchmaker_workbench_good_news.py tests/test_workspace_good_news_flow.py -q
 
   workspace-meeting-mysql:
     runs-on: ubuntu-24.04

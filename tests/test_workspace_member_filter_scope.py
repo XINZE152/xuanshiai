@@ -64,7 +64,7 @@ class Database:
 async def test_abandon_and_pickup_share_crm_pool_and_preserve_review():
     db = Database()
     db.db.execute("INSERT INTO matchmaker_member_review(user_id,status) VALUES (1,'PASSED')")
-    supervisor = WorkspaceActor(user_id=101, display_name='A', level='SUPER', organization_id=10)
+    supervisor = WorkspaceActor(user_id=101, display_name='A', level='SUPER', organization_id=None)
     await abandon_workspace_member(db, supervisor, 1, '测试原因')
     row = db.db.execute('SELECT user_id, reason, abandoned_by, restored_at FROM member_abandonment').fetchone()
     assert tuple(row) == (1, '测试原因', 11, None)
@@ -81,6 +81,34 @@ async def test_abandon_and_pickup_share_crm_pool_and_preserve_review():
     assert row[0] == 11 and row[1] is not None and row[2] == 101
     assert db.db.execute('SELECT status FROM matchmaker_member_review WHERE user_id=1').fetchone()[0] == 'PASSED'
     assert db.db.execute('SELECT COUNT(*) FROM resource_assignment WHERE user_id=1 AND status=1').fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_only_head_office_can_abandon_unassigned_member():
+    db = Database()
+    db.db.execute('UPDATE resource_assignment SET status=2 WHERE user_id=3')
+    for level, org in [('NORMAL', None), ('SUPER', 10)]:
+        with pytest.raises(HTTPException) as denied:
+            await abandon_workspace_member(db, WorkspaceActor(101, 'A', level, org), 3, '原因')
+        assert denied.value.status_code == 403
+    await abandon_workspace_member(db, WorkspaceActor(101, 'A', 'SUPER', None), 3, '原因')
+    assert db.db.execute('SELECT user_id FROM member_abandonment').fetchone()[0] == 3
+
+
+@pytest.mark.asyncio
+async def test_only_head_office_can_select_matchmaker_for_unassigned_member():
+    from app.services.matchmaker_workspace import _require_head_office_member
+
+    db = Database()
+    db.db.execute('UPDATE resource_assignment SET status=2 WHERE user_id=3')
+    await _require_head_office_member(db, WorkspaceActor(101, 'A', 'SUPER', None), 3)
+    for level, org in [('NORMAL', None), ('SUPER', 10)]:
+        with pytest.raises(HTTPException) as denied:
+            await _require_head_office_member(db, WorkspaceActor(101, 'A', level, org), 3)
+        assert denied.value.status_code == 403
+    with pytest.raises(HTTPException) as missing:
+        await _require_head_office_member(db, WorkspaceActor(101, 'A', 'SUPER', None), 999)
+    assert missing.value.status_code == 404
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 """Mobile service-matchmaker workbench routes protected by normal user JWTs."""
 
-from fastapi import APIRouter, Depends, File, Path, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Path, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user
@@ -38,6 +39,7 @@ from app.schemas.matchmaker_workspace import (
     WorkspaceAbandonRequest,
     WorkspaceAssignRequest,
     WorkspaceCommissionEntryPage,
+    WorkspaceCommissionStandards,
     WorkspaceOfflineIncomePage,
     WorkspaceLead,
     WorkspaceLeadConvertRequest,
@@ -112,6 +114,7 @@ from app.services.matchmaker_workspace import (
     list_partner_join_requests,
     list_workspace_colleagues,
     list_workspace_commission_entries,
+    get_workspace_commission_standards,
     list_workspace_offline_income,
     list_workspace_introductions,
     list_workspace_lead_follow_ups,
@@ -388,6 +391,18 @@ async def workbench_commission_entries(
 
 
 @router.get(
+    "/workbench/commission-standards",
+    response_model=WorkspaceCommissionStandards,
+    summary="查询分成级别与分成标准（只读）",
+)
+async def workbench_commission_standards(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceCommissionStandards:
+    return await get_workspace_commission_standards(db, await require_workspace(db, current))
+
+
+@router.get(
     "/workbench/offline-income",
     response_model=WorkspaceOfflineIncomePage,
     summary="查询我的线下业绩明细（线下 VIP 已收款订单）",
@@ -636,6 +651,29 @@ async def create_workbench_member_follow_up(
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceMemberFollowUp:
     return await create_member_follow_up(db, await require_workspace(db, current), member_id, body)
+
+
+@router.post("/workbench/members/{member_id}/follow-ups/{follow_up_id}/images", status_code=204, summary="上传会员跟进图片")
+async def upload_workbench_follow_up_image(
+    member_id: int = Path(..., ge=1), follow_up_id: int = Path(..., ge=1),
+    file: UploadFile = File(...), upload_key: str = Form(..., min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$"),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    from app.services.matchmaker_workspace import add_member_follow_up_image
+
+    await add_member_follow_up_image(db, await require_workspace(db, current), member_id, follow_up_id, file, upload_key)
+
+
+@router.get("/workbench/members/{member_id}/follow-ups/{follow_up_id}/images/{index}", summary="读取会员跟进图片")
+async def read_workbench_follow_up_image(
+    member_id: int = Path(..., ge=1), follow_up_id: int = Path(..., ge=1), index: int = Path(..., ge=0, le=8),
+    current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+) -> FileResponse:
+    from app.services.matchmaker_workspace import get_member_follow_up_image
+
+    path = await get_member_follow_up_image(db, await require_workspace(db, current), member_id, follow_up_id, index)
+    return FileResponse(path, media_type="image/webp", headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/workbench/members/{member_id}/contact", response_model=WorkspaceMemberContact, summary="受审计读取会员联系方式")

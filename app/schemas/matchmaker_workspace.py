@@ -351,7 +351,7 @@ class WorkspaceMemberPickupResult(BaseModel):
 class WorkspaceMemberNoteUpdate(BaseModel):
     """红娘说：红娘对会员的公开评价。"""
 
-    note: str = Field(min_length=0, max_length=200)
+    note: str = Field(min_length=0, max_length=1000)
 
 
 class WorkspaceMemberNote(BaseModel):
@@ -373,6 +373,7 @@ class WorkspaceMemberFollowUp(BaseModel):
     content: str
     next_follow_at: datetime | None
     created_at: datetime
+    images: list[str] = Field(default_factory=list)
 
 
 class WorkspaceMemberFollowUpPage(BaseModel):
@@ -516,6 +517,35 @@ class WorkspaceCommissionEntryPage(BaseModel):
     has_more: bool
     # 与工作台概览 online_commission 同口径：本人全部分成之和，已剔除冲正行。
     total_amount: str
+
+
+class WorkspaceCommissionLevel(BaseModel):
+    """分成级别总览行：只回小程序版式需要的字段，不暴露计提比例等内部配置。"""
+
+    code: str = Field(max_length=32)
+    name: str = Field(max_length=64)
+    # 自动升级条件的原文描述；「默认」级别的种子文案同样由后台维护。
+    promotion_condition: str | None = Field(default=None, max_length=128)
+    # 平台额外奖励金额，字符串两位小数（如 "1000.00"），由后台 commission_level 维护。
+    platform_extra_amount: str
+
+
+class WorkspaceCommissionEvent(BaseModel):
+    """按消费项目的分成标准行：fixed 回金额，rate 回计提比例，两者不会同时有值。"""
+
+    name: str = Field(max_length=128)
+    mode: Literal["fixed", "rate"]
+    amount: str | None
+    rate_percent: str | None
+
+
+class WorkspaceCommissionStandards(BaseModel):
+    """「分成级别」页面数据：级别总览 + 本人当前级别 + 按项目分成标准。"""
+
+    levels: list[WorkspaceCommissionLevel]
+    # 后台未给本人指派级别时为 null，前端显示占位，不得自行推断。
+    current_level: WorkspaceCommissionLevel | None
+    events: list[WorkspaceCommissionEvent]
 
 
 class WorkspaceOfflineIncome(BaseModel):
