@@ -12,6 +12,7 @@ from app.main import app
 from app.services import matchmaker_workspace as service
 from app.services import member_follow_up_admin
 from app.services.matchmaker_workspace import WorkspaceActor
+from app.schemas.matchmaker_workspace import WorkspaceMemberFollowUpCreate
 
 
 class Result:
@@ -24,6 +25,16 @@ class Result:
     def first(self):
         row = self.cursor.fetchone()
         return dict(row) if row else None
+
+    def one(self):
+        return dict(self.cursor.fetchone())
+
+    def all(self):
+        return [dict(row) for row in self.cursor.fetchall()]
+
+    @property
+    def lastrowid(self):
+        return self.cursor.lastrowid
 
 
 class Database:
@@ -70,7 +81,7 @@ async def test_images_share_admin_storage_scope_and_limit(tmp_path, monkeypatch)
         if current.user_id != 30 or member != 20:
             raise HTTPException(404)
 
-    monkeypatch.setattr(service, '_require_scoped_member', scope)
+    monkeypatch.setattr(service, '_require_owned_or_head_office_member', scope)
     monkeypatch.setattr(service.settings, 'upload_dir', str(tmp_path))
     async def run_inline(func, *args):
         return func(*args)
@@ -101,3 +112,63 @@ async def test_images_share_admin_storage_scope_and_limit(tmp_path, monkeypatch)
     db.conn.execute("UPDATE member_follow_up SET images = '[\"/storage/uploads/20/../../secret\"]' WHERE id=10")
     with pytest.raises(HTTPException):
         await service.get_member_follow_up_image(db, actor, 20, 10, 0)
+
+
+@pytest.mark.asyncio
+async def test_follow_up_scope_for_text_and_images(tmp_path, monkeypatch):
+    db = Database()
+    db.conn.executescript('''
+        DROP TABLE member_follow_up;
+        DROP TABLE business_audit_log;
+        CREATE TABLE users(id INTEGER PRIMARY KEY, deleted_at TEXT);
+        CREATE TABLE resource_assignment(user_id INTEGER, matchmaker_id INTEGER, status INTEGER);
+        CREATE TABLE member_follow_up(id INTEGER PRIMARY KEY, user_id INTEGER, method TEXT, content TEXT,
+            next_follow_at TEXT, created_by INTEGER, images TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE business_audit_log(actor_user_id INTEGER, action TEXT, resource_type TEXT, resource_id INTEGER, reason TEXT);
+        INSERT INTO users VALUES (1,NULL),(2,NULL),(3,NULL),(4,'deleted');
+        INSERT INTO resource_assignment VALUES (1,30,1),(2,40,1),(3,30,0),(4,30,1);
+    ''')
+
+    async def scalar(query, params):
+        row = db.conn.execute(str(query), params).fetchone()
+        return row[0] if row else None
+
+    db.scalar = scalar
+    monkeypatch.setattr(service.settings, 'upload_dir', str(tmp_path))
+
+    async def run_inline(func, *args):
+        return func(*args)
+
+    async def write_inline(path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    monkeypatch.setattr(service.asyncio, 'to_thread', run_inline)
+    monkeypatch.setattr(member_follow_up_admin, '_fu_write_bytes', write_inline)
+    head = WorkspaceActor(99, '总店', 'SUPER', None)
+    regular = WorkspaceActor(30, '服务红娘', 'NORMAL', None)
+    branch_super = WorkspaceActor(30, '门店超级红娘', 'SUPER', 7)
+    request = WorkspaceMemberFollowUpCreate(method='PHONE', content='测试跟进')
+
+    for member in (2, 3):
+        record = await service.create_member_follow_up(db, head, member, request)
+        assert (await service.list_member_follow_ups(db, head, member, 1, 20)).total == 1
+        await service.add_member_follow_up_image(db, head, member, record.id, image_file(), '0')
+        assert (await service.get_member_follow_up_image(db, head, member, record.id, 0)).is_file()
+
+    own = await service.create_member_follow_up(db, regular, 1, request)
+    assert (await service.list_member_follow_ups(db, branch_super, 1, 1, 20)).total == 1
+    await service.add_member_follow_up_image(db, regular, 1, own.id, image_file(), '0')
+    assert (await service.get_member_follow_up_image(db, branch_super, 1, own.id, 0)).is_file()
+
+    for actor, member in ((regular, 2), (branch_super, 2), (regular, 3), (head, 4), (regular, 4)):
+        operations = (
+            lambda: service.list_member_follow_ups(db, actor, member, 1, 20),
+            lambda: service.create_member_follow_up(db, actor, member, request),
+            lambda: service.get_member_follow_up_image(db, actor, member, 1, 0),
+            lambda: service.add_member_follow_up_image(db, actor, member, 1, image_file(), '1'),
+        )
+        for operation in operations:
+            with pytest.raises(HTTPException) as denied:
+                await operation()
+            assert denied.value.status_code == 404

@@ -1965,7 +1965,7 @@ async def create_member_follow_up(
     member_id: int,
     request: WorkspaceMemberFollowUpCreate,
 ) -> WorkspaceMemberFollowUp:
-    await _require_scoped_member(db, actor, member_id)
+    await _require_owned_or_head_office_member(db, actor, member_id)
     result = await db.execute(
         text(
             """INSERT INTO member_follow_up (user_id, method, content, next_follow_at, created_by)
@@ -1997,7 +1997,7 @@ async def create_member_follow_up(
 async def list_member_follow_ups(
     db: AsyncSession, actor: WorkspaceActor, member_id: int, page: int, page_size: int
 ) -> WorkspaceMemberFollowUpPage:
-    await _require_scoped_member(db, actor, member_id)
+    await _require_owned_or_head_office_member(db, actor, member_id)
     params = {"member_id": member_id, "limit": page_size, "offset": (page - 1) * page_size}
     rows = await db.execute(
         text(
@@ -2040,7 +2040,7 @@ async def add_member_follow_up_image(
         _fu_read_limited, _fu_write_bytes, _parse_follow_up_images,
     )
 
-    await _require_scoped_member(db, actor, member_id)
+    await _require_owned_or_head_office_member(db, actor, member_id)
     data = await _fu_read_limited(image, FOLLOW_UP_IMAGE_MAX_BYTES)
     webp, _ = await asyncio.to_thread(_fu_image_outputs, data)
     row = (await db.execute(
@@ -2078,7 +2078,7 @@ async def get_member_follow_up_image(
 ) -> Path:
     from app.services.member_follow_up_admin import _parse_follow_up_images
 
-    await _require_scoped_member(db, actor, member_id)
+    await _require_owned_or_head_office_member(db, actor, member_id)
     row = (await db.execute(text("SELECT images FROM member_follow_up WHERE id = :id AND user_id = :uid"),
                             {"id": follow_up_id, "uid": member_id})).mappings().first()
     images = _parse_follow_up_images(row["images"]) if row else []
@@ -2250,7 +2250,7 @@ async def list_match_history(
     )
 
 
-async def _require_note_member(db: AsyncSession, actor: WorkspaceActor, member_id: int) -> None:
+async def _require_owned_or_head_office_member(db: AsyncSession, actor: WorkspaceActor, member_id: int) -> None:
     """总店超级红娘可管理全部会员；其他红娘只可管理自己名下的会员。"""
     params: dict[str, object] = {"member_id": member_id}
     if actor.level == "SUPER" and actor.organization_id is None:
@@ -2270,7 +2270,7 @@ async def get_workspace_member_note(
     db: AsyncSession, actor: WorkspaceActor, member_id: int
 ) -> WorkspaceMemberNote:
     """红娘说：读取会员的公开评价（工作台范围内）。"""
-    await _require_note_member(db, actor, member_id)
+    await _require_owned_or_head_office_member(db, actor, member_id)
     row = (
         await db.execute(
             text("SELECT matchmaker_note AS note, updated_at FROM user_profile WHERE user_id = :member_id"),
@@ -2288,7 +2288,7 @@ async def update_workspace_member_note(
     db: AsyncSession, actor: WorkspaceActor, member_id: int, request: WorkspaceMemberNoteUpdate
 ) -> WorkspaceMemberNote:
     """红娘说：保存会员的公开评价，留审计痕迹。"""
-    await _require_note_member(db, actor, member_id)
+    await _require_owned_or_head_office_member(db, actor, member_id)
     note = request.note.strip()
     await db.execute(
         text(

@@ -30,7 +30,7 @@ class Database:
 async def test_note_reads_and_writes_admin_profile_field(monkeypatch):
     async def scoped(*args): return None
     async def audit(*args): return None
-    monkeypatch.setattr(service, '_require_note_member', scoped)
+    monkeypatch.setattr(service, '_require_owned_or_head_office_member', scoped)
     monkeypatch.setattr(service, '_audit', audit)
     db = Database()
     actor = service.WorkspaceActor(user_id=1, display_name='红娘', level='NORMAL', organization_id=None)
@@ -66,14 +66,14 @@ async def test_note_access_head_office_and_assigned_members():
     regular = service.WorkspaceActor(10, '服务红娘', 'NORMAL', None)
     branch_super = service.WorkspaceActor(10, '门店超级红娘', 'SUPER', 7)
     for member in (1, 2, 3):
-        await service._require_note_member(db, head, member)
+        await service._require_owned_or_head_office_member(db, head, member)
     for actor in (regular, branch_super):
-        await service._require_note_member(db, actor, 1)
+        await service._require_owned_or_head_office_member(db, actor, 1)
         for member in (2, 3, 4):
             with pytest.raises(HTTPException) as denied:
-                await service._require_note_member(db, actor, member)
+                await service._require_owned_or_head_office_member(db, actor, member)
             assert denied.value.status_code == 404
     for member in (4, 999):
         with pytest.raises(HTTPException) as denied:
-            await service._require_note_member(db, head, member)
+            await service._require_owned_or_head_office_member(db, head, member)
         assert denied.value.status_code == 404
