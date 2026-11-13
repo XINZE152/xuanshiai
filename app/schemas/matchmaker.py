@@ -25,6 +25,8 @@ class MatchmakerCard(BaseModel):
     cases: list[MatchmakerCaseCard] = Field(default_factory=list)
     certification_tags: list[str]
     success_count: int
+    served_member_count: int = 0
+    successful_meeting_member_count: int = 0
     rating_score: float
     rating_count: int
     is_available: bool

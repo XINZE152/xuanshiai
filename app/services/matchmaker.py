@@ -94,6 +94,8 @@ def _card(row: Any) -> MatchmakerCard:
         cases=_case_cards(details.get("success_cases")),
         certification_tags=["平台认证"],
         success_count=int(row["success_count"] or 0),
+        served_member_count=int(row.get("served_member_count") or 0),
+        successful_meeting_member_count=int(row.get("successful_meeting_member_count") or 0),
         rating_score=float(row["rating_score"] or 0),
         rating_count=int(row["rating_count"] or 0),
         is_available=bool(row["role_status"] == 1),
@@ -178,11 +180,19 @@ async def _list_public_ranking(db: AsyncSession, page: int, page_size: int) -> M
     result = await db.execute(text(f"""SELECT u.id AS user_id, u.nickname, u.avatar,
         ma.intro, ma.slogan, ma.application_details,
         {STAFF_SUCCESS_COUNT} AS success_count,
+        (SELECT COUNT(*) FROM resource_assignment a JOIN users member ON member.id = a.user_id
+          WHERE a.matchmaker_id = u.id AND a.status = 1 AND member.deleted_at IS NULL
+          AND a.id = (SELECT MAX(latest.id) FROM resource_assignment latest WHERE latest.user_id = a.user_id AND latest.status = 1)) AS served_member_count,
+        (SELECT COUNT(*) FROM resource_assignment a JOIN users member ON member.id = a.user_id
+          WHERE a.matchmaker_id = u.id AND a.status = 1 AND member.deleted_at IS NULL
+          AND a.id = (SELECT MAX(latest.id) FROM resource_assignment latest WHERE latest.user_id = a.user_id AND latest.status = 1)
+          AND EXISTS (SELECT 1 FROM meeting_request rq JOIN meeting_record mr ON mr.request_id = rq.id
+            WHERE mr.status = 'COMPLETED' AND (rq.user_id = a.user_id OR rq.target_user_id = a.user_id))) AS successful_meeting_member_count,
         COALESCE((SELECT AVG(score) FROM matchmaker_rating WHERE matchmaker_id = u.id), 0) AS rating_score,
         (SELECT COUNT(*) FROM matchmaker_rating WHERE matchmaker_id = u.id) AS rating_count,
         (SELECT MAX(status) FROM user_role WHERE user_id = u.id AND role_code = 'service_matchmaker') AS role_status
         {base}
-        ORDER BY success_count DESC, rating_score DESC, ma.reviewed_at DESC, ma.id DESC
+        ORDER BY served_member_count DESC, rating_score DESC, ma.reviewed_at DESC, ma.id DESC
         LIMIT :limit OFFSET :offset"""), params)
     count = await db.execute(text(f"SELECT COUNT(*) {base}"))
     total = int(count.scalar() or 0)
