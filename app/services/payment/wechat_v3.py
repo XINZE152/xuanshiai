@@ -227,6 +227,29 @@ class WechatPayV3Client(PaymentGateway):
             raise PaymentAPIError(502, "微信支付未返回 prepay_id", payload=data)
         return JsapiPrepay(prepay_id=prepay_id)
 
+    async def create_merchant_transfer(
+        self, *, out_bill_no: str, openid: str, amount_cents: int,
+        scene_id: str, remark: str, notify_url: str,
+        scene_report_infos: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """发起商家转账；调用方负责持久化商户单号及处理不确定结果。"""
+        if not out_bill_no or not out_bill_no.isascii() or not out_bill_no.isalnum() or len(out_bill_no) > 32:
+            raise PaymentValidationError('商户转账单号必须为 1 至 32 位字母或数字')
+        if not openid or amount_cents <= 0 or not scene_id or not remark or not notify_url or not scene_report_infos:
+            raise PaymentValidationError('商家转账参数不完整')
+        return await self._request('POST', '/v3/fund-app/mch-transfer/transfer-bills', {
+            'appid': self.config.app_id, 'out_bill_no': out_bill_no,
+            'transfer_scene_id': scene_id, 'openid': openid,
+            'transfer_amount': amount_cents, 'transfer_remark': remark,
+            'notify_url': notify_url, 'transfer_scene_report_infos': scene_report_infos,
+        })
+
+    async def query_merchant_transfer(self, out_bill_no: str) -> dict[str, Any]:
+        """使用商户单号查询转账最终状态。"""
+        if not out_bill_no or not out_bill_no.isascii() or not out_bill_no.isalnum() or len(out_bill_no) > 32:
+            raise PaymentValidationError('商户转账单号无效')
+        return await self._request('GET', '/v3/fund-app/mch-transfer/transfer-bills/out-bill-no/' + quote(out_bill_no, safe=''), retryable=True)
+
     async def query_order(self, out_trade_no: str) -> dict[str, Any]:
         """按商户订单号查询微信订单。"""
         path = (
