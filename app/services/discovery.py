@@ -199,6 +199,12 @@ def _skip_discovery_gates() -> bool:
 # - self_match（自己找对象）/ parent_match（父母帮找）：只推异性，沿用历史行为；
 # - companion（找搭子）：同性异性都推，搭子是兴趣社交，不按性别对立；
 # - 未选择身份的存量用户走 self_match 分支，保证改动前后推荐结果一致。
+#
+# 产品口径（2026-11-14 已确认，改动前先对一遍，别自作主张放开）：
+# 1. 身份只在注册/引导流程里选一次，不提供「老用户改身份」的入口，
+#    因此这里按「多数用户没有 intent_type」是常态而非异常来设计。
+# 2. 择偶偏好（年龄/身高/收入/学历等，respect_preferences）对 companion 同样生效，
+#    找搭子只是放开性别，不放开其他门禁。
 SAME_GENDER_OPEN_INTENTS = frozenset({"companion"})
 
 
