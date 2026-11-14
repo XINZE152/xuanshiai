@@ -1710,9 +1710,11 @@ async def update_follow_template(db: AsyncSession, template_id: int, name: str |
         raise HTTPException(status_code=404, detail="模板不存在")
     sets, params = [], {"id": template_id}
     if name is not None:
-        sets.append("name = :name"); params["name"] = name
+        sets.append("name = :name")
+        params["name"] = name
     if content is not None:
-        sets.append("content = :content"); params["content"] = content
+        sets.append("content = :content")
+        params["content"] = content
     if sets:
         await db.execute(text(f"UPDATE lead_follow_template SET {', '.join(sets)} WHERE id = :id"), params)
         await db.commit()
