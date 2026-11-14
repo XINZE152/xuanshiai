@@ -583,12 +583,8 @@ async def recall_message(db: AsyncSession, user_id: int, message_id: int) -> Cha
             ORDER BY id DESC LIMIT 1"""), {"sid": int(row["session_id"])})).mappings().first()
         preview = "消息已撤回" if latest is None else _message_preview(int(latest["type"]), latest.get("content"))
         await db.execute(text("UPDATE chat_session SET last_message = :preview WHERE id = :sid"), {"preview": preview, "sid": int(row["session_id"])})
-    await emit_notification(
-        db, recipient_user_id=int(row["to_user_id"]), actor_user_id=user_id,
-        event_type="message_recalled", title="消息已撤回", content="对方撤回了一条消息",
-        target_type="chat_session", target_id=int(row["session_id"]),
-        payload={"message_id": message_id},
-    )
+    # 撤回不再给对方发通知（微信式：只在聊天流里留一行灰字提示）。
+    # notifications.py 保留 message_recalled 的分类映射，历史通知仍能正常展示。
     await db.commit()
     row = dict(row)
     quotes = await _load_quotes(db, [row])
