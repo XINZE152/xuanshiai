@@ -92,6 +92,10 @@ jobs:
           app/services/user_columns.py tests/test_region_preflight_20261104.py
       - name: Ruff (workspace member filters)
         run: uv run --no-sync ruff check tests/test_workspace_member_filter_scope.py
+      - name: Ruff (merchant transfer gateway)
+        run: uv run --no-sync ruff check app/services/payment/wechat_v3.py app/services/payment/transfer_state.py app/services/payment/transfer_notification.py tests/test_wechat_merchant_transfer_gateway.py tests/test_wechat_transfer_state.py tests/test_wechat_transfer_notification.py
+      - name: Test merchant transfer gateway
+        run: uv run --no-sync pytest tests/test_wechat_merchant_transfer_gateway.py tests/test_wechat_transfer_state.py tests/test_wechat_transfer_notification.py -q
       - name: Ruff (workspace follow-up images)
         run: uv run --no-sync ruff check tests/test_workspace_follow_up_images.py
       - name: Test workspace follow-up images
