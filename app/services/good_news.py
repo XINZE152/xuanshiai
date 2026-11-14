@@ -714,14 +714,14 @@ async def _ensure_workspace_member(db: AsyncSession, actor: Any, member_id: int)
             "AND ra.status = 1 AND ra.matchmaker_id = :matchmaker_id)"
         )
         params["matchmaker_id"] = actor.user_id
-    else:
-        if not getattr(actor, "organization_id", None):
-            raise HTTPException(403, detail="超级服务红娘尚未绑定有效组织范围")
+    elif getattr(actor, "organization_id", None):
         condition = (
             "EXISTS (SELECT 1 FROM resource_assignment ra WHERE ra.user_id = :member_id "
             "AND ra.status = 1 AND ra.organization_id = :organization_id)"
         )
         params["organization_id"] = actor.organization_id
+    else:
+        condition = "EXISTS (SELECT 1 FROM resource_assignment ra WHERE ra.user_id = :member_id AND ra.status = 1)"
     allowed = (await db.execute(text(f"SELECT {condition}"), params)).scalar()
     if not allowed:
         raise HTTPException(403, detail="只能登记工作范围内的会员")
@@ -1023,10 +1023,9 @@ async def list_workspace(
         "offset": (page - 1) * page_size,
     }
     if getattr(actor, "scope", "SELF") == "ORGANIZATION":
-        if not getattr(actor, "organization_id", None):
-            raise HTTPException(403, detail="超级服务红娘尚未绑定有效组织范围")
-        conditions.append("m.organization_id = :organization_id")
-        params["organization_id"] = actor.organization_id
+        if getattr(actor, "organization_id", None):
+            conditions.append("m.organization_id = :organization_id")
+            params["organization_id"] = actor.organization_id
     else:
         conditions.append("m.matchmaker_id = :matchmaker_id")
         params["matchmaker_id"] = actor.user_id
