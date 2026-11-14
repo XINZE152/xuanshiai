@@ -22,6 +22,7 @@ from app.schemas.payments import (
     CreateBoostOrderRequest,
     PaidOrderResponse,
     SpotlightPaymentRequest,
+    SpotlightPriceResponse,
 )
 from app.services.payment.base import (
     PaymentConfigError,
@@ -46,6 +47,7 @@ from app.services.payments import (
     create_spotlight_order,
     get_boost_status,
     get_paid_order,
+    get_spotlight_price,
     list_boost_packages,
 )
 
@@ -77,6 +79,12 @@ async def boost_order(
 @router.get("/boost/orders/{order_no}", response_model=PaidOrderResponse, summary="查询置顶订单")
 async def boost_order_detail(order_no: str = Path(..., min_length=8, max_length=64), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> PaidOrderResponse:
     return await get_paid_order(db, current.id, order_no, 4)
+
+
+@router.get("/spotlights/price", response_model=SpotlightPriceResponse, summary="查询爆灯单价")
+async def spotlight_price(db: AsyncSession = Depends(get_db)) -> SpotlightPriceResponse:
+    """公开读接口：C 端卡片按此展示单价，下单金额由服务端按同一配置计算。"""
+    return await get_spotlight_price(db)
 
 
 @router.post("/spotlights/payments", response_model=PaidOrderResponse, status_code=201, summary="创建爆灯订单")

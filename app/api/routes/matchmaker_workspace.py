@@ -9,13 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentUser, get_current_user
 from app.db.session import get_db
 from app.schemas.matchmaker_workspace import (
+    WorkspaceActivityPage,
     WorkspaceGoodNewsBlessingCreate, WorkspaceGoodNewsBlessingPage, WorkspaceGoodNewsBlessingResult,
     WorkspaceGoodNewsItem, WorkspacePennantCreate, WorkspacePennantItem,
 )
 from app.services.workspace_good_news import (
     create_blessing, create_pennant, good_news_detail, list_blessings, pennant_detail,
 )
-from app.schemas.matchmaker_workspace import WorkspaceActivityPage
 from app.services.workspace_activity import list_workspace_activity_signups
 from app.schemas.auth import (
     CompletionResponse,

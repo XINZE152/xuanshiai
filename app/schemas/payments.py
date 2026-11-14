@@ -30,6 +30,17 @@ class PaidOrderResponse(BaseModel):
     payment_required: bool
 
 
+class SpotlightPriceResponse(BaseModel):
+    """爆灯单价，供 C 端展示。
+
+    金额来自运行期配置 `finance.spotlight_price`，与下单时读取的是同一个 key，
+    避免再次出现「前端写死 9.9、后端按 5.00 收」的口径分裂。
+    """
+
+    amount: Decimal
+    currency: str = "CNY"
+
+
 class BoostPackage(BaseModel):
     code: str
     name: str

@@ -94,6 +94,9 @@ class DiscoveryCard(BaseModel):
     hometown_display: str | None = None
     residence_display: str | None = None
     zodiac: str | None = None
+    # 首页「基础资料」第 4 格展示星座（2026-11-14）：优先取 user_profile.constellation，
+    # 老数据没填时由生日推导，与详情页 same 口径；detail_locked 时置 None。
+    constellation: str | None = None
     self_intro: str | None = None
     qa_answers: list[dict[str, object]] = Field(default_factory=list, description="首页卡片展示的公开问答，最多 3 条")
     personal_tags: list[str] = Field(default_factory=list, description="合并后的兴趣标签，受资料可见性约束")

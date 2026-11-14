@@ -109,7 +109,7 @@ CARD_SELECT = """
                      ORDER BY um.id DESC LIMIT 1), u.avatar) AS avatar_thumb,
            u.birthday, u.is_married,
            u.is_single_pledge, p.height, p.education_level, p.occupation, p.income,
-           p.weight, p.zodiac,
+           p.weight, p.zodiac, p.constellation,
            p.hometown_province_code, p.hometown_city_code, p.hometown_district_code,
            p.residence_province_code, p.residence_city_code, p.residence_district_code,
            (p.residence_city_code IS NOT NULL AND p.residence_city_code =
@@ -169,12 +169,13 @@ async def _viewer_context(db: AsyncSession, user_id: int) -> dict[str, Any]:
                       u.phone, p.height, p.education_level, p.income, p.mbti, p.interest_tags,
                p.personality_tags, p.tags, p.residence_city_code,
                COALESCE(ua.realname_status, 0) AS realname_status,
-                      pref.age_min, pref.age_max, pref.height_min, pref.height_max,
+                      ri.intent_type, pref.age_min, pref.age_max, pref.height_min, pref.height_max,
                        pref.education_min, pref.income_min, pref.marriage_status,
                        pref.preferred_province_code, pref.preferred_city_codes
                FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
                LEFT JOIN user_profile_completion c ON c.user_id = u.id
                LEFT JOIN user_auth ua ON ua.user_id = u.id
+               LEFT JOIN user_registration_intent ri ON ri.user_id = u.id AND ri.status = 1
                LEFT JOIN user_partner_preference pref ON pref.user_id = u.id
                WHERE u.id = :user_id"""),
         {"user_id": user_id},
@@ -192,6 +193,29 @@ async def _is_vip(db: AsyncSession, user_id: int) -> bool:
 def _skip_discovery_gates() -> bool:
     """测试环境专用：是否放开发现链路的异性过滤与资料完整度门禁。"""
     return settings.discovery_skip_gates_enabled
+
+
+# 注册身份 → 推荐性别口径（2026-11-14）。
+# - self_match（自己找对象）/ parent_match（父母帮找）：只推异性，沿用历史行为；
+# - companion（找搭子）：同性异性都推，搭子是兴趣社交，不按性别对立；
+# - 未选择身份的存量用户走 self_match 分支，保证改动前后推荐结果一致。
+#
+# 产品口径（2026-11-14 已确认，改动前先对一遍，别自作主张放开）：
+# 1. 身份只在注册/引导流程里选一次，不提供「老用户改身份」的入口，
+#    因此这里按「多数用户没有 intent_type」是常态而非异常来设计。
+# 2. 择偶偏好（年龄/身高/收入/学历等，respect_preferences）对 companion 同样生效，
+#    找搭子只是放开性别，不放开其他门禁。
+# 3. 搜索（search_discovery）不套身份口径：用户按昵称/标签指名找人，找对象身份
+#    也要能搜到同性。由 apply_intent_gender_gate=False 单独关闭；推荐流与广场仍生效。
+SAME_GENDER_OPEN_INTENTS = frozenset({"companion"})
+
+
+def _only_opposite_gender(viewer: dict[str, Any]) -> bool:
+    """当前用户是否只应看到异性。找搭子身份放开同性，其余身份（含未选择）只推异性。"""
+    intent = viewer.get("intent_type")
+    if intent is None:
+        return True
+    return str(intent).strip() not in SAME_GENDER_OPEN_INTENTS
 
 
 def _viewer_completion_ok(viewer: dict[str, Any]) -> bool:
@@ -462,6 +486,27 @@ async def _attach_card_qa_media(db: AsyncSession, cards: list[DiscoveryCard]) ->
             answer["media"] = media
 
 
+def _constellation_from_birthday(birthday: Any) -> str | None:
+    """按生日推导星座，口径与 C 端详情页 constellationFromBirthday 一致。
+
+    卡片第 4 格从「属相」改为「星座」（2026-11-14）。user_profile.constellation 是
+    可由用户手填的展示字段，老数据可能为空；为空时用生日兜底，避免同一人在首页
+    显示「未填写」而在详情页有星座。
+    """
+    if not isinstance(birthday, date):
+        return None
+    signs = ["摩羯座", "水瓶座", "双鱼座", "白羊座", "金牛座", "双子座",
+             "巨蟹座", "狮子座", "处女座", "天秤座", "天蝎座", "射手座"]
+    # 各月星座切换日（当日属于前一个星座），与 C 端详情页同一张表：
+    # 摩羯12/22 水瓶1/20 双鱼2/19 白羊3/21 金牛4/20 双子5/21
+    # 巨蟹6/22 狮子7/23 处女8/23 天秤9/23 天蝎10/24 射手11/23
+    cutoffs = [20, 19, 21, 20, 21, 22, 23, 23, 23, 24, 23, 22]
+    if not 1 <= birthday.month <= 12 or not 1 <= birthday.day <= 31:
+        return None
+    index = (birthday.month - 1 if birthday.day < cutoffs[birthday.month - 1] else birthday.month) % 12
+    return signs[index]
+
+
 def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = False) -> DiscoveryCard:
     certification_tags: list[str] = []
     if row.get("realname_status") == 2:
@@ -503,6 +548,9 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         if not detail_locked
         else None,
         zodiac=(row.get("zodiac") or None) if not detail_locked else None,
+        constellation=(
+            (row.get("constellation") or None) or _constellation_from_birthday(row.get("birthday"))
+        ) if not detail_locked else None,
         self_intro=(row.get("self_intro") or None) if not detail_locked else None,
         qa_answers=_card_qa_answers(row.get("qa_answers")) if not detail_locked else [],
         personal_tags=display_personal_tags(_json_list(row.get("interest_tags")) + _json_list(row.get("personality_tags")), _stored_custom_tags(row)) if not detail_locked else [],
@@ -597,12 +645,17 @@ def _candidate_snapshot(
     nickname: str | None,
     tag: str | None,
     respect_preferences: bool,
+    apply_intent_gender_gate: bool = True,
 ) -> CandidateQuerySnapshot:
     """Build one server-owned candidate SELECT/count pair.
 
     Both statements consume the same visibility and filter clauses.  The
     query fingerprint deliberately excludes the page and cursor so a cursor
     can advance through one logical result set without changing its identity.
+
+    ``apply_intent_gender_gate`` 只由调用方显式关闭（当前仅「按昵称/标签搜索」
+    关闭）：搜索是用户指名找人的动作，不该被身份口径限制成搜不到同性。
+    推荐流与广场保持默认 True。
     """
     scene = VisibilityScene.SEARCH if nickname or tag else VisibilityScene.DISCOVERY
     skip_gates = _skip_discovery_gates()
@@ -630,7 +683,16 @@ def _candidate_snapshot(
         )"""
         )
         params["search_tag"] = tag
-    if not skip_gates and viewer.get("gender") in (1, 2):
+    # 身份决定性别门禁（2026-11-14）：找对象只推异性，找搭子同性异性都推。
+    # 显式筛了性别（filters.gender）时以用户筛选为准，否则「找对象 + 筛同性」会恒空。
+    # apply_intent_gender_gate=False（搜索）时整段不生效：搜索按用户输入找人，
+    # 不套身份口径，否则找对象用户按昵称永远搜不到同性好友。
+    only_opposite_gender = (
+        apply_intent_gender_gate
+        and _only_opposite_gender(viewer)
+        and not filters.gender
+    )
+    if not skip_gates and viewer.get("gender") in (1, 2) and only_opposite_gender:
         clauses.append("u.gender <> :opposite_gender")
         params["opposite_gender"] = viewer["gender"]
     if respect_preferences:
@@ -658,7 +720,9 @@ def _candidate_snapshot(
     filter_facts.pop("cursor", None)
     filter_facts.pop("page", None)
     viewer_predicate_facts: dict[str, Any] = {
-        "gender": viewer.get("gender"),
+        # 事实记录「实际生效的性别门禁」：找搭子不筛性别时记 None，
+        # 让同一用户身份切换前后的游标指纹不同，不会把上一条口径的 cursor 续用。
+        "gender": viewer.get("gender") if only_opposite_gender else None,
     }
     if skip_gates:
         viewer_predicate_facts["gender"] = None
@@ -712,6 +776,7 @@ async def _candidate_query_page(
     nickname: str | None = None,
     tag: str | None = None,
     respect_preferences: bool = True,
+    apply_intent_gender_gate: bool = True,
 ) -> tuple[dict[str, Any], bool, CandidatePage]:
     viewer = await _viewer_context(db, viewer_id)
     viewer_is_vip = await _is_vip(db, viewer_id)
@@ -724,6 +789,7 @@ async def _candidate_query_page(
         nickname=nickname,
         tag=tag,
         respect_preferences=respect_preferences,
+        apply_intent_gender_gate=apply_intent_gender_gate,
     )
     try:
         page = await candidate_query_service.fetch_page(
@@ -746,6 +812,7 @@ async def _fetch_rows(
     nickname: str | None = None,
     tag: str | None = None,
     respect_preferences: bool = True,
+    apply_intent_gender_gate: bool = True,
 ) -> list[dict[str, Any]]:
     """Compatibility wrapper for callers that still need a candidate list."""
     _, _, page = await _candidate_query_page(
@@ -756,6 +823,7 @@ async def _fetch_rows(
         nickname=nickname,
         tag=tag,
         respect_preferences=respect_preferences,
+        apply_intent_gender_gate=apply_intent_gender_gate,
     )
     return page.items
 
@@ -809,6 +877,9 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         nickname=query.nickname,
         tag=query.tag,
         respect_preferences=False,
+        # 搜索单独放开性别（产品确认 2026-11-14）：按昵称/标签找人是明确的指名动作，
+        # 找对象用户也要能搜到同性好友。推荐流与广场不受影响，仍按身份口径过滤。
+        apply_intent_gender_gate=False,
     )
     items = [
         _card(

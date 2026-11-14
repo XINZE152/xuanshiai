@@ -115,6 +115,7 @@ def test_workspace_routes_are_registered_and_require_normal_user_authentication(
         "/api/v1/matchmaker/workbench/commission-entries",
         "/api/v1/matchmaker/workbench/commission-standards",
         "/api/v1/matchmaker/workbench/offline-income",
+        "/api/v1/matchmaker/workbench/activity-signups",
         "/api/v1/matchmaker/workbench/members/{member_id}/contact",
         "/api/v1/matchmaker/partner-center",
         "/api/v1/matchmaker/promoter-center",
@@ -124,7 +125,18 @@ def test_workspace_routes_are_registered_and_require_normal_user_authentication(
     assert client.get("/api/v1/matchmaker/management-center/access").status_code == 401
     # 分成标准与其余工作台接口同权限：普通用户 JWT，未登录 401，不要求后台账号。
     assert client.get("/api/v1/matchmaker/workbench/commission-standards").status_code == 401
+    assert client.get("/api/v1/matchmaker/workbench/activity-signups").status_code == 401
     assert paths["/api/v1/matchmaker/workbench/members"]["get"].get("security")
+
+
+def test_workspace_activity_signup_openapi_contract_is_paged_and_filterable() -> None:
+    operation = client.get("/openapi.json").json()["paths"]["/api/v1/matchmaker/workbench/activity-signups"]["get"]
+    parameters = {item["name"]: item for item in operation["parameters"]}
+    assert {"activity_id", "page", "page_size", "keyword", "filter_key"} <= set(parameters)
+    assert parameters["page"]["schema"]["default"] == 1
+    assert parameters["page_size"]["schema"]["default"] == 20
+    assert parameters["filter_key"]["schema"]["default"] == "all"
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("WorkspaceActivityPage")
 
 
 def test_workspace_role_name_follows_level_and_store_binding() -> None:

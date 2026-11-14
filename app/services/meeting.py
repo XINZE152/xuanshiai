@@ -130,9 +130,17 @@ async def create_matchmaker_meeting_request(
 
 
 async def list_my_meeting_requests(db: AsyncSession, current: CurrentUser) -> list[MeetingRequestResponse]:
-    result = await db.execute(text("""SELECT id, user_id, target_user_id, matchmaker_id,
-        service_id, organization_id, status, note, created_at, updated_at FROM meeting_request
-        WHERE user_id = :user_id OR target_user_id = :user_id ORDER BY created_at DESC, id DESC"""), {"user_id": current.id})
+    # P1（2026-11-14）：C 端卡片需要双方昵称与服务红娘名，与 admin_list_requests 一样 JOIN users。
+    # 之前只 SELECT meeting_request 自身字段，user_nickname/target_nickname/matchmaker_name 恒为 null。
+    result = await db.execute(text("""SELECT r.id, r.user_id, r.target_user_id, r.matchmaker_id,
+        r.service_id, r.organization_id, r.status, r.note, r.created_at, r.updated_at,
+        u.nickname AS user_nickname, t.nickname AS target_nickname, m.nickname AS matchmaker_name
+        FROM meeting_request r
+        LEFT JOIN users u ON u.id = r.user_id
+        LEFT JOIN users t ON t.id = r.target_user_id
+        LEFT JOIN users m ON m.id = r.matchmaker_id
+        WHERE r.user_id = :user_id OR r.target_user_id = :user_id
+        ORDER BY r.created_at DESC, r.id DESC"""), {"user_id": current.id})
     return [_request_response(row) for row in result.mappings().all()]
 
 
@@ -165,8 +173,15 @@ async def update_meeting_request(db: AsyncSession, current: CurrentUser, request
         await db.execute(text("UPDATE matchmaker_service_quota SET available_count = available_count + 1, used_count = GREATEST(used_count - 1, 0), refunded_count = refunded_count + 1 WHERE user_id = :id"), {"id": row["user_id"]})
     if request.status == "ACCEPTED":
         await emit_notification(db, recipient_user_id=int(row["user_id"]), actor_user_id=int(row["target_user_id"]), event_type="match_application_accepted", title="约见申请已通过", content="对方已接受你的约见申请", target_type="meeting_request", target_id=request_id)
-    elif request.status in ("DECLINED", "CLOSED"):
-        await emit_notification(db, recipient_user_id=int(row["user_id"]), actor_user_id=int(row["target_user_id"]), event_type="match_application_rejected", title="约见申请未通过", content=request.reason or "你的约见申请未通过", target_type="meeting_request", target_id=request_id)
+    elif request.status == "DECLINED":
+        await emit_notification(db, recipient_user_id=int(row["user_id"]), actor_user_id=int(row["target_user_id"]), event_type="match_application_rejected", title="约见申请未通过", content=request.reason or "对方婉拒了你的约见申请", target_type="meeting_request", target_id=request_id)
+    elif request.status == "CLOSED":
+        # P1（2026-11-14）：CLOSED 可由任一方发起，通知必须发给「另一方」而不是操作者本人。
+        # 之前一律发给发起方，导致发起方自己撤回时会收到一条「约见申请未通过」的诡异通知。
+        if current.id == int(row["user_id"]):
+            await emit_notification(db, recipient_user_id=int(row["target_user_id"]), actor_user_id=int(row["user_id"]), event_type="match_application_rejected", title="约见申请已撤回", content=request.reason or "对方撤回了约见申请", target_type="meeting_request", target_id=request_id)
+        else:
+            await emit_notification(db, recipient_user_id=int(row["user_id"]), actor_user_id=int(row["target_user_id"]), event_type="match_application_rejected", title="约见申请已关闭", content=request.reason or "对方关闭了约见申请", target_type="meeting_request", target_id=request_id)
     await db.commit()
     result = await db.execute(text("""SELECT id, user_id, target_user_id, matchmaker_id,
         service_id, organization_id, status, note, created_at, updated_at FROM meeting_request WHERE id = :id"""), {"id": request_id})
