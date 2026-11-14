@@ -41,6 +41,14 @@ from app.services.notifications import emit_notification
 from app.services.social import ensure_users_can_interact
 from app.services.matchmaker_staff_admin import STAFF_BASE, STAFF_SUCCESS_COUNT
 
+# 公开端（小程序红娘列表/详情）统计口径，2026-11-14 调整：
+# 牵线成功数该红娘牵线记录（SUCCEEDED），不再用付费服务完成单；
+# 累计服务数该红娘名下当前归属会员（resource_assignment 每会员最新有效行）。
+PUBLIC_SUCCESS_COUNT = "(SELECT COUNT(*) FROM matchmaker_introduction mi WHERE mi.matchmaker_id = u.id AND mi.status = 'SUCCEEDED')"
+PUBLIC_SERVED_MEMBER_COUNT = """(SELECT COUNT(*) FROM resource_assignment a JOIN users member ON member.id = a.user_id
+    WHERE a.matchmaker_id = u.id AND a.status = 1 AND member.deleted_at IS NULL
+    AND a.id = (SELECT MAX(latest.id) FROM resource_assignment latest WHERE latest.user_id = a.user_id AND latest.status = 1))"""
+
 
 def _datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
@@ -141,9 +149,19 @@ async def list_matchmakers(
         filters.append("role.status = :role_status")
         params["role_status"] = 1 if available else 2
     filter_sql = " AND ".join(filters)
+    if admin is None:
+        stats_select = f"{PUBLIC_SUCCESS_COUNT} AS success_count,\n        {PUBLIC_SERVED_MEMBER_COUNT} AS served_member_count,"
+        stats_join = ""
+    else:
+        stats_select = "COALESCE(service_stats.success_count, 0) AS success_count,"
+        stats_join = """LEFT JOIN (SELECT ms.matchmaker_id, COUNT(*) AS success_count
+          FROM matchmaker_service ms
+          JOIN payment_order po ON po.id = ms.order_id AND po.type = 3 AND po.status = 1
+          WHERE ms.status = 2 GROUP BY ms.matchmaker_id) service_stats
+          ON service_stats.matchmaker_id = app.user_id"""
     query = text(f"""SELECT app.user_id, u.nickname, u.avatar, app.intro, app.slogan, app.cert_images,
         app.application_details,
-        COALESCE(service_stats.success_count, 0) AS success_count,
+        {stats_select}
         COALESCE(rating_stats.rating_score, 0) AS rating_score,
         COALESCE(rating_stats.rating_count, 0) AS rating_count,
         role.status AS role_status
@@ -151,11 +169,7 @@ async def list_matchmakers(
         JOIN users u ON u.id = app.user_id AND u.status = 1
         JOIN user_role role ON role.user_id = app.user_id
           AND role.role_code = 'service_matchmaker' AND role.status IN (1, 2)
-        LEFT JOIN (SELECT ms.matchmaker_id, COUNT(*) AS success_count
-          FROM matchmaker_service ms
-          JOIN payment_order po ON po.id = ms.order_id AND po.type = 3 AND po.status = 1
-          WHERE ms.status = 2 GROUP BY ms.matchmaker_id) service_stats
-          ON service_stats.matchmaker_id = app.user_id
+        {stats_join}
         LEFT JOIN (SELECT matchmaker_id, AVG(score) AS rating_score, COUNT(*) AS rating_count
           FROM matchmaker_rating GROUP BY matchmaker_id) rating_stats
           ON rating_stats.matchmaker_id = app.user_id
@@ -180,9 +194,7 @@ async def _list_public_ranking(db: AsyncSession, page: int, page_size: int) -> M
     result = await db.execute(text(f"""SELECT u.id AS user_id, u.nickname, u.avatar,
         ma.intro, ma.slogan, ma.application_details,
         {STAFF_SUCCESS_COUNT} AS success_count,
-        (SELECT COUNT(*) FROM resource_assignment a JOIN users member ON member.id = a.user_id
-          WHERE a.matchmaker_id = u.id AND a.status = 1 AND member.deleted_at IS NULL
-          AND a.id = (SELECT MAX(latest.id) FROM resource_assignment latest WHERE latest.user_id = a.user_id AND latest.status = 1)) AS served_member_count,
+        {PUBLIC_SERVED_MEMBER_COUNT} AS served_member_count,
         (SELECT COUNT(*) FROM resource_assignment a JOIN users member ON member.id = a.user_id
           WHERE a.matchmaker_id = u.id AND a.status = 1 AND member.deleted_at IS NULL
           AND a.id = (SELECT MAX(latest.id) FROM resource_assignment latest WHERE latest.user_id = a.user_id AND latest.status = 1)
@@ -207,7 +219,8 @@ async def get_matchmaker(
 ) -> MatchmakerCard:
     if admin is None:
         result = await db.execute(text(f"""SELECT u.id AS user_id, u.nickname, u.avatar,
-            ma.intro, ma.slogan, ma.application_details, {STAFF_SUCCESS_COUNT} AS success_count,
+            ma.intro, ma.slogan, ma.application_details, {PUBLIC_SUCCESS_COUNT} AS success_count,
+            {PUBLIC_SERVED_MEMBER_COUNT} AS served_member_count,
             COALESCE((SELECT AVG(score) FROM matchmaker_rating WHERE matchmaker_id = u.id), 0) AS rating_score,
             (SELECT COUNT(*) FROM matchmaker_rating WHERE matchmaker_id = u.id) AS rating_count,
             (SELECT MAX(status) FROM user_role WHERE user_id = u.id AND role_code = 'service_matchmaker') AS role_status

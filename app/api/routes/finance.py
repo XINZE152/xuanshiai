@@ -264,14 +264,14 @@ async def admin_commission_entries(
     "/commission-entries",
     response_model=MatchmakerCommissionEntryCreateResult,
     status_code=201,
-    summary="后台手工录入一笔服务红娘分成（不动余额账本）",
+    summary="后台手工录入一笔服务红娘分成（生成待结算余额明细）",
 )
 async def admin_create_commission_entry_route(
     body: MatchmakerCommissionEntryCreate = Body(...),
     admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> MatchmakerCommissionEntryCreateResult:
-    """录入一笔服务红娘分成：只写 commission_entry（PENDING）+ 审计，不写 account_ledger、不动余额。"""
+    """录入一笔服务红娘分成：写 commission_entry（PENDING）+ account_ledger（CREDIT/PENDING）+ 审计；释放结算后计入红娘余额。"""
     admin.require("finance.write")
     return await admin_create_commission_entry(db, _finance_actor(admin), body)
 

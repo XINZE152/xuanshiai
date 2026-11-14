@@ -72,6 +72,9 @@ class FakeDB:
         self.calls.append((sql, params))
         return self.handler(sql, params)
 
+    async def scalar(self, statement: object, params: dict | None = None) -> object:
+        return (await self.execute(statement, params)).scalar()
+
     async def commit(self) -> None:
         self.commits += 1
 
