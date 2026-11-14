@@ -93,7 +93,7 @@ class PaymentOrderResponse(BaseModel):
 
 class CommissionEntryResponse(BaseModel):
     id: int
-    order_id: int
+    order_id: int | None  # 手工录入分成无关联订单，为 NULL
     beneficiary_type: str
     beneficiary_id: int
     base_amount: Decimal
@@ -105,9 +105,9 @@ class CommissionEntryResponse(BaseModel):
 class MatchmakerCommissionEntryCreate(BaseModel):
     """后台手工录入一笔服务红娘分成。
 
-    口径（与合伙人人手工录入同源，2026-10-28 决策）：只写 commission_entry + 审计日志，
-    **不动余额账本**（不写 account_ledger，不凭空增加可提现余额）；默认 PENDING，
-    供红娘线上分成明细页展示与事后核对。
+    口径（2026-11-14 调整）：写 commission_entry（PENDING）+ account_ledger
+    待结算余额明细（CREDIT/PENDING）+ 审计日志；释放结算后翻转 AVAILABLE
+    计入红娘可提现余额（小程序与后台同口径读账本）。
     """
 
     matchmaker_user_id: int = Field(ge=1, description="服务红娘 user id")

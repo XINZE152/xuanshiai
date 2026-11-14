@@ -497,6 +497,43 @@ class WorkspaceIntroductionContactViewed(BaseModel):
     to_phone_viewed: bool = Field(description="当前红娘在本条、本轮已查看被牵线方有效电话")
 
 
+class WorkspaceActivityOption(BaseModel):
+    id: int
+    title: str
+
+
+class WorkspaceActivitySignup(BaseModel):
+    id: int
+    user_id: int
+    nickname: str
+    avatar: str | None = None
+    status: int
+    checked_in: bool
+    created_at: datetime
+    pay_status: str
+    pay_amount: str
+
+
+class WorkspaceActivityStatistics(BaseModel):
+    total: int = 0
+    pending: int = 0
+    approved: int = 0
+    rejected: int = 0
+    checked_in: int = 0
+    not_checked_in: int = 0
+
+
+class WorkspaceActivityPage(BaseModel):
+    activities: list[WorkspaceActivityOption]
+    selected_activity_id: int | None
+    statistics: WorkspaceActivityStatistics
+    items: list[WorkspaceActivitySignup]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
+
+
 class WorkspaceCommissionEntry(BaseModel):
     """红娘本人的一笔线上分成：消费会员与分成事件由订单、规则回带。"""
 

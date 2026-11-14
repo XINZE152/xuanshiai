@@ -1216,10 +1216,12 @@ async def admin_create_commission_entry(
     actor: CurrentUser,
     body: MatchmakerCommissionEntryCreate,
 ) -> MatchmakerCommissionEntryCreateResult:
-    """后台手工录入一笔服务红娘分成：只写 commission_entry（PENDING）+ 审计日志，不动余额账本。
+    """后台手工录入一笔服务红娘分成：写 commission_entry（PENDING）+ 待结算余额明细 + 审计日志。
 
-    与合伙人手工录入同源，但按 2026-10-28 决策不写 account_ledger（不凭空增加可提现余额）；
-    记录落入「红娘线上分成明细」页供展示与事后核对。
+    2026-11-14 调整：录入即写 account_ledger（CREDIT/PENDING，source_type='commission'），
+    与订单结算同键位（ledger:commission:{entry_id}）；释放结算（release_commission）
+    翻转 AVAILABLE 后计入红娘可提现余额。小程序 /finance/balance 与后台钱包
+    同口径读 account_ledger，不另写余额字段。
     """
     matchmaker = await db.scalar(
         text("SELECT id FROM users WHERE id = :id"), {"id": body.matchmaker_user_id}
@@ -1269,6 +1271,20 @@ async def admin_create_commission_entry(
         },
     )
     entry_id = int(result.lastrowid)
+
+    # 余额明细与分成明细同事务生成：待结算 CREDIT，释放结算时由 release_commission 翻转为 AVAILABLE。
+    await db.execute(
+        text("""INSERT INTO account_ledger
+            (account_type, account_id, direction, amount, state, source_type, source_id, idempotency_key)
+            VALUES ('user', :account_id, 'CREDIT', :amount, 'PENDING', 'commission', :source_id, :key)
+            ON DUPLICATE KEY UPDATE id = id"""),
+        {
+            "account_id": body.matchmaker_user_id,
+            "amount": f"{amount:.2f}",
+            "source_id": entry_id,
+            "key": f"ledger:commission:{entry_id}",
+        },
+    )
 
     await db.execute(
         text("""INSERT INTO business_audit_log
