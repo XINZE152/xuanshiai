@@ -709,17 +709,23 @@ async def list_workspace_commission_entries(
         "offset": (page - 1) * page_size,
     }
     clause = "ce.beneficiary_type = 'service_matchmaker' AND ce.beneficiary_id = :user_id"
-    base = """FROM commission_entry ce
-        LEFT JOIN payment_order po ON po.id = ce.order_id
-        LEFT JOIN users c ON c.id = po.user_id
+    base = "FROM commission_entry ce"
+    detail_joins = """LEFT JOIN payment_order po ON po.id = ce.order_id
+        LEFT JOIN users c ON c.id = COALESCE(po.user_id, (
+            SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(a.after_json, '$.consumer_user_id')) AS UNSIGNED)
+            FROM business_audit_log a
+            WHERE ce.source = 'manual' AND a.resource_type = 'commission_entry'
+                AND a.resource_id = ce.id AND a.action = 'finance.matchmaker_commission.create'
+            ORDER BY a.id DESC LIMIT 1
+        ))
         LEFT JOIN commission_rule rule ON rule.id = ce.rule_id"""
     rows = await db.execute(
         text(
             f"""SELECT ce.id, ce.created_at, ce.status, ce.base_amount, ce.amount,
-            po.order_no, po.user_id AS consumer_id, po.product_name,
+            po.order_no, c.id AS consumer_id, po.product_name,
             c.nickname AS consumer_name, c.avatar AS consumer_avatar,
             COALESCE(rule.name, po.product_name) AS event_name
-            {base} WHERE {clause} ORDER BY ce.created_at DESC, ce.id DESC
+            {base} {detail_joins} WHERE {clause} ORDER BY ce.created_at DESC, ce.id DESC
             LIMIT :limit OFFSET :offset"""
         ),
         params,

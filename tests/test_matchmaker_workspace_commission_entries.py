@@ -93,6 +93,8 @@ async def test_commission_entries_enrich_consumer_and_event_name() -> None:
     assert "ce.beneficiary_type = 'service_matchmaker' AND ce.beneficiary_id = :user_id" in db.sql[0]
     assert db.params[0]["user_id"] == 21
     assert "LEFT JOIN payment_order po ON po.id = ce.order_id" in db.sql[0]
+    assert "a.action = 'finance.matchmaker_commission.create'" in db.sql[0]
+    assert "c.id AS consumer_id" in db.sql[0]
     assert "COALESCE(rule.name, po.product_name) AS event_name" in db.sql[0]
     assert "ce.status <> 'REVERSED'" in db.sql[2]
 
