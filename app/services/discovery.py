@@ -205,6 +205,8 @@ def _skip_discovery_gates() -> bool:
 #    因此这里按「多数用户没有 intent_type」是常态而非异常来设计。
 # 2. 择偶偏好（年龄/身高/收入/学历等，respect_preferences）对 companion 同样生效，
 #    找搭子只是放开性别，不放开其他门禁。
+# 3. 搜索（search_discovery）不套身份口径：用户按昵称/标签指名找人，找对象身份
+#    也要能搜到同性。由 apply_intent_gender_gate=False 单独关闭；推荐流与广场仍生效。
 SAME_GENDER_OPEN_INTENTS = frozenset({"companion"})
 
 
@@ -643,12 +645,17 @@ def _candidate_snapshot(
     nickname: str | None,
     tag: str | None,
     respect_preferences: bool,
+    apply_intent_gender_gate: bool = True,
 ) -> CandidateQuerySnapshot:
     """Build one server-owned candidate SELECT/count pair.
 
     Both statements consume the same visibility and filter clauses.  The
     query fingerprint deliberately excludes the page and cursor so a cursor
     can advance through one logical result set without changing its identity.
+
+    ``apply_intent_gender_gate`` 只由调用方显式关闭（当前仅「按昵称/标签搜索」
+    关闭）：搜索是用户指名找人的动作，不该被身份口径限制成搜不到同性。
+    推荐流与广场保持默认 True。
     """
     scene = VisibilityScene.SEARCH if nickname or tag else VisibilityScene.DISCOVERY
     skip_gates = _skip_discovery_gates()
@@ -678,7 +685,13 @@ def _candidate_snapshot(
         params["search_tag"] = tag
     # 身份决定性别门禁（2026-11-14）：找对象只推异性，找搭子同性异性都推。
     # 显式筛了性别（filters.gender）时以用户筛选为准，否则「找对象 + 筛同性」会恒空。
-    only_opposite_gender = _only_opposite_gender(viewer) and not filters.gender
+    # apply_intent_gender_gate=False（搜索）时整段不生效：搜索按用户输入找人，
+    # 不套身份口径，否则找对象用户按昵称永远搜不到同性好友。
+    only_opposite_gender = (
+        apply_intent_gender_gate
+        and _only_opposite_gender(viewer)
+        and not filters.gender
+    )
     if not skip_gates and viewer.get("gender") in (1, 2) and only_opposite_gender:
         clauses.append("u.gender <> :opposite_gender")
         params["opposite_gender"] = viewer["gender"]
@@ -763,6 +776,7 @@ async def _candidate_query_page(
     nickname: str | None = None,
     tag: str | None = None,
     respect_preferences: bool = True,
+    apply_intent_gender_gate: bool = True,
 ) -> tuple[dict[str, Any], bool, CandidatePage]:
     viewer = await _viewer_context(db, viewer_id)
     viewer_is_vip = await _is_vip(db, viewer_id)
@@ -775,6 +789,7 @@ async def _candidate_query_page(
         nickname=nickname,
         tag=tag,
         respect_preferences=respect_preferences,
+        apply_intent_gender_gate=apply_intent_gender_gate,
     )
     try:
         page = await candidate_query_service.fetch_page(
@@ -797,6 +812,7 @@ async def _fetch_rows(
     nickname: str | None = None,
     tag: str | None = None,
     respect_preferences: bool = True,
+    apply_intent_gender_gate: bool = True,
 ) -> list[dict[str, Any]]:
     """Compatibility wrapper for callers that still need a candidate list."""
     _, _, page = await _candidate_query_page(
@@ -807,6 +823,7 @@ async def _fetch_rows(
         nickname=nickname,
         tag=tag,
         respect_preferences=respect_preferences,
+        apply_intent_gender_gate=apply_intent_gender_gate,
     )
     return page.items
 
@@ -860,6 +877,9 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         nickname=query.nickname,
         tag=query.tag,
         respect_preferences=False,
+        # 搜索单独放开性别（产品确认 2026-11-14）：按昵称/标签找人是明确的指名动作，
+        # 找对象用户也要能搜到同性好友。推荐流与广场不受影响，仍按身份口径过滤。
+        apply_intent_gender_gate=False,
     )
     items = [
         _card(
