@@ -1,5 +1,7 @@
 """Homepage discovery, card interactions and public profile routes."""
 
+from typing import Annotated
+
 from fastapi import APIRouter, Body, Depends, Header, Path, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,12 +67,12 @@ async def filter_options() -> FilterOptionsResponse:
 
 
 @router.get("/recommendations", response_model=DiscoveryPage, summary="查询推荐名片流")
-async def recommendations(filters: DiscoveryFilters = Depends(), current: CurrentUser = Depends(get_browsable_user), db: AsyncSession = Depends(get_db)) -> DiscoveryPage:
+async def recommendations(filters: Annotated[DiscoveryFilters, Query()], current: CurrentUser = Depends(get_browsable_user), db: AsyncSession = Depends(get_db)) -> DiscoveryPage:
     return await get_discovery_page(db, current.id, filters, plaza=False)
 
 
 @router.get("/plaza", response_model=DiscoveryPage, summary="查询广场名片流")
-async def plaza(filters: DiscoveryFilters = Depends(), current: CurrentUser = Depends(get_browsable_user), db: AsyncSession = Depends(get_db)) -> DiscoveryPage:
+async def plaza(filters: Annotated[DiscoveryFilters, Query()], current: CurrentUser = Depends(get_browsable_user), db: AsyncSession = Depends(get_db)) -> DiscoveryPage:
     return await get_discovery_page(db, current.id, filters, plaza=True)
 
 
