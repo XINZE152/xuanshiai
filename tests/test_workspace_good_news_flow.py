@@ -10,8 +10,33 @@ from pydantic import ValidationError
 from app.schemas.matchmaker_workspace import WorkspaceGoodNewsBlessingCreate, WorkspacePennantCreate
 from app.services import workspace_good_news as service
 from app.services.matchmaker_workspace import WorkspaceActor
+from app.services import good_news
 
 ACTOR = WorkspaceActor(user_id=21, display_name="测试红娘", level="NORMAL", organization_id=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level,org,expected", [("SUPER", None, None), ("SUPER", 8, "m.organization_id"), ("NORMAL", 8, "m.matchmaker_id")])
+async def test_news_list_scope_matches_workspace(level, org, expected):
+    response = SimpleNamespace(scalar=lambda: 0, mappings=lambda: SimpleNamespace(all=lambda: []))
+    db = SimpleNamespace(execute=AsyncMock(return_value=response))
+    actor = WorkspaceActor(21, "红娘", level, org)
+    await good_news.list_workspace(db, actor=actor, stage=None, page=1, page_size=20)
+    sql = str(db.execute.await_args_list[0].args[0])
+    if expected is None:
+        assert "m.organization_id =" not in sql and "m.matchmaker_id =" not in sql
+    else:
+        assert expected in sql
+    assert "m.review_status = 'APPROVED'" in sql and "m.submitted_by_user_id = :actor_id" in sql
+
+
+@pytest.mark.asyncio
+async def test_head_office_report_requires_active_assignment():
+    db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar=lambda: 0)))
+    with pytest.raises(HTTPException) as error:
+        await good_news._ensure_workspace_member(db, WorkspaceActor(21, "红娘", "SUPER", None), 1)
+    assert error.value.status_code == 403
+    assert "ra.status = 1" in str(db.execute.await_args.args[0])
 
 
 def result(row=None, lastrowid=7):
