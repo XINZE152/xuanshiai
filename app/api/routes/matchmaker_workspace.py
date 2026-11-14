@@ -1,5 +1,7 @@
 """Mobile service-matchmaker workbench routes protected by normal user JWTs."""
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, File, Form, Path, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,12 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentUser, get_current_user
 from app.db.session import get_db
 from app.schemas.matchmaker_workspace import (
+    WorkspaceActivityPage,
     WorkspaceGoodNewsBlessingCreate, WorkspaceGoodNewsBlessingPage, WorkspaceGoodNewsBlessingResult,
     WorkspaceGoodNewsItem, WorkspacePennantCreate, WorkspacePennantItem,
 )
 from app.services.workspace_good_news import (
     create_blessing, create_pennant, good_news_detail, list_blessings, pennant_detail,
 )
+from app.services.workspace_activity import list_workspace_activity_signups
 from app.schemas.auth import (
     CompletionResponse,
     NicknameUpdateRequest,
@@ -166,6 +170,20 @@ from app.services.matchmaker_member_profile import (
 
 
 router = APIRouter(prefix="/matchmaker")
+
+
+@router.get('/workbench/activity-signups', response_model=WorkspaceActivityPage, summary='红娘工作台活动报名')
+async def workbench_activity_signups(
+    activity_id: int | None = Query(None, ge=1),
+    page: int = Query(1, ge=1, le=1000),
+    page_size: int = Query(20, ge=1, le=100),
+    keyword: str | None = Query(None, max_length=80),
+    filter_key: Literal['all', 'pending', 'approved', 'rejected', 'checked_in', 'not_checked_in'] = 'all',
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceActivityPage:
+    return await list_workspace_activity_signups(db, await require_workspace(db, current),
+        activity_id, page, page_size, keyword.strip() if keyword else None, filter_key)
 
 
 @router.get("/management-center/access", response_model=MatchmakerWorkspaceAccess, summary="查询服务红娘工作台准入")
