@@ -152,6 +152,12 @@ jobs:
         run: uv run --no-sync ruff check app/services/discovery.py tests/test_discovery_intent_gender_gate.py
       - name: Registration intent gender gate contracts
         run: uv run --no-sync pytest tests/test_discovery_intent_gender_gate.py -q
+      # GUEST-PREVIEW-20261115：匿名游客预览（推荐/社区/活动）。
+      # 新增测试必须 Ruff + pytest 双登记（PROJECT_RULES 7.1）。
+      - name: Ruff (public guest preview)
+        run: uv run --no-sync ruff check app/schemas/public_preview.py app/services/public_preview.py app/api/routes/public_preview.py app/api/router.py tests/test_public_guest_preview.py
+      - name: Public guest preview contracts
+        run: uv run --no-sync pytest tests/test_public_guest_preview.py -q
 
   ai-unit:
     runs-on: ubuntu-24.04
