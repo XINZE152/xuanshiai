@@ -38,6 +38,7 @@ from app.schemas.finance import (
     WithdrawalCreate,
     WithdrawalResponse,
     WithdrawalReview,
+    WithdrawalPayeeResponse,
     LedgerEntryPage,
     PaymentOrderAdminPage,
     WithdrawalAdminPage,
@@ -69,6 +70,8 @@ from app.services.finance import (
     release_commission,
     mark_order_paid_and_settle,
     request_withdrawal,
+    list_my_withdrawals,
+    get_withdrawal_payee,
     review_withdrawal,
     create_product_commission_config,
     admin_list_ledger,
@@ -120,8 +123,19 @@ async def commission_entries(current: CurrentUser = Depends(get_current_user), d
 
 
 @router.post("/withdrawals", response_model=WithdrawalResponse, status_code=201, summary="申请提现")
-async def withdrawal(body: WithdrawalCreate = Body(...), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> WithdrawalResponse:
-    return await request_withdrawal(db, current, body)
+async def withdrawal(body: WithdrawalCreate = Body(...), idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=128), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> WithdrawalResponse:
+    return await request_withdrawal(db, current, body, idempotency_key)
+
+
+@router.get("/withdrawals", response_model=list[WithdrawalResponse], summary="查询我的提现申请")
+async def my_withdrawals(current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> list[WithdrawalResponse]:
+    return await list_my_withdrawals(db, current.id)
+
+
+@admin_router.get("/withdrawals/{withdrawal_id}/payee", response_model=WithdrawalPayeeResponse, summary="查看提现收款信息")
+async def withdrawal_payee(withdrawal_id: int = Path(..., ge=1), admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> WithdrawalPayeeResponse:
+    admin.require("finance.write")
+    return WithdrawalPayeeResponse(**await get_withdrawal_payee(db, withdrawal_id, admin))
 
 
 @admin_router.post("/commission-rules", response_model=CommissionRuleResponse, status_code=201, summary="创建分成规则")

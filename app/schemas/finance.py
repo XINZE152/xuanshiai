@@ -191,7 +191,25 @@ class AccountBalanceResponse(BaseModel):
 
 class WithdrawalCreate(BaseModel):
     amount: Decimal = Field(gt=0, le=1000000, decimal_places=2)
-    payee_masked: str = Field(min_length=1, max_length=128)
+    payee_masked: str | None = Field(default=None, min_length=1, max_length=128)
+    method: Literal["wechat", "bank", "alipay"] | None = None
+    account: str | None = Field(default=None, min_length=1, max_length=100)
+    payee_name: str | None = Field(default=None, min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def validate_payee(self):
+        if any(value is not None for value in (self.method, self.account, self.payee_name)):
+            if not self.method or not self.account or not self.account.strip() or not self.payee_name or not self.payee_name.strip():
+                raise ValueError("请填写完整收款信息")
+        else:
+            raise ValueError("请填写完整收款账号和收款人姓名")
+        return self
+
+
+class WithdrawalPayeeResponse(BaseModel):
+    method: Literal["wechat", "bank", "alipay"]
+    account: str
+    payee_name: str
 
 
 class WithdrawalResponse(BaseModel):

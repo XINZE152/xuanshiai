@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import uuid
 from datetime import UTC, datetime
@@ -9,6 +11,7 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
 from fastapi import HTTPException
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -498,7 +501,48 @@ async def get_balance(db: AsyncSession, account_type: str, account_id: int) -> A
     return AccountBalanceResponse(account_type=account_type, account_id=account_id, pending_amount=row["pending_amount"], available_amount=row["available_amount"])
 
 
-async def request_withdrawal(db: AsyncSession, current: CurrentUser, request: WithdrawalCreate) -> WithdrawalResponse:
+def _withdrawal_cipher() -> Fernet:
+    key = settings.withdrawal_payee_encryption_key
+    if key is None:
+        raise HTTPException(503, detail="提现收款信息加密尚未配置")
+    try:
+        return Fernet(key.get_secret_value().encode())
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(503, detail="提现收款信息加密配置无效") from exc
+
+
+def encrypt_sensitive(value: str) -> str:
+    return _withdrawal_cipher().encrypt(value.encode()).decode()
+
+
+def decrypt_sensitive(value: str) -> str:
+    try:
+        return _withdrawal_cipher().decrypt(value.encode()).decode()
+    except (InvalidToken, ValueError) as exc:
+        raise HTTPException(503, detail="收款信息暂不可读取，请联系管理员") from exc
+
+
+async def request_withdrawal(db: AsyncSession, current: CurrentUser, request: WithdrawalCreate, idempotency_key: str) -> WithdrawalResponse:
+    # Lock a stable account row before any consistent read: this also serializes
+    # retries when there are no ledger rows to lock.
+    await db.execute(text("SELECT id FROM users WHERE id = :id FOR UPDATE"), {"id": current.id})
+    key_digest = hashlib.sha256(f"{current.id}:{idempotency_key}".encode()).hexdigest()
+    event_key = f"withdrawal-request:{key_digest}"
+    canonical = request.model_dump(mode="json")
+    canonical["amount"] = f"{request.amount:.2f}"
+    if request.account:
+        _withdrawal_cipher()
+    hash_key = settings.withdrawal_payee_encryption_key.get_secret_value() if settings.withdrawal_payee_encryption_key else settings.secret_key
+    fingerprint = hmac.new(hash_key.encode(), json.dumps(canonical, sort_keys=True, ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
+    prior = (await db.execute(text("""SELECT we.payload_hash, wr.id, wr.account_type, wr.account_id,
+        wr.amount, wr.status, wr.payee_masked, wr.failure_reason, wr.created_at, wr.updated_at
+        FROM withdrawal_event we JOIN withdrawal_request wr ON wr.id = we.withdrawal_id
+        WHERE we.provider_event_id = :key AND wr.account_type = 'user' AND wr.account_id = :user_id"""),
+        {"key": event_key, "user_id": current.id})).mappings().first()
+    if prior is not None:
+        if not hmac.compare_digest(str(prior["payload_hash"] or ""), fingerprint):
+            raise HTTPException(409, detail="该提现请求编号已用于其他申请，请先查看提现记录")
+        return _withdrawal(prior)
     # 财务配置：提现开关与单笔最低金额（后台「系统配置」页实时可调）
     policy = await withdrawal_policy(db)
     if not policy["enabled"]:
@@ -512,20 +556,51 @@ async def request_withdrawal(db: AsyncSession, current: CurrentUser, request: Wi
     balance = await get_balance(db, "user", current.id)
     if Decimal(str(balance.available_amount)) < request.amount:
         raise HTTPException(409, detail="可提现余额不足")
+    masked = request.payee_masked
+    if request.account and request.method and request.payee_name:
+        masked = f"{request.method} / ****{request.account.strip()[-4:]}"
     result = await db.execute(text("""INSERT INTO withdrawal_request
         (account_type, account_id, amount, payee_masked) VALUES ('user', :user_id, :amount, :payee)"""), {
-        "user_id": current.id, "amount": request.amount, "payee": request.payee_masked,
+        "user_id": current.id, "amount": request.amount, "payee": masked,
     })
     withdrawal_id = int(result.lastrowid)
+    if request.account and request.method and request.payee_name:
+        encrypted = encrypt_sensitive(json.dumps({"method": request.method, "account": request.account.strip(), "payee_name": request.payee_name.strip()}, ensure_ascii=False))
+        await db.execute(text("INSERT INTO withdrawal_payee_secret (withdrawal_id, ciphertext) VALUES (:id, :ciphertext)"), {"id": withdrawal_id, "ciphertext": encrypted})
     await db.execute(text("""INSERT INTO account_ledger
         (account_type, account_id, direction, amount, state, source_type, source_id, idempotency_key)
         VALUES ('user', :user_id, 'DEBIT', :amount, 'AVAILABLE', 'withdrawal', :source_id, :key)"""), {
         "user_id": current.id, "amount": request.amount, "source_id": withdrawal_id, "key": f"ledger:withdrawal:{withdrawal_id}",
     })
+    await db.execute(text("""INSERT INTO withdrawal_event (withdrawal_id, event_type, provider_event_id, payload_hash)
+        VALUES (:id, 'REQUEST', :key, :fingerprint)"""),
+        {"id": withdrawal_id, "key": event_key, "fingerprint": fingerprint})
     await db.commit()
     result = await db.execute(text("""SELECT id, account_type, account_id, amount, status,
         payee_masked, failure_reason, created_at, updated_at FROM withdrawal_request WHERE id = :id"""), {"id": withdrawal_id})
     return _withdrawal(result.mappings().one())
+
+
+async def list_my_withdrawals(db: AsyncSession, user_id: int) -> list[WithdrawalResponse]:
+    result = await db.execute(text("""SELECT id, account_type, account_id, amount, status, payee_masked,
+        failure_reason, created_at, updated_at FROM withdrawal_request
+        WHERE account_type = 'user' AND account_id = :user_id ORDER BY id DESC LIMIT 100"""), {"user_id": user_id})
+    return [_withdrawal(row) for row in result.mappings().all()]
+
+
+async def get_withdrawal_payee(db: AsyncSession, withdrawal_id: int, admin: CurrentMatchmakerAdmin) -> dict:
+    params: dict[str, object] = {"id": withdrawal_id}
+    scope = _account_anchor_scope(admin, params, type_column="wr.account_type", account_column="wr.account_id")
+    result = await db.execute(text(f"""SELECT s.ciphertext FROM withdrawal_request wr
+        JOIN withdrawal_payee_secret s ON s.withdrawal_id = wr.id WHERE wr.id = :id AND ({scope})"""), params)
+    encrypted = result.scalar()
+    if not encrypted:
+        raise HTTPException(404, detail="收款信息不存在或无权查看")
+    value = json.loads(decrypt_sensitive(encrypted))
+    await db.execute(text("""INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id)
+        VALUES (:actor, 'finance.withdrawal_payee.view', 'withdrawal_request', :id)"""), {"actor": admin.account.id, "id": withdrawal_id})
+    await db.commit()
+    return value
 
 
 async def review_withdrawal(db: AsyncSession, admin: CurrentUser, withdrawal_id: int, request: WithdrawalReview, *, scope_admin: CurrentMatchmakerAdmin | None = None) -> WithdrawalResponse:
@@ -539,7 +614,7 @@ async def review_withdrawal(db: AsyncSession, admin: CurrentUser, withdrawal_id:
     if not row:
         raise HTTPException(404, detail="提现申请不存在")
     allowed = {
-        "PENDING_REVIEW": {"APPROVED", "REJECTED"},
+        "PENDING_REVIEW": {"APPROVED", "REJECTED", "SUCCEEDED"},
         "APPROVED": {"PROCESSING", "FAILED", "REJECTED"},
         "PROCESSING": {"SUCCEEDED", "FAILED"},
     }

@@ -875,6 +875,13 @@ BUSINESS_TABLES = {
             KEY `idx_withdrawal_status` (`status`, `created_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='提现申请'
     """,
+    "withdrawal_payee_secret": """
+        CREATE TABLE IF NOT EXISTS withdrawal_payee_secret (
+            withdrawal_id bigint unsigned NOT NULL PRIMARY KEY,
+            ciphertext text NOT NULL,
+            created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
     "withdrawal_event": """
         CREATE TABLE IF NOT EXISTS `withdrawal_event` (
             `id` bigint unsigned NOT NULL AUTO_INCREMENT,

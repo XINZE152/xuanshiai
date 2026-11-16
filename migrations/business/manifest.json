@@ -198,6 +198,19 @@
       }
     },
     {
+      "version": "20261116_01_withdrawal_payee",
+      "up": "20261116_01_withdrawal_payee_up.sql",
+      "down": "20261116_01_withdrawal_payee_down.sql",
+      "verify": "20261116_01_withdrawal_payee_verify.sql",
+      "verify_previous": "20261116_01_withdrawal_payee_verify_previous.sql",
+      "sha256": {
+        "up": "2392d44c481ac219a8c62c3ab704bc1b5c928583dbdab7bc710de749080de2f7",
+        "down": "9c242a500faf2c5b2a7b89be092a40ad0d8758342db56ae98a90c1eaf57cbe74",
+        "verify": "ef91b964c6c2118470dabf5136460b6dbfea81623bccc57fb3eebbcb17928f5b",
+        "verify_previous": "57b43e882977be0414321054b5234a8c5621670b5b11fd4973b48be1680d7256"
+      }
+    },
+    {
       "version": "20261110_01_point_redeem_order_count",
       "up": "20261110_01_point_redeem_order_count_up.sql",
       "down": "20261110_01_point_redeem_order_count_down.sql",

@@ -94,6 +94,8 @@ jobs:
         run: uv run --no-sync ruff check tests/test_workspace_member_filter_scope.py
       - name: Test workspace activity check-in
         run: uv run --no-sync pytest tests/test_workspace_activity_signups.py tests/test_matchmaker_workspace_contracts.py -q
+      - name: Test withdrawal submission safeguards
+        run: uv run --no-sync pytest tests/test_withdrawal_submission_idempotency.py -q
       - name: Ruff (merchant transfer gateway)
         run: uv run --no-sync ruff check app/services/payment/wechat_v3.py app/services/payment/transfer_state.py app/services/payment/transfer_notification.py tests/test_wechat_merchant_transfer_gateway.py tests/test_wechat_transfer_state.py tests/test_wechat_transfer_notification.py
       - name: Test merchant transfer gateway

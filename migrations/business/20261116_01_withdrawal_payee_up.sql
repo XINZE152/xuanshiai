@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS withdrawal_payee_secret (
+  withdrawal_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+  ciphertext TEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

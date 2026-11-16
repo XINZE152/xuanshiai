@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
 
     secret_key: str = "change-me-in-local-env"
+    withdrawal_payee_encryption_key: SecretStr | None = None
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 30
