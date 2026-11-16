@@ -154,6 +154,12 @@ jobs:
         run: uv run --no-sync ruff check app/services/discovery.py tests/test_discovery_intent_gender_gate.py
       - name: Registration intent gender gate contracts
         run: uv run --no-sync pytest tests/test_discovery_intent_gender_gate.py -q
+      # GUEST-PREVIEW-20261115：匿名游客预览（推荐/社区/活动）。
+      # 新增测试必须 Ruff + pytest 双登记（PROJECT_RULES 7.1）。
+      - name: Ruff (public guest preview)
+        run: uv run --no-sync ruff check app/schemas/public_preview.py app/services/public_preview.py app/api/routes/public_preview.py app/api/router.py tests/test_public_guest_preview.py
+      - name: Public guest preview contracts
+        run: uv run --no-sync pytest tests/test_public_guest_preview.py -q
 
   ai-unit:
     runs-on: ubuntu-24.04
@@ -281,6 +287,7 @@ jobs:
           enable-cache: true
       - name: Install backend and dev dependencies
         run: uv sync --locked --extra dev
+      # 2026-11-07 客源意向 A-G 七档：工作台契约漏跟扩档导致 workbench/leads 500。
       - name: Ruff (admin scope, redaction and signup soft delete scope)
         run: >-
           uv run --no-sync ruff check
@@ -293,7 +300,6 @@ jobs:
           app/services/region/http_client.py app/services/region/online_ip.py
           app/services/region/online_phone.py
           app/services/customer_lead_admin.py app/services/finance.py
-          # 2026-11-07 客源意向 A-G 七档：工作台契约漏跟扩档导致 workbench/leads 500。
           app/schemas/customer_lead_admin.py app/schemas/lead_ai_extract.py
           app/schemas/matchmaker_workspace.py app/services/matchmaker_workspace.py
           tests/test_workspace_lead_intention_grades_20261107.py
