@@ -9,14 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentUser, get_current_user
 from app.db.session import get_db
 from app.schemas.matchmaker_workspace import (
-    WorkspaceActivityPage,
+    WorkspaceActivityPage, WorkspaceActivityCheckIn,
     WorkspaceGoodNewsBlessingCreate, WorkspaceGoodNewsBlessingPage, WorkspaceGoodNewsBlessingResult,
     WorkspaceGoodNewsItem, WorkspacePennantCreate, WorkspacePennantItem,
 )
 from app.services.workspace_good_news import (
     create_blessing, create_pennant, good_news_detail, list_blessings, pennant_detail,
 )
-from app.services.workspace_activity import list_workspace_activity_signups
+from app.services.workspace_activity import list_workspace_activity_signups, check_in_workspace_signup
 from app.schemas.auth import (
     CompletionResponse,
     NicknameUpdateRequest,
@@ -184,6 +184,15 @@ async def workbench_activity_signups(
 ) -> WorkspaceActivityPage:
     return await list_workspace_activity_signups(db, await require_workspace(db, current),
         activity_id, page, page_size, keyword.strip() if keyword else None, filter_key)
+
+
+@router.post('/workbench/activity-signups/{signup_id}/check-in', response_model=WorkspaceActivityCheckIn, summary='红娘代会员签到')
+async def workbench_activity_check_in(
+    signup_id: int = Path(..., ge=1),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceActivityCheckIn:
+    return await check_in_workspace_signup(db, await require_workspace(db, current), signup_id)
 
 
 @router.get("/management-center/access", response_model=MatchmakerWorkspaceAccess, summary="查询服务红娘工作台准入")

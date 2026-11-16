@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.services.matchmaker_workspace import WorkspaceActor
-from app.services.workspace_activity import list_workspace_activity_signups
+from app.services.workspace_activity import check_in_workspace_signup, list_workspace_activity_signups
 
 
 class _Mappings:
@@ -18,6 +18,9 @@ class _Mappings:
         return self._rows
 
     def one(self):
+        return self._one
+
+    def first(self):
         return self._one
 
 
@@ -82,3 +85,49 @@ async def test_activity_signups_reject_an_activity_outside_the_available_options
 
     assert error.value.status_code == 404
     assert len(db.calls) == 1
+
+
+class CheckInDB:
+    def __init__(self, row):
+        self.row = row
+        self.calls = []
+        self.commits = 0
+
+    async def execute(self, statement, params=None):
+        self.calls.append((str(statement), dict(params or {})))
+        return _Result(one=self.row)
+
+    async def commit(self):
+        self.commits += 1
+
+
+@pytest.mark.asyncio
+async def test_check_in_is_scoped_and_audited():
+    db = CheckInDB({'id': 10, 'status': 1, 'checked_in': 0})
+    actor = WorkspaceActor(user_id=21, display_name='红娘', level='NORMAL', organization_id=1)
+    result = await check_in_workspace_signup(db, actor, 10)
+    assert result.checked_in is True
+    assert db.calls[0][1]['scope_matchmaker_id'] == 21
+    assert 'FOR UPDATE' in db.calls[0][0]
+    assert 'UPDATE activity_signup SET checked_in = 1' in db.calls[1][0]
+    assert 'business_audit_log' in db.calls[2][0]
+    assert db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_check_in_repeated_is_idempotent():
+    db = CheckInDB({'id': 10, 'status': 1, 'checked_in': 1})
+    actor = WorkspaceActor(user_id=21, display_name='红娘', level='NORMAL', organization_id=1)
+    assert (await check_in_workspace_signup(db, actor, 10)).checked_in
+    assert len(db.calls) == 1 and db.commits == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('row,code', [(None, 404), ({'id': 10, 'status': 3, 'checked_in': 0}, 409)])
+async def test_check_in_rejects_outside_scope_or_invalid_signup(row, code):
+    db = CheckInDB(row)
+    actor = WorkspaceActor(user_id=21, display_name='红娘', level='NORMAL', organization_id=1)
+    with pytest.raises(HTTPException) as error:
+        await check_in_workspace_signup(db, actor, 10)
+    assert error.value.status_code == code
+    assert len(db.calls) == 1 and db.commits == 0

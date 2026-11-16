@@ -512,6 +512,17 @@ class WorkspaceActivitySignup(BaseModel):
     created_at: datetime
     pay_status: str
     pay_amount: str
+    phone: str | None = None
+    age: int | None = None
+    height: int | None = None
+    education: str | None = None
+    income: str | None = None
+    marriage_status: str | None = None
+
+
+class WorkspaceActivityCheckIn(BaseModel):
+    id: int
+    checked_in: bool
 
 
 class WorkspaceActivityStatistics(BaseModel):

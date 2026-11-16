@@ -116,6 +116,7 @@ def test_workspace_routes_are_registered_and_require_normal_user_authentication(
         "/api/v1/matchmaker/workbench/commission-standards",
         "/api/v1/matchmaker/workbench/offline-income",
         "/api/v1/matchmaker/workbench/activity-signups",
+        "/api/v1/matchmaker/workbench/activity-signups/{signup_id}/check-in",
         "/api/v1/matchmaker/workbench/members/{member_id}/contact",
         "/api/v1/matchmaker/partner-center",
         "/api/v1/matchmaker/promoter-center",
@@ -126,6 +127,7 @@ def test_workspace_routes_are_registered_and_require_normal_user_authentication(
     # 分成标准与其余工作台接口同权限：普通用户 JWT，未登录 401，不要求后台账号。
     assert client.get("/api/v1/matchmaker/workbench/commission-standards").status_code == 401
     assert client.get("/api/v1/matchmaker/workbench/activity-signups").status_code == 401
+    assert client.post("/api/v1/matchmaker/workbench/activity-signups/301/check-in").status_code == 401
     assert paths["/api/v1/matchmaker/workbench/members"]["get"].get("security")
 
 
