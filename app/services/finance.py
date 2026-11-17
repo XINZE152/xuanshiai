@@ -7,7 +7,7 @@ import hmac
 import json
 import uuid
 from datetime import UTC, datetime
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
 
 from fastapi import HTTPException
@@ -547,6 +547,22 @@ async def request_withdrawal(db: AsyncSession, current: CurrentUser, request: Wi
     policy = await withdrawal_policy(db)
     if not policy["enabled"]:
         raise HTTPException(403, detail="提现功能暂未开放，请联系平台客服")
+    if policy.get("fee_mode", "none") != "none":
+        raise HTTPException(503, detail="当前提现手续费规则暂不支持，请联系平台客服")
+    methods = policy.get("withdraw_methods")
+    method_name = f"manual_{request.method}"
+    method_policy = methods.get(method_name) if isinstance(methods, dict) else None
+    if not isinstance(method_policy, dict) or method_policy.get("enabled") is not True:
+        raise HTTPException(403, detail="当前提现方式暂未开放")
+    try:
+        method_min = Decimal(str(method_policy["min_amount"]))
+        method_max = Decimal(str(method_policy["max_amount"]))
+        if not method_min.is_finite() or not method_max.is_finite() or method_min < 0 or method_max < method_min:
+            raise ValueError("invalid amount limits")
+    except (KeyError, InvalidOperation, ValueError, TypeError) as exc:
+        raise HTTPException(503, detail="提现方式金额配置无效，请联系平台客服") from exc
+    if request.amount < method_min or request.amount > method_max:
+        raise HTTPException(422, detail=f"该提现方式的金额范围为 {method_min:.2f} 至 {method_max:.2f} 元")
     min_amount = Decimal(str(policy["min_amount"] or "0"))
     if request.amount < min_amount:
         raise HTTPException(422, detail=f"单笔提现金额不能低于 {min_amount:.2f} 元")

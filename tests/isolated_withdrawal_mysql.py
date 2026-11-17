@@ -1,6 +1,7 @@
 """Run only against a disposable MySQL instance using the dedicated /tmp socket."""
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +38,10 @@ async def main():
         assert (await conn.execute(text(previous))).first() is None
         await conn.execute(text(up))
         await conn.execute(text("INSERT INTO users (id) VALUES (1)"))
+        config = {'withdrawal': {'enabled': True, 'min_amount': '0', 'fee_mode': 'none'},
+                  'withdraw_methods': {'manual_wechat': {'enabled': True, 'min_amount': '1', 'max_amount': '1000'}}}
+        await conn.execute(text("INSERT INTO admin_config_snapshot (namespace,config_json) VALUES ('finance', :config)"),
+                           {'config': json.dumps(config)})
         await conn.execute(text("""INSERT INTO account_ledger
             (account_type,account_id,direction,amount,state,source_type,source_id,idempotency_key)
             VALUES ('user',1,'CREDIT',100,'AVAILABLE','test',1,'test-credit')"""))

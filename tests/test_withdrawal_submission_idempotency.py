@@ -54,7 +54,7 @@ async def test_submit_saves_payee_ledger_and_idempotency_in_one_transaction(monk
     db = DB()
     monkeypatch.setattr(finance.settings, 'withdrawal_payee_encryption_key', SecretStr(Fernet.generate_key().decode()))
     async def policy(_db):
-        return {'enabled': True, 'min_amount': '0'}
+        return {'enabled': True, 'min_amount': '0', 'fee_mode': 'none', 'withdraw_methods': {'manual_wechat': {'enabled': True, 'min_amount': '1', 'max_amount': '1000'}}}
     async def balance(_db, _kind, _id):
         return SimpleNamespace(available_amount='100')
     monkeypatch.setattr(finance, 'withdrawal_policy', policy)
@@ -114,3 +114,24 @@ def test_payee_encryption_requires_key_and_round_trips(monkeypatch):
 def test_masked_only_request_is_rejected():
     with pytest.raises(ValidationError):
         WithdrawalCreate(amount='10', payee_masked='wechat / ****1234')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('method_config,fee,amount,expected', [
+    ({'enabled': False, 'min_amount': '1', 'max_amount': '1000'}, 'none', '10', 403),
+    ({'enabled': True, 'min_amount': '1', 'max_amount': '1000'}, 'none', '0.01', 422),
+    ({'enabled': True, 'min_amount': '1', 'max_amount': '1000'}, 'none', '1001', 422),
+    ({'enabled': True, 'min_amount': '1', 'max_amount': '1000'}, 'deduct', '10', 503),
+    ({'enabled': True, 'min_amount': 'bad', 'max_amount': '1000'}, 'none', '10', 503),
+])
+async def test_method_policy_rejects_before_debit(monkeypatch, method_config, fee, amount, expected):
+    monkeypatch.setattr(finance.settings, 'withdrawal_payee_encryption_key', SecretStr(Fernet.generate_key().decode()))
+    async def policy(_db):
+        return {'enabled': True, 'min_amount': '0', 'fee_mode': fee, 'withdraw_methods': {'manual_wechat': method_config}}
+    monkeypatch.setattr(finance, 'withdrawal_policy', policy)
+    db = DB()
+    request = WithdrawalCreate(amount=amount, method='wechat', account='wx-user', payee_name='张三')
+    with pytest.raises(HTTPException) as exc:
+        await finance.request_withdrawal(db, SimpleNamespace(id=1), request, 'request-key-123')
+    assert exc.value.status_code == expected
+    assert not db.committed and not any('INSERT INTO' in sql for sql, _ in db.calls)
