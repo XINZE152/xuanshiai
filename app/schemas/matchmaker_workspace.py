@@ -985,7 +985,7 @@ class WorkspaceGoodNewsItem(BaseModel):
 
 
 class WorkspaceGoodNewsCreate(BaseModel):
-    """红娘在「红娘喜讯」里代会员提交的反馈喜讯，落后台 good_news 内容域待审行。"""
+    """红娘在「红娘喜讯」里代会员提交的反馈喜讯，提交后在工作台展示。"""
 
     stage: str = Field(min_length=1, max_length=20, description="当前状态，取栏目配置的喜讯分类")
     partner_name: str = Field(min_length=1, max_length=40, description="对方称呼")

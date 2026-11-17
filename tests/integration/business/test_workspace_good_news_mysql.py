@@ -47,15 +47,10 @@ async def test_good_news_round_trip_and_concurrent_blessing():
             assert repeated.id == created.id
             assert await db.scalar(text("SELECT COUNT(*) FROM admin_content_item WHERE domain='good_news'")) == 1
             detail = await news.good_news_detail(db, actor, created.id)
-            assert detail.from_name == "李先生" and detail.pending_review
+            assert detail.from_name == "李先生" and not detail.pending_review
             with pytest.raises(HTTPException) as error:
                 await news.good_news_detail(db, other, created.id)
             assert error.value.status_code == 404
-            with pytest.raises(HTTPException) as error:
-                await news.create_blessing(db, actor, created.id, WorkspaceGoodNewsBlessingCreate(message="送上祝福"))
-            assert error.value.status_code == 409
-            await db.execute(text("UPDATE admin_content_item SET status=1 WHERE id=:id"), {"id": created.id})
-            await db.commit()
         async def send():
             async with AsyncSession(engine, expire_on_commit=False) as session:
                 return await news.create_blessing(session, actor, created.id, WorkspaceGoodNewsBlessingCreate(message="祝福你们，彼此珍惜"))
@@ -69,9 +64,10 @@ async def test_good_news_round_trip_and_concurrent_blessing():
             assert (await news.good_news_detail(db, actor, created.id)).blessing_count == 1
             gift = WorkspacePennantCreate(giver="李先生", left_words="感谢红娘", right_words="真诚服务", consent_confirmed=True, client_request_id="gift-test-key-1")
             pennant = await news.create_pennant(db, actor, gift)
+            assert not pennant.pending_review
             assert (await news.create_pennant(db, actor, gift)).id == pennant.id
             detail = await news.pennant_detail(db, actor, pennant.id)
-            assert detail.target_user_id == 21 and detail.pending_review
+            assert detail.target_user_id == 21 and not detail.pending_review
             renamed = WorkspaceActor(user_id=21, display_name="已经改名的红娘", level="NORMAL", organization_id=1)
             assert (await list_workbench_good_news_pennants(db, renamed, 1, 20)).total == 1
             assert (await list_workbench_good_news_pennants(db, other, 1, 20)).total == 0

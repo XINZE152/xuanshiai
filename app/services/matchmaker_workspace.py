@@ -3713,9 +3713,7 @@ async def list_workbench_good_news(
     后台录一条红娘这边就能看到，不另建表，公开开关沿用 extra.public。
     范围与其它中心一致——总店（SUPER）看全部，普通红娘只看 extra.matchmaker_id 是自己
     的那些；后台代录常常先不填归属红娘，这类无归属行只有总店看得见。
-    可见性上红娘端「报喜」的行会先停在待审（status=2），所以 SELF 放宽到 status IN (1, 2)
-    （归属条件保证她只会看到自己代报的），SUPER 也放行归属到她名下的待审行，
-    否则总店账号报完喜在自己的工作区里看不到那条记录。
+    历史待审记录仍按原范围展示；新提交反馈直接写入 status=1。
     双方昵称头像按 extra.from_user_id/to_user_id 回查 users，查不到（后台手填的自定义姓名）
     才退回 extra.feedback_name/partner_name。
     """
@@ -3788,12 +3786,11 @@ async def list_workbench_good_news(
 async def create_workbench_good_news(
     db: AsyncSession, actor: WorkspaceActor, request: WorkspaceGoodNewsCreate
 ) -> WorkspaceGoodNewsCreated:
-    """红娘代会员报喜，写入后台喜讯内容域的待审行。
+    """红娘代会员报喜，提交后在红娘喜讯中直接展示。
 
     与后台「运营工具-喜讯管理」共用 admin_content_item(domain=good_news)，不另建表：
     红娘端没有会员选择器，双方都只存姓名文本（extra.partner_name），读侧按文本回退；
-    行落 status=2 待审，由后台喜讯管理放行（status=1）后才对其它红娘和总店可见，
-    提交人自己在「红娘喜讯」里能立刻看到带「待审」标记的这条。
+    新提交的喜讯写入 status=1；既有数据不受影响。
     """
     stage = request.stage.strip()
     partner_name = request.partner_name.strip()
@@ -3828,7 +3825,7 @@ async def create_workbench_good_news(
         text(
             "INSERT INTO admin_content_item "
             "(tenant_id, domain, title, subtitle, image_url, status, sort, extra_json, created_by) "
-            "VALUES (1, :domain, :title, :subtitle, :image_url, 2, 0, :extra, :created_by)"
+            "VALUES (1, :domain, :title, :subtitle, :image_url, 1, 0, :extra, :created_by)"
         ),
         {
             "domain": GOOD_NEWS_DOMAIN,
@@ -3840,7 +3837,7 @@ async def create_workbench_good_news(
         },
     )
     await db.commit()
-    return WorkspaceGoodNewsCreated(id=int(result.lastrowid or 0), pending_review=True)
+    return WorkspaceGoodNewsCreated(id=int(result.lastrowid or 0), pending_review=False)
 
 
 async def list_workbench_good_news_pennants(

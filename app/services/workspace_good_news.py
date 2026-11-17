@@ -60,14 +60,14 @@ async def create_pennant(db: AsyncSession, actor: WorkspaceActor, body: Workspac
     }
     result = await db.execute(text("""INSERT INTO admin_content_item
         (tenant_id, domain, title, subtitle, image_url, status, sort, extra_json, created_by)
-        VALUES (1, :domain, :title, :target, :image, 2, 0, :extra, :actor)"""), {
+        VALUES (1, :domain, :title, :target, :image, 1, 0, :extra, :actor)"""), {
         "domain": GOOD_NEWS_PENNANT_DOMAIN, "title": body.giver.strip(), "target": actor.display_name,
         "image": body.image_url, "extra": json.dumps(extra, ensure_ascii=False), "actor": actor.user_id,
     })
     item_id = int(result.lastrowid)
     await _audit(db, actor.user_id, "matchmaker_workspace.pennant.create", "admin_content_item", item_id)
     await db.commit()
-    return WorkspaceGoodNewsCreated(id=item_id, pending_review=True)
+    return WorkspaceGoodNewsCreated(id=item_id, pending_review=False)
 
 
 def _blessing_params(item_id: int, actor: WorkspaceActor) -> dict:
