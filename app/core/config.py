@@ -114,7 +114,7 @@ class Settings(BaseSettings):
     public_base_url: str = "http://127.0.0.1:8000"
     wechat_mini_program_page: str = "pages/profile/profile"
     recommendation_page_size: int = 20
-    browse_daily_limit: int = 8
+    browse_daily_limit: int = 20
     browse_high_match_bonus: int = 5
     apply_daily_free_limit: int = 3
     apply_daily_vip_limit: int = 10
@@ -242,7 +242,8 @@ class Settings(BaseSettings):
     ai_avatar_timeout_seconds: float = Field(default=20, gt=0, le=60)
     ai_avatar_max_output_tokens: int = Field(default=500, ge=64, le=2000)
     ai_avatar_max_context_messages: int = Field(default=12, ge=2, le=30)
-    ai_avatar_daily_limit: int = Field(default=20, ge=1, le=200)
+    # 测试期临时放宽到 100；上线前按产品口径回调
+    ai_avatar_daily_limit: int = Field(default=100, ge=1, le=200)
 
     # Optional second-layer text moderation. The provider is disabled until
     # the purchased marketplace API path and AppCode are configured.

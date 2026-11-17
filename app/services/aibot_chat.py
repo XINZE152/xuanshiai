@@ -385,13 +385,14 @@ async def post_welcome(db: AsyncSession, user_id: int, session_id: str) -> Aibot
     fixed = await _insert_turn(
         db, session_id=session_id, role="system_fixed", content=_WELCOME_FIXED
     )
+    # 开场入口由前端四宫格 guide 卡承接，不再下发底部快捷选项（避免与卡片重复）
     agent_hello = await _insert_turn(
         db,
         session_id=session_id,
         role="assistant",
         content=hello,
         intent="chat",
-        choices=["看看恋爱报告", "给我推荐几个对象", "演个剧情", "兴趣画像"],
+        choices=[],
     )
     await db.execute(
         text(

@@ -84,7 +84,7 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
     "platform_permissions": (
         "平台权限配置", "浏览、资料查看、牵线和会员状态权限。",
          {"default_show_gender": "opposite", "incomplete_browse_pages": 2,
-         "free_browse_daily_limit": 8, "high_match_browse_bonus": 5,
+         "free_browse_daily_limit": 20, "high_match_browse_bonus": 5,
          "free_apply_daily_limit": 3, "vip_apply_daily_limit": 10,
          "free_superlike_daily_limit": 1, "vip_superlike_daily_limit": 3,
          "paper_plane_daily_limit": 3,

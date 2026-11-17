@@ -8,7 +8,7 @@
 - 隐私：公开资料上下文由后端按目标用户当前隐私设置生成。客户端不得提交或覆盖资料上下文。
 - 隔离：会话保存在 `ai_avatar_conversation`、`ai_avatar_message`，不进入真人消息列表、未读数或通知。
 - 模型：后端调用 OpenAI 兼容的 `/chat/completions`，不会向客户端返回供应商密钥。
-- 限额：发送消息默认每位用户每日 20 次，以 UTC 自然日重置，实际值由 `AI_AVATAR_DAILY_LIMIT` 配置。
+- 限额：发送消息默认每位用户每日 100 次（测试期放宽；原 20），以 UTC 自然日重置，实际值由 `AI_AVATAR_DAILY_LIMIT` 配置。
 - 主人补充：每个访客问题都会进入分身所属用户的待回答列表。主人补充回答后，原访客下次读取会话可看到来源为 `owner-answer` 的消息；这不是真人聊天，不产生通知或开放联系方式。
 
 ### 1.1 公共消息字段
@@ -35,7 +35,7 @@
 | `403` | 自己的分身、双方任一方拉黑、资料不可见、认证或会员条件不满足 | `{"detail":"该用户当前未公开个人资料"}` | 关闭入口并提示原因 |
 | `404` | 目标用户不存在或账号不可用 | `{"detail":"用户不存在"}` | 返回上一页并刷新用户列表 |
 | `422` | 路径或请求体校验失败、问题命中拒绝规则 | `{"detail":[{"msg":"String should have at most 300 characters"}]}` | 保留输入并提示修改 |
-| `429` | 当日 AI 提问达到限额 | `{"detail":"今日 AI 分身提问已达 20 次上限"}` | 禁止重复提交，次日重试 |
+| `429` | 当日 AI 提问达到限额 | `{"detail":"今日 AI 分身提问已达 100 次上限"}` | 禁止重复提交，次日重试 |
 | `503` | AI 门禁未放行（AI 总闸关闭、生产审批门禁未通过或分身 provider 未配置）、供应商异常或 Redis 在生产环境不可用 | `{"detail":"AI服务未启用"}`（门禁未放行）；`{"detail":"AI 服务暂时不可用，请稍后重试"}`（供应商/Redis） | 按具体文案提示；展示重试，不回退 Mock |
 | `504` | AI 供应商请求超时 | `{"detail":"AI 回答超时，请稍后重试"}` | 保留输入并允许重试 |
 
@@ -109,7 +109,7 @@ Authorization: Bearer <access-token>
 **返回示例**：
 
 ```json
-{"targetUserId":2,"messages":[{"id":0,"type":"text","content":"你好，我是林夏的 AI 分身。这里只参考 Ta 当前对你公开的资料，不是真人聊天，Ta 也不会收到提醒。你可以问我基本资料、兴趣爱好、择偶标准或平台规则。","time":1786675200000,"showTime":false,"isMine":false,"avatar":null,"source":"system","category":"general","handoffRequired":false,"handoffStatus":"not_requested"}]}
+{"targetUserId":2,"messages":[{"id":0,"type":"text","content":"你好，我是林夏的 AI 分身。可以聊聊主人已公开的资料，比如城市、工作、兴趣和择偶期待；不知道的事我会说「我的主人还没告诉我」。这不是真人聊天，主人也不会收到提醒。","time":1786675200000,"showTime":false,"isMine":false,"avatar":null,"source":"system","category":"general","handoffRequired":false,"handoffStatus":"not_requested"}]}
 ```
 
 **使用方法与业务规则**：成功加载公开资料后调用。没有数据库历史时仍返回一条临时欢迎消息；欢迎消息 ID 为 `0`，不会存入数据库。最多返回当前会话前 200 条数据库消息。历史只对发起者可见，不产生已读或未读状态。
@@ -219,7 +219,7 @@ AI_AVATAR_MODEL=YOUR_AI_AVATAR_MODEL
 AI_AVATAR_TIMEOUT_SECONDS=20
 AI_AVATAR_MAX_OUTPUT_TOKENS=500
 AI_AVATAR_MAX_CONTEXT_MESSAGES=12
-AI_AVATAR_DAILY_LIMIT=20
+AI_AVATAR_DAILY_LIMIT=100
 ```
 
 本地无密钥的兼容服务可不设置 `AI_AVATAR_API_KEY`。staging/production 强制 `AI_AVATAR_BASE_URL` 使用 HTTPS。修改配置后需要重启 FastAPI。

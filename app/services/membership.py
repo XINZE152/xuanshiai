@@ -27,7 +27,7 @@ DEFAULT_RIGHTS = {
     "apply_daily_limit": 3,
     "apply_bonus": 0,
     "superlike_daily_limit": 1,
-    "browse_daily_limit": 8,
+    "browse_daily_limit": 20,
     "visitor_detail": False,
     "browse_history_scope": "today",
 }

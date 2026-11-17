@@ -110,6 +110,9 @@ class DiscoveryCard(BaseModel):
     # 当前登录用户是否「喜欢」该用户（user_favorite.type=1），与 GET /relations/likes 同源。
     # 关系字段：锁定/隐私不影响本字段；is_favorite 是 type=2 旧收藏，两者不混用。
     is_liked: bool = False
+    # 与当前登录用户之间的认识申请关系（match_apply / user_match），不受 detail_locked 影响。
+    # none=无申请；pending=已申请待回应；accepted=双方已同意可真人聊；rejected/expired=终态。
+    apply_status: str = "none"
     is_vip: bool = False
     is_pure_free: bool
     is_boosted: bool

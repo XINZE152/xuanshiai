@@ -147,7 +147,20 @@ CARD_SELECT = """
            -- 「喜欢」与「收藏」分表语义：type=1 是红心/喜欢（与 /relations/likes 同源），
            -- type=2 是旧收藏，仅保留兼容。走 uk_pair_type(user_id,target_user_id,type) 索引。
            EXISTS (SELECT 1 FROM user_favorite f
-                   WHERE f.user_id = :viewer_id AND f.target_user_id = u.id AND f.type = 1) AS is_liked
+                   WHERE f.user_id = :viewer_id AND f.target_user_id = u.id AND f.type = 1) AS is_liked,
+           -- 认识申请 / 匹配：红娘推荐卡据此决定是否露出「和真人发消息」
+           (SELECT ma.status FROM match_apply ma
+             WHERE ((ma.from_user_id = :viewer_id AND ma.to_user_id = u.id)
+                 OR (ma.from_user_id = u.id AND ma.to_user_id = :viewer_id))
+               AND ma.status IN (0, 1, 2, 3)
+             ORDER BY FIELD(ma.status, 1, 0, 2, 3), ma.id DESC
+             LIMIT 1) AS apply_status_code,
+           EXISTS (
+             SELECT 1 FROM user_match m
+             WHERE ((m.user_id = :viewer_id AND m.target_user_id = u.id)
+                 OR (m.user_id = u.id AND m.target_user_id = :viewer_id))
+               AND m.status IN (1, 2)
+           ) AS is_matched
 """
 
 
@@ -507,6 +520,32 @@ def _constellation_from_birthday(birthday: Any) -> str | None:
     return signs[index]
 
 
+def _apply_status_from_row(row: dict[str, Any]) -> str:
+    """把 match_apply.status / user_match 归一成前端可读关系态。"""
+    if bool(row.get("is_matched")):
+        return "accepted"
+    code = row.get("apply_status_code")
+    if code is None and row.get("apply_status") is not None:
+        # 单测 / 手工构造可直接传字符串
+        raw = row.get("apply_status")
+        if isinstance(raw, str) and raw:
+            return raw
+        code = raw
+    try:
+        status = int(code) if code is not None else -1
+    except (TypeError, ValueError):
+        return "none"
+    if status == 0:
+        return "pending"
+    if status == 1:
+        return "accepted"
+    if status == 2:
+        return "rejected"
+    if status == 3:
+        return "expired"
+    return "none"
+
+
 def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = False) -> DiscoveryCard:
     certification_tags: list[str] = []
     if row.get("realname_status") == 2:
@@ -562,6 +601,7 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         match_score_source=LEGACY_MATCH_ALGORITHM_VERSION,
         is_favorite=bool(row.get("is_favorite")),
         is_liked=bool(row.get("is_liked")),
+        apply_status=_apply_status_from_row(row),
         is_vip=bool(row.get("is_vip")),
         is_pure_free=not bool(row.get("is_vip")) and not bool(row.get("is_boosted")),
         is_boosted=bool(row.get("is_boosted")),
