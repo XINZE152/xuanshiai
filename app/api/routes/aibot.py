@@ -10,6 +10,10 @@ from app.db.session import get_db
 from app.schemas.aibot import (
     AibotAssignmentResponse,
     AibotAssignmentUpdate,
+    AibotReportListItem,
+    AibotReportListResponse,
+    AibotReportRequest,
+    AibotReportResponse,
     AibotSessionCreate,
     AibotSessionResponse,
     AibotTurnRequest,
@@ -24,6 +28,7 @@ from app.services.aibot_chat import (
     post_welcome,
     put_assignment,
 )
+from app.services.aibot_report import generate_report, get_report, list_reports, latest_report
 from app.services.discovery import get_aibot_recommendations_page
 
 router = APIRouter(prefix="/ai/aibot", tags=["恋 AI BOT"])
@@ -116,3 +121,65 @@ async def aibot_recommendations(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> DiscoveryPage:
     return await get_aibot_recommendations_page(db, current.id, filters)
+
+
+@router.post(
+    "/reports",
+    response_model=AibotReportResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="生成恋爱报告（资料 + AI 画像 + 聊天情绪）并落库",
+)
+async def create_love_report(
+    body: Annotated[AibotReportRequest, Body()] = AibotReportRequest(),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AibotReportResponse:
+    payload = await generate_report(
+        db,
+        current.id,
+        client_score=body.score.model_dump() if body.score is not None else None,
+        love_index=body.love_index.model_dump() if body.love_index is not None else None,
+        agent_id=body.agent_id,
+    )
+    return AibotReportResponse(**payload)
+
+
+@router.get(
+    "/reports/latest",
+    response_model=AibotReportResponse | None,
+    summary="读取最新一版恋爱报告（无版本时返回 null）",
+)
+async def read_latest_love_report(
+    current: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AibotReportResponse | None:
+    payload = await latest_report(db, current.id)
+    return AibotReportResponse(**payload) if payload else None
+
+
+@router.get(
+    "/reports",
+    response_model=AibotReportListResponse,
+    summary="恋爱报告历史版本列表（回看 / 下载）",
+)
+async def read_love_reports(
+    current: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+) -> AibotReportListResponse:
+    items = await list_reports(db, current.id, limit)
+    return AibotReportListResponse(items=[AibotReportListItem(**item) for item in items])
+
+
+@router.get(
+    "/reports/{version}",
+    response_model=AibotReportResponse,
+    summary="按版本号读取一版恋爱报告",
+)
+async def read_love_report(
+    version: Annotated[int, Path(ge=1, le=9999)],
+    current: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AibotReportResponse:
+    payload = await get_report(db, current.id, version)
+    return AibotReportResponse(**payload)
