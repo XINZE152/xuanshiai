@@ -28,8 +28,9 @@ def test_code_schema_covers_every_table_with_a_primary_key() -> None:
     # + Q63 chat_message_hidden + Q74 community_post_remind
     # + Q69 paper_plane_catch
     # + 原站资源镜像 5 表（ref_teacher / ref_product / ref_guide /
-    #   ref_instruction / ref_material），合计 277。
-    assert len(schema) == 277
+    #   ref_instruction / ref_material）
+    # + 人工提现收款信息表 withdrawal_payee_secret（WITHDRAWAL-MANUAL-20261116），合计 278。
+    assert len(schema) == 278
     assert all(spec["has_primary_key"] for spec in schema.values()), "所有表都应有主键"
     assert "paper_plane_profile_unlock" in schema
     assert "payment_refund" in schema
