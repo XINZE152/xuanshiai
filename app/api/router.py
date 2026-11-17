@@ -28,6 +28,7 @@ from app.api.routes import (
     admin_cms,
     admin_user_feedback,
     ai_avatar,
+    aibot,
     auth,
     ai,
     compatibility,
@@ -127,6 +128,7 @@ api_router.include_router(app_version.router, tags=["系统"])
 api_router.include_router(auth.router, tags=["账号与认证"])
 api_router.include_router(ai.router, tags=["AI能力"])
 api_router.include_router(ai_advisor.router, tags=["AIAdvisor"])
+api_router.include_router(aibot.router, tags=["恋 AI BOT"])
 api_router.include_router(ai_avatar.router, tags=["AI 分身"])
 api_router.include_router(ai_avatar.memory_router, tags=["AI 分身"])
 api_router.include_router(users.router, tags=["账号与认证"])

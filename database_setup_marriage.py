@@ -364,6 +364,7 @@ class DatabaseManager:
                 "drinking": "`drinking` varchar(32) DEFAULT NULL COMMENT '饮酒情况'",
                 "religion": "`religion` varchar(32) DEFAULT NULL COMMENT '宗教信仰'",
                 "marriage_plan": "`marriage_plan` varchar(64) DEFAULT NULL COMMENT '结婚计划'",
+                "bot_intake_json": "`bot_intake_json` json DEFAULT NULL COMMENT '恋AI BOT采集原样：{field:{id,label,source,updated_at}}'",
                 "hometown": "`hometown` varchar(128) DEFAULT NULL COMMENT '家乡展示名称'",
                 "residence": "`residence` varchar(128) DEFAULT NULL COMMENT '现居展示名称'",
                 "household_province_code": "`household_province_code` varchar(32) DEFAULT NULL",
@@ -3672,6 +3673,7 @@ class DatabaseManager:
                 "drinking": "varchar(32) DEFAULT NULL COMMENT '饮酒情况'",
                 "religion": "varchar(32) DEFAULT NULL COMMENT '宗教信仰'",
                 "marriage_plan": "varchar(64) DEFAULT NULL COMMENT '结婚计划'",
+                "bot_intake_json": "json DEFAULT NULL COMMENT '恋AI BOT采集原样'",
             },
             "user_auth": {
                 "education": "varchar(64) DEFAULT NULL COMMENT '学历'",

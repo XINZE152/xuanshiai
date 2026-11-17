@@ -496,6 +496,7 @@ async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> d
                       p.height, p.weight, p.occupation, p.industry, p.education_level, p.income,
                       p.constellation, p.zodiac, p.household, p.ethnicity,
                       p.house, p.car, p.smoking, p.drinking, p.religion, p.marriage_plan,
+                      p.bot_intake_json,
                       p.ideal_partner,
                       p.household_province_code, p.household_city_code, p.household_district_code,
                       p.hometown AS hometown_text, p.residence AS residence_text,
@@ -550,6 +551,19 @@ async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> d
         if income is not None
         else None
     )
+    raw_bot = data.pop("bot_intake_json", None)
+    if isinstance(raw_bot, dict):
+        data["bot_intake"] = raw_bot
+    elif isinstance(raw_bot, (bytes, bytearray, str)):
+        try:
+            parsed_bot = json.loads(
+                raw_bot.decode("utf-8") if isinstance(raw_bot, (bytes, bytearray)) else raw_bot
+            )
+            data["bot_intake"] = parsed_bot if isinstance(parsed_bot, dict) else None
+        except Exception:
+            data["bot_intake"] = None
+    else:
+        data["bot_intake"] = None
     # 地区展示：有编码按编码现拼，没有编码回落到旧文本列（红娘代录的会员只有文本，
     # 口径与红娘待审卡片一致——卡片显示了地区而主页显示「未填写」是最容易被当成 bug 的组合）。
     legacy_hometown = str(data.get("hometown_text") or "").strip()
@@ -565,6 +579,8 @@ async def get_profile(db: AsyncSession, user_id: int, public: bool = False) -> d
         data.get("household_province_code"), data.get("household_city_code"), data.get("household_district_code")
     ) or data.get("household")
     if public:
+        # BOT 模糊采集仅本人可见，不进公开资料卡
+        data["bot_intake"] = None
         # Public profile responses must not expose exact location or income by default.
         for field in ("income", "hometown_province_code", "hometown_city_code", "hometown_district_code", "residence_province_code", "residence_city_code", "residence_district_code"):
             data[field] = None
@@ -657,6 +673,54 @@ async def update_profile(
     一并锁定，红娘需要纠正录入错误，因此代改路径放行这一道锁。
     """
     values = request.model_dump(exclude_unset=True)
+    sync_precise_from_bot = bool(values.pop("sync_precise_from_bot", False))
+    incoming_bot_intake = values.pop("bot_intake", None)
+
+    if incoming_bot_intake is not None or sync_precise_from_bot:
+        from app.services.aibot_profile_sync import (
+            merge_bot_intake,
+            parse_bot_intake_dict,
+            precise_fills_from_bot_intake,
+        )
+
+        existing_bot_row = (
+            await db.execute(
+                text("SELECT bot_intake_json FROM user_profile WHERE user_id = :id"),
+                {"id": user_id},
+            )
+        ).mappings().first()
+        existing_bot = existing_bot_row["bot_intake_json"] if existing_bot_row else None
+        if incoming_bot_intake is not None:
+            merged_bot = merge_bot_intake(existing_bot, incoming_bot_intake)
+            values["bot_intake_json"] = json.dumps(merged_bot, ensure_ascii=False)
+        else:
+            merged_bot = parse_bot_intake_dict(existing_bot)
+
+        if sync_precise_from_bot and merged_bot:
+            current_row = (
+                await db.execute(
+                    text(
+                        """SELECT u.gender, u.is_married, p.education_level, p.occupation
+                           FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
+                           WHERE u.id = :id"""
+                    ),
+                    {"id": user_id},
+                )
+            ).mappings().first()
+            fills = precise_fills_from_bot_intake(
+                merged_bot,
+                current_gender=None if current_row is None else current_row["gender"],
+                current_is_married=None if current_row is None else current_row["is_married"],
+                current_education_level=None
+                if current_row is None
+                else current_row["education_level"],
+                current_occupation=None if current_row is None else current_row["occupation"],
+            )
+            # 请求里已显式带的精准字段优先；BOT 只填仍为空的键
+            for key, fill_value in fills.items():
+                if key not in values:
+                    values[key] = fill_value
+
     if "personal_tags" in values:
         selected = values.pop("personal_tags")
         selected_custom_categories = values.pop("custom_tag_categories", {})

@@ -487,37 +487,33 @@ async def login_existing_account(db: AsyncSession, request: ExistingAccountLogin
 async def bind_phone(db: AsyncSession, user_id: int, request: BindPhoneRequest, ip: str | None) -> None:
     if request.purpose != "bind_phone":
         raise HTTPException(422, detail="绑定手机号验证码用途必须为bind_phone")
-    bound = await db.execute(text("SELECT phone FROM users WHERE id = :id"), {"id": user_id})
-    bound_phone = bound.scalar()
-    if bound_phone and bound_phone != request.phone:
-        # 此前该接口对已绑定账号直接覆盖 phone，只校验新号验证码：任何持有有效
-        # token 的人都能用自己的号码改绑并接管账号。已绑定用户必须走换绑流程。
-        raise HTTPException(409, detail="账号已绑定手机号，请使用换绑流程")
     await sms_store.verify(request.phone, "bind_phone", request.code)
-    async with db.begin():
-        result = await db.execute(text("SELECT id, phone FROM users WHERE id = :id FOR UPDATE"), {"id": user_id})
-        current = result.mappings().first()
-        if not current:
-            raise HTTPException(404, detail="用户不存在")
-        if current["phone"] == request.phone:
-            return
-        if current["phone"]:
-            raise HTTPException(409, detail="账号已绑定手机号，请使用换绑流程")
-        result = await db.execute(text("SELECT id FROM users WHERE phone = :phone FOR UPDATE"), {"phone": request.phone})
-        if result.first():
-            raise HTTPException(409, detail="该手机号已绑定其他账号")
-        set_parts = [
-            "phone = :phone",
-            "phone_verified_at = UTC_TIMESTAMP()",
-            "updated_at = UTC_TIMESTAMP()",
-        ]
-        # 换号后旧号码的归属地必须失效，否则列表会一直显示旧号属地。
-        if await should_reset_phone_region(db, phone_changed=True):
-            set_parts.append("phone_region = NULL")
-        await db.execute(
-            text(f"UPDATE users SET {', '.join(set_parts)} WHERE id = :id"),
-            {"phone": request.phone, "id": user_id},
-        )
+    # get_current_user 可能已在同一 Session 上 autobegin，不能再套 db.begin()。
+    result = await db.execute(text("SELECT id, phone FROM users WHERE id = :id FOR UPDATE"), {"id": user_id})
+    current = result.mappings().first()
+    if not current:
+        raise HTTPException(404, detail="用户不存在")
+    if current["phone"] == request.phone:
+        return
+    if current["phone"]:
+        # 此前该接口对已绑定账号直接覆盖 phone；已绑定须走换绑流程。
+        raise HTTPException(409, detail="账号已绑定手机号，请使用换绑流程")
+    result = await db.execute(text("SELECT id FROM users WHERE phone = :phone FOR UPDATE"), {"phone": request.phone})
+    if result.first():
+        raise HTTPException(409, detail="该手机号已绑定其他账号")
+    set_parts = [
+        "phone = :phone",
+        "phone_verified_at = UTC_TIMESTAMP()",
+        "updated_at = UTC_TIMESTAMP()",
+    ]
+    # 换号后旧号码的归属地必须失效，否则列表会一直显示旧号属地。
+    if await should_reset_phone_region(db, phone_changed=True):
+        set_parts.append("phone_region = NULL")
+    await db.execute(
+        text(f"UPDATE users SET {', '.join(set_parts)} WHERE id = :id"),
+        {"phone": request.phone, "id": user_id},
+    )
+    await db.commit()
 
 
 async def change_phone(

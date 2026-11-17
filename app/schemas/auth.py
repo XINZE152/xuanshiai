@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -175,6 +175,16 @@ class ProfileUpdateRequest(BaseModel):
     industry: str | None = Field(default=None, max_length=128)
     education_level: int | None = Field(default=None, ge=1, le=8)
     income: float | None = Field(default=None, ge=0, le=1_000_000)
+    # 恋 AI BOT 模糊采集原样（选项 id/文案）；与精准字段双轨并存，合并写入不覆盖未传键
+    bot_intake: dict[str, Any] | None = Field(
+        default=None,
+        description="BOT 采集快照，字段值为 {id,label} 或字符串选项 id；服务端合并进 bot_intake_json",
+    )
+    # true：按 bot_intake 中可对齐项回填当前为空的精准字段（不取中值、不覆盖已有精准值）
+    sync_precise_from_bot: bool | None = Field(
+        default=None,
+        description="是否用 bot_intake 回填空的精准字段",
+    )
     hometown_province_code: str | None = Field(default=None, max_length=32)
     hometown_city_code: str | None = Field(default=None, max_length=32)
     hometown_district_code: str | None = Field(default=None, max_length=32)
@@ -345,6 +355,10 @@ class ProfileResponse(BaseModel):
     education_level: int | None
     income: float | None
     income_display: str | None = None
+    bot_intake: dict[str, Any] | None = Field(
+        default=None,
+        description="BOT 模糊采集原样；有精准字段时业务侧优先读精准",
+    )
     house: str | None = None
     car: str | None = None
     ethnicity: str | None = None

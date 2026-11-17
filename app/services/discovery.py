@@ -646,6 +646,7 @@ def _candidate_snapshot(
     tag: str | None,
     respect_preferences: bool,
     apply_intent_gender_gate: bool = True,
+    force_skip_completion_gate: bool = False,
 ) -> CandidateQuerySnapshot:
     """Build one server-owned candidate SELECT/count pair.
 
@@ -656,9 +657,12 @@ def _candidate_snapshot(
     ``apply_intent_gender_gate`` 只由调用方显式关闭（当前仅「按昵称/标签搜索」
     关闭）：搜索是用户指名找人的动作，不该被身份口径限制成搜不到同性。
     推荐流与广场保持默认 True。
+
+    ``force_skip_completion_gate`` 供恋 AI BOT 推荐：资料可后置完善，但仍走
+    现网会员池与可见性裁剪，不绕过拉黑/隐私等其它门禁。
     """
     scene = VisibilityScene.SEARCH if nickname or tag else VisibilityScene.DISCOVERY
-    skip_gates = _skip_discovery_gates()
+    skip_gates = _skip_discovery_gates() or force_skip_completion_gate
     visibility = _visibility_predicate(
         viewer_id,
         viewer,
@@ -777,6 +781,7 @@ async def _candidate_query_page(
     tag: str | None = None,
     respect_preferences: bool = True,
     apply_intent_gender_gate: bool = True,
+    force_skip_completion_gate: bool = False,
 ) -> tuple[dict[str, Any], bool, CandidatePage]:
     viewer = await _viewer_context(db, viewer_id)
     viewer_is_vip = await _is_vip(db, viewer_id)
@@ -790,6 +795,7 @@ async def _candidate_query_page(
         tag=tag,
         respect_preferences=respect_preferences,
         apply_intent_gender_gate=apply_intent_gender_gate,
+        force_skip_completion_gate=force_skip_completion_gate,
     )
     try:
         page = await candidate_query_service.fetch_page(
@@ -828,14 +834,29 @@ async def _fetch_rows(
     return page.items
 
 
-async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: DiscoveryFilters, *, plaza: bool) -> DiscoveryPage:
+async def get_discovery_page(
+    db: AsyncSession,
+    viewer_id: int,
+    filters: DiscoveryFilters,
+    *,
+    plaza: bool,
+    relax_viewer_completion: bool = False,
+) -> DiscoveryPage:
     if not await platform_browse_open(db):
         raise HTTPException(403, detail=await platform_maintenance_message(db))
     viewer = await _viewer_context(db, viewer_id)
-    if not _skip_discovery_gates() and not _viewer_completion_ok(viewer):
+    if (
+        not relax_viewer_completion
+        and not _skip_discovery_gates()
+        and not _viewer_completion_ok(viewer)
+    ):
         raise HTTPException(403, detail="请先完善资料后再进入推荐")
     _, viewer_is_vip, candidate_page = await _candidate_query_page(
-        db, viewer_id, filters, plaza=plaza
+        db,
+        viewer_id,
+        filters,
+        plaza=plaza,
+        force_skip_completion_gate=relax_viewer_completion,
     )
     items = [
         _card(
@@ -855,6 +876,21 @@ async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: Discover
         next_cursor=candidate_page.next_cursor,
         sort_version=candidate_page.sort_version,
         total_is_estimate=candidate_page.total_is_estimate,
+    )
+
+
+async def get_aibot_recommendations_page(
+    db: AsyncSession,
+    viewer_id: int,
+    filters: DiscoveryFilters,
+) -> DiscoveryPage:
+    """恋 AI BOT 推荐：资料可后置，仍复用现网会员池。"""
+    return await get_discovery_page(
+        db,
+        viewer_id,
+        filters,
+        plaza=False,
+        relax_viewer_completion=True,
     )
 
 
