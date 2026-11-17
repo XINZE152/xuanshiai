@@ -162,6 +162,17 @@ jobs:
         run: uv run --no-sync ruff check app/schemas/public_preview.py app/services/public_preview.py app/api/routes/public_preview.py app/api/router.py tests/test_public_guest_preview.py
       - name: Public guest preview contracts
         run: uv run --no-sync pytest tests/test_public_guest_preview.py -q
+      # PAGE-SWITCH-20261116：页面显示开关（71 页注册表 + 匿名下发 + 配置域）。
+      # 新增测试必须 Ruff + pytest 双登记（PROJECT_RULES 7.1）。
+      - name: Ruff (page switches scope)
+        run: >-
+          uv run --no-sync ruff check
+          app/services/page_switches.py app/services/admin_config.py
+          app/api/routes/public_page_switches.py app/schemas/public_page_switches.py
+          app/api/routes/ai_capabilities.py app/api/router.py
+          tests/test_page_switches.py
+      - name: Page switch contracts
+        run: uv run --no-sync pytest tests/test_page_switches.py -q
 
   ai-unit:
     runs-on: ubuntu-24.04
@@ -189,6 +200,7 @@ jobs:
           app/services/voice/audio_access.py app/services/voice/gateway.py
           app/services/voice/providers.py app/services/voice/realtime/context.py
           app/services/voice/realtime/moxiang_bridge.py
+          app/services/ai/flags.py app/services/ai/runtime_gates.py
           tests/test_ai_advisor.py tests/test_ai_advisor_output_locale.py
           tests/test_ai_memory_migration_contract.py tests/test_ai_roleplay.py
           tests/test_ai_api_contracts.py tests/test_ai_config_hardening.py
@@ -198,6 +210,7 @@ jobs:
           tests/test_ai_mock_fallback.py tests/test_ai_search.py
           tests/test_voice_auth.py tests/test_voice_cleanup.py
           tests/test_voice_providers_aliyun.py tests/test_voice_ws.py
+          tests/test_ai_runtime_gates.py
       - name: AI and voice unit contracts
         env:
           UPLOAD_DIR: ${{ runner.temp }}/xuanshiai-ai-uploads
@@ -219,7 +232,8 @@ jobs:
           tests/test_voice_auth.py
           tests/test_voice_ws.py
           tests/test_voice_providers_aliyun.py
-          tests/test_voice_cleanup.py -q
+          tests/test_voice_cleanup.py
+          tests/test_ai_runtime_gates.py -q
 
   # 审计整改（脱敏 / 数据范围 / 事务 / 报名软删除）：全部为不依赖 DB 的单元契约。
   # 2026-10-14 补齐 PR #49 新增的 7 个测试文件（此前未挂任何 job，CI 里从不执行，

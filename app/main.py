@@ -225,6 +225,27 @@ def create_app() -> FastAPI:
                     )
         return await call_next(request)
 
+    @application.middleware("http")
+    async def refresh_ai_runtime_gates(request: Request, call_next) -> Response:
+        """PAGE-SWITCH-20261116：AI/voice 请求按 TTL 刷新运行时 kill 缓存。
+
+        TTL 内零 DB 开销；刷新失败保留旧缓存（fail-open 到 env 门禁），
+        绝不因配置表不可用而阻断请求。WebSocket 升级不经过 HTTP 中间件，
+        其 kill 状态由同进程其它请求的刷新兜底。
+        """
+        path = request.url.path
+        prefix = settings.api_prefix
+        if path.startswith(prefix + "/ai/") or path.startswith(prefix + "/voice"):
+            from app.services.ai import runtime_gates
+
+            if session_factory is not None and runtime_gates.refresh_due():
+                try:
+                    async with session_factory() as session:
+                        await runtime_gates.maybe_refresh(session)
+                except Exception:
+                    logger.warning("ai_runtime_gates_refresh_failed", exc_info=True)
+        return await call_next(request)
+
     # Minimal Linux images may not register WebP in Python's MIME table.
     mimetypes.add_type("image/webp", ".webp")
     mimetypes.add_type("video/mp4", ".mp4")
