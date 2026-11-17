@@ -1,5 +1,6 @@
 """牵线阶段与会员回应分离；逐条、逐红娘审计电话查看并校验状态流转。"""
 from datetime import datetime
+import sqlite3
 
 import pytest
 from fastapi import HTTPException
@@ -7,9 +8,27 @@ from pydantic import ValidationError
 
 from app.schemas.matchmaker_workspace import WorkspaceIntroductionCreate, WorkspaceIntroductionStatusUpdate
 from app.services.matchmaker_workspace import (
-    WorkspaceActor, _introduction_from_row, update_workspace_introduction_status,
+    WorkspaceActor, _introduction_from_row, _introduction_work_scope, update_workspace_introduction_status,
     view_workspace_introduction_contact,
 )
+
+
+def test_shared_pending_and_handler_scope_respects_rejection_reset():
+    db = sqlite3.connect(":memory:")
+    db.executescript("""
+        CREATE TABLE matchmaker_introduction (id INTEGER, matchmaker_id INTEGER, status TEXT);
+        CREATE TABLE business_audit_log (id INTEGER, resource_type TEXT, resource_id INTEGER, actor_user_id INTEGER, action TEXT);
+        INSERT INTO matchmaker_introduction VALUES (1, 22, 'PENDING'), (2, 22, 'IN_PROGRESS'), (3, 22, 'SUCCEEDED');
+    """)
+    params = {}
+    clause = _introduction_work_scope(WorkspaceActor(21, '红娘', 'NORMAL', 3), 'mi', params)
+    def ids():
+        return [row[0] for row in db.execute(f'SELECT mi.id FROM matchmaker_introduction mi WHERE {clause} ORDER BY mi.id', params)]
+    assert ids() == [1]
+    db.execute("INSERT INTO business_audit_log VALUES (1, 'matchmaker_introduction', 2, 21, 'matchmaker_workspace.introduction.contacts_obtained')")
+    assert ids() == [1, 2]
+    db.execute("INSERT INTO business_audit_log VALUES (2, 'matchmaker_introduction', 2, 22, 'matchmaker_workspace.introduction.response.rejected')")
+    assert ids() == [1]
 
 
 class Result:

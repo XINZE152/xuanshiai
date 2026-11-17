@@ -276,6 +276,23 @@ def _scope_predicate(actor: WorkspaceActor, alias: str, params: dict[str, object
     return f"{alias}.organization_id = :scope_organization_id"
 
 
+def _introduction_work_scope(actor: WorkspaceActor, alias: str, params: dict[str, object]) -> str:
+    """待牵线共享；已接手的牵线中记录继续向接手红娘开放。"""
+    original = _scope_predicate(actor, alias, params)
+    params["introduction_handler_id"] = actor.user_id
+    return f"""({alias}.status = 'PENDING' OR ({original}) OR
+        ({alias}.status = 'IN_PROGRESS' AND EXISTS (
+            SELECT 1 FROM business_audit_log handler_log
+            WHERE handler_log.resource_type = 'matchmaker_introduction'
+              AND handler_log.resource_id = {alias}.id
+              AND handler_log.actor_user_id = :introduction_handler_id
+              AND handler_log.action = 'matchmaker_workspace.introduction.contacts_obtained'
+              AND handler_log.id > COALESCE((SELECT MAX(reset_log.id) FROM business_audit_log reset_log
+                  WHERE reset_log.resource_type = 'matchmaker_introduction' AND reset_log.resource_id = {alias}.id
+                    AND reset_log.action = 'matchmaker_workspace.introduction.response.rejected'), 0)
+        )))"""
+
+
 def _meeting_scope_predicate(actor: WorkspaceActor, alias: str, params: dict[str, object]) -> str:
     if actor.scope == "SELF":
         params["scope_matchmaker_id"] = actor.user_id
@@ -576,15 +593,17 @@ async def workspace_dashboard(
         )
         or 0
     )
-    introduction_params: dict[str, object] = {}
-    introduction_scope = _scope_predicate(actor, "mi", introduction_params)
+    # 待牵线由所有服务红娘共同处理；成功业绩仍属于原归属红娘。
+    introduction_params: dict[str, object] = {"intro_owner_id": actor.user_id}
+    introduction_scope = "mi.matchmaker_id = :intro_owner_id"
     intro_count = int(
         await db.scalar(
             text(
-                f"""SELECT COUNT(*) FROM matchmaker_introduction mi
-                WHERE {introduction_scope} AND mi.status = 'PENDING'"""
+                """SELECT COUNT(*) FROM matchmaker_introduction mi
+                JOIN users fu ON fu.id = mi.from_user_id JOIN users tu ON tu.id = mi.to_user_id
+                WHERE mi.status = 'PENDING'"""
             ),
-            introduction_params,
+            {},
         )
         or 0
     )
@@ -946,7 +965,7 @@ async def list_workspace_introductions(
     search: str | None,
 ) -> WorkspaceIntroductionPage:
     params: dict[str, object] = {"limit": page_size, "offset": (page - 1) * page_size}
-    where = [_scope_predicate(actor, "mi", params)]
+    where = [_introduction_work_scope(actor, "mi", params)]
     if status:
         where.append("mi.status = :status")
         params["status"] = status
@@ -3369,7 +3388,7 @@ async def update_workspace_introduction_status(
     contact_confirmed: bool = False,
 ) -> None:
     params: dict[str, object] = {"id": introduction_id}
-    clause = _scope_predicate(actor, "mi", params)
+    clause = _introduction_work_scope(actor, "mi", params)
     row = await db.execute(text(f"SELECT id, status, created_at, updated_at FROM matchmaker_introduction mi WHERE mi.id = :id AND {clause} FOR UPDATE"), params)
     current = row.mappings().first()
     if current is None:
@@ -3418,7 +3437,7 @@ async def view_workspace_introduction_contact(
     if side not in {"from", "to"}:
         raise HTTPException(422, detail="无效的牵线方")
     params: dict[str, object] = {"id": introduction_id}
-    clause = _scope_predicate(actor, "mi", params)
+    clause = _introduction_work_scope(actor, "mi", params)
     row = (await db.execute(text(f"""SELECT mi.id, mi.status, mi.from_user_id, mi.to_user_id,
         mi.created_at, mi.updated_at FROM matchmaker_introduction mi
         WHERE mi.id = :id AND {clause} FOR UPDATE"""), params)).mappings().first()

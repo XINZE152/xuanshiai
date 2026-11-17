@@ -234,3 +234,15 @@ def test_dashboard_super_actor_scopes_by_organization_not_person() -> None:
     commission_params = db.params_for("FROM commission_entry")
     # 分成是「本人」收益，即使超级红娘看整个门店，这一项仍按被查看红娘本人结算。
     assert commission_params == {"user_id": 22}
+
+
+def test_dashboard_pending_introductions_are_shared_and_success_remains_personal() -> None:
+    for organization_id in (None, 3):
+        db = dashboard_db()
+        run(
+            matchmaker_workspace.workspace_dashboard(
+                db, matchmaker_workspace.WorkspaceActor(22, "总店超级红娘", "SUPER", organization_id)
+            )
+        )
+        assert db.params_for("mi.status = 'SUCCEEDED'") == {"intro_owner_id": 22}
+        assert db.params_for("mi.status = 'PENDING'") == {}
