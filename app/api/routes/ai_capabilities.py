@@ -7,10 +7,13 @@
 """
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user
 from app.core.config import settings
+from app.db.session import get_db
 from app.schemas.ai_common import AiCapabilitiesResponse
+from app.services.ai import runtime_gates
 from app.services.ai.flags import AiFeature, AiFeatureDisabledError, require_ai_feature
 
 router = APIRouter()
@@ -32,9 +35,12 @@ def _usable(feature: AiFeature) -> bool:
 )
 async def get_ai_capabilities(
     _current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession | None = Depends(get_db),
 ) -> AiCapabilitiesResponse:
     """返回各 AI 能力此刻是否可用；``master=false`` 时其余字段恒为 false。"""
-    master = bool(settings.ai_master_enabled)
+    if db is not None:
+        await runtime_gates.maybe_refresh(db)
+    master = bool(settings.ai_master_enabled) and not runtime_gates.master_killed()
     return AiCapabilitiesResponse(
         master=master,
         profile=_usable(AiFeature.PROFILE),

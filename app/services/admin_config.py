@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.admin_config import AdminConfigAuditItem, AdminConfigAuditPage, AdminConfigSnapshot, AdminConfigUpdate
+from app.services.page_switches import default_page_switches_config
 
 NAMESPACE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 
@@ -34,6 +35,17 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
         {"mode": "online-offline", "registration_enabled": True, "browse_enabled": True,
          "online_match_enabled": True, "membership_enabled": True, "matchmaker_enabled": True,
          "maintenance_message": "平台正在维护中，请稍后再试。"}, [],
+    ),
+    "platform_page_switches": (
+        "页面显示开关", "前端 71 页与 10 个模块的显示开关；生效值=模块 AND 页面，登录/注册/首页恒开。",
+        default_page_switches_config(), [],
+    ),
+    "ai_runtime": (
+        "AI 运行时关停", "应急关停（只关不开）：true=强制关闭对应 AI 能力，≤30 秒生效；打开功能仍须 env 开关与生产审批门。",
+        {"master_kill": False, "profile_kill": False, "search_kill": False,
+         "compatibility_shadow_kill": False, "voice_kill": False,
+         "voice_conversation_kill": False, "recommend_kill": False,
+         "advisor_kill": False, "avatar_kill": False}, [],
     ),
     "platform_navigation": (
         "导航配置", "PC、H5、小程序和会员中心导航入口。",

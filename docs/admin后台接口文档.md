@@ -547,3 +547,23 @@ GET/PATCH /api/v1/admin/outbound-call-platform
 ### 4. 手机换绑联动
 
 用户换绑手机、后台编辑会员手机号、推广红娘改号后，`phone_region` 会置空；下一次手机属地刷新会按新号码补齐。页面不要把“属地暂时为空”当成异常。
+
+## 页面显示开关与 AI 运行时关停（PAGE-SWITCH-20261116，2026-11-17）
+
+复用既有 `GET/PATCH /api/v1/admin/configs/{namespace}`（CurrentMatchmakerAdmin，完整快照 + version 乐观锁 + change_summary，审计自动记录），新增两个配置域：
+
+### platform_page_switches（页面显示开关）
+
+- `modules`：10 个模块开关（ai/emotion_lab/community/paper_plane/matchmaker/membership/parent/profile_tools/chat/system），默认全 true。
+- `pages`：71 个前端页面路径开关（pages.json 2026-11-16 快照），默认全 true。生效值 = 模块 AND 页面，由后端计算后经 `GET /api/v1/public/page-switches` 匿名下发；前端不复制与/或逻辑。
+- `placeholder_text`：功能关闭占位文案，默认「该功能维护中，敬请期待」。
+- 锚点六页恒开：`pages/auth/login`、`pages/auth/register`、`pages/index/index`、`pagesSub/userExtra/onboarding/profile`、`pagesSub/parent/parent`、`pagesSub/parent/user-detail`；写入 false 也不生效（防守卫重定向死循环/锁死登录；与前端 enforceParentRoute 豁免白名单对齐，2026-11-17）。
+- 注册表外路径键被忽略；前端 pages.json 变更需后端同批更新注册表（app/services/page_switches.py）。
+
+### ai_runtime（AI 应急关停，只关不开）
+
+- 9 个布尔键：`master_kill` + profile/search/compatibility_shadow/voice/voice_conversation/recommend/advisor/avatar 各 `_kill`，默认全 false。
+- kill=true：对应 AI 能力强制关闭，≤30 秒各实例生效（TTL 缓存），AI 接口返回既有 `503 AI_FEATURE_DISABLED`，`/ai/capabilities` 自动随动；**无需改 env/重启**。
+- kill=false 不能打开 env 开关或生产审批门关闭的功能（安全方向与 fail-closed 一致）。
+- 应急操作：GET 读 version+config → 置 `master_kill=true` → PATCH 完整快照；恢复同流程置 false。
+- C 端完整契约见 `docs/api/页面开关.md`。

@@ -91,6 +91,7 @@ from app.api.routes import (
     paper_plane_contact_exchange,
     presence,
     profile,
+    public_page_switches,
     public_preview,
     regions,
     reward_rule_admin,
@@ -145,6 +146,7 @@ api_router.include_router(profile.router, tags=["首页与资料"])
 api_router.include_router(discovery.router, tags=["首页与资料"])
 api_router.include_router(discovery.users_router, tags=["首页与资料"])
 api_router.include_router(public_preview.router, tags=["游客预览"])
+api_router.include_router(public_page_switches.router, tags=["游客预览"])
 api_router.include_router(matchmaker.router, tags=["红娘"])
 # 静态 /matchmaker/workbench/good-news 必须先于工作台动态路由挂载。
 api_router.include_router(good_news_workspace.router, tags=["红娘"])
