@@ -14,6 +14,7 @@ from app.api.dependencies import (
 from app.db.session import get_db
 from app.schemas.finance import (
     AccountBalanceResponse,
+    UserFinancePage,
     BalanceAdjustmentRequest,
     BalanceAdjustmentResult,
     CommissionEntryResponse,
@@ -56,6 +57,7 @@ from app.services.finance import (
     create_order,
     create_rule,
     get_balance,
+    list_user_finance_records,
     list_rules,
     list_user_commissions,
     admin_finance_report,
@@ -117,6 +119,16 @@ async def balance(current: CurrentUser = Depends(get_current_user), db: AsyncSes
     return await get_balance(db, "user", current.id)
 
 
+@router.get("/ledger", response_model=UserFinancePage, summary="查询本人余额明细")
+async def my_ledger(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> UserFinancePage:
+    return await list_user_finance_records(db, current.id, "balance", page, page_size)
+
+
+@router.get("/expenses", response_model=UserFinancePage, summary="查询本人支付支出明细")
+async def my_expenses(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> UserFinancePage:
+    return await list_user_finance_records(db, current.id, "expense", page, page_size)
+
+
 @router.get("/commission-entries", response_model=list[CommissionEntryResponse], summary="查询我的分成明细")
 async def commission_entries(current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> list[CommissionEntryResponse]:
     return await list_user_commissions(db, current)
@@ -128,8 +140,8 @@ async def withdrawal(body: WithdrawalCreate = Body(...), idempotency_key: str = 
 
 
 @router.get("/withdrawals", response_model=list[WithdrawalResponse], summary="查询我的提现申请")
-async def my_withdrawals(current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> list[WithdrawalResponse]:
-    return await list_my_withdrawals(db, current.id)
+async def my_withdrawals(page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=100), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> list[WithdrawalResponse]:
+    return await list_my_withdrawals(db, current.id, page, page_size)
 
 
 @admin_router.get("/withdrawals/{withdrawal_id}/payee", response_model=WithdrawalPayeeResponse, summary="查看提现收款信息")

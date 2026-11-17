@@ -19,6 +19,8 @@ from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser
 from app.core.config import settings
 from app.schemas.finance import (
     AccountBalanceResponse,
+    UserFinancePage,
+    UserFinanceRecord,
     BalanceAdjustmentRequest,
     BalanceAdjustmentResult,
     CommissionEntryResponse,
@@ -501,6 +503,27 @@ async def get_balance(db: AsyncSession, account_type: str, account_id: int) -> A
     return AccountBalanceResponse(account_type=account_type, account_id=account_id, pending_amount=row["pending_amount"], available_amount=row["available_amount"])
 
 
+async def list_user_finance_records(db: AsyncSession, user_id: int, kind: str, page: int, page_size: int) -> UserFinancePage:
+    params = {"user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size}
+    if kind == "balance":
+        base = "FROM account_ledger al LEFT JOIN withdrawal_request wr ON al.source_type IN ('withdrawal','withdrawal_reversal') AND wr.id=al.source_id AND wr.account_type=al.account_type AND wr.account_id=al.account_id WHERE al.account_type='user' AND al.account_id=:user_id"
+        selection = "al.id, al.amount, al.direction, al.state, al.source_type, al.created_at, wr.status"
+        order = "al.created_at DESC, al.id DESC"
+    elif kind == "expense":
+        base = "FROM payment_order po WHERE po.user_id=:user_id AND po.status IN (1,3) AND po.pay_time IS NOT NULL AND po.pay_type IN (1,2) AND COALESCE(po.channel,'legacy') <> 'mock'"
+        selection = "po.id, COALESCE(po.paid_amount,po.amount) AS amount, 'DEBIT' AS direction, 'AVAILABLE' AS state, 'payment_order' AS source_type, po.pay_time AS created_at, CASE WHEN po.status=3 OR po.refund_status='FULL' THEN 'REFUNDED' WHEN po.refund_status='PARTIAL' THEN 'PARTIAL_REFUND' ELSE 'PAID' END AS status, po.product_name AS title"
+        order = "po.pay_time DESC, po.id DESC"
+    else:
+        raise ValueError('unknown finance record kind')
+    total = int(await db.scalar(text(f"SELECT COUNT(*) {base}"), {"user_id": user_id}) or 0)
+    rows = (await db.execute(text(f"SELECT {selection} {base} ORDER BY {order} LIMIT :limit OFFSET :offset"), params)).mappings().all()
+    labels = {"commission": "分成收入", "withdrawal": "提现申请", "withdrawal_reversal": "提现退回", "membership_order": "会员消费", "admin_balance_adjust": "余额调整", "commission_refund": "分成冲正"}
+    items = [UserFinanceRecord(id=int(row['id']), title=str(row.get('title') or labels.get(str(row['source_type']), '余额变动')),
+        amount=row['amount'], direction=row['direction'], state=str(row['state']), source_type=str(row['source_type']),
+        created_at=_dt(row['created_at']), status=str(row['status']) if row['status'] is not None else None) for row in rows]
+    return UserFinancePage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
+
+
 def _withdrawal_cipher() -> Fernet:
     key = settings.withdrawal_payee_encryption_key
     if key is None:
@@ -597,10 +620,10 @@ async def request_withdrawal(db: AsyncSession, current: CurrentUser, request: Wi
     return _withdrawal(result.mappings().one())
 
 
-async def list_my_withdrawals(db: AsyncSession, user_id: int) -> list[WithdrawalResponse]:
+async def list_my_withdrawals(db: AsyncSession, user_id: int, page: int = 1, page_size: int = 100) -> list[WithdrawalResponse]:
     result = await db.execute(text("""SELECT id, account_type, account_id, amount, status, payee_masked,
         failure_reason, created_at, updated_at FROM withdrawal_request
-        WHERE account_type = 'user' AND account_id = :user_id ORDER BY id DESC LIMIT 100"""), {"user_id": user_id})
+        WHERE account_type = 'user' AND account_id = :user_id ORDER BY id DESC LIMIT :limit OFFSET :offset"""), {"user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size})
     return [_withdrawal(row) for row in result.mappings().all()]
 
 

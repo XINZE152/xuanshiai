@@ -189,6 +189,25 @@ class AccountBalanceResponse(BaseModel):
     available_amount: Decimal
 
 
+class UserFinanceRecord(BaseModel):
+    id: int
+    title: str
+    amount: Decimal
+    direction: Literal["CREDIT", "DEBIT"]
+    state: str
+    source_type: str
+    created_at: datetime
+    status: str | None = None
+
+
+class UserFinancePage(BaseModel):
+    items: list[UserFinanceRecord]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
+
+
 class WithdrawalCreate(BaseModel):
     amount: Decimal = Field(gt=0, le=1000000, decimal_places=2)
     payee_masked: str | None = Field(default=None, min_length=1, max_length=128)
