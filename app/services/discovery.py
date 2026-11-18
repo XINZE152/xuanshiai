@@ -1687,8 +1687,26 @@ async def create_application(db: AsyncSession, viewer_id: int, target_id: int, r
     target_status = int((target_auth.mappings().first() or {}).get("realname_status") or 0)
     target_realname_required = target_status != 2
     existing = await db.execute(text("SELECT id, status FROM match_apply WHERE ((from_user_id = :from_id AND to_user_id = :to_id) OR (from_user_id = :to_id AND to_user_id = :from_id)) AND status IN (0, 1) LIMIT 1"), {"from_id": viewer_id, "to_id": target_id})
-    if existing.first():
-        raise HTTPException(409, detail="双方已有进行中的认识申请或匹配")
+    existing_row = existing.mappings().first()
+    if existing_row is not None:
+        # status 0=待对方回应；1=双方已同意。勿把「申请或匹配」糊成一句，前端曾因文案含「匹配」误报「对方已同意」。
+        if int(existing_row.get("status") or 0) == 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "ALREADY_ACCEPTED",
+                    "message": "双方已互相同意认识，可去消息页真人聊天",
+                    "retryable": False,
+                },
+            )
+        raise HTTPException(
+            409,
+            detail={
+                "code": "ALREADY_PENDING",
+                "message": "认识申请已发送，请等待对方同意后再真人聊天",
+                "retryable": False,
+            },
+        )
     quota_key = await _quota_key("apply", viewer_id)
     vip = await _is_vip(db, viewer_id)
     if await _consume_apply_quota(db, viewer_id, vip):

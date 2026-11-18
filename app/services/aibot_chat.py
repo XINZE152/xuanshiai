@@ -443,13 +443,23 @@ async def _generate_reply(
         if content:
             history.append({"role": role, "content": content})
 
+    # post_turn 先写入本轮 user 再调用本函数，history 末尾通常已是当前 user_text；
+    # 再 append 一次会变成连续两条相同 user，DeepSeek json_object 易返回纯空白 content，
+    # 上层再被映射成「AI 服务暂时不可用」。
+    normalized_user = (user_text or "").strip()
+    if (
+        not history
+        or history[-1].get("role") != "user"
+        or history[-1].get("content") != normalized_user
+    ):
+        history.append({"role": "user", "content": normalized_user})
+
     messages = [
         {
             "role": "system",
             "content": build_system_prompt(agent_id, nickname, member_facts=member_facts or None),
         },
         *history,
-        {"role": "user", "content": user_text},
     ]
     try:
         raw = await complete(
@@ -465,7 +475,11 @@ async def _generate_reply(
         intent = _normalize_intent(parsed.get("intent"))
         choices = _choices_from(parsed.get("choices"))
         return {"reply": reply, "intent": intent, "choices": choices}
-    except HTTPException:
+    except HTTPException as exc:
+        # 供应商空白/抖动时 complete 会 503；对用户改为兜底回复，避免整轮不可用。
+        if getattr(exc, "status_code", None) == 503:
+            logger.warning("aibot llm 503 fallback agent=%s", agent_id)
+            return fallback_reply(agent_id, user_text)
         raise
     except Exception:
         logger.warning("aibot llm parse/fallback agent=%s", agent_id, exc_info=True)

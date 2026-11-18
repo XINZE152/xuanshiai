@@ -1167,7 +1167,12 @@ class _OpenAICompatProvider:
         *,
         json_mode: bool = False,
     ) -> str:
-        """非流式 chat。只返回非空 content，不记录原文或供应商响应。"""
+        """非流式 chat。只返回非空 content，不记录原文或供应商响应。
+
+        DeepSeek V4 Flash 在多轮 + ``response_format=json_object`` 时会间歇返回
+        纯空白 ``content``（finish=stop、有 usage），上层会误报「AI 服务暂时不可用」。
+        这里关闭 thinking，并对空白正文做有限次重试。
+        """
         client = self._ensure_client()
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -1176,34 +1181,55 @@ class _OpenAICompatProvider:
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        try:
-            response = await client.chat.completions.create(**kwargs)
-        except (
-            _RateLimitError,
-            _APITimeoutError,
-            _APIConnectionError,
-            _AuthenticationError,
-            _PermissionDeniedError,
-            _BadRequestError,
-            _APIStatusError,
-            _APIError,
-        ) as exc:
-            raise self._map_openai_exception(exc) from exc
-        last_token_usage.set(_usage_from_response(response, self._model))
-        if not response.choices:
-            raise ProviderError(
-                code="AI_INPUT_INVALID",
-                message="provider 返回空 choices",
-                kind=ProviderErrorKind.NON_RETRYABLE,
+        if isinstance(self, DeepSeekAIProvider):
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
+        last_usage: dict[str, Any] | None = None
+        # 先按调用方要求试；若一直空白且开了 json_mode，再去掉 response_format 兜底重试。
+        attempt_plans: list[dict[str, Any]] = [dict(kwargs), dict(kwargs), dict(kwargs)]
+        if json_mode:
+            no_json = dict(kwargs)
+            no_json.pop("response_format", None)
+            attempt_plans.extend([dict(no_json), dict(no_json)])
+
+        for attempt, call_kwargs in enumerate(attempt_plans, start=1):
+            try:
+                response = await client.chat.completions.create(**call_kwargs)
+            except (
+                _RateLimitError,
+                _APITimeoutError,
+                _APIConnectionError,
+                _AuthenticationError,
+                _PermissionDeniedError,
+                _BadRequestError,
+                _APIStatusError,
+                _APIError,
+            ) as exc:
+                raise self._map_openai_exception(exc) from exc
+            last_usage = _usage_from_response(response, self._model)
+            if not response.choices:
+                raise ProviderError(
+                    code="AI_INPUT_INVALID",
+                    message="provider 返回空 choices",
+                    kind=ProviderErrorKind.NON_RETRYABLE,
+                )
+            content = response.choices[0].message.content
+            if isinstance(content, str) and content.strip():
+                last_token_usage.set(last_usage)
+                return content.strip()
+            logger.warning(
+                "ai_provider_empty_content attempt=%s model=%s json_mode=%s",
+                attempt,
+                self._model,
+                "response_format" in call_kwargs,
             )
-        content = response.choices[0].message.content
-        if not isinstance(content, str) or not content.strip():
-            raise ProviderError(
-                code="AI_INPUT_INVALID",
-                message="provider 返回空内容",
-                kind=ProviderErrorKind.NON_RETRYABLE,
-            )
-        return content
+
+        last_token_usage.set(last_usage)
+        raise ProviderError(
+            code="AI_INPUT_INVALID",
+            message="provider 返回空内容",
+            kind=ProviderErrorKind.NON_RETRYABLE,
+        )
 
     async def stream_chat(
         self,
