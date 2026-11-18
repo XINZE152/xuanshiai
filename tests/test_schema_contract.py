@@ -29,8 +29,10 @@ def test_code_schema_covers_every_table_with_a_primary_key() -> None:
     # + Q69 paper_plane_catch
     # + 原站资源镜像 5 表（ref_teacher / ref_product / ref_guide /
     #   ref_instruction / ref_material）
-    # + 人工提现收款信息表 withdrawal_payee_secret（WITHDRAWAL-MANUAL-20261116），合计 278。
-    assert len(schema) == 278
+    # + 人工提现收款信息表 withdrawal_payee_secret（WITHDRAWAL-MANUAL-20261116）
+    # + 恋 AI BOT 4 张表（aibot_user_assignment / aibot_session /
+    #   aibot_turn / aibot_love_report，20261117_01/03），合计 282。
+    assert len(schema) == 282
     assert all(spec["has_primary_key"] for spec in schema.values()), "所有表都应有主键"
     assert "paper_plane_profile_unlock" in schema
     assert "payment_refund" in schema
@@ -51,7 +53,9 @@ def test_multiline_generated_column_is_not_parsed_as_column() -> None:
 def test_bootstrap_only_columns_exclude_base_ddl_columns() -> None:
     gaps = bootstrap_only_columns()
     total = sum(len(columns) for columns in gaps.values())
-    assert total == 101
+    # 101 基线 + user_profile.bot_intake_json（恋 AI BOT 采集原样，
+    # 20261117_02_bot_intake_up.sql 覆盖，2026-11-18）。
+    assert total == 102
     assert "deleted_at" in {name for name, _ in gaps["users"]}
     assert "realname_status" in {name for name, _ in gaps["user_auth"]}
     # 基础 DDL 已有的列不应算作补列。

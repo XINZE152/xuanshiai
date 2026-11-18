@@ -66,6 +66,12 @@ def test_manifest_checksums_are_lf_normalised() -> None:
         "20261109_01_profile_completion_missing_rows",
         "20261116_01_withdrawal_payee",
         "20261110_01_point_redeem_order_count",
+        # 恋 AI BOT 会话与报告（2026-11-18 事故修复）：原文件误放在
+        # migrations/aibot/ 且 manifest 为空文件，任何 runner 都不会执行，
+        # 已并入 business 域并补齐 down/verify/verify_previous 四件套。
+        "20261117_01_aibot_chat",
+        "20261117_02_bot_intake",
+        "20261117_03_aibot_love_report",
     ]
     for entry in manifest["versions"]:
         for direction in ("up", "down", "verify", "verify_previous"):
@@ -89,6 +95,9 @@ def test_gap_migrations_cover_all_bootstrap_only_columns() -> None:
         ("user_auth", "realname_status"),
         ("chat_session", "user1_pinned_at"),
         ("chat_session", "user2_pinned_at"),
+        # 恋 AI BOT 采集原样：由独立迁移 20261117_02_bot_intake_up.sql 覆盖，
+        # 不在早期 gap 迁移里重复补列（2026-11-18）。
+        ("user_profile", "bot_intake_json"),
     }
     for version, tables in expected.items():
         up = (MIGRATION_ROOT / f"{version}_up.sql").read_text(encoding="utf-8")
@@ -105,7 +114,10 @@ def test_gap_migrations_cover_all_bootstrap_only_columns() -> None:
         assert verify.count(";") == 1
         assert "DROP COLUMN `" in down
     assert covered == {item for item in covered if item not in already}
-    assert len(covered) + len(already) == 101
+    # 补列总数 102 = gap 迁移覆盖 96 + 其他途径覆盖 6（already）；
+    # user_profile.bot_intake_json 由 20261117_02_bot_intake_up.sql 负责，
+    # 所以 gap 迁移覆盖数仍是 96（2026-11-18）。
+    assert len(covered) + len(already) == 102
     assert len(covered) == 96
 
 
