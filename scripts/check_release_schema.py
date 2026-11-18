@@ -136,6 +136,7 @@ def collect(cursor: Any) -> list[CheckResult]:
         _table_present(cursor, "aibot_session"),
         _table_present(cursor, "aibot_turn"),
         _table_present(cursor, "aibot_love_report"),
+        _table_present(cursor, "aibot_timeline_message"),
         _column_present(cursor, "user_profile", "bot_intake_json"),
     ]
 

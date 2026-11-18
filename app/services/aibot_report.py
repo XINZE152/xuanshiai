@@ -35,9 +35,9 @@ from app.services.ai_provider import complete, parse_json
 logger = logging.getLogger(__name__)
 
 _REPORT_QUOTA_PREFIX = "aibot-report"
-# 生成次数限制（查看历史不受限）；报告要陪用户走完整个择偶周期，
-# 一天 6 次足够覆盖「补充资料后重算」，又挡得住脚本刷模型。
-_REPORT_DAILY_LIMIT = 6
+# 生成次数限制（查看历史不受限）；一人一天 100 次，覆盖反复改资料/调试，
+# 仍保留软上限避免异常刷模型。
+_REPORT_DAILY_LIMIT = 100
 _CHAT_DIGEST_LIMIT = 40
 
 # 情绪兜底判词：模型不可用时也不能让报告缺这一块。
@@ -331,7 +331,7 @@ def build_report_messages(
         "objective/subjective/history/pattern/growth/timeline/must/plus/flexible 每项 2~4 条。"
     )
     user = (
-        f"【会员资料（精准优先，bot 来源可能是区间，不能当精确值）】\n{facts_block}\n\n"
+        f"【会员资料（精准优先；bot 来源若是区间/手输原文，正文与 PART01 必须原样引用，禁止取中值或改成单点数字）】\n{facts_block}\n\n"
         f"【已发布的 AI 画像】\n{ai_block}\n\n"
         f"【最近对话摘录（用于判断情绪，不要复述原文）】\n{chat_block}\n\n"
         f"【系统已算好的分数，不得改写】竞争力 {score_total} 分；恋爱意愿「{love_index_label}」。\n\n"
@@ -481,26 +481,142 @@ async def _next_version(db: AsyncSession, user_id: int) -> int:
     return int(row["v"] or 0) + 1 if row else 1
 
 
-def _profile_rows(member_facts: dict[str, Any], ai_lines: list[str]) -> list[dict[str, str]]:
-    """PART 01 的键值行：只列真实有的字段，缺的不占位。"""
-    mapping = (
-        ("性别", "gender"),
-        ("年龄段", "age_band"),
-        ("生日", "birthday"),
-        ("身高", "height_cm"),
-        ("体重", "weight_kg"),
-        ("学历", "education_level"),
-        ("职业", "occupation"),
-        ("收入", "income"),
-        ("城市", "city"),
-    )
-    rows: list[dict[str, str]] = []
-    for label, key in mapping:
+# 用户资料学历刻度 1–5（与 discovery / 前端 educationLabel 对齐）；展示用中文，不露裸数字
+_USER_EDU_LABELS = {
+    1: "高中及以下",
+    2: "大专",
+    3: "本科",
+    4: "硕士",
+    5: "博士",
+}
+
+
+def _first_fact(member_facts: dict[str, Any], *keys: str) -> str | None:
+    """按优先级取第一条非空事实文案。"""
+    for key in keys:
         value = member_facts.get(key)
-        if value is None or str(value).strip() == "":
+        if value is None:
             continue
-        rows.append({"k": label, "v": str(value)[:32]})
-    rows.append({"k": "AI 画像", "v": f"{len(ai_lines)} 条已发布" if ai_lines else "未建构"})
+        text = str(value).strip()
+        if text != "":
+            return text
+    return None
+
+
+def _looks_like_region_code(text: str) -> bool:
+    """六位左右纯数字行政区划码（如 110100），不能当城市名展示。"""
+    s = text.strip()
+    return s.isdigit() and 4 <= len(s) <= 6
+
+
+def _resolve_city_name(raw: str) -> str | None:
+    """把城市文案或编码收成可读地名；解析失败则不展示裸码。"""
+    text = str(raw).strip()
+    if text == "":
+        return None
+    if not _looks_like_region_code(text):
+        return text[:48]
+    try:
+        from app.services.regions import region_display
+
+        name = region_display(text[:2], text, None)
+        if name and str(name).strip() != "":
+            return str(name).strip()[:48]
+    except Exception:
+        pass
+    return None
+
+
+def _display_education(member_facts: dict[str, Any]) -> str | None:
+    """学历：Bot 选项/手输原文优先；精准枚举转中文，禁止直接展示 2/3。"""
+    bot = _first_fact(member_facts, "education_bot")
+    if bot:
+        return bot
+    raw = member_facts.get("education_level")
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        level = int(raw)
+    except Exception:
+        return str(raw).strip()[:32]
+    return _USER_EDU_LABELS.get(level, str(raw).strip()[:32])
+
+
+def _display_height(member_facts: dict[str, Any]) -> str | None:
+    """身高：Bot 区间/手输优先（如实）；否则精准 cm 带单位。"""
+    bot = _first_fact(member_facts, "height_band")
+    if bot:
+        return bot
+    if member_facts.get("height_cm") is not None:
+        try:
+            return f"{int(member_facts['height_cm'])} cm"
+        except Exception:
+            pass
+    return None
+
+
+def _display_weight(member_facts: dict[str, Any]) -> str | None:
+    """体重/身材：Bot 原文优先；否则精准 kg 带单位。"""
+    bot = _first_fact(member_facts, "bmi_band")
+    if bot:
+        return bot
+    if member_facts.get("weight_kg") is not None:
+        try:
+            return f"{int(member_facts['weight_kg'])} kg"
+        except Exception:
+            pass
+    return None
+
+
+def _display_income(member_facts: dict[str, Any]) -> str | None:
+    """收入：Bot 范围/手输优先；否则格式化精准数字，去掉 50000.0 这类裸 float。"""
+    bot = _first_fact(member_facts, "income_bot")
+    if bot:
+        return bot
+    if member_facts.get("income") is not None:
+        try:
+            num = float(member_facts["income"])
+            if num == int(num):
+                return f"{int(num)} 元"
+            return f"{num:.0f} 元"
+        except Exception:
+            return str(member_facts["income"]).strip()[:32]
+    return None
+
+
+def _display_city(member_facts: dict[str, Any]) -> str | None:
+    """城市：可读地名；若误入区划码则解析，解析失败不展示。"""
+    city = _first_fact(member_facts, "city")
+    if city is None:
+        return None
+    return _resolve_city_name(city)
+
+
+def _profile_rows(member_facts: dict[str, Any]) -> list[dict[str, str]]:
+    """PART 01 个人情况：只展示资料采集/会员档案字段；范围写范围，不取中值。
+
+    AI 兴趣画像不在此列表展示（仍参与报告正文生成，见 ai_lines）。
+    """
+    rows: list[dict[str, str]] = []
+
+    def add(label: str, value: str | None) -> None:
+        if value is None:
+            return
+        text = str(value).strip()
+        if text == "":
+            return
+        rows.append({"k": label, "v": text[:48]})
+
+    add("性别", _first_fact(member_facts, "gender"))
+    # 有精准生日显示生日；否则显示年龄段/手输年份原文
+    add("生日", _first_fact(member_facts, "birthday"))
+    add("年龄段", _first_fact(member_facts, "age_band"))
+    add("身高", _display_height(member_facts))
+    add("体重", _display_weight(member_facts))
+    add("学历", _display_education(member_facts))
+    add("职业", _first_fact(member_facts, "occupation"))
+    add("收入", _display_income(member_facts))
+    add("城市", _display_city(member_facts))
     return rows
 
 
@@ -634,7 +750,7 @@ async def _compose_and_store(
         },
         "letter": narrative["letter"],
         "part01": {
-            "profile": _profile_rows(member_facts, ai_lines),
+            "profile": _profile_rows(member_facts),
             "strengths": narrative["part01"]["strengths"],
             "summary": narrative["part01"]["summary"],
         },

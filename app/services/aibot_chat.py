@@ -139,16 +139,22 @@ async def _load_member_facts(db: AsyncSession, user_id: int) -> dict[str, Any]:
     if not row:
         return {}
     residence_display = None
+    residence_text = (
+        str(row["residence_text"]).strip() if row.get("residence_text") else None
+    )
     try:
         from app.services.regions import region_display
 
+        # 直辖市 city_code（如 110100）树节点名是「市辖区」，会被过滤掉；
+        # 必须带上省级码（前 2 位），才能落到「北京市」而不是空串再回退成裸编码。
+        raw_code = row.get("residence_city_code")
+        code_s = str(raw_code).strip() if raw_code is not None else ""
+        province = code_s[:2] if len(code_s) >= 2 else None
         residence_display = region_display(
-            None, row.get("residence_city_code"), None
-        ) or (str(row["residence_text"]).strip() if row.get("residence_text") else None)
+            province, code_s or None, None
+        ) or residence_text
     except Exception:
-        residence_display = (
-            str(row["residence_text"]).strip() if row.get("residence_text") else None
-        )
+        residence_display = residence_text
     precise = {
         "gender": row.get("gender"),
         "birthday": row.get("birthday"),
@@ -601,6 +607,24 @@ async def post_turn(
             ),
             {"intent": intent, "sid": session_id},
         )
+        # 自由聊文本同步进可上翻时间线（与 turn 同事务；失败不阻断主回复）
+        try:
+            from app.services.aibot_timeline import append_text_pair_from_turn
+
+            await append_text_pair_from_turn(
+                db,
+                user_id=user_id,
+                agent_id=session.agent_id,
+                session_id=session_id,
+                user_content=question,
+                assistant_content=reply,
+                user_turn_id=user_turn.turn_id,
+                assistant_turn_id=assistant_turn.turn_id,
+                intent=intent,
+                choices=choices,
+            )
+        except Exception:
+            logger.warning("aibot timeline sync in post_turn skipped", exc_info=True)
         await db.commit()
     except Exception:
         await db.rollback()

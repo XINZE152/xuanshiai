@@ -16,6 +16,9 @@ from app.schemas.aibot import (
     AibotReportResponse,
     AibotSessionCreate,
     AibotSessionResponse,
+    AibotTimelineMessageIn,
+    AibotTimelineMessageOut,
+    AibotTimelinePageResponse,
     AibotTurnRequest,
     AibotTurnResponse,
     AibotWelcomeResponse,
@@ -28,6 +31,7 @@ from app.services.aibot_chat import (
     post_welcome,
     put_assignment,
 )
+from app.services.aibot_timeline import append_timeline_message, list_timeline
 from app.services.aibot_report import (
     create_report_invite_wxacode,
     generate_report,
@@ -114,6 +118,60 @@ async def create_turn(
         body.text,
         idempotency_key=idempotency_key,
     )
+
+
+@router.get(
+    "/timeline",
+    response_model=AibotTimelinePageResponse,
+    summary="聊天时间线上翻分页（before_id 为空=最新一页）",
+)
+async def read_timeline(
+    current: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    agent_id: Annotated[str, Query(min_length=1, max_length=32)],
+    before_id: Annotated[int | None, Query(ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=80)] = 40,
+) -> AibotTimelinePageResponse:
+    page = await list_timeline(
+        db,
+        user_id=current.id,
+        agent_id=agent_id,
+        before_id=before_id,
+        limit=limit,
+    )
+    return AibotTimelinePageResponse(
+        items=[AibotTimelineMessageOut(**item) for item in page["items"]],
+        has_more=bool(page.get("has_more")),
+        oldest_id=page.get("oldest_id"),
+        newest_id=page.get("newest_id"),
+        limit=int(page.get("limit") or limit),
+    )
+
+
+@router.post(
+    "/timeline",
+    response_model=AibotTimelineMessageOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="上报一条聊天 UI 消息到时间线（幂等 client_msg_id）",
+)
+async def create_timeline_message(
+    body: AibotTimelineMessageIn,
+    current: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AibotTimelineMessageOut:
+    item = await append_timeline_message(
+        db,
+        user_id=current.id,
+        agent_id=body.agent_id,
+        role=body.role,
+        kind=body.kind,
+        content=body.content,
+        payload=body.payload,
+        session_id=body.session_id,
+        client_msg_id=body.client_msg_id,
+    )
+    await db.commit()
+    return AibotTimelineMessageOut(**item)
 
 
 @router.get(

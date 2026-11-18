@@ -48,10 +48,9 @@ def test_collect_reports_all_release_gates() -> None:
         }
     )
     results = module.collect(cursor)
-    # 4 项历史门禁 + 5 项恋 AI BOT 门禁（20261117_01/02/03）：
-    # aibot_user_assignment / aibot_session / aibot_turn / aibot_love_report
-    # 四张表，以及 user_profile.bot_intake_json 列。缺任一项都会让代码查不到
-    # 结构而 500（2026-11-18 生产事故根因），因此发布前必须逐项核对。
+    # 4 项历史门禁 + 恋 AI BOT 门禁（20261117_01/02/03 + 20261118_01 timeline）：
+    # aibot_user_assignment / aibot_session / aibot_turn / aibot_love_report /
+    # aibot_timeline_message，以及 user_profile.bot_intake_json 列。
     assert [item.name for item in results] == [
         "user_profile_completion.completion_grandfathered",
         "table community_post_remind",
@@ -61,6 +60,7 @@ def test_collect_reports_all_release_gates() -> None:
         "table aibot_session",
         "table aibot_turn",
         "table aibot_love_report",
+        "table aibot_timeline_message",
         "user_profile.bot_intake_json",
     ]
     assert all(item.ok for item in results)

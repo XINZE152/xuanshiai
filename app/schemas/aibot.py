@@ -126,3 +126,37 @@ class AibotReportListItem(BaseModel):
 
 class AibotReportListResponse(BaseModel):
     items: list[AibotReportListItem] = Field(default_factory=list)
+
+
+class AibotTimelineMessageIn(BaseModel):
+    """前端 pushMsg 上报的一条 UI 消息。"""
+
+    agent_id: str = Field(..., min_length=1, max_length=32)
+    role: str = Field("assistant", max_length=16)
+    kind: str = Field("text", max_length=32)
+    content: str = Field("", max_length=8000)
+    payload: dict[str, Any] | list[Any] | None = None
+    session_id: str | None = Field(default=None, max_length=64)
+    client_msg_id: str | None = Field(default=None, max_length=128)
+
+
+class AibotTimelineMessageOut(BaseModel):
+    id: int
+    message_id: str
+    role: str
+    kind: str = "text"
+    content: str = ""
+    payload: Any = None
+    client_msg_id: str | None = None
+    session_id: str | None = None
+    agent_id: str = ""
+    created_at: str | None = None
+    created_at_ms: int = 0
+
+
+class AibotTimelinePageResponse(BaseModel):
+    items: list[AibotTimelineMessageOut] = Field(default_factory=list)
+    has_more: bool = False
+    oldest_id: int | None = None
+    newest_id: int | None = None
+    limit: int = 40

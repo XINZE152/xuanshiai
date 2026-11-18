@@ -139,7 +139,11 @@ def facts_for_ai(
     precise: dict[str, Any] | None,
     bot_intake: Any,
 ) -> dict[str, Any]:
-    """AI 上下文：有精准用精准，否则回落 BOT 模糊文案。"""
+    """AI / 报告上下文：精准值与 Bot 原文可并存。
+
+    - 精准字段供打分与模型推理；
+    - Bot 区间/手输原文（``*_band`` / ``*_bot``）始终保留，报告 PART01 优先如实展示。
+    """
     precise = precise or {}
     bot = _as_dict(bot_intake)
     out: dict[str, Any] = {}
@@ -148,7 +152,10 @@ def facts_for_ai(
         entry = bot.get(key)
         if isinstance(entry, dict):
             label = entry.get("label") or entry.get("id")
-            return str(label) if label is not None else None
+            if label is None:
+                return None
+            text = str(label).strip()
+            return text if text != "" else None
         return None
 
     if precise.get("gender") in (1, 2):
@@ -161,30 +168,34 @@ def facts_for_ai(
     if precise.get("birthday") is not None:
         out["birthday"] = str(precise["birthday"])
         out["birthday_source"] = "precise"
-    elif bot_label("ageBand"):
+    if bot_label("ageBand"):
         out["age_band"] = bot_label("ageBand")
-        out["age_band_source"] = "bot"
+        if "birthday_source" not in out:
+            out["age_band_source"] = "bot"
 
     if precise.get("height") is not None:
         out["height_cm"] = int(precise["height"])
         out["height_source"] = "precise"
-    elif bot_label("height"):
+    if bot_label("height"):
         out["height_band"] = bot_label("height")
-        out["height_source"] = "bot"
+        if "height_source" not in out:
+            out["height_source"] = "bot"
 
     if precise.get("weight") is not None:
         out["weight_kg"] = int(precise["weight"])
         out["weight_source"] = "precise"
-    elif bot_label("bmi"):
+    if bot_label("bmi"):
         out["bmi_band"] = bot_label("bmi")
-        out["bmi_source"] = "bot"
+        if "bmi_source" not in out:
+            out["bmi_source"] = "bot"
 
     if precise.get("education_level") is not None:
         out["education_level"] = int(precise["education_level"])
         out["education_source"] = "precise"
-    elif bot_label("edu"):
+    if bot_label("edu"):
         out["education_bot"] = bot_label("edu")
-        out["education_source"] = "bot"
+        if "education_source" not in out:
+            out["education_source"] = "bot"
 
     if precise.get("occupation"):
         out["occupation"] = str(precise["occupation"])
@@ -196,23 +207,30 @@ def facts_for_ai(
     if precise.get("is_married") is not None:
         out["is_married"] = int(precise["is_married"])
         out["marriage_source"] = "precise"
-    elif bot_label("marital"):
+    if bot_label("marital"):
         out["marriage_bot"] = bot_label("marital")
-        out["marriage_source"] = "bot"
+        if "marriage_source" not in out:
+            out["marriage_source"] = "bot"
 
     if precise.get("income") is not None:
         out["income"] = float(precise["income"])
         out["income_source"] = "precise"
-    elif bot_label("income"):
+    if bot_label("income"):
         out["income_bot"] = bot_label("income")
-        out["income_source"] = "bot"
+        if "income_source" not in out:
+            out["income_source"] = "bot"
 
-    city_display = precise.get("residence_display") or precise.get("residence_city_code")
-    if city_display:
-        out["city"] = str(city_display)
-        out["city_source"] = "precise"
-    elif bot_label("city"):
-        out["city"] = bot_label("city")
+    # 城市：Bot 原文优先留给报告；精准地名作补充。禁止裸行政区划码。
+    bot_city = bot_label("city")
+    city_display = precise.get("residence_display")
+    city_text = str(city_display).strip() if city_display is not None else ""
+    if bot_city:
+        out["city"] = bot_city
         out["city_source"] = "bot"
+        if city_text != "" and not city_text.isdigit() and city_text != bot_city:
+            out["city_precise"] = city_text
+    elif city_text != "" and not city_text.isdigit():
+        out["city"] = city_text
+        out["city_source"] = "precise"
 
     return out
