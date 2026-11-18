@@ -28,7 +28,13 @@ from app.services.aibot_chat import (
     post_welcome,
     put_assignment,
 )
-from app.services.aibot_report import generate_report, get_report, list_reports, latest_report
+from app.services.aibot_report import (
+    create_report_invite_wxacode,
+    generate_report,
+    get_report,
+    list_reports,
+    latest_report,
+)
 from app.services.discovery import get_aibot_recommendations_page
 
 router = APIRouter(prefix="/ai/aibot", tags=["恋 AI BOT"])
@@ -183,3 +189,14 @@ async def read_love_report(
 ) -> AibotReportResponse:
     payload = await get_report(db, current.id, version)
     return AibotReportResponse(**payload)
+
+
+@router.post(
+    "/invite-wxacode",
+    summary="报告分享/导出邀请小程序码（base64 图片）",
+)
+async def create_invite_wxacode(
+    current: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict[str, str]:
+    _ = current
+    return await create_report_invite_wxacode()

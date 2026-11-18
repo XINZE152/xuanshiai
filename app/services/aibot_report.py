@@ -14,15 +14,18 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from datetime import datetime
 from typing import Any
 
+import httpx
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.redis import consume_daily, daily_quota_key, refund_daily
 from app.schemas.ai_profile import PROFILE_ENTRY_CATEGORY_LABELS
 from app.services.aibot_prompts import get_agent_meta
@@ -746,3 +749,47 @@ async def latest_report(db: AsyncSession, user_id: int) -> dict[str, Any] | None
     if not row:
         return None
     return await get_report(db, user_id, int(row["version"]))
+
+
+async def create_report_invite_wxacode() -> dict[str, str]:
+    """报告分享/导出用的邀请小程序码（getwxacodeunlimit）。
+
+    scene 固定 ``xsa=report``，落地页走恋 AI BOT 入口；微信凭据未配置时 503。
+    """
+    if not settings.wechat_app_id or not settings.wechat_app_secret:
+        raise HTTPException(503, detail="微信小程序码服务未配置")
+    page = "pages/auth/aibot-entry"
+    scene = "xsa=report"
+    async with httpx.AsyncClient(timeout=10) as client:
+        token_response = await client.get(
+            "https://api.weixin.qq.com/cgi-bin/token",
+            params={
+                "grant_type": "client_credential",
+                "appid": settings.wechat_app_id,
+                "secret": settings.wechat_app_secret,
+            },
+        )
+        token_data = token_response.json()
+        if token_data.get("errcode") or not token_data.get("access_token"):
+            raise HTTPException(503, detail="微信访问令牌获取失败")
+        qr_response = await client.post(
+            f"https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={token_data['access_token']}",
+            json={
+                "scene": scene,
+                "page": page,
+                "check_path": False,
+                "env_version": "release",
+            },
+        )
+    if "image" not in qr_response.headers.get("content-type", ""):
+        logger.warning(
+            "aibot invite wxacode failed content-type=%s body=%s",
+            qr_response.headers.get("content-type"),
+            qr_response.text[:200] if qr_response.text else "",
+        )
+        raise HTTPException(503, detail="微信小程序码生成失败")
+    return {
+        "scene": scene,
+        "page": page,
+        "image": "data:image/png;base64," + base64.b64encode(qr_response.content).decode("ascii"),
+    }
