@@ -3486,6 +3486,81 @@ class DatabaseManager:
                     KEY `idx_status_time` (`status`,`start_at`,`end_at`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户置顶曝光购买记录'
             """,
+            # ============================================
+            # 恋 AI BOT：专属红娘绑定、会话轮次与恋爱报告
+            # 与 migrations/business/20261117_01_aibot_chat_up.sql、
+            # 20261117_03_aibot_love_report_up.sql 同源：迁移只负责给既有库
+            # 做增量升级，全新库必须由 bootstrap 直接建出，否则全新部署会缺表。
+            # ============================================
+            "aibot_user_assignment": """
+                CREATE TABLE IF NOT EXISTS `aibot_user_assignment` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `user_id` BIGINT UNSIGNED NOT NULL,
+                    `agent_id` VARCHAR(32) NOT NULL,
+                    `assigned_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `welcome_seen_at` DATETIME NULL,
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_assignment_user` (`user_id`),
+                    KEY `idx_aibot_assignment_agent` (`agent_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            "aibot_session": """
+                CREATE TABLE IF NOT EXISTS `aibot_session` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `session_id` VARCHAR(64) NOT NULL,
+                    `user_id` BIGINT UNSIGNED NOT NULL,
+                    `agent_id` VARCHAR(32) NOT NULL,
+                    `mode` VARCHAR(16) NOT NULL DEFAULT 'free',
+                    `status` VARCHAR(16) NOT NULL DEFAULT 'active',
+                    `needs_welcome` TINYINT NOT NULL DEFAULT 1,
+                    `last_intent` VARCHAR(32) NULL,
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_session_id` (`session_id`),
+                    KEY `idx_aibot_session_user_status` (`user_id`, `status`, `updated_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            "aibot_turn": """
+                CREATE TABLE IF NOT EXISTS `aibot_turn` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `session_id` VARCHAR(64) NOT NULL,
+                    `turn_id` VARCHAR(64) NOT NULL,
+                    `role` VARCHAR(16) NOT NULL,
+                    `content` TEXT NOT NULL,
+                    `intent` VARCHAR(32) NULL,
+                    `choices_json` JSON NULL,
+                    `actions_json` JSON NULL,
+                    `cards_json` JSON NULL,
+                    `idempotency_key` VARCHAR(128) NULL,
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_turn_id` (`turn_id`),
+                    UNIQUE KEY `uk_aibot_turn_idem` (`session_id`, `idempotency_key`),
+                    KEY `idx_aibot_turn_session` (`session_id`, `id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            "aibot_love_report": """
+                CREATE TABLE IF NOT EXISTS `aibot_love_report` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `user_id` BIGINT UNSIGNED NOT NULL,
+                    `version` INT UNSIGNED NOT NULL,
+                    `agent_id` VARCHAR(32) NOT NULL,
+                    `scene` VARCHAR(16) NOT NULL DEFAULT 'ai',
+                    `score_total` INT NOT NULL DEFAULT 0,
+                    `love_index` DECIMAL(5,2) NOT NULL DEFAULT 0,
+                    `emotion_label` VARCHAR(32) NULL,
+                    `emotion_score` DECIMAL(5,2) NULL,
+                    `payload_json` JSON NOT NULL,
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_report_user_version` (`user_id`, `version`),
+                    KEY `idx_aibot_report_user_created` (`user_id`, `created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
         }
 
         # 本次一期商业化领域表与基础用户表保持同一初始化入口。

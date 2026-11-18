@@ -128,6 +128,15 @@ def collect(cursor: Any) -> list[CheckResult]:
         _table_present(cursor, "community_post_remind"),
         _table_present(cursor, "chat_message_hidden"),
         _unlock_cost(cursor),
+        # 恋 AI BOT（migrations/business/20261117_01/02/03）：
+        # 2026-11-18 事故复盘——代码已查询 user_profile.bot_intake_json 与
+        # aibot_* 表，但迁移既未登记 manifest、也未进 bootstrap，全新库与
+        # 升级库都缺，导致资料接口与红娘绑定接口全量 500。发布前必须逐项核对。
+        _table_present(cursor, "aibot_user_assignment"),
+        _table_present(cursor, "aibot_session"),
+        _table_present(cursor, "aibot_turn"),
+        _table_present(cursor, "aibot_love_report"),
+        _column_present(cursor, "user_profile", "bot_intake_json"),
     ]
 
 

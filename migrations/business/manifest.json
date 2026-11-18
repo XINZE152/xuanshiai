@@ -222,6 +222,45 @@
         "verify": "42a0ee83ee94aa3c58507507dcc2d1566038cb6989301a2c5d6527bca49476de",
         "verify_previous": "14fd0a048032d3fc7b4cffa1118a1b4eeb1022005e4758803305a7ae856470ca"
       }
+    },
+    {
+      "version": "20261117_01_aibot_chat",
+      "up": "20261117_01_aibot_chat_up.sql",
+      "down": "20261117_01_aibot_chat_down.sql",
+      "verify": "20261117_01_aibot_chat_verify.sql",
+      "verify_previous": "20261117_01_aibot_chat_verify_previous.sql",
+      "sha256": {
+        "up": "635281aacf0eb7b72abe1ecd9477dd26a31afd1d12086b2188019dbe68861cb0",
+        "down": "045459aa4a596e9c9e862eafa52793d73d20cf222def3defd6eb6f6130a6f1cf",
+        "verify": "05a2e07388af8732f6cc347adbf12c1c15b77d49fc0465754aac034c1aaaa4c5",
+        "verify_previous": "e308abf3b87e3a91a4c5a424f86ea2d10b5155754d5c6f96819a5637c1f5b0b4"
+      }
+    },
+    {
+      "version": "20261117_02_bot_intake",
+      "up": "20261117_02_bot_intake_up.sql",
+      "down": "20261117_02_bot_intake_down.sql",
+      "verify": "20261117_02_bot_intake_verify.sql",
+      "verify_previous": "20261117_02_bot_intake_verify_previous.sql",
+      "sha256": {
+        "up": "ecded91833255ae1262b7ee2878dae1087356f86f49e2b312c6b3ffb78d79d8b",
+        "down": "5ca0b6e0cefd22a651f6ef52fa2507f81a4e04e324bd4e09af27a9ad572413dc",
+        "verify": "a1aeeab676c85d30e4b9c56992c13802bd6239e96ce49a23282952ba86e829d5",
+        "verify_previous": "bb51cd91c62352ff5fbe456e4ab25bdfe229417322561375533d1a02f8b7784a"
+      }
+    },
+    {
+      "version": "20261117_03_aibot_love_report",
+      "up": "20261117_03_aibot_love_report_up.sql",
+      "down": "20261117_03_aibot_love_report_down.sql",
+      "verify": "20261117_03_aibot_love_report_verify.sql",
+      "verify_previous": "20261117_03_aibot_love_report_verify_previous.sql",
+      "sha256": {
+        "up": "34a3f3a6a35a08040a16207a1572e8dd5fd2715a499d46a6ec2e16eb0b6f94fd",
+        "down": "782350862d3e805a6d641dd5fdd54d0fb94872782eececac88445605aa53bf68",
+        "verify": "a804a15469c317503df1ae0b6bb05470340ca2bb74260565984c562a77e0f44c",
+        "verify_previous": "fde4792f87b1e5ff1f26f8bbd8d08fb87b1488dfc8f95acdbdcc04deafb0cfae"
+      }
     }
   ]
 }
