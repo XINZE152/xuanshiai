@@ -21,6 +21,8 @@ from app.schemas.auth import (
     ExistingAccountLoginRequest,
     UserResponse,
     WechatLoginRequest,
+    WechatPhoneBindRequest,
+    WechatPhoneLoginRequest,
 )
 from app.services import auth
 from app.services.presence import mark_session_offline, mark_user_offline
@@ -51,6 +53,28 @@ async def phone_login(request: Request, body: PhoneLoginRequest, db: AsyncSessio
 async def wechat_login(request: Request, body: WechatLoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
     """使用微信登录凭证换取用户身份并创建登录会话。"""
     return await auth.login_wechat(db, body, request_ip(request), request.headers.get("user-agent"))
+
+
+@router.post("/wechat/phone-login", response_model=TokenResponse, summary="微信授权手机号一键登录")
+async def wechat_phone_login(
+    request: Request,
+    body: WechatPhoneLoginRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """wx.login code + getPhoneNumber code 一次完成登录/注册并绑定实名手机号。"""
+    return await auth.login_wechat_with_phone(
+        db, body, request_ip(request), request.headers.get("user-agent")
+    )
+
+
+@router.post("/wechat/bind-phone", status_code=status.HTTP_204_NO_CONTENT, summary="微信授权手机号绑定")
+async def wechat_bind_phone(
+    body: WechatPhoneBindRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """已登录账号补绑手机号，无需短信验证码；已绑定须走 PUT /auth/phone 换绑。"""
+    await auth.bind_wechat_phone(db, current.id, body)
 
 
 @router.post("/test-login", response_model=TokenResponse, summary="使用已有账号测试登录")

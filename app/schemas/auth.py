@@ -90,6 +90,28 @@ class WechatLoginRequest(BaseModel):
     app_version: str | None = Field(default=None, max_length=32)
 
 
+class WechatPhoneLoginRequest(BaseModel):
+    """微信一键手机号登录：login code 换 openid，phone_code 换手机号。"""
+
+    code: str = Field(min_length=1, max_length=512)
+    phone_code: str = Field(
+        min_length=1,
+        max_length=512,
+        description="button open-type=getPhoneNumber 回调里的 e.detail.code",
+    )
+    nickname: str | None = Field(default=None, max_length=64)
+    avatar: str | None = Field(default=None, max_length=255)
+    device_id: str | None = Field(default=None, max_length=128)
+    platform: str | None = Field(default=None, max_length=32)
+    app_version: str | None = Field(default=None, max_length=32)
+
+
+class WechatPhoneBindRequest(BaseModel):
+    """已登录的微信账号补绑手机号，无需短信验证码。"""
+
+    phone_code: str = Field(min_length=1, max_length=512)
+
+
 class ExistingAccountLoginRequest(BaseModel):
     """Login an existing local account with its phone and password."""
 

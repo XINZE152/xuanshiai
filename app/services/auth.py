@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import secrets
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -32,6 +34,8 @@ from app.schemas.auth import (
     RealNameRequest,
     RefreshRequest,
     WechatLoginRequest,
+    WechatPhoneBindRequest,
+    WechatPhoneLoginRequest,
     ExistingAccountLoginRequest,
 )
 from app.services.identity_verify.base import IdentityVerifyRequest, IdentityVerifyResult
@@ -274,6 +278,103 @@ async def exchange_wechat_code(code: str) -> dict[str, str]:
     return {key: data[key] for key in ("openid", "unionid") if key in data}
 
 
+# 微信全局 access_token 缓存：/cgi-bin/token 有日调用配额，不能每次登录都换。
+# 多 worker 各自缓存一份是可接受的（token 本身全局有效），锁只保护本进程并发。
+_wechat_access_token: str | None = None
+_wechat_access_token_expires_at: float = 0.0
+_wechat_access_token_app_id: str | None = None
+_wechat_access_token_lock = asyncio.Lock()
+
+
+async def get_wechat_access_token() -> str:
+    """获取调用 getPhoneNumber 接口所需的公众号/小程序全局 access_token。"""
+    global _wechat_access_token, _wechat_access_token_expires_at, _wechat_access_token_app_id
+    app_id = (settings.wechat_app_id or "").strip()
+    app_secret = (settings.wechat_app_secret or "").strip()
+    if not app_id or not app_secret:
+        raise HTTPException(503, detail="微信登录服务未配置")
+
+    now = time.time()
+    if (
+        _wechat_access_token
+        and _wechat_access_token_app_id == app_id
+        and now < _wechat_access_token_expires_at - 60
+    ):
+        return _wechat_access_token
+
+    async with _wechat_access_token_lock:
+        now = time.time()
+        if (
+            _wechat_access_token
+            and _wechat_access_token_app_id == app_id
+            and now < _wechat_access_token_expires_at - 60
+        ):
+            return _wechat_access_token
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.get(
+                    "https://api.weixin.qq.com/cgi-bin/token",
+                    params={
+                        "grant_type": "client_credential",
+                        "appid": app_id,
+                        "secret": app_secret,
+                    },
+                )
+                data = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(503, detail="微信登录服务暂时不可用") from exc
+        token = data.get("access_token")
+        if data.get("errcode") or not token:
+            raise HTTPException(503, detail="微信登录服务暂时不可用")
+        _wechat_access_token = str(token)
+        _wechat_access_token_app_id = app_id
+        _wechat_access_token_expires_at = time.time() + int(data.get("expires_in") or 7200)
+        return _wechat_access_token
+
+
+async def exchange_wechat_phone_code(code: str) -> str:
+    """把 getPhoneNumber 返回的 code 换成已实名的手机号。
+
+    Mock 模式用 ``mock-phone-13800138000`` 形式，方便本地与单测覆盖完整契约；
+    真实模式调用微信 ``wxa/business/getuserphonenumber``，只取 purePhoneNumber。
+    """
+    if settings.wechat_provider.lower() == "mock":
+        if not settings.is_test_mode:
+            raise HTTPException(503, detail="微信 Mock 服务仅允许测试环境使用")
+        prefix = "mock-phone-"
+        if not code.startswith(prefix):
+            raise HTTPException(400, detail="微信手机号凭证无效")
+        phone = code[len(prefix):].strip()
+        if not re.fullmatch(r"1[3-9]\d{9}", phone):
+            raise HTTPException(400, detail="微信手机号凭证无效")
+        return phone
+
+    access_token = await get_wechat_access_token()
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.post(
+                "https://api.weixin.qq.com/wxa/business/getuserphonenumber",
+                params={"access_token": access_token},
+                json={"code": code},
+            )
+            data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(503, detail="微信登录服务暂时不可用") from exc
+
+    if data.get("errcode") not in (0, None):
+        raise HTTPException(400, detail="微信手机号凭证无效")
+    phone_info = data.get("phone_info")
+    if not isinstance(phone_info, dict):
+        raise HTTPException(400, detail="微信手机号凭证无效")
+    country_code = str(phone_info.get("countryCode") or "86")
+    if country_code != "86":
+        raise HTTPException(400, detail="暂不支持该地区手机号")
+    phone = str(phone_info.get("purePhoneNumber") or phone_info.get("phoneNumber") or "").strip()
+    if not re.fullmatch(r"1[3-9]\d{9}", phone):
+        raise HTTPException(400, detail="微信手机号凭证无效")
+    return phone
+
+
 async def create_session(
     db: AsyncSession,
     user_id: int,
@@ -460,6 +561,142 @@ async def login_wechat(db: AsyncSession, request: WechatLoginRequest, ip: str | 
         await db.execute(text("INSERT INTO user_login_log (user_id, login_type, ip, device) VALUES (:id, 1, :ip, :device)"), {"id": user_id, "ip": ip, "device": user_agent})
     tokens["need_bind_phone"] = not bool(phone)
     return tokens
+
+
+async def login_wechat_with_phone(
+    db: AsyncSession,
+    request: WechatPhoneLoginRequest,
+    ip: str | None,
+    user_agent: str | None,
+) -> dict[str, Any]:
+    """微信一键手机号登录：openid 识别账号，phone_code 提供已实名的手机号。
+
+    与 ``login_wechat`` 的区别是手机号在授权阶段就拿到，不再返回
+    ``need_bind_phone=true``。手机号冲突时不静默改绑，必须走换绑流程。
+    """
+    identity = await exchange_wechat_code(request.code)
+    phone = await exchange_wechat_phone_code(request.phone_code)
+    user_agent = normalize_user_agent(user_agent)
+
+    async with db.begin():
+        result = await db.execute(
+            text("SELECT id, phone, status FROM users WHERE openid = :openid FOR UPDATE"),
+            {"openid": identity["openid"]},
+        )
+        row = result.mappings().first()
+        if row and row["status"] != 1:
+            raise HTTPException(403, detail="账号当前不可用")
+
+        if row:
+            user_id = int(row["id"])
+            bound_phone = row["phone"]
+            if bound_phone and bound_phone != phone:
+                raise HTTPException(409, detail="该微信账号已绑定其他手机号，请使用原手机号登录")
+            await touch_login(
+                db,
+                user_id,
+                extra_set="nickname = COALESCE(:nickname, nickname), avatar = COALESCE(:avatar, avatar)",
+                extra_params={"nickname": request.nickname, "avatar": request.avatar},
+            )
+            if not bound_phone:
+                # 手机号在 users 表是唯一身份，绑定前必须再次确认没被别人占用。
+                dup = await db.execute(
+                    text("SELECT id FROM users WHERE phone = :phone FOR UPDATE"),
+                    {"phone": phone},
+                )
+                dup_row = dup.mappings().first()
+                if dup_row and int(dup_row["id"]) != user_id:
+                    raise HTTPException(409, detail="该手机号已绑定其他账号")
+                await db.execute(
+                    text("UPDATE users SET phone = :phone, phone_verified_at = UTC_TIMESTAMP() WHERE id = :id"),
+                    {"phone": phone, "id": user_id},
+                )
+        else:
+            if not await platform_registration_open(db):
+                raise HTTPException(403, detail="平台当前暂停新用户注册，请联系红娘开通后再试")
+            dup = await db.execute(
+                text("SELECT id FROM users WHERE phone = :phone FOR UPDATE"),
+                {"phone": phone},
+            )
+            if dup.mappings().first():
+                raise HTTPException(409, detail="该手机号已绑定其他账号")
+
+            columns = ["openid", "phone", "phone_verified_at", "register_ip"]
+            values = [":openid", ":phone", "UTC_TIMESTAMP()", ":ip"]
+            payload: dict[str, Any] = {
+                "openid": identity["openid"],
+                "phone": phone,
+                "ip": ip,
+            }
+            if identity.get("unionid"):
+                columns.append("unionid")
+                values.append(":unionid")
+                payload["unionid"] = identity["unionid"]
+            if request.nickname:
+                columns.append("nickname")
+                values.append(":nickname")
+                payload["nickname"] = request.nickname
+            if request.avatar:
+                columns.append("avatar")
+                values.append(":avatar")
+                payload["avatar"] = request.avatar
+            user_columns = await _users_columns(db)
+            if "source" in user_columns:
+                columns.append("source")
+                values.append(":source")
+                payload["source"] = SOURCE_SELF_REGISTER
+            result = await db.execute(
+                text(_render_user_insert(columns, values)),
+                payload,
+            )
+            user_id = int(result.lastrowid)
+
+        await ensure_default_user_role(db, user_id)
+        tokens = await create_session(
+            db, user_id, request.device_id, request.platform, request.app_version, ip, user_agent
+        )
+        # login_type=1 与既有微信登录同一类，避免统计口径分裂。
+        await db.execute(
+            text("INSERT INTO user_login_log (user_id, login_type, ip, device) VALUES (:id, 1, :ip, :device)"),
+            {"id": user_id, "ip": ip, "device": user_agent},
+        )
+
+    tokens["need_bind_phone"] = False
+    return tokens
+
+
+async def bind_wechat_phone(
+    db: AsyncSession,
+    user_id: int,
+    request: WechatPhoneBindRequest,
+) -> None:
+    """已登录账号用微信授权手机号补绑，不走短信验证码。"""
+    phone = await exchange_wechat_phone_code(request.phone_code)
+    async with db.begin():
+        result = await db.execute(
+            text("SELECT phone, status FROM users WHERE id = :id FOR UPDATE"),
+            {"id": user_id},
+        )
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(404, detail="用户不存在")
+        if row["status"] != 1:
+            raise HTTPException(403, detail="账号当前不可用")
+        if row["phone"] == phone:
+            return
+        if row["phone"]:
+            raise HTTPException(409, detail="账号已绑定手机号，请使用换绑流程")
+        dup = await db.execute(
+            text("SELECT id FROM users WHERE phone = :phone FOR UPDATE"),
+            {"phone": phone},
+        )
+        dup_row = dup.mappings().first()
+        if dup_row and int(dup_row["id"]) != int(user_id):
+            raise HTTPException(409, detail="该手机号已绑定其他账号")
+        await db.execute(
+            text("UPDATE users SET phone = :phone, phone_verified_at = UTC_TIMESTAMP() WHERE id = :id"),
+            {"phone": phone, "id": user_id},
+        )
 
 
 async def login_existing_account(db: AsyncSession, request: ExistingAccountLoginRequest, ip: str | None, user_agent: str | None) -> dict[str, Any]:
