@@ -327,35 +327,35 @@ def build_report_messages(
         "平台红线：不承诺关系结果，不制造年龄焦虑，不使用「命中注定」「最后机会」这类表述，"
         "不做心理诊断，不评价外貌高低。\n"
         "只输出一个 JSON 对象，不要 Markdown 代码块，不要任何解释性文字。\n"
-        "除 emotion 的判断外，其它列表字段每项都是 20~60 字的中文短句，"
-        "objective/subjective/history/pattern/growth/timeline/must/plus/flexible 每项 2~4 条。"
+        "控制总长度：列表每项 1~2 条、每条不超过 40 字；letter/closing 各不超过 120 字，"
+        "必须一次输出完整可解析的 JSON（以 } 收尾）。"
     )
     user = (
-        f"【会员资料（精准优先；bot 来源若是区间/手输原文，正文与 PART01 必须原样引用，禁止取中值或改成单点数字）】\n{facts_block}\n\n"
+        f"【会员资料（精准优先；bot 来源若是区间/手输原文，正文必须原样引用，禁止取中值）】\n{facts_block}\n\n"
         f"【已发布的 AI 画像】\n{ai_block}\n\n"
         f"【最近对话摘录（用于判断情绪，不要复述原文）】\n{chat_block}\n\n"
         f"【系统已算好的分数，不得改写】竞争力 {score_total} 分；恋爱意愿「{love_index_label}」。\n\n"
-        "请输出 JSON，字段如下（缺失也保留键）：\n"
+        "请输出精简 JSON（缺失也保留键，数组宁可短）：\n"
         "{\n"
-        '  "letter": "顾问寄语，120~200 字，第二人称，先肯定再指出一个卡点",\n'
+        '  "letter": "顾问寄语，≤120 字",\n'
         '  "emotion": {\n'
-        '    "label": "情绪标签，4~6 字，如 平稳期待 / 压力偏高 / 观望犹豫",\n'
-        '    "score": -1.0 到 1.0 的数字（负=低压，正=积极）,\n'
-        '    "trend": "升 | 平 | 降",\n'
-        '    "evidence": ["对话里能支撑这个判断的现象，2~3 条，不要引用原句"],\n'
-        '    "advice": "针对这个情绪的一条具体建议"\n'
+        '    "label": "4~6 字情绪标签",\n'
+        '    "score": -1.0 到 1.0,\n'
+        '    "trend": "升|平|降",\n'
+        '    "evidence": ["现象1","现象2"],\n'
+        '    "advice": "一条建议"\n'
         "  },\n"
-        '  "part01": {"strengths": ["优势 2~3 条"], "summary": "一句话总结当前条件与意愿"},\n'
-        '  "part02": {"objective": ["客观原因"], "subjective": ["主观原因"], "conclusion": "结论"},\n'
-        '  "part03": {"history": ["情感经历要点"], "pattern": ["相处模式"], "growth": ["可成长点"]},\n'
+        '  "part01": {"strengths": ["优势"], "summary": "一句话"},\n'
+        '  "part02": {"objective": ["客观"], "subjective": ["主观"], "conclusion": "结论"},\n'
+        '  "part03": {"history": ["经历"], "pattern": ["模式"], "growth": ["成长"]},\n'
         '  "part04": {\n'
-        '    "current": [{"item": "期望项", "raw": "用户当前写法", "advice": "建议", "tier": "核心底线|可调整项|加分项"}],\n'
-        '    "must": ["底线"], "plus": ["加分项"], "flexible": ["可让步项"]\n'
+        '    "current": [{"item": "期望", "raw": "原话", "advice": "建议", "tier": "核心底线|可调整项|加分项"}],\n'
+        '    "must": ["底线"], "plus": ["加分"], "flexible": ["可让步"]\n'
         "  },\n"
-        '  "part05": {"timeline": ["时间节奏"], "growth": ["能力建设"]},\n'
+        '  "part05": {"timeline": ["节奏"], "growth": ["建设"]},\n'
         '  "part06": {"issues": [{"name": "议题", "level": "高|中|低", "note": "说明"}], "tactics": ["策略"]},\n'
-        '  "part07": {"path": ["下一步动作"], "closing": "结尾一段话，不承诺结果"},\n'
-        '  "match_focus": ["下一轮推荐该优先看什么，3 条"]\n'
+        '  "part07": {"path": ["下一步"], "closing": "结尾≤80字"},\n'
+        '  "match_focus": ["优先看1","优先看2","优先看3"]\n'
         "}"
     )
     return [
@@ -709,10 +709,17 @@ async def _compose_and_store(
         if not str(parsed.get("letter") or "").strip():
             raise ValueError("empty letter")
         narrative = _normalize_narrative(parsed)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.warning("aibot report fallback to rule narrative user=%s", user_id, exc_info=True)
+    except Exception as exc:
+        # 含 parse_json 的 503「AI返回格式无效」、截断 JSON、空 letter：
+        # 报告必须仍能生成，PART01 资料行来自会员事实，不依赖模型正文。
+        if isinstance(exc, HTTPException) and int(getattr(exc, "status_code", 0) or 0) not in (503, 502, 500):
+            raise
+        logger.warning(
+            "aibot report fallback to rule narrative user=%s err=%s",
+            user_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
         source = "rule"
         narrative = _rule_narrative(
             nickname=nickname,
