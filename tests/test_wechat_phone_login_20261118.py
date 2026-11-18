@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import re
-from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -96,7 +95,7 @@ def _stub_login_dependencies(monkeypatch: pytest.MonkeyPatch, phone: str = "1380
 @pytest.mark.asyncio
 async def test_mock_phone_code_parses_only_mainland_mobile(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(auth_service.settings, "wechat_provider", "mock")
-    monkeypatch.setattr(auth_service.settings, "is_test_mode", True)
+    monkeypatch.setattr(auth_service.settings, "environment", "testing")
 
     assert await auth_service.exchange_wechat_phone_code("mock-phone-13800138000") == "13800138000"
     with pytest.raises(HTTPException) as bad:

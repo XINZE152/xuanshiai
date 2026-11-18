@@ -129,8 +129,16 @@ async def moderate_text(
     content: str | None,
     *,
     field: str = "内容",
+    scene: int = 1,
+    openid: str | None = None,
 ) -> ContentDecision:
-    """Apply local rules first, then the optional external provider once."""
+    """Apply local rules, then optional Aliyun and WeChat providers once each.
+
+    ``scene``/``openid`` are additive optional args: existing callers keep their
+    behaviour (scene defaults to 1 / user profile). Callers on comment/forum/
+    social paths should pass the matching scene so 微信 msgSecCheck uses the
+    right classification context.
+    """
     # Keep the existing assertion hook for compatibility with callers and
     # tests. It blocks local reject rules before any external request.
     await assert_text_allowed(db, content, field=field)
@@ -141,22 +149,37 @@ async def moderate_text(
     from app.services.aliyun_content_moderation import moderate_with_aliyun
 
     provider_decision = await moderate_with_aliyun(content or "")
-    if provider_decision.action == "allow":
+    if provider_decision.action != "allow":
+        display_content = content or ""
+        if provider_decision.action == "replace":
+            for token in sorted(provider_decision.matched_words, key=len, reverse=True):
+                if token:
+                    display_content = display_content.replace(
+                        token,
+                        "*" * max(1, len(token)),
+                    )
+        return ContentDecision(
+            action=provider_decision.action,
+            display_content=display_content,
+            matched_words=provider_decision.matched_words,
+            max_level=provider_decision.risk_level,
+            provider=provider_decision.provider,
+        )
+
+    # 微信官方文本检测（默认关闭；命中违规→reject，异常→manual_review）。
+    from app.services.wechat_sec_check import check_text
+
+    wechat_decision = await check_text(content or "", scene=scene, openid=openid)
+    if wechat_decision.action == "allow":
         return local_decision
-
-    display_content = content or ""
-    if provider_decision.action == "replace":
-        for token in sorted(provider_decision.matched_words, key=len, reverse=True):
-            if token:
-                display_content = display_content.replace(
-                    token,
-                    "*" * max(1, len(token)),
-                )
-
+    # 返回既有 action 语义，交给调用方的 reject/manual_review 分支统一处理
+    # （通知、422 文案、待审落库），不在本层抛异常绕过那些逻辑。
+    # reject 时 display_content 用原文：调用方会拒绝该内容，不会展示。
+    display_content = local_decision.display_content if wechat_decision.action == "manual_review" else (content or "")
     return ContentDecision(
-        action=provider_decision.action,
+        action=wechat_decision.action,
         display_content=display_content,
-        matched_words=provider_decision.matched_words,
-        max_level=provider_decision.risk_level,
-        provider=provider_decision.provider,
+        matched_words=local_decision.matched_words,
+        max_level=max(local_decision.max_level, wechat_decision.risk_level),
+        provider=wechat_decision.provider,
     )

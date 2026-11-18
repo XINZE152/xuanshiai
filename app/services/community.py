@@ -302,7 +302,7 @@ async def create_post(
     from app.services.content_filter import moderate_text
 
     content = (request.content or "").strip()
-    decision = await moderate_text(db, content, field="动态内容")
+    decision = await moderate_text(db, content, field="动态内容", scene=3)
     if decision.action == "reject":
         await _notify_moderation_rejected(db, user_id, "post")
         if commit:
@@ -452,7 +452,7 @@ async def update_post(
     if not result.scalar():
         raise HTTPException(404, detail="动态不存在或无权修改")
     content = (request.content or "").strip()
-    decision = await moderate_text(db, content, field="动态内容")
+    decision = await moderate_text(db, content, field="动态内容", scene=3)
     if decision.action == "reject":
         await _notify_moderation_rejected(db, user_id, "post")
         if commit:
@@ -1098,7 +1098,7 @@ async def create_comment(
     await ensure_user_allowed(db, user_id, "COMMENT_RESTRICTED")
     from app.services.content_filter import moderate_text
 
-    decision = await moderate_text(db, request.content, field="评论内容")
+    decision = await moderate_text(db, request.content, field="评论内容", scene=2)
     if decision.action == "reject":
         await _notify_moderation_rejected(db, user_id, "comment")
         if commit:
@@ -1886,7 +1886,7 @@ async def create_paper_plane(
 
     content = (request.content or "").strip()
     try:
-        decision = await moderate_text(db, content, field="纸飞机内容")
+        decision = await moderate_text(db, content, field="纸飞机内容", scene=3)
     except Exception:
         if used_daily:
             await _refund_quota_after_failure(key)
@@ -2194,7 +2194,7 @@ async def reply_paper_plane(
     await ensure_user_allowed(db, user_id, "COMMENT_RESTRICTED")
     from app.services.content_filter import moderate_text
 
-    decision = await moderate_text(db, request.content, field="纸飞机回复")
+    decision = await moderate_text(db, request.content, field="纸飞机回复", scene=3)
     if decision.action == "reject":
         await _notify_moderation_rejected(db, user_id, "paper_plane_reply")
         if commit:
@@ -2369,7 +2369,7 @@ async def send_paper_plane_message(
 
     # 文本消息过滤敏感词；媒体消息 content 为空，无需过滤
     if request.type == 1 and (request.content or "").strip():
-        decision = await moderate_text(db, request.content, field="会话消息")
+        decision = await moderate_text(db, request.content, field="会话消息", scene=4)
         if decision.action == "reject":
             await _notify_moderation_rejected(db, user_id, "paper_plane_message")
             if commit:

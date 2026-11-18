@@ -175,6 +175,22 @@ jobs:
           tests/test_page_switches.py
       - name: Page switch contracts
         run: uv run --no-sync pytest tests/test_page_switches.py -q
+      # CONTENT-SEC-20261118：微信官方内容安全检测（文本 msgSecCheck + 图片 imgSecCheck）。
+      # 开关关闭时完全放行，不改变既有审核链路；用例为桩 + monkeypatch，无真实微信调用、无真实 DB。
+      # 新增测试必须 Ruff + pytest 双登记（PROJECT_RULES 7.1）。
+      - name: Ruff (wechat content security scope)
+        run: >-
+          uv run --no-sync ruff check
+          app/services/wechat_sec_check.py app/services/content_filter.py
+          app/services/profile.py app/services/community_media.py
+          app/services/community.py app/core/config.py
+          tests/test_wechat_sec_check_20261118.py
+          tests/test_wechat_phone_login_20261118.py
+      - name: Wechat content security contracts
+        run: >-
+          uv run --no-sync pytest
+          tests/test_wechat_sec_check_20261118.py
+          tests/test_wechat_phone_login_20261118.py -q
 
   ai-unit:
     runs-on: ubuntu-24.04

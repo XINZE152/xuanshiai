@@ -263,6 +263,18 @@ class Settings(BaseSettings):
         "manual_review", "reject", "replace"
     ] = "manual_review"
 
+    # 微信官方内容安全（msgSecCheck 文本 / imgSecCheck 图片）。默认关闭，
+    # 关闭时所有检测直接放行，不改变既有审核链路；开启需小程序为企业主体并
+    # 完成微信认证。复用 wechat_app_id/wechat_app_secret 换取的全局 access_token。
+    wechat_sec_check_enabled: bool = False
+    wechat_sec_check_fail_mode: Literal["manual_review", "reject"] = "manual_review"
+    wechat_sec_check_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    wechat_sec_check_max_retries: int = Field(default=1, ge=0, le=3)
+    wechat_sec_check_max_width: int = 750
+    wechat_sec_check_max_height: int = 1334
+    wechat_sec_check_max_bytes: int = 900000
+    wechat_sec_check_mock: bool = False
+
     # Optional environment overrides for commercial configuration. When unset,
     # the corresponding database configuration remains the fallback.
     membership_monthly_price: float | None = Field(default=None, ge=0)

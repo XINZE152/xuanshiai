@@ -468,6 +468,32 @@ def _image_outputs(data: bytes) -> tuple[bytes, bytes]:
         raise HTTPException(415, detail="图片内容无法识别") from exc
 
 
+async def _gate_media_by_sec_check(data: bytes, *, scene: int = 1) -> None:
+    """上传落盘前做微信图片内容安全检测。
+
+    仅在开关打开时生效（见 wechat_sec_check）。判定违规直接 422 拒绝且不落盘；
+    人工审核/服务异常沿用既有 review_status 待审链路，不改变头像展示口径。
+    """
+    from app.services.wechat_sec_check import check_image
+
+    decision = await check_image(data, scene=scene)
+    if decision.action == "reject":
+        logger.warning(
+            "wechat_img_sec_check_rejected scene=%s provider=%s raw_errcode=%s",
+            scene,
+            decision.provider,
+            decision.raw_errcode,
+        )
+        raise HTTPException(422, detail="图片含违规内容，请更换")
+    if decision.action == "manual_review":
+        logger.warning(
+            "wechat_img_sec_check_manual_review scene=%s provider=%s error=%s",
+            scene,
+            decision.provider,
+            decision.error,
+        )
+
+
 def _user_media_dir(user_id: int) -> Path:
     return Path(settings.upload_dir) / str(user_id)
 
@@ -870,6 +896,10 @@ async def update_nickname(
     )
     if result.mappings().first() is None:
         raise HTTPException(404, detail="用户不存在")
+    # 昵称是公开 UGC 字段，写库前必须过内容安全（本地词库 + 微信 msgSecCheck）。
+    decision = await moderate_text(db, nickname, field="昵称", scene=1)
+    if decision.action in {"reject", "manual_review"}:
+        raise HTTPException(422, detail="昵称含违规信息，请修改后重试")
     await db.execute(
         text("UPDATE users SET nickname = :nickname, updated_at = UTC_TIMESTAMP() WHERE id = :user_id"),
         {"user_id": user_id, "nickname": nickname},
@@ -1121,6 +1151,7 @@ async def upload_avatar(
 ) -> dict[str, Any]:
     """上传头像。auto_approve 供服务红娘代传使用，直接标记为审核通过。"""
     data = await _read_limited(file, IMAGE_MAX_BYTES)
+    await _gate_media_by_sec_check(data, scene=1)
     image_data, thumbnail_data = await asyncio.to_thread(_image_outputs, data)
     name = uuid.uuid4().hex
     directory = _user_media_dir(user_id)
@@ -1158,6 +1189,7 @@ async def upload_avatar(
 
 async def upload_background(db: AsyncSession, user_id: int, file: UploadFile) -> dict[str, Any]:
     data = await _read_limited(file, IMAGE_MAX_BYTES)
+    await _gate_media_by_sec_check(data, scene=1)
     image_data, thumbnail_data = await asyncio.to_thread(_image_outputs, data)
     name = uuid.uuid4().hex
     directory = _user_media_dir(user_id)
@@ -1190,6 +1222,7 @@ async def upload_photo(
     if result.scalar() >= MAX_PHOTOS:
         raise HTTPException(409, detail="相册最多保存9张图片")
     data = await _read_limited(file, IMAGE_MAX_BYTES)
+    await _gate_media_by_sec_check(data, scene=1)
     image_data, thumbnail_data = await asyncio.to_thread(_image_outputs, data)
     result = await db.execute(text("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM user_media WHERE user_id = :user_id AND media_type = 'photo' AND deleted_at IS NULL"), {"user_id": user_id})
     sort_order = int(result.scalar())
