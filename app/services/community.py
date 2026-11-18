@@ -1332,6 +1332,84 @@ async def get_topic(db: AsyncSession, user_id: int, topic_id: int) -> CommunityT
     return _topic_response(dict(row))
 
 
+# 会员自建话题的每日上限。话题会进入公共列表，必须有额度兜底，否则可被刷成话题墙。
+TOPIC_CREATE_DAILY_LIMIT = 3
+
+
+async def create_user_topic(
+    db: AsyncSession,
+    user_id: int,
+    name: str,
+    *,
+    commit: bool = True,
+    quota_key: str | None = None,
+) -> CommunityTopicResponse:
+    """会员自建话题。
+
+    约束：
+    - 同名话题直接复用（含被停用的），既保证重试幂等，也避免「健身」「健身 」刷出重复行；
+    - 名称过内容安全，命中高危词直接 422；
+    - 每人每日 ``TOPIC_CREATE_DAILY_LIMIT`` 条，防刷公共话题池；
+    - 新话题 ``is_active=1``：发布动态时的校验要求 ``is_active=1``，否则建完也用不了。
+      代价是自建话题立即可见，运营侧仍需有下架手段（``is_active=0``）。
+    """
+    from app.core.redis import daily_quota_key
+    from app.services.content_filter import moderate_text
+
+    await ensure_user_allowed(db, user_id, "POST_RESTRICTED")
+    normalized = (name or "").strip().lstrip("#").strip()
+    if len(normalized) < 2 or len(normalized) > 20:
+        raise HTTPException(422, detail="话题名称需 2-20 个字")
+
+    existing = await db.execute(
+        text(
+            "SELECT id, is_active FROM community_topic WHERE name = :name "
+            "ORDER BY is_active DESC, id ASC LIMIT 1"
+        ),
+        {"name": normalized},
+    )
+    existing_row = existing.mappings().first()
+    if existing_row is not None:
+        # 复用已存在的话题：停用的顺手重新启用，用户不该因为运营下架过就建不出来。
+        if int(existing_row["is_active"]) != 1:
+            await db.execute(
+                text("UPDATE community_topic SET is_active = 1 WHERE id = :id"),
+                {"id": int(existing_row["id"])},
+            )
+        if commit:
+            await db.commit()
+        return await get_topic(db, user_id, int(existing_row["id"]))
+
+    key = quota_key or daily_quota_key("community-topic", user_id)
+    allowed = await consume_daily(key, TOPIC_CREATE_DAILY_LIMIT)
+    if not allowed:
+        raise HTTPException(429, detail="今天创建的话题已达上限，明天再来")
+
+    try:
+        decision = await moderate_text(db, normalized, field="话题名称", scene=3)
+    except Exception:
+        await _refund_quota_after_failure(key)
+        raise
+    if decision.action in {"reject", "manual_review"}:
+        await _refund_quota_after_failure(key)
+        raise HTTPException(422, detail="话题名称含违规信息，请修改后重试")
+
+    result = await db.execute(
+        text(
+            "INSERT INTO community_topic (name, icon, sort, is_active) "
+            "VALUES (:name, '', 0, 1)"
+        ),
+        {"name": normalized},
+    )
+    topic_id = int(result.lastrowid or 0)
+    if topic_id <= 0:
+        await _refund_quota_after_failure(key)
+        raise HTTPException(500, detail="话题创建失败，请重试")
+    if commit:
+        await db.commit()
+    return await get_topic(db, user_id, topic_id)
+
+
 async def get_topic_detail(
     db: AsyncSession,
     user_id: int,

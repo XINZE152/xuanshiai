@@ -621,6 +621,21 @@ def test_feed_openapi_exposes_mine_mode() -> None:
     assert "mine" in modes
 
 
+def test_member_topic_create_is_exposed() -> None:
+    """发布动态页的「创建话题」依赖该接口。
+
+    锁三件事：路径存在、只收 name（icon/sort 归服务端）、状态码 201，
+    避免前端已经放了按钮而后端路由被误删或改成要求额外字段。
+    """
+    spec = app.openapi()
+    operation = spec["paths"]["/api/v1/community/topics"]["post"]
+    assert "201" in operation["responses"]
+    ref = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    body_schema = spec["components"]["schemas"][ref.split("/")[-1]]
+    assert body_schema["required"] == ["name"]
+    assert set(body_schema["properties"]) == {"name"}
+
+
 @pytest.mark.asyncio
 async def test_post_visibility_blocks_outsiders_and_keeps_self_only_for_author(
     community_database: CommunityDatabaseHarness,

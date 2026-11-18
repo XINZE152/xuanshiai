@@ -40,6 +40,7 @@ from app.schemas.community import (
     CommunityReportReason,
     CommunityReportResponse,
     CommunityTopicDetailResponse,
+    CommunityTopicCreate,
     CommunityTopicJoinResponse,
     CommunityTopicPage,
     CommunityTopicResponse,
@@ -69,6 +70,7 @@ from app.services.community import (
     create_comment,
     create_paper_plane,
     create_post,
+    create_user_topic,
     update_post,
     delete_comment,
     delete_post,
@@ -433,6 +435,26 @@ async def unlike_comment_route(
     db: AsyncSession = Depends(get_db),
 ) -> CommunityCommentResponse:
     return await like_comment(db, current.id, comment_id, False)
+
+
+@router.post(
+    "/community/topics",
+    response_model=CommunityTopicResponse,
+    status_code=201,
+    summary="创建话题（会员自建）",
+)
+async def create_topic_route(
+    body: CommunityTopicCreate,
+    current: CurrentUser = Depends(get_face_verified_user),
+    db: AsyncSession = Depends(get_db),
+) -> CommunityTopicResponse:
+    """会员在发布动态时自建话题。
+
+    门槛与发动态同口径（实名 + 人脸），避免出现「能建话题却发不了帖」。
+    同名话题直接返回已有行（重试幂等）；每日 3 条上限在服务层扣。
+    """
+    quota_key = daily_quota_key("community-topic", current.id)
+    return await create_user_topic(db, current.id, body.name, quota_key=quota_key)
 
 
 @router.get("/community/topics", response_model=list[CommunityTopicResponse], summary="话题列表")
