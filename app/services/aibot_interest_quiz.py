@@ -1,4 +1,8 @@
-"""恋 AI BOT 兴趣连问：第 2 轮起按已有标签动态出题。"""
+"""恋 AI BOT 兴趣连问：第 2 轮起按已有标签动态出题。
+
+提示词权威：项目文档 10 §5.3；对照 19 / 27。
+改本题干策略时请同步文档并 bump INTEREST_QUIZ_PROMPT_VERSION。
+"""
 
 from __future__ import annotations
 
@@ -15,6 +19,9 @@ from app.services.aibot_prompts import get_agent_meta
 
 logger = logging.getLogger(__name__)
 
+# 与项目文档 10 §5.3 / 27 对齐；审计与抽检用。
+INTEREST_QUIZ_PROMPT_VERSION = "interest-quiz-v2-2026-11-19"
+
 _FIXED_STEMS = {
     "平时更爱吃什么",
     "空下来更爱玩什么",
@@ -25,6 +32,12 @@ _FIXED_STEMS = {
     "听音乐更爱哪一类",
     "周末更想怎么过",
 }
+
+_INTEREST_QUIZ_SYSTEM = (
+    "你是兴趣连问出题助手，服务婚恋平台「宣誓爱」的恋 AI BOT。"
+    "只输出一个 JSON 对象，不要 Markdown，不要题解旁白。"
+    "目标：按用户已有兴趣标签扩维出题，让画像变厚，而不是复读第 1 轮固定问卷。"
+)
 
 # 按类目的扩展题库（禁止复读第 1 轮固定题原文）
 _EXPAND_BANK: list[dict[str, Any]] = [
@@ -105,6 +118,42 @@ _EXPAND_BANK: list[dict[str, Any]] = [
         "category": "情感社交",
         "opts": ["常联系短聊", "约得出门", "深度长聊", "保持边界", "看缘分"],
         "anchors": ["桌游", "剧本杀", "聚会"],
+    },
+    {
+        "q": "咖啡店里你更常点哪一类？",
+        "category": "生活",
+        "opts": ["美式提神", "拿铁奶香", "手冲细品", "甜品搭配", "不太喝"],
+        "anchors": ["咖啡", "探店", "甜品"],
+    },
+    {
+        "q": "拍照分享时你更在意什么？",
+        "category": "艺术",
+        "opts": ["构图光影", "记录日常", "修得很美", "随手一拍", "不太发"],
+        "anchors": ["摄影", "看展", "短视频"],
+    },
+    {
+        "q": "露营或户外过夜，你更能接受？",
+        "category": "旅行",
+        "opts": ["精致营地", "轻装徒步", "只白天户外", "更爱酒店", "还没试过"],
+        "anchors": ["露营", "徒步", "旅行"],
+    },
+    {
+        "q": "球类运动里你更想碰哪样？",
+        "category": "运动",
+        "opts": ["羽毛球", "篮球", "网球", "乒乓球", "先看再说"],
+        "anchors": ["羽毛球", "篮球", "网球", "运动"],
+    },
+    {
+        "q": "听现场演出你更冲哪类？",
+        "category": "音乐",
+        "opts": ["乐队 Live", "流行演唱会", "小型音乐会", "更爱耳机", "看搭子"],
+        "anchors": ["乐队现场", "流行歌", "音乐"],
+    },
+    {
+        "q": "漫画/小说你更吃哪一口？",
+        "category": "阅读",
+        "opts": ["爱情甜宠", "悬疑烧脑", "热血成长", "现实题材", "最近很少看"],
+        "anchors": ["漫画", "小说", "阅读"],
     },
 ]
 
@@ -230,12 +279,16 @@ def build_interest_quiz_messages(
     asked_questions: list[str],
     willingness: str = "",
 ) -> list[dict[str, str]]:
+    """构建兴趣出题 messages；正文对齐项目文档 10 §5.3。"""
     meta = get_agent_meta(agent_id)
     next_no = max(2, int(session_count) + 1)
+    fixed_line = " / ".join(sorted(_FIXED_STEMS))
     user = (
         "INTEREST_QUIZ\n"
+        f"prompt_version={INTEREST_QUIZ_PROMPT_VERSION}\n"
         f"你是【{meta['name']}】。请为「这一位用户」策划下一轮兴趣选择题。\n"
-        "第 1 轮固定题已问过，禁止再出同义题（不要再问「平时更爱吃什么 / 空下来更爱玩什么」等原题）。\n\n"
+        "第 1 轮固定题已问过，禁止再出同义题或换皮题。\n\n"
+        f"【第1轮固定题干·禁止同义】{fixed_line}\n"
         f"【你的人设】{meta['persona']}\n"
         f"【本轮是用户的第 {next_no} 轮连问】\n"
         f"【已有兴趣标签】{json.dumps(interests[:20], ensure_ascii=False)}\n"
@@ -243,19 +296,30 @@ def build_interest_quiz_messages(
         f"【近两轮已问过的题干】{_asked_line(asked_questions)}\n"
         f"【愿填程度信号】{willingness or '未知'}\n\n"
         "【你来决定】\n"
-        "1. 本轮聊什么方向（主题自定）。\n"
+        "1. 本轮聊什么方向（主题自定，不按「第 N 轮必须某类」脚本）。\n"
         "2. 出几道题（2～6 道）：愿填弱→2～3；中→3～4；强→4～6。\n"
-        "3. 有 Top 标签时优先同族扩展；禁止与已问题干同义。\n"
-        "4. 选项 4～6 个，宜能落成 ≤8 字标签。\n\n"
+        "3. why_count 用一句话说明题量理由（给日志）。\n"
+        "4. session_theme 用口语短标题，像红娘开口。\n\n"
+        "【出题策略】\n"
+        "A. 有 Top 标签时优先同族扩维（看剧→类型/追更；火锅→辣度/约饭）。\n"
+        "B. 标签空或同族已挖透时再开新维"
+        "（生活|美食|游戏|旅行|阅读|动漫影视|运动|音乐|情感社交|艺术|其他）。\n"
+        "C. 同一轮尽量覆盖 ≥2 个小角度，避免全问同一细点。\n"
+        "D. 每题选项 4～6 个；宜能落成 ≤8 字标签；可含 1 个低负担项，但不要题题敷衍。\n"
+        "E. 不同用户因标签不同题目应不同；禁止一套万能卷。\n"
+        "F. 题干短、可点、不审判；可轻微带人设，不要废话寒暄。\n\n"
+        "【硬禁止】\n"
+        "1. 禁止与已问题干同义/换皮；禁止复读第 1 轮固定 8 题。\n"
+        "2. 禁止盘问收入、资产、精确住址、联系方式；无歧视、无性暗示、无未成年人相关。\n"
+        "3. 禁止输出解析或旁白；只要题。\n"
+        "4. anchor_tags 只能来自已有标签或本题选项可落成的短标签，禁止虚构。\n\n"
         "【输出 JSON】\n"
         '{"session_theme":"≤12字","question_count":4,"why_count":"≤20字",'
-        '"questions":[{"q":"题干≤24字","category":"生活|美食|游戏|…","opts":["A","B","C","D"],"anchor_tags":["看剧"]}]}'
+        '"questions":[{"q":"题干≤24字","category":"生活|美食|游戏|旅行|阅读|动漫影视|运动|音乐|情感社交|艺术|其他",'
+        '"opts":["A","B","C","D"],"anchor_tags":["看剧"]}]}'
     )
     return [
-        {
-            "role": "system",
-            "content": "你是兴趣连问出题助手。只输出一个 JSON 对象，不要 Markdown。",
-        },
+        {"role": "system", "content": _INTEREST_QUIZ_SYSTEM},
         {"role": "user", "content": user},
     ]
 
@@ -326,4 +390,5 @@ async def generate_interest_quiz(
         "questions": questions,
         "agent_id": meta["id"],
         "agent_name": meta["name"],
+        "prompt_version": INTEREST_QUIZ_PROMPT_VERSION,
     }
