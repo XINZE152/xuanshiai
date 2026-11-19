@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser
 from app.schemas.auth import MatchmakerApplicationCreate, MatchmakerReviewRequest, RegistrationIntentUpdate
+from app.services.matchmaker_workspace import sync_workspace_profile
 from app.services.notifications import emit_notification
 
 INTENT_OPTIONS = {
@@ -199,6 +200,10 @@ async def review_matchmaker_application(
             VALUES (:user_id, :role_code, 1, :admin_id)
             ON DUPLICATE KEY UPDATE status = 1, granted_by = :admin_id, revoked_at = NULL, revoke_reason = NULL"""),
             {"user_id": row["user_id"], "role_code": role_code, "admin_id": admin_id})
+        if role_code == "service_matchmaker":
+            # 审核通过即成为服务红娘，工作台档案要当场有行，否则小程序「修改红娘」选不到人。
+            # overwrite=False：红娘在工作台自设过的名称与门店不被审核覆盖。
+            await sync_workspace_profile(db, int(row["user_id"]), overwrite=False)
     elif request.status in (2, 3):
         await db.execute(text("""UPDATE user_role SET status = CASE WHEN :status = 3 THEN 2 ELSE 3 END,
             revoked_at = UTC_TIMESTAMP(), revoke_reason = :reason

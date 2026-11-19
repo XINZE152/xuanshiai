@@ -39,7 +39,7 @@
 | `nickname` | string/null | 1-64 字符 | 会员昵称 |
 | `gender` | integer/null | `1` 男、`2` 女 | 性别 |
 | `birthday` | string/null | `YYYY-MM-DD` | 生日 |
-| `height` / `weight` | integer/null | 身高 80-250、体重 40-120 | 身高厘米、体重千克 |
+| `height` / `weight` | integer/null | 身高 80-250、体重 30-150 | 身高厘米、体重千克 |
 | `constellation` / `zodiac` | string/null | 最多 16 字符 | 星座、属相 |
 | `hometown` / `residence` / `household` | string/null | 最多 128 字符 | 家乡、现居、户籍展示名称 |
 | 区域代码字段 | string/null | 最多 32 字符 | 家乡、现居、户籍的省/市/区代码：`*_province_code`、`*_city_code`、`*_district_code` |
@@ -211,6 +211,7 @@ Content-Type: application/json
 - 2026-10-24（缺口补全）：`GET /admin/matchmaker/members` 新增 `auth_status`（多值，B6）、`source__is_null`（B5）、`activity_id`（B0）、`weight_min/max`（B9）、`next_follow_start/end`（A15）；`MemberListItem` 出参补 `real_name/weight/tags/last_login_at/ip_location`（B8/A12）；`/statistics` 补 `source_distribution`（B5/A11）；`MemberDetail.tags` 放宽类型修复脏数据 500（B10）；兼容层 `getAdminIndexStatistic` 修复 `maleNums/femaleNums`（B7）；新增批量弃海 `POST /admin/members/batch-abandon`（A18）。全部向后兼容。
 
 - 2026-10-20（B3 / A9）：会员列表新增 `abandoned` 筛选参数与出参字段，统计新增 `abandoned` 计数；新增弃海 / 捞回接口。
+- 2026-10-18：`weight` 校验范围由 40-120 放宽为 30-150（会员详情编辑 `PATCH /admin/matchmaker/members/{member_id}` 与红娘工作台会员录入同口径）；`height` 范围不变。向后兼容，旧客户端无需改动，仅此前被拒的 30-39 与 121-150 现可保存。
 
 - 2026-10-17：`PATCH /admin/matchmaker/members/{member_id}` 新增 `phone`（11 位、全局唯一、撞号 409）与 `wechat_added`（0/1/2）。此前会员抽屉里手机号与微信号的「修改」、以及「加上了？」下拉都没有可写字段，是死控件。
 - 2026-10-11（D-9 敏感操作）：`PATCH /admin/matchmaker/members/{member_id}/assignment`（改派）与 `POST /admin/matchmaker/members/batch-status`（批量改状态）纳入统一敏感操作，强制 `Idempotency-Key` + `confirm=true`，同键重放不重复执行；越权在幂等预占之前拦截。

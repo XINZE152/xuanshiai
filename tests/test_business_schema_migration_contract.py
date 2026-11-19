@@ -20,6 +20,7 @@ from scripts.manage_business_migration import (
     _database_config_for_target,
     _manifest,
     _run,
+    _statements,
 )
 
 
@@ -57,10 +58,22 @@ def test_manifest_checksums_are_lf_normalised() -> None:
         "20261030_02_payment_reconcile",
         "20261030_03_payment_entitlement_keys",
         "20261030_04_user_points_biz_key",
+        "20261101_01_short_video_comment_reply",
         "20261102_01_user_feedback",
         "20261104_01_good_news",
         "20261106_01_profile_completion_grandfather",
         "20261106_02_community_post_remind",
+        "20261109_01_profile_completion_missing_rows",
+        "20261116_01_withdrawal_payee",
+        "20261110_01_point_redeem_order_count",
+        # 恋 AI BOT 会话与报告（2026-11-18 事故修复）：原文件误放在
+        # migrations/aibot/ 且 manifest 为空文件，任何 runner 都不会执行，
+        # 已并入 business 域并补齐 down/verify/verify_previous 四件套。
+        "20261117_01_aibot_chat",
+        "20261117_02_bot_intake",
+        "20261117_03_aibot_love_report",
+        "20261118_01_aibot_timeline",
+        "20261119_01_aibot_story_play",
     ]
     for entry in manifest["versions"]:
         for direction in ("up", "down", "verify", "verify_previous"):
@@ -84,6 +97,9 @@ def test_gap_migrations_cover_all_bootstrap_only_columns() -> None:
         ("user_auth", "realname_status"),
         ("chat_session", "user1_pinned_at"),
         ("chat_session", "user2_pinned_at"),
+        # 恋 AI BOT 采集原样：由独立迁移 20261117_02_bot_intake_up.sql 覆盖，
+        # 不在早期 gap 迁移里重复补列（2026-11-18）。
+        ("user_profile", "bot_intake_json"),
     }
     for version, tables in expected.items():
         up = (MIGRATION_ROOT / f"{version}_up.sql").read_text(encoding="utf-8")
@@ -100,7 +116,10 @@ def test_gap_migrations_cover_all_bootstrap_only_columns() -> None:
         assert verify.count(";") == 1
         assert "DROP COLUMN `" in down
     assert covered == {item for item in covered if item not in already}
-    assert len(covered) + len(already) == 101
+    # 补列总数 102 = gap 迁移覆盖 96 + 其他途径覆盖 6（already）；
+    # user_profile.bot_intake_json 由 20261117_02_bot_intake_up.sql 负责，
+    # 所以 gap 迁移覆盖数仍是 96（2026-11-18）。
+    assert len(covered) + len(already) == 102
     assert len(covered) == 96
 
 
@@ -224,3 +243,29 @@ def test_q74_remind_migration_creates_author_only_table() -> None:
     assert "CREATE TABLE IF NOT EXISTS `community_post_remind`" in up
     assert "uk_community_post_remind_post_user" in up
     assert "DROP TABLE IF EXISTS `community_post_remind`" in down
+
+
+def test_all_manifest_verify_files_satisfy_runner_contract() -> None:
+    """全部版本的 verify/verify_previous 必须满足 runner 的可执行契约。
+
+    `_verify` 要求单条查询，且「返回 0 行 = 通过」。此前只有
+    20261027_02/03 被 `test_gap_migrations_cover_all_bootstrap_only_columns`
+    覆盖，新增版本因此能带着两条语句或恒返回一行的聚合查询进主干，
+    使 `up` 链在中途版本中止。本例把断言扩到 manifest 全量版本。
+    """
+    for entry in _manifest_data()["versions"]:
+        for direction in ("verify", "verify_previous"):
+            path = MIGRATION_ROOT / str(entry[direction])
+            statements = _statements(path)
+            label = f"{entry['version']}.{direction}"
+            assert len(statements) == 1, f"{label} 必须是单条查询，实际 {len(statements)} 条"
+            body = " ".join(statements).lower()
+            if direction == "verify":
+                # 缺失态检测：只有对象不存在时才返回行。
+                assert "is null" in body or "not exists" in body, (
+                    f"{label} 缺少失败导向结构（LEFT JOIN ... IS NULL 或 NOT EXISTS），"
+                    "会在迁移成功时返回行而判为失败"
+                )
+            elif "count(*)" in body:
+                # 无 GROUP BY 的聚合恒返回 1 行，回滚校验永远过不了。
+                assert "group by" in body, f"{label} 的 COUNT(*) 缺少 GROUP BY，恒返回 1 行"

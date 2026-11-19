@@ -5,14 +5,32 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.membership import active_membership_exists_sql
+from app.services.profile import RECOMMEND_MIN_COMPLETION_KEYS
 
 POLICY_REVISION = "ai-policy-2026-08-07-v1"
 _SQL_ALIAS = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+CompletionGateMode = Literal["full", "recommend_min", "none"]
+
+# user_profile_completion 列名与 COMPLETION_RULES key 对齐（personal_tags → interest）。
+_COMPLETION_COLUMN_BY_KEY: dict[str, str] = {
+    "gender": "gender_completed",
+    "birthday": "birthday_completed",
+    "location": "location_completed",
+    "marriage": "marriage_completed",
+    "occupation": "occupation_completed",
+    "education": "education_completed",
+    "income": "income_completed",
+    "height": "height_completed",
+    "weight": "weight_completed",
+    "hometown": "hometown_completed",
+}
 
 
 class VisibilityScene(str, Enum):
@@ -69,6 +87,18 @@ class SqlPredicate:
     params: dict[str, int]
     scene: VisibilityScene
     policy_revision: str = POLICY_REVISION
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionWaiver:
+    """服务红娘代管会员时只豁免「资料完整度 100」这一条门槛，其余可见性规则不变。
+
+    代管关系与工作台 _member_scope_predicate 同口径：organization_id 为空按
+    matchmaker_id（普通红娘自己名下），有值按门店范围（超级红娘）。
+    """
+
+    matchmaker_id: int
+    organization_id: int | None = None
 
 
 def evaluate_visibility(
@@ -149,7 +179,8 @@ class CandidateVisibilityService:
                           AND (candidate_restriction.ends_at IS NULL
                                OR candidate_restriction.ends_at > UTC_TIMESTAMP())
                     ) AS not_restricted,
-                    COALESCE(candidate_completion.score, 0) >= 100 AS profile_complete,
+                    (COALESCE(candidate_completion.score, 0) >= 100
+                     OR COALESCE(candidate_completion.completion_grandfathered, 0) = 1) AS profile_complete,
                     -- 只拦「拒绝(2) / 隐藏(3)」。审核中(0) 不算违规：公开资料序列化
                     -- 层已只取 review_status = 1，待审图片本身不会外泄。
                     NOT EXISTS (
@@ -217,11 +248,31 @@ class CandidateVisibilityService:
         candidate_alias: str = "u",
         privacy_alias: str = "pr",
         completion_alias: str = "c",
+        completion_waiver: CompletionWaiver | None = None,
         skip_completion_gate: bool = False,
+        completion_gate_mode: CompletionGateMode | None = None,
     ) -> SqlPredicate:
         for alias in (candidate_alias, privacy_alias, completion_alias):
             if not _SQL_ALIAS.fullmatch(alias):
                 raise ValueError("invalid SQL alias")
+        params: dict[str, int] = {
+            "visibility_viewer_id": viewer.user_id,
+            "visibility_realname_status": viewer.realname_status or 0,
+        }
+        mode: CompletionGateMode
+        if completion_gate_mode is not None:
+            mode = completion_gate_mode
+        elif skip_completion_gate:
+            mode = "none"
+        else:
+            mode = "full"
+        completion_clause = self._completion_clause(
+            completion_alias=completion_alias,
+            candidate_alias=candidate_alias,
+            mode=mode,
+            completion_waiver=completion_waiver,
+            params=params,
+        )
         parts: list[str] = [
             f"{candidate_alias}.id <> :visibility_viewer_id",
             f"{candidate_alias}.status = 1",
@@ -262,14 +313,57 @@ class CandidateVisibilityService:
             f"OR (bl.user_id = {candidate_alias}.id "
             "AND bl.target_user_id = :visibility_viewer_id))",
         ]
-        if not skip_completion_gate:
-            parts.insert(2, f"COALESCE({completion_alias}.score, 0) >= 100")
+        if completion_clause is not None:
+            parts.insert(2, completion_clause)
         clause = " AND ".join(parts)
         return SqlPredicate(
             clause=clause,
-            params={
-                "visibility_viewer_id": viewer.user_id,
-                "visibility_realname_status": viewer.realname_status or 0,
-            },
+            params=params,
             scene=scene,
         )
+
+    def _completion_clause(
+        self,
+        *,
+        completion_alias: str,
+        candidate_alias: str,
+        mode: CompletionGateMode,
+        completion_waiver: CompletionWaiver | None,
+        params: dict[str, int],
+    ) -> str | None:
+        if mode == "none":
+            return None
+        score_ok = f"COALESCE({completion_alias}.score, 0) >= 100"
+        grandfather_ok = f"COALESCE({completion_alias}.completion_grandfathered, 0) = 1"
+        if mode == "recommend_min":
+            required = []
+            for key in RECOMMEND_MIN_COMPLETION_KEYS:
+                column = _COMPLETION_COLUMN_BY_KEY[key]
+                required.append(f"COALESCE({completion_alias}.{column}, 0) = 1")
+            min_ok = "(" + " AND ".join(required) + ")"
+            base_without_waiver = f"({min_ok} OR ({score_ok} OR {grandfather_ok}))"
+        else:
+            base_without_waiver = f"({score_ok} OR {grandfather_ok})"
+        if completion_waiver is None:
+            return base_without_waiver
+        if completion_waiver.organization_id is None:
+            params["visibility_waiver_matchmaker_id"] = completion_waiver.matchmaker_id
+            waiver_relation = "waiver_ra.matchmaker_id = :visibility_waiver_matchmaker_id"
+        else:
+            params["visibility_waiver_organization_id"] = completion_waiver.organization_id
+            waiver_relation = "waiver_ra.organization_id = :visibility_waiver_organization_id"
+        # 完整度豁免结构与历史契约一致：((score>=100 OR EXISTS waiver) OR grandfather)
+        # recommend_min 额外允许最低三字段，仍保留 waiver / grandfather。
+        waiver_exists = (
+            "EXISTS (SELECT 1 FROM resource_assignment waiver_ra "
+            f"WHERE waiver_ra.user_id = {candidate_alias}.id "
+            f"AND waiver_ra.status = 1 AND {waiver_relation})"
+        )
+        if mode == "recommend_min":
+            required = []
+            for key in RECOMMEND_MIN_COMPLETION_KEYS:
+                column = _COMPLETION_COLUMN_BY_KEY[key]
+                required.append(f"COALESCE({completion_alias}.{column}, 0) = 1")
+            min_ok = "(" + " AND ".join(required) + ")"
+            return f"({min_ok} OR (({score_ok} OR {waiver_exists}) OR {grandfather_ok}))"
+        return f"(({score_ok} OR {waiver_exists}) OR {grandfather_ok})"

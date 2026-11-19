@@ -129,6 +129,16 @@ class _CreateDb:
             )
         return _Result()
 
+    async def scalar(self, statement: object, params: dict[str, Any] | None = None) -> Any:
+        """``db.scalar(sql)`` 是 AsyncSession 的合法用法，假库不能只实现 execute。
+
+        ``matchmaker_workspace._application_follow_up_owner`` 用它判断申请人本人是不是
+        服务红娘（是则不生成牵线记录）。假库漏掉这个方法，会让「实名口径」的用例被一个
+        与实名无关的 AttributeError 挡掉。
+        直接转给 execute 复用既有分派，避免两处 SQL 识别逻辑各写一遍而漂移。
+        """
+        return (await self.execute(statement, params)).scalar()
+
     async def commit(self) -> None:
         return None
 
@@ -225,6 +235,10 @@ class _RespondDb:
         if "FROM user_auth WHERE user_id = :user_id" in sql:
             return _Result(first={"realname_status": self.responder_realname_status})
         return _Result()
+
+    async def scalar(self, statement: object, params: dict[str, Any] | None = None) -> Any:
+        """同 _CreateDb.scalar：假库要覆盖 AsyncSession 的 scalar 入口。"""
+        return (await self.execute(statement, params)).scalar()
 
     async def commit(self) -> None:
         return None

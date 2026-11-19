@@ -9,14 +9,24 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+class MatchmakerCaseCard(BaseModel):
+    description: str
+    images: list[str] = Field(default_factory=list)
+
+
 class MatchmakerCard(BaseModel):
     user_id: int
     nickname: str | None
     avatar: str | None
     application_type: Literal["service_matchmaker"]
     intro: str
+    slogan: str | None = None
+    specialties: list[str] = Field(default_factory=list)
+    cases: list[MatchmakerCaseCard] = Field(default_factory=list)
     certification_tags: list[str]
     success_count: int
+    served_member_count: int = 0
+    successful_meeting_member_count: int = 0
     rating_score: float
     rating_count: int
     is_available: bool

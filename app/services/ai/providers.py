@@ -36,6 +36,7 @@ from app.services.ai.base import (
     ModerationRequest,
     ModerationResult,
     NarrativeDimension,
+    NarrativeEmotionalInsight,
     NarrativeHistoryObservation,
     NarrativeIdealWeight,
     NarrativeRecentChange,
@@ -288,6 +289,13 @@ _NARRATIVE_FIXTURE_PERSONAL = NarrativeResult(
         ),
     ),
     conclusion="总的来说，你要的并不复杂——一份能彼此回应的关系，和一段能一起慢慢走远的路。",
+    emotional_insight=NarrativeEmotionalInsight(
+        attachment_style="secure",
+        attachment_summary="情绪沉着，期待细水长流的坦诚回应",
+        highlights=("温和包容，注重承诺践行", "尊重彼此边界，善于倾听"),
+        boundaries=("需要独处充电空间", "反感冷暴力或言行不一"),
+        master_message="知遇有言：心安处方能久长，愿遇一人懂你留白，亦惜你深情。",
+    ),
 )
 
 _NARRATIVE_FIXTURE_IDEAL_PARTNER = NarrativeResult(
@@ -828,6 +836,74 @@ def sanitize_narrative_dimension_icon(key: str, icon: Any) -> str:
     return fallback
 
 
+_ATTACHMENT_STYLE_ALIASES: dict[str, str] = {
+    "secure": "secure",
+    "anxious": "anxious",
+    "avoidant": "avoidant",
+    "fearful": "fearful",
+    "安全型": "secure",
+    "安全": "secure",
+    "焦虑型": "anxious",
+    "焦虑": "anxious",
+    "回避型": "avoidant",
+    "回避": "avoidant",
+    "恐惧型": "fearful",
+    "恐惧回避型": "fearful",
+    "混乱型": "fearful",
+}
+
+
+def _as_text_list(raw: Any, limit: int) -> list[str]:
+    """把模型偶发输出的单字符串/数组统一成去空截断的字符串列表。"""
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [text[:60]] if text else []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    items: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            items.append(item.strip()[:60])
+    return items[:limit]
+
+
+def _normalize_emotional_insight(raw: Any) -> dict[str, Any] | None:
+    """把模型输出的情感气质透视归一为 :class:`NarrativeEmotionalInsight` 形状。
+
+    产品口径（PRODUCT.md「情感气质透视」）要求五个子字段齐全，缺任一项该
+    整块能力就没有展示价值：此时返回 ``None`` 让前端整块隐藏，**不**用半成品
+    拼凑（前端会把不完整的依恋结论当作正式画像展示）。
+
+    模型常见漂移：``attachment_style`` 写中文（"安全型"/"回避"）、
+    ``highlights``/``boundaries`` 写成单个字符串、文案超长。
+    """
+    if not isinstance(raw, dict):
+        return None
+    style_raw = str(raw.get("attachment_style") or "").strip()
+    mapped_style = _ATTACHMENT_STYLE_ALIASES.get(
+        style_raw.lower()
+    ) or _ATTACHMENT_STYLE_ALIASES.get(style_raw)
+    summary = str(raw.get("attachment_summary") or "").strip()[:60]
+    highlights = _as_text_list(raw.get("highlights"), 4)
+    boundaries = _as_text_list(raw.get("boundaries"), 3)
+    master_message = str(raw.get("master_message") or "").strip()[:80]
+    if (
+        mapped_style in {"secure", "anxious", "avoidant", "fearful"}
+        and summary
+        and len(highlights) >= 2
+        and len(boundaries) >= 1
+        and master_message
+    ):
+        return {
+            "attachment_style": mapped_style,
+            "attachment_summary": summary,
+            "highlights": highlights,
+            "boundaries": boundaries,
+            "master_message": master_message,
+        }
+    return None
+
+
 def _normalize_narrative_payload(data: Any) -> Any:
     """把模型对叙事 JSON 的常见漂移写法归一为 schema 期望的形状。
 
@@ -865,27 +941,32 @@ def _normalize_narrative_payload(data: Any) -> Any:
             fixed.append(item)
         data["history_observations"] = fixed
     weights = data.get("ideal_weights")
-    if not isinstance(weights, list):
-        return data
-    normalized: list[Any] = []
-    for item in weights:
-        if (
-            isinstance(item, dict)
-            and "key" not in item
-            and isinstance(item.get("dimension"), str)
-            and item.get("weight") is not None
-        ):
-            label = item["dimension"]
-            normalized.append(
-                {
-                    "key": _IDEAL_WEIGHT_KEY_BY_LABEL.get(label, label),
-                    "label": label,
-                    "percent": item["weight"],
-                }
-            )
-        else:
-            normalized.append(item)
-    data["ideal_weights"] = normalized
+    if isinstance(weights, list):
+        normalized: list[Any] = []
+        for item in weights:
+            if (
+                isinstance(item, dict)
+                and "key" not in item
+                and isinstance(item.get("dimension"), str)
+                and item.get("weight") is not None
+            ):
+                label = item["dimension"]
+                normalized.append(
+                    {
+                        "key": _IDEAL_WEIGHT_KEY_BY_LABEL.get(label, label),
+                        "label": label,
+                        "percent": item["weight"],
+                    }
+                )
+            else:
+                normalized.append(item)
+        data["ideal_weights"] = normalized
+    # 注意：emotional_insight 必须在 ideal_weights 处理之后无条件执行。
+    # 旧实现把 `if not isinstance(weights, list): return data` 放在此处提前
+    # 返回，会连带跳过情感透视归一整段（模型漏吐 ideal_weights 时必然命中）。
+    data["emotional_insight"] = _normalize_emotional_insight(
+        data.get("emotional_insight")
+    )
     return data
 
 
@@ -1086,7 +1167,12 @@ class _OpenAICompatProvider:
         *,
         json_mode: bool = False,
     ) -> str:
-        """非流式 chat。只返回非空 content，不记录原文或供应商响应。"""
+        """非流式 chat。只返回非空 content，不记录原文或供应商响应。
+
+        DeepSeek V4 Flash 在多轮 + ``response_format=json_object`` 时会间歇返回
+        纯空白 ``content``（finish=stop、有 usage），上层会误报「AI 服务暂时不可用」。
+        这里关闭 thinking，并对空白正文做有限次重试。
+        """
         client = self._ensure_client()
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -1095,34 +1181,55 @@ class _OpenAICompatProvider:
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        try:
-            response = await client.chat.completions.create(**kwargs)
-        except (
-            _RateLimitError,
-            _APITimeoutError,
-            _APIConnectionError,
-            _AuthenticationError,
-            _PermissionDeniedError,
-            _BadRequestError,
-            _APIStatusError,
-            _APIError,
-        ) as exc:
-            raise self._map_openai_exception(exc) from exc
-        last_token_usage.set(_usage_from_response(response, self._model))
-        if not response.choices:
-            raise ProviderError(
-                code="AI_INPUT_INVALID",
-                message="provider 返回空 choices",
-                kind=ProviderErrorKind.NON_RETRYABLE,
+        if isinstance(self, DeepSeekAIProvider):
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
+        last_usage: dict[str, Any] | None = None
+        # 先按调用方要求试；若一直空白且开了 json_mode，再去掉 response_format 兜底重试。
+        attempt_plans: list[dict[str, Any]] = [dict(kwargs), dict(kwargs), dict(kwargs)]
+        if json_mode:
+            no_json = dict(kwargs)
+            no_json.pop("response_format", None)
+            attempt_plans.extend([dict(no_json), dict(no_json)])
+
+        for attempt, call_kwargs in enumerate(attempt_plans, start=1):
+            try:
+                response = await client.chat.completions.create(**call_kwargs)
+            except (
+                _RateLimitError,
+                _APITimeoutError,
+                _APIConnectionError,
+                _AuthenticationError,
+                _PermissionDeniedError,
+                _BadRequestError,
+                _APIStatusError,
+                _APIError,
+            ) as exc:
+                raise self._map_openai_exception(exc) from exc
+            last_usage = _usage_from_response(response, self._model)
+            if not response.choices:
+                raise ProviderError(
+                    code="AI_INPUT_INVALID",
+                    message="provider 返回空 choices",
+                    kind=ProviderErrorKind.NON_RETRYABLE,
+                )
+            content = response.choices[0].message.content
+            if isinstance(content, str) and content.strip():
+                last_token_usage.set(last_usage)
+                return content.strip()
+            logger.warning(
+                "ai_provider_empty_content attempt=%s model=%s json_mode=%s",
+                attempt,
+                self._model,
+                "response_format" in call_kwargs,
             )
-        content = response.choices[0].message.content
-        if not isinstance(content, str) or not content.strip():
-            raise ProviderError(
-                code="AI_INPUT_INVALID",
-                message="provider 返回空内容",
-                kind=ProviderErrorKind.NON_RETRYABLE,
-            )
-        return content
+
+        last_token_usage.set(last_usage)
+        raise ProviderError(
+            code="AI_INPUT_INVALID",
+            message="provider 返回空内容",
+            kind=ProviderErrorKind.NON_RETRYABLE,
+        )
 
     async def stream_chat(
         self,

@@ -145,6 +145,10 @@ def build_member_filter(
     elif values.get("vip") is False:
         where.append("(v.user_id IS NULL OR (v.vip_end_at IS NOT NULL AND v.vip_end_at <= UTC_TIMESTAMP()))")
     auth_status_raw = values.get("auth_status")
+    profile_review = values.get("profile_review_status")
+    if profile_review is not None:
+        where.append("COALESCE(mr.status, 'PENDING') = :profile_review_status")
+        params["profile_review_status"] = {0: "PENDING", 1: "REJECTED", 2: "PASSED", 3: "STORE_VERIFIED"}[profile_review]
     if auth_status_raw is not None and str(auth_status_raw) != "":
         # B6：支持英文逗号分隔多值（如 1,2,3,4 表示已提交资料），与 marriage/education
         # 等多选参数同口径；单个值时行为与旧的等值匹配一致，向后兼容。

@@ -223,6 +223,12 @@ async def upload_community_media(
                     pass
 
     data = await _read_limited(file, IMAGE_MAX_BYTES)
+    # 微信图片内容安全（scene=3 论坛）：违规直接拒绝且不落盘；开关关闭时 no-op。
+    from app.services.wechat_sec_check import check_image
+
+    sec_decision = await check_image(data, scene=3)
+    if sec_decision.action == "reject":
+        raise HTTPException(422, detail="图片含违规内容，请更换")
     image_data, thumb_data = _image_outputs(data)
     token = uuid.uuid4().hex
     image_path = directory / f"{token}.webp"

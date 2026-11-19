@@ -13,12 +13,13 @@ from app.api.dependencies import CurrentMatchmakerAdmin
 from app.core.security import hash_password
 from app.schemas.matchmaker_admin import MatchmakerAdminAccount
 from app.services.matchmaker_admin_auth import _issue_session
-from app.services import user_candidates
+from app.services import matchmaker_workspace, user_candidates
 from app.schemas.matchmaker_staff_admin import (
     AdminMenuNode,
     CommissionLevelItem,
     MatchmakerDeleteResponse,
     MatchmakerDetailReport,
+    MatchmakerFrontPreview,
     MatchmakerPermissions,
     MatchmakerPermissionsUpdate,
     MatchmakerPlatformTokenResponse,
@@ -87,17 +88,38 @@ def _item(row: dict) -> MatchmakerStaffItem:
     )
 
 
+STAFF_SUCCESS_COUNT = "(SELECT COUNT(*) FROM matchmaker_service s WHERE s.matchmaker_id = u.id AND s.status = 2)"
+STAFF_BASE = """FROM users u JOIN user_matchmaker_apply ma ON ma.user_id = u.id AND ma.application_type = 'service_matchmaker' AND ma.status = 1
+    LEFT JOIN matchmaker_profile p ON p.user_id = u.id"""
+
+
+async def _ensure_profile(db: AsyncSession, user_id: int) -> None:
+    """历史红娘只有申请单没有档案行时补一条默认档案。
+
+    matchmaker_profile 是锁定 / 前台展示 / 红娘角色 / 分成级别的唯一落库位置；
+    缺行时 UPDATE ... WHERE user_id=? 命中 0 行，接口照样 200，前端看起来就是
+    「点了没反应 / 提交后还是普通红娘」。这里统一幂等补行。
+    """
+    await db.execute(
+        text(
+            "INSERT INTO matchmaker_profile (user_id, role_tag, visible, contact_editable) "
+            "VALUES (:id, 'normal', 1, 1) "
+            "ON DUPLICATE KEY UPDATE user_id = user_id"
+        ),
+        {"id": user_id},
+    )
+
+
 SELECT_STAFF = """SELECT u.id, u.avatar, u.nickname, u.phone, u.created_at, u.updated_at,
     p.wechat, p.wechat_qr, p.role_tag, p.visible, p.locked, p.description, p.slogan, p.sort, p.contact_editable, p.lock_at, p.commission_level_id,
     l.name commission_level_name, l.rate_percent,
     a.id account_id, a.username,
     o.id store_id, COALESCE(o.display_name, o.name) store_name,
-    (SELECT COUNT(*) FROM matchmaker_service s WHERE s.matchmaker_id = u.id AND s.status = 2) success_count,
+    {success_count} success_count,
     (SELECT COUNT(*) FROM matchmaker_menu_permission mmp WHERE mmp.matchmaker_user_id = u.id) menu_permission_count,
     (CASE WHEN {configured_state} THEN 1 ELSE 0 END) menu_permission_configured,
     (SELECT COALESCE(SUM(e.amount), 0) FROM commission_entry e WHERE e.beneficiary_type = 'service_matchmaker' AND e.beneficiary_id = u.id AND e.status <> 'REVERSED') commission_amount
-    FROM users u JOIN user_matchmaker_apply ma ON ma.user_id = u.id AND ma.application_type = 'service_matchmaker' AND ma.status = 1
-    LEFT JOIN matchmaker_profile p ON p.user_id = u.id
+    {staff_base}
     LEFT JOIN commission_level l ON l.id = p.commission_level_id
     LEFT JOIN matchmaker_admin_account a ON a.matchmaker_user_id = u.id
     LEFT JOIN organization_member om ON om.user_id = u.id AND om.role_code = 'store_matchmaker' AND om.status = 1
@@ -131,7 +153,7 @@ async def _has_permission_state_table(db: AsyncSession) -> bool:
 
 async def _staff_select(db: AsyncSession) -> str:
     configured = _PERMISSION_CONFIGURED_SQL if await _has_permission_state_table(db) else "0"
-    return SELECT_STAFF.format(configured_state=configured)
+    return SELECT_STAFF.format(configured_state=configured, success_count=STAFF_SUCCESS_COUNT, staff_base=STAFF_BASE)
 
 
 async def search_user_candidates(db: AsyncSession, keyword: str, limit: int = 10) -> list[MatchmakerUserCandidate]:
@@ -262,6 +284,15 @@ async def _validate_refs(
         raise HTTPException(422, detail="分成级别不存在或已停用")
 
 
+def _workspace_level(role_tag: str | None) -> str | None:
+    """后台角色下拉 → 工作台级别；未知值返回 None，交给同步函数保持原级别。"""
+    if role_tag == "super":
+        return "SUPER"
+    if role_tag == "normal":
+        return "NORMAL"
+    return None
+
+
 async def create_staff(
     db: AsyncSession, admin: CurrentMatchmakerAdmin, body: MatchmakerStaffCreate
 ) -> MatchmakerStaffDetail:
@@ -286,15 +317,33 @@ async def create_staff(
             raise HTTPException(409, detail="该手机号已注册，请通过账号绑定选择普通用户")
         result = await db.execute(text("INSERT INTO users (phone,nickname,avatar,status) VALUES (:phone,:name,:avatar,1)"), {"phone": body.phone, "name": body.display_name, "avatar": body.avatar})
         user_id = int(result.lastrowid)
+    # 下面四张表都带唯一键，直接 INSERT 会在「该用户已提交过申请 / 已建过档案 / 已绑过门店」时
+    # 撞键抛 IntegrityError（接口 500）。统一改为幂等 upsert，并顺手补写审计字段 granted_by。
     await db.execute(
         text(
-            "INSERT INTO user_role (user_id,role_code,status) VALUES (:id,'service_matchmaker',1)"
+            """INSERT INTO user_role (user_id, role_code, status, granted_by)
+            VALUES (:id, 'service_matchmaker', 1, :actor)
+            ON DUPLICATE KEY UPDATE status = 1, granted_by = :actor,
+                granted_at = UTC_TIMESTAMP(), revoked_at = NULL, revoke_reason = NULL"""
         ),
-        {"id": user_id},
+        {"id": user_id, "actor": admin.account.id},
     )
     await db.execute(
         text(
-            "INSERT INTO user_matchmaker_apply (user_id,application_type,real_name,phone,intro,status,reviewed_by,reviewed_at) VALUES (:id,'service_matchmaker',:name,:phone,:description,1,:actor,UTC_TIMESTAMP())"
+            """INSERT INTO user_matchmaker_apply
+            (user_id, application_type, real_name, phone, intro, status, reviewed_by, reviewed_at)
+            VALUES (:id, 'service_matchmaker', :name, :phone, :description, 1, :actor, UTC_TIMESTAMP())
+            ON DUPLICATE KEY UPDATE
+                real_name = :name,
+                phone = :phone,
+                intro = :description,
+                status = 1,
+                fail_reason = NULL,
+                reviewed_by = :actor,
+                reviewed_at = UTC_TIMESTAMP(),
+                suspended_at = NULL,
+                suspension_reason = NULL,
+                updated_at = UTC_TIMESTAMP()"""
         ),
         {
             "id": user_id,
@@ -325,10 +374,20 @@ async def create_staff(
     if body.store_id:
         await db.execute(
             text(
-                "INSERT INTO organization_member (organization_id,user_id,role_code,status) VALUES (:store,:id,'store_matchmaker',1)"
+                """INSERT INTO organization_member
+                (organization_id, user_id, role_code, status, granted_by)
+                VALUES (:store, :id, 'store_matchmaker', 1, :actor)
+                ON DUPLICATE KEY UPDATE status = 1, granted_by = :actor,
+                    ended_at = NULL, end_reason = NULL"""
             ),
-            {"store": body.store_id, "id": user_id},
+            {"store": body.store_id, "id": user_id, "actor": admin.account.id},
         )
+    # 小程序「修改红娘」读的是 matchmaker_workspace_profile，过去后台建档不写这张表，
+    # 建完的红娘在小程序里根本选不到。同一事务内补齐，两边才是同一批人。
+    # 后台的角色下拉就是工作台级别：总店-超级红娘 = 平台范围，总店-普通红娘 = 自己名下。
+    await matchmaker_workspace.sync_workspace_profile(
+        db, user_id, overwrite=True, level=_workspace_level(body.role_tag)
+    )
     await db.commit()
     return await get_staff(db, user_id)
 
@@ -337,8 +396,17 @@ async def update_staff(
     db: AsyncSession, matchmaker_id: int, body: MatchmakerStaffUpdate
 ) -> MatchmakerStaffDetail:
     await get_staff(db, matchmaker_id)
+    await _ensure_profile(db, matchmaker_id)
     await _validate_refs(db, body)
     values = body.model_dump(exclude_unset=True)
+    # 手机号有唯一约束：撞号时直接给 409 业务提示，避免前端只看到 500。
+    if values.get("phone"):
+        taken = await db.scalar(
+            text("SELECT 1 FROM users WHERE phone=:phone AND id<>:id"),
+            {"phone": values["phone"], "id": matchmaker_id},
+        )
+        if taken:
+            raise HTTPException(409, detail="该手机号已被其他账号使用")
     user_fields = {"display_name": "nickname", "avatar": "avatar", "phone": "phone"}
     for source, target in user_fields.items():
         if source in values:
@@ -368,6 +436,20 @@ async def update_staff(
                 text(f"UPDATE matchmaker_profile SET {target}=:value WHERE user_id=:id"),
                 {"value": value, "id": matchmaker_id},
             )
+    homepage_map = {"description": "intro", "slogan": "slogan"}
+    homepage_values = {
+        column: values[source] for source, column in homepage_map.items() if source in values
+    }
+    if homepage_values:
+        # 公开主页与红娘本人编辑都读入驻申请表，后台改介绍/签名必须同步落到这里。
+        assignments = ", ".join(f"{column} = :{column}" for column in homepage_values)
+        await db.execute(
+            text(
+                f"UPDATE user_matchmaker_apply SET {assignments} "
+                "WHERE user_id = :id AND application_type = 'service_matchmaker'"
+            ),
+            {**homepage_values, "id": matchmaker_id},
+        )
     if "password" in values:
         await db.execute(
             text(
@@ -389,6 +471,12 @@ async def update_staff(
                 ),
                 {"store": values["store_id"], "id": matchmaker_id},
             )
+    # 后台改了昵称、门店或角色，工作台档案必须跟着走，否则小程序「修改红娘」显示的是旧名字、
+    # 同店同事列表按旧门店范围取人、角色下拉升降级也不生效。
+    if "display_name" in values or "store_id" in values or "role_tag" in values:
+        await matchmaker_workspace.sync_workspace_profile(
+            db, matchmaker_id, overwrite=True, level=_workspace_level(values.get("role_tag"))
+        )
     await db.commit()
     return await get_staff(db, matchmaker_id)
 
@@ -397,6 +485,7 @@ async def set_lock(
     db: AsyncSession, matchmaker_id: int, body: MatchmakerLockUpdate
 ) -> MatchmakerStaffDetail:
     await get_staff(db, matchmaker_id)
+    await _ensure_profile(db, matchmaker_id)
     await db.execute(
         text("UPDATE matchmaker_profile SET locked=:locked WHERE user_id=:id"),
         {"locked": int(body.locked), "id": matchmaker_id},
@@ -419,6 +508,7 @@ async def set_visibility(
     db: AsyncSession, matchmaker_id: int, body: MatchmakerVisibilityUpdate
 ) -> MatchmakerStaffDetail:
     await get_staff(db, matchmaker_id)
+    await _ensure_profile(db, matchmaker_id)
     await db.execute(
         text("UPDATE matchmaker_profile SET visible=:visible WHERE user_id=:id"),
         {"visible": int(body.visible), "id": matchmaker_id},
@@ -664,6 +754,25 @@ async def platform_token(db: AsyncSession, matchmaker_id: int) -> MatchmakerPlat
         refresh_token=issued.refresh_token,
         expires_in=issued.expires_in,
         jump_url=f"/matchmaker/workbench?token={issued.access_token}",
+    )
+
+
+async def front_preview(
+    db: AsyncSession, matchmaker_id: int, admin: CurrentMatchmakerAdmin
+) -> MatchmakerFrontPreview:
+    """按被查看红娘的工作台身份取小程序红娘管理中心首页数据。
+
+    只读：不建红娘会话、不发 Token、不改业务数据；数据范围沿用 get_staff 的门店校验。
+    工作台未开通（无 service_matchmaker 有效角色）时按会员侧同一口径 403；
+    总店超级红娘（SUPER 且不挂门店）范围即平台全部，不再算未绑定。
+    """
+    await get_staff(db, matchmaker_id, admin)
+    actor = await matchmaker_workspace.require_workspace_for_user(db, matchmaker_id)
+    return MatchmakerFrontPreview(
+        matchmaker_id=matchmaker_id,
+        workspace_level=actor.level,
+        workspace_scope=actor.scope,
+        dashboard=await matchmaker_workspace.workspace_dashboard(db, actor),
     )
 
 

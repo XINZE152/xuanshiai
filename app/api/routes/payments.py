@@ -15,13 +15,21 @@ from app.api.dependencies import (
 )
 from app.core.config import settings
 from app.db.session import get_db
-from app.schemas.payment import JsapiPayParams, RefundCreateRequest, RefundResponse
+from app.schemas.payment import (
+    JsapiPayParams,
+    RefundCreateRequest,
+    RefundResponse,
+    VirtualPayParamsRequest,
+    VirtualPayParamsResponse,
+    XpayStatusResponse,
+)
 from app.schemas.payments import (
     BoostPackage,
     BoostStatus,
     CreateBoostOrderRequest,
     PaidOrderResponse,
     SpotlightPaymentRequest,
+    SpotlightPriceResponse,
 )
 from app.services.payment.base import (
     PaymentConfigError,
@@ -41,11 +49,18 @@ from app.services.payment.wechat_v3 import (
     build_payment_runtime,
     parse_wechat_notification,
 )
+from app.services.payment.xpay import XpayService
+from app.services.payment.xpay_notify import (
+    extract_goods_deliver,
+    parse_push_payload,
+    verify_url_signature,
+)
 from app.services.payments import (
     create_boost_order,
     create_spotlight_order,
     get_boost_status,
     get_paid_order,
+    get_spotlight_price,
     list_boost_packages,
 )
 
@@ -79,6 +94,12 @@ async def boost_order_detail(order_no: str = Path(..., min_length=8, max_length=
     return await get_paid_order(db, current.id, order_no, 4)
 
 
+@router.get("/spotlights/price", response_model=SpotlightPriceResponse, summary="查询爆灯单价")
+async def spotlight_price(db: AsyncSession = Depends(get_db)) -> SpotlightPriceResponse:
+    """公开读接口：C 端卡片按此展示单价，下单金额由服务端按同一配置计算。"""
+    return await get_spotlight_price(db)
+
+
 @router.post("/spotlights/payments", response_model=PaidOrderResponse, status_code=201, summary="创建爆灯订单")
 async def spotlight_order(
     body: SpotlightPaymentRequest,
@@ -94,36 +115,194 @@ async def spotlight_order_detail(order_no: str = Path(..., min_length=8, max_len
     return await get_paid_order(db, current.id, order_no, 2)
 
 
+@router.get(
+    "/payments/xpay/status",
+    response_model=XpayStatusResponse,
+    summary="虚拟支付开关状态",
+)
+async def xpay_status() -> XpayStatusResponse:
+    """前端据此选择 ``requestVirtualPayment`` 或回退 JSAPI。"""
+    mode = settings.wechat_xpay_mode
+    return XpayStatusResponse(
+        enabled=mode in {"mock", "real"},
+        mode=mode,  # type: ignore[arg-type]
+        env=int(settings.wechat_xpay_env),  # type: ignore[arg-type]
+        offer_id_configured=bool((settings.wechat_xpay_offer_id or "").strip()),
+    )
+
+
+@router.post(
+    "/payments/orders/{order_no}/virtual-pay-params",
+    response_model=VirtualPayParamsResponse,
+    summary="虚拟支付签名参数",
+)
+async def virtual_pay_params(
+    body: VirtualPayParamsRequest,
+    order_no: str = Path(..., min_length=8, max_length=64),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> VirtualPayParamsResponse:
+    """返回 ``wx.requestVirtualPayment`` 所需 signData / 双签名。
+
+    服务端不下单；真正下单发生在客户端拉起支付时。
+    ``js_code`` 须为当次 ``uni.login`` 新鲜 code，用于换取 session_key。
+    """
+    try:
+        params = await XpayService().build_virtual_pay_params(
+            db, current.id, order_no, body.js_code
+        )
+    except PaymentConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PaymentValidationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PaymentError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return VirtualPayParamsResponse(
+        sign_data=params.sign_data,
+        mode="short_series_goods",
+        pay_sig=params.pay_sig,
+        signature=params.signature,
+        offer_id=params.offer_id,
+        product_id=params.product_id,
+        goods_price=params.goods_price,
+        out_trade_no=params.out_trade_no,
+        env=params.env,  # type: ignore[arg-type]
+    )
+
+
+@router.post(
+    "/payments/orders/{order_no}/xpay-confirm",
+    summary="虚拟支付查单兜底确认",
+)
+async def xpay_confirm_order(
+    order_no: str = Path(..., min_length=8, max_length=64),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """前端支付 success 后若推送延迟，可调本接口查单并落库发货。"""
+    try:
+        order = await XpayService().confirm_by_query(db, current.id, order_no)
+    except PaymentConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PaymentValidationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PaymentError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "order_no": order.get("order_no"),
+        "status": order.get("status"),
+        "transaction_id": order.get("transaction_id"),
+    }
+
+
+@router.api_route(
+    "/payments/xpay/notify",
+    methods=["GET", "POST"],
+    summary="虚拟支付发货推送",
+)
+async def xpay_notify(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """MP「发货推送」回调：GET 接入校验，POST 道具发货。
+
+    成功响应 ``{"ErrCode":0,"ErrMsg":"success"}``（JSON）或等价空成功，
+    否则微信会重试最多 15 次。
+    """
+    token = (settings.wechat_xpay_push_token or "").strip()
+
+    if request.method == "GET":
+        signature = request.query_params.get("signature", "")
+        timestamp = request.query_params.get("timestamp", "")
+        nonce = request.query_params.get("nonce", "")
+        echostr = request.query_params.get("echostr", "")
+        if not token or not verify_url_signature(
+            token=token,
+            timestamp=timestamp,
+            nonce=nonce,
+            echostr=echostr,
+            signature=signature,
+        ):
+            return Response(content="invalid signature", status_code=403)
+        return Response(content=echostr, media_type="text/plain")
+
+    raw_body = await request.body()
+    try:
+        event = parse_push_payload(
+            raw_body,
+            content_type=request.headers.get("content-type"),
+            msg_signature=request.query_params.get("msg_signature"),
+            timestamp=request.query_params.get("timestamp"),
+            nonce=request.query_params.get("nonce"),
+        )
+        event_name = str(event.get("Event") or event.get("event") or "")
+        if event_name and event_name != "xpay_goods_deliver_notify":
+            # 退款/投诉等事件先 ACK，避免微信无限重试；后续可再拆处理。
+            logger.info("xpay notify ignore event=%s", event_name)
+            return JSONResponse({"ErrCode": 0, "ErrMsg": "success"})
+
+        deliver = extract_goods_deliver(event)
+        async with db.begin():
+            await XpayService().mark_paid_from_deliver(
+                db,
+                out_trade_no=str(deliver["out_trade_no"]),
+                transaction_id=(
+                    str(deliver["transaction_id"])
+                    if deliver.get("transaction_id")
+                    else None
+                ),
+                amount_cents=(
+                    int(deliver["amount_cents"])
+                    if deliver.get("amount_cents") is not None
+                    else None
+                ),
+                payer_openid=(
+                    str(deliver["openid"]) if deliver.get("openid") else None
+                ),
+                product_id=(
+                    str(deliver["product_id"]) if deliver.get("product_id") else None
+                ),
+            )
+    except PaymentSignatureError as exc:
+        logger.warning("xpay notify signature failed: %s", exc)
+        return JSONResponse({"ErrCode": 1, "ErrMsg": "签名验证失败"}, status_code=401)
+    except PaymentDecryptError as exc:
+        logger.warning("xpay notify decrypt failed: %s", exc)
+        return JSONResponse({"ErrCode": 1, "ErrMsg": "解密失败"}, status_code=401)
+    except PaymentValidationError as exc:
+        logger.warning("xpay notify validation failed: %s", exc)
+        return JSONResponse({"ErrCode": 1, "ErrMsg": str(exc)}, status_code=409)
+    except Exception:
+        logger.exception("xpay notify processing failed")
+        return JSONResponse({"ErrCode": 1, "ErrMsg": "处理失败"}, status_code=409)
+
+    return JSONResponse({"ErrCode": 0, "ErrMsg": "success"})
+
+
 @router.post(
     "/payments/orders/{order_no}/prepay",
     response_model=JsapiPayParams,
-    summary="微信支付预下单",
+    deprecated=True,
+    summary="【已下线】旧版微信支付预下单（虚拟商品请使用虚拟支付）",
 )
 async def prepay_order(
     order_no: str = Path(..., min_length=8, max_length=64),
     current: CurrentUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ) -> JsapiPayParams:
-    """为当前用户的待支付订单创建微信预支付单。
+    """旧版 JSAPI 预下单，已整体下线。
 
-    新链路独立于旧测试支付；``WECHAT_PAY_MODE != real`` 时返回 503。
+    会员/置顶/爆灯/积分均为微信定义的**虚拟商品**，只能通过小程序虚拟支付
+    （``POST /payments/orders/{order_no}/virtual-pay-params`` + 前端
+    ``wx.requestVirtualPayment``）完成。保留该路径而非直接删除，是为了让
+    存量客户端与脚本拿到明确的 410，而不是含糊的 404。
+
+    仍需登录态，避免未授权探测。
     """
-    try:
-        runtime = build_payment_runtime()
-    except PaymentConfigError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    try:
-        service = PaymentOrderService(runtime.gateway, runtime.crypto)
-        return await service.prepay(db, current.id, order_no)
-    except PaymentValidationError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except PaymentError as exc:
-        # 微信 4xx/5xx、网络超时、配置错误统一映射为 503；订单状态错误由上面的
-        # HTTPException 直接透传。
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    finally:
-        await runtime.gateway.aclose()
+    raise HTTPException(
+        status_code=410,
+        detail="旧版微信支付通道已下线，虚拟商品请使用小程序虚拟支付",
+    )
 
 
 @router.post(

@@ -112,6 +112,7 @@ async def update_member(
 ) -> MatchmakerMemberAdminItem:
     await _member(db, member_id, scope, scope_params)
     values = body.model_dump(exclude_unset=True)
+    profile_review_status = values.pop("profile_review_status", None)
     # 后台表单预填的是掩码值，原样提交会用 ``***`` 覆盖库中真实微信号：掩码形态一律
     # 丢弃该字段，确实要改必须提交新的完整微信号。
     if is_masked_value(values.get("wechat")):
@@ -138,7 +139,7 @@ async def update_member(
         # 后台保存表单常把未改动的手机号一并提交；只有真的换号才让旧属地失效。
         if await should_reset_phone_region(db, phone_changed=phone != current_phone):
             user_values["phone_region"] = None
-    auth_values = {key: values.pop(key) for key in ("education", "school", "job", "company", "auth_status") if key in values}
+    auth_values = {key: values.pop(key) for key in ("education", "school", "job", "company", "auth_status", "store_verified") if key in values}
     match_status = values.pop("match_status", None) if "match_status" in values else None
     profile_columns: set[str] = set()
     if values:
@@ -194,6 +195,13 @@ async def update_member(
             VALUES (:user_id, {', '.join(':' + key for key in auth_values)})
             ON DUPLICATE KEY UPDATE {', '.join(f'{key} = VALUES({key})' for key in auth_values)}"""),
             {"user_id": member_id, **auth_values})
+    if profile_review_status is not None:
+        review_status = {0: "PENDING", 1: "REJECTED", 2: "PASSED", 3: "STORE_VERIFIED"}[profile_review_status]
+        await db.execute(text("""INSERT INTO matchmaker_member_review (user_id, status, reason, reviewed_by, reviewed_at)
+            VALUES (:user_id, :status, NULL, :actor_id, UTC_TIMESTAMP())
+            ON DUPLICATE KEY UPDATE status = VALUES(status), reason = NULL,
+                reviewed_by = VALUES(reviewed_by), reviewed_at = VALUES(reviewed_at), updated_at = UTC_TIMESTAMP()"""),
+            {"user_id": member_id, "status": review_status, "actor_id": actor_id})
     if match_status is not None:
         await db.execute(text("""INSERT INTO user_privacy (user_id, match_status)
             VALUES (:user_id, :match_status)

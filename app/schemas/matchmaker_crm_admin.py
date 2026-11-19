@@ -50,6 +50,7 @@ class MemberListItem(BaseModel):
     company: str | None = None
     match_status: int | None = None
     auth_status: int | None = None
+    profile_review_status: int = 0
     intention_level: int | None = None
     last_follow_at: datetime | None = None
     next_follow_at: datetime | None = None
@@ -57,6 +58,7 @@ class MemberListItem(BaseModel):
     source: str | None = None
     region: str | None = None
     cert_status: int | None = None
+    store_verified: int | None = None  # 2026-11-11 审核状态「已到店核验」
     wechat_added: int | None = None
     promoted: int | None = None
     newcomer: int | None = None
@@ -81,6 +83,9 @@ class MemberListItem(BaseModel):
     # 本轮仅展示不自动解析（缺列降级 None）；ip_location 仍为原始注册 IP。
     ip_region: str | None = None
     phone_region: str | None = None
+    # 推广人：promotion_attribution 里 status=1 的最新一条归属，取该推广账号的昵称。
+    # 用标量子查询而不是 JOIN，避免一个用户多条归属把列表行数放大。
+    promoter_nickname: str | None = None
     # A12-钱包（余额）：取 account_ledger 中 account_type='user' 的可用余额，
     # 与 finance.get_balance 口径一致（无流水为 0）；纯只读派生，不新建表。
     balance: Decimal = Field(default=Decimal(0))
@@ -226,6 +231,7 @@ class MatchRecordResponse(BaseModel):
 
 
 class MatchRecordItem(MatchRecordResponse):
+    introduction_status: Literal["PENDING", "IN_PROGRESS", "SUCCEEDED", "FAILED", "CLOSED"] | None = None
     from_nickname: str | None = None
     to_nickname: str | None = None
     matchmaker_id: int | None = None
@@ -268,7 +274,7 @@ class MatchRecordPage(BaseModel):
 
 
 class MatchRecordStatistics(BaseModel):
-    """顶部统计卡口径：待牵线=未分派红娘的待处理，牵线中=已分派红娘的待处理。"""
+    """顶部统计卡直接按同一牵线记录的阶段统计。"""
 
     total: int
     pending: int

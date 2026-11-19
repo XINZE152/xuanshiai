@@ -47,6 +47,16 @@ _INDEX_RE = re.compile(r"^\s*(UNIQUE\s+KEY|KEY|PRIMARY\s+KEY|INDEX)\s*`?([A-Za-z
 _SKIP_HEADS = {"primary", "unique", "key", "index", "constraint", "check", "foreign", "fulltext", "spatial"}
 _INT_WIDTH_RE = re.compile(r"^(tinyint|smallint|mediumint|int|bigint)\(\d+\)")
 
+# Release-critical constraints that cannot be inferred reliably from every DDL
+# dialect. Keep this list short: it exists to make silent drift (e.g. Q45's
+# 50/80 check) fail ``check-db`` before deployment.
+CRITICAL_DEFAULTS: dict[str, dict[str, str]] = {
+    "paper_plane_profile_unlock": {"points_cost": "50"},
+}
+CRITICAL_CHECKS: dict[str, dict[str, tuple[str, ...]]] = {
+    "paper_plane_profile_unlock": {"ck_paper_plane_unlock_cost": ("50", "80")},
+}
+
 
 _TYPE_WORDS = (
     "bigint", "int", "tinyint", "smallint", "mediumint", "varchar", "char", "text", "longtext",
@@ -316,6 +326,67 @@ def read_database_schema(connection: Any, database: str) -> dict[str, dict[str, 
     return tables
 
 
+def read_database_constraints(connection: Any, database: str) -> dict[str, dict[str, Any]]:
+    """Read defaults and CHECK clauses used by the critical constraint contract."""
+    defaults: dict[str, dict[str, str | None]] = {}
+    checks: dict[str, dict[str, str]] = {}
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT TABLE_NAME AS table_name, COLUMN_NAME AS column_name, COLUMN_DEFAULT AS column_default "
+            "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = %s",
+            (database,),
+        )
+        for row in cursor.fetchall():
+            item = row if isinstance(row, dict) else {"table_name": row[0], "column_name": row[1], "column_default": row[2]}
+            defaults.setdefault(item["table_name"], {})[item["column_name"]] = (
+                None if item["column_default"] is None else str(item["column_default"])
+            )
+        cursor.execute(
+            "SELECT tc.TABLE_NAME AS table_name, cc.CONSTRAINT_NAME AS constraint_name, "
+            "cc.CHECK_CLAUSE AS check_clause "
+            "FROM information_schema.CHECK_CONSTRAINTS cc "
+            "JOIN information_schema.TABLE_CONSTRAINTS tc "
+            "  ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA "
+            " AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME "
+            "WHERE cc.CONSTRAINT_SCHEMA = %s",
+            (database,),
+        )
+        for row in cursor.fetchall():
+            item = row if isinstance(row, dict) else {"table_name": row[0], "constraint_name": row[1], "check_clause": row[2]}
+            checks.setdefault(item["table_name"], {})[item["constraint_name"]] = str(item["check_clause"] or "")
+    return {"defaults": defaults, "checks": checks}
+
+
+def diff_constraints(actual: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+    """Only curated critical defaults/checks are compared; extra objects are ignored."""
+    defaults = actual.get("defaults", {})
+    checks = actual.get("checks", {})
+    default_mismatches: list[str] = []
+    missing_checks: list[str] = []
+    check_mismatches: list[str] = []
+    for table, columns in CRITICAL_DEFAULTS.items():
+        for column, expected in columns.items():
+            got = defaults.get(table, {}).get(column)
+            if got != expected:
+                default_mismatches.append(f"{table}.{column}: expected {expected}, got {got if got is not None else 'NULL'}")
+    for table, constraints in CRITICAL_CHECKS.items():
+        for name, tokens in constraints.items():
+            clause = checks.get(table, {}).get(name)
+            if clause is None:
+                missing_checks.append(f"{table}.{name}")
+                continue
+            missing_tokens = [token for token in tokens if token not in clause]
+            if missing_tokens:
+                check_mismatches.append(
+                    f"{table}.{name}: missing {','.join(missing_tokens)} in {clause}"
+                )
+    return {
+        "default_mismatches": default_mismatches,
+        "missing_checks": missing_checks,
+        "check_mismatches": check_mismatches,
+    }
+
+
 def diff(expected: dict[str, dict[str, Any]], actual: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Only "should exist but does not" is a failure; extra objects are informational."""
     missing_tables = sorted(set(expected) - set(actual))
@@ -371,23 +442,41 @@ def connect(database_url: str) -> tuple[Any, str]:
     return connection, database
 
 
-def _print_report(report: dict[str, Any], verbose: bool) -> int:
+def _print_report(
+    report: dict[str, Any],
+    verbose: bool,
+    constraints: dict[str, list[str]] | None = None,
+) -> int:
+    constraints = constraints or {
+        "default_mismatches": [],
+        "missing_checks": [],
+        "check_mismatches": [],
+    }
     failures = (
         len(report["missing_tables"])
         + len(report["missing_columns"])
         + len(report["type_mismatches"])
         + len(report["missing_indexes"])
         + len(report["missing_primary_keys"])
+        + len(constraints["default_mismatches"])
+        + len(constraints["missing_checks"])
+        + len(constraints["check_mismatches"])
     )
     print(f"missing tables        : {len(report['missing_tables'])}")
     print(f"missing columns       : {len(report['missing_columns'])}")
     print(f"type mismatches       : {len(report['type_mismatches'])}")
     print(f"missing indexes       : {len(report['missing_indexes'])}")
     print(f"missing primary keys  : {len(report['missing_primary_keys'])}")
+    print(f"default mismatches    : {len(constraints['default_mismatches'])}")
+    print(f"missing checks        : {len(constraints['missing_checks'])}")
+    print(f"check mismatches      : {len(constraints['check_mismatches'])}")
     print(f"extra columns (info)  : {len(report['extra_columns'])}")
     if verbose or failures:
         for key in ("missing_tables", "missing_primary_keys", "missing_columns", "type_mismatches", "missing_indexes"):
             for item in report[key][:200]:
+                print(f"  [{key}] {item}")
+        for key in ("default_mismatches", "missing_checks", "check_mismatches"):
+            for item in constraints[key][:200]:
                 print(f"  [{key}] {item}")
     print("contract: " + ("FAIL" if failures else "OK"))
     return 1 if failures else 0
@@ -417,11 +506,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     connection, database = connect(args.database_url)
     try:
         actual = read_database_schema(connection, database)
+        constraint_actual = read_database_constraints(connection, database)
     finally:
         connection.close()
     expected = parse_code_schema()
     print(f"schema contract: database={database} expected_tables={len(expected)} actual_tables={len(actual)}")
-    return _print_report(diff(expected, actual), args.verbose)
+    return _print_report(diff(expected, actual), args.verbose, diff_constraints(constraint_actual))
 
 
 if __name__ == "__main__":

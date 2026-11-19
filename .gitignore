@@ -67,15 +67,32 @@ scripts/*
 !scripts/migrate_admin_public_media.py
 # 7.2 迁移差集检查脚本必须随仓库发布，团队成员与 CI 均可直接执行
 !scripts/check_migrations.py
+# Q54 资料完整度 profile-v5 一次性回填脚本：部署后需在测试服/生产执行
+!scripts/recalculate_profile_completion.py
+# P0 发布前 schema 预检：schema-contract/backend-ci 引用，必须随仓库发布
+!scripts/check_release_schema.py
+# paper_plane/chat 域迁移执行器：P3 起必须随仓库发布
+!scripts/manage_domain_migration.py
 # 业务迁移执行器：tests/test_business_schema_migration_contract.py 直接导入
 !scripts/manage_business_migration.py
 # 微信支付 real 模式预检与安全暂停脚本：backend-ci.yml 的 admin Ruff 门禁引用
 !scripts/verify_wechat_pay_preflight.py
+# 墨相师评测用例集是测试数据资产（tests/test_ai_quality_cases.py 直接读取 cases/*.json），
+# 不随仓库发布时该契约测试在干净 clone / CI 上必然失败
+!scripts/moxiang_prompt_loop/
 !scripts/pause_real_pay.py
+!scripts/verify_remote_workspace_leads.py
 # 0.01 元测试商品/回调冒烟脚本（M6-C-01），仅测试环境使用
 !scripts/payment_smoke_0_01.py
+# 测试种子会员写入 / 按 is_test_seed 清理（本地/测试/生产显式放行后执行）
+!scripts/seed_community_members.py
+!scripts/cleanup_test_seed_members.py
 # 属地刷新上线预检（A12），只读检查数据资产与 users 列
 !scripts/region_preflight.py
+# Q51 超时抓包对账：注入 X-Request-ID 记录客户端耗时，线上排障与验收都要用它，
+# 必须随仓库发布，否则每个人都要重写一遍
+!scripts/probe_request_trace.py
+!scripts/backfill_unified_introductions.py
 artifacts/
 
 # Local runtime logs

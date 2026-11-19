@@ -103,7 +103,7 @@ PROFILE_CONSENT_SCOPE = "profile_text_extract"
 
 # 画像叙事层（narrative）版本常量——发布后生成人格画像解读成品。
 NARRATIVE_SCHEMA_VERSION = "profile-narrative-v1"
-NARRATIVE_PROMPT_VERSION = "profile-narrative-prompt-v4"
+NARRATIVE_PROMPT_VERSION = "profile-narrative-prompt-v5"
 _NARRATIVE_TASK_TYPE = "profile_narrative"
 # 叙事层重新生成（regenerate）每日上限：24h 窗口内 profile_narrative 任务数。
 _NARRATIVE_REGENERATE_DAILY_LIMIT = 5
@@ -5076,6 +5076,13 @@ async def generate_profile_narrative_handler(
         # subject 一致性：personal 画像不应返回 ideal_weights
         if subject_value == ProfileSubject.PERSONAL.value and result.ideal_weights:
             raise ValueError("personal narrative must not have ideal_weights")
+        # 情感气质透视仅 personal 主体生成：ideal_partner 一律剥离，
+        # 避免「理想型画像」把对另一半的心理推断落进 summary_text。
+        if (
+            subject_value == ProfileSubject.IDEAL_PARTNER.value
+            and result.emotional_insight is not None
+        ):
+            result = result.model_copy(update={"emotional_insight": None})
     except (AttributeError, TypeError, ValueError):
         await fail_task(
             db, task.task_id, worker_id,

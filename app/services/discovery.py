@@ -27,6 +27,10 @@ from app.services.membership import (
     active_membership_exists_for_column_sql,
     has_active_membership,
 )
+from app.services.matchmaker_workspace import (
+    record_member_application_introduction,
+    sync_member_application_introduction,
+)
 from app.schemas.discovery import (
     ApplicationCreateRequest,
     ApplicationPage,
@@ -62,6 +66,7 @@ from app.services.candidate_query import (
 )
 from app.services.candidate_visibility import (
     CandidateVisibilityService,
+    CompletionWaiver,
     SqlPredicate,
     ViewerContext,
     VisibilityScene,
@@ -104,7 +109,7 @@ CARD_SELECT = """
                      ORDER BY um.id DESC LIMIT 1), u.avatar) AS avatar_thumb,
            u.birthday, u.is_married,
            u.is_single_pledge, p.height, p.education_level, p.occupation, p.income,
-           p.weight, p.zodiac,
+           p.weight, p.zodiac, p.constellation,
            p.hometown_province_code, p.hometown_city_code, p.hometown_district_code,
            p.residence_province_code, p.residence_city_code, p.residence_district_code,
            (p.residence_city_code IS NOT NULL AND p.residence_city_code =
@@ -142,7 +147,20 @@ CARD_SELECT = """
            -- 「喜欢」与「收藏」分表语义：type=1 是红心/喜欢（与 /relations/likes 同源），
            -- type=2 是旧收藏，仅保留兼容。走 uk_pair_type(user_id,target_user_id,type) 索引。
            EXISTS (SELECT 1 FROM user_favorite f
-                   WHERE f.user_id = :viewer_id AND f.target_user_id = u.id AND f.type = 1) AS is_liked
+                   WHERE f.user_id = :viewer_id AND f.target_user_id = u.id AND f.type = 1) AS is_liked,
+           -- 认识申请 / 匹配：红娘推荐卡据此决定是否露出「和真人发消息」
+           (SELECT ma.status FROM match_apply ma
+             WHERE ((ma.from_user_id = :viewer_id AND ma.to_user_id = u.id)
+                 OR (ma.from_user_id = u.id AND ma.to_user_id = :viewer_id))
+               AND ma.status IN (0, 1, 2, 3)
+             ORDER BY FIELD(ma.status, 1, 0, 2, 3), ma.id DESC
+             LIMIT 1) AS apply_status_code,
+           EXISTS (
+             SELECT 1 FROM user_match m
+             WHERE ((m.user_id = :viewer_id AND m.target_user_id = u.id)
+                 OR (m.user_id = u.id AND m.target_user_id = :viewer_id))
+               AND m.status IN (1, 2)
+           ) AS is_matched
 """
 
 
@@ -160,15 +178,17 @@ CARD_FROM = """
 async def _viewer_context(db: AsyncSession, user_id: int) -> dict[str, Any]:
     result = await db.execute(
         text("""SELECT u.gender, u.birthday, COALESCE(c.score, 0) AS completion_score,
+                      COALESCE(c.completion_grandfathered, 0) AS completion_grandfathered,
                       u.phone, p.height, p.education_level, p.income, p.mbti, p.interest_tags,
                p.personality_tags, p.tags, p.residence_city_code,
                COALESCE(ua.realname_status, 0) AS realname_status,
-                      pref.age_min, pref.age_max, pref.height_min, pref.height_max,
+                      ri.intent_type, pref.age_min, pref.age_max, pref.height_min, pref.height_max,
                        pref.education_min, pref.income_min, pref.marriage_status,
                        pref.preferred_province_code, pref.preferred_city_codes
                FROM users u LEFT JOIN user_profile p ON p.user_id = u.id
                LEFT JOIN user_profile_completion c ON c.user_id = u.id
                LEFT JOIN user_auth ua ON ua.user_id = u.id
+               LEFT JOIN user_registration_intent ri ON ri.user_id = u.id AND ri.status = 1
                LEFT JOIN user_partner_preference pref ON pref.user_id = u.id
                WHERE u.id = :user_id"""),
         {"user_id": user_id},
@@ -188,6 +208,36 @@ def _skip_discovery_gates() -> bool:
     return settings.discovery_skip_gates_enabled
 
 
+# 注册身份 → 推荐性别口径（2026-11-14）。
+# - self_match（自己找对象）/ parent_match（父母帮找）：只推异性，沿用历史行为；
+# - companion（找搭子）：同性异性都推，搭子是兴趣社交，不按性别对立；
+# - 未选择身份的存量用户走 self_match 分支，保证改动前后推荐结果一致。
+#
+# 产品口径（2026-11-14 已确认，改动前先对一遍，别自作主张放开）：
+# 1. 身份只在注册/引导流程里选一次，不提供「老用户改身份」的入口，
+#    因此这里按「多数用户没有 intent_type」是常态而非异常来设计。
+# 2. 择偶偏好（年龄/身高/收入/学历等，respect_preferences）对 companion 同样生效，
+#    找搭子只是放开性别，不放开其他门禁。
+# 3. 搜索（search_discovery）不套身份口径：用户按昵称/标签指名找人，找对象身份
+#    也要能搜到同性。由 apply_intent_gender_gate=False 单独关闭；推荐流与广场仍生效。
+SAME_GENDER_OPEN_INTENTS = frozenset({"companion"})
+
+
+def _only_opposite_gender(viewer: dict[str, Any]) -> bool:
+    """当前用户是否只应看到异性。找搭子身份放开同性，其余身份（含未选择）只推异性。"""
+    intent = viewer.get("intent_type")
+    if intent is None:
+        return True
+    return str(intent).strip() not in SAME_GENDER_OPEN_INTENTS
+
+
+def _viewer_completion_ok(viewer: dict[str, Any]) -> bool:
+    """完整度门禁：满 100 或 Q23 grandfather 豁免；展示分不受 grandfather 影响。"""
+    return float(viewer.get("completion_score") or 0) >= 100 or bool(
+        viewer.get("completion_grandfathered")
+    )
+
+
 def _visibility_predicate(
     viewer_id: int,
     viewer: dict[str, Any],
@@ -197,7 +247,9 @@ def _visibility_predicate(
     candidate_alias: str = "u",
     privacy_alias: str = "pr",
     completion_alias: str = "c",
+    completion_waiver: CompletionWaiver | None = None,
     skip_completion_gate: bool = False,
+    completion_gate_mode: str | None = None,
 ) -> SqlPredicate:
     return candidate_visibility_service.predicate(
         ViewerContext(
@@ -209,8 +261,38 @@ def _visibility_predicate(
         candidate_alias=candidate_alias,
         privacy_alias=privacy_alias,
         completion_alias=completion_alias,
+        completion_waiver=completion_waiver,
         skip_completion_gate=skip_completion_gate,
+        completion_gate_mode=completion_gate_mode,  # type: ignore[arg-type]
     )
+
+
+async def _serving_matchmaker_waiver(
+    db: AsyncSession, viewer_id: int
+) -> CompletionWaiver | None:
+    """服务红娘返回完整度豁免范围，普通会员返回 None。
+
+    红娘录入的会员资料本就是半成品，代管人必须能打开其主页核对与编辑；范围口径
+    与工作台 _member_scope_predicate 一致，主页可见范围不宽于工作台会员列表。
+    """
+    row = (
+        await db.execute(
+            text(
+                """SELECT COALESCE(p.level, 'NORMAL') AS level, p.organization_id
+                FROM user_role r
+                LEFT JOIN matchmaker_workspace_profile p ON p.user_id = r.user_id AND p.status = 1
+                WHERE r.user_id = :user_id AND r.role_code = 'service_matchmaker'
+                  AND r.status = 1 LIMIT 1"""
+            ),
+            {"user_id": viewer_id},
+        )
+    ).mappings().first()
+    if not row:
+        return None
+    organization_id = int(row["organization_id"]) if row["organization_id"] else None
+    if str(row["level"]) != "SUPER":
+        organization_id = None
+    return CompletionWaiver(matchmaker_id=viewer_id, organization_id=organization_id)
 
 
 async def _scene_visibility(
@@ -419,6 +501,53 @@ async def _attach_card_qa_media(db: AsyncSession, cards: list[DiscoveryCard]) ->
             answer["media"] = media
 
 
+def _constellation_from_birthday(birthday: Any) -> str | None:
+    """按生日推导星座，口径与 C 端详情页 constellationFromBirthday 一致。
+
+    卡片第 4 格从「属相」改为「星座」（2026-11-14）。user_profile.constellation 是
+    可由用户手填的展示字段，老数据可能为空；为空时用生日兜底，避免同一人在首页
+    显示「未填写」而在详情页有星座。
+    """
+    if not isinstance(birthday, date):
+        return None
+    signs = ["摩羯座", "水瓶座", "双鱼座", "白羊座", "金牛座", "双子座",
+             "巨蟹座", "狮子座", "处女座", "天秤座", "天蝎座", "射手座"]
+    # 各月星座切换日（当日属于前一个星座），与 C 端详情页同一张表：
+    # 摩羯12/22 水瓶1/20 双鱼2/19 白羊3/21 金牛4/20 双子5/21
+    # 巨蟹6/22 狮子7/23 处女8/23 天秤9/23 天蝎10/24 射手11/23
+    cutoffs = [20, 19, 21, 20, 21, 22, 23, 23, 23, 24, 23, 22]
+    if not 1 <= birthday.month <= 12 or not 1 <= birthday.day <= 31:
+        return None
+    index = (birthday.month - 1 if birthday.day < cutoffs[birthday.month - 1] else birthday.month) % 12
+    return signs[index]
+
+
+def _apply_status_from_row(row: dict[str, Any]) -> str:
+    """把 match_apply.status / user_match 归一成前端可读关系态。"""
+    if bool(row.get("is_matched")):
+        return "accepted"
+    code = row.get("apply_status_code")
+    if code is None and row.get("apply_status") is not None:
+        # 单测 / 手工构造可直接传字符串
+        raw = row.get("apply_status")
+        if isinstance(raw, str) and raw:
+            return raw
+        code = raw
+    try:
+        status = int(code) if code is not None else -1
+    except (TypeError, ValueError):
+        return "none"
+    if status == 0:
+        return "pending"
+    if status == 1:
+        return "accepted"
+    if status == 2:
+        return "rejected"
+    if status == 3:
+        return "expired"
+    return "none"
+
+
 def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = False) -> DiscoveryCard:
     certification_tags: list[str] = []
     if row.get("realname_status") == 2:
@@ -433,6 +562,7 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         user_id=int(row["user_id"]),
         nickname=row.get("nickname"),
         avatar=row.get("avatar"),
+        gender=row.get("card_gender") if row.get("card_gender") is not None else row.get("gender"),
         age=_calculate_age(row["birthday"]) if row.get("birthday") else None,
         height=row.get("height") if not detail_locked else None,
         education_level=row.get("education_level") if not detail_locked and not row.get("hide_school") else None,
@@ -459,6 +589,9 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         if not detail_locked
         else None,
         zodiac=(row.get("zodiac") or None) if not detail_locked else None,
+        constellation=(
+            (row.get("constellation") or None) or _constellation_from_birthday(row.get("birthday"))
+        ) if not detail_locked else None,
         self_intro=(row.get("self_intro") or None) if not detail_locked else None,
         qa_answers=_card_qa_answers(row.get("qa_answers")) if not detail_locked else [],
         personal_tags=display_personal_tags(_json_list(row.get("interest_tags")) + _json_list(row.get("personality_tags")), _stored_custom_tags(row)) if not detail_locked else [],
@@ -470,6 +603,7 @@ def _card(row: dict[str, Any], score: float, reason: str, detail_locked: bool = 
         match_score_source=LEGACY_MATCH_ALGORITHM_VERSION,
         is_favorite=bool(row.get("is_favorite")),
         is_liked=bool(row.get("is_liked")),
+        apply_status=_apply_status_from_row(row),
         is_vip=bool(row.get("is_vip")),
         is_pure_free=not bool(row.get("is_vip")) and not bool(row.get("is_boosted")),
         is_boosted=bool(row.get("is_boosted")),
@@ -495,6 +629,17 @@ def _filter_sql(filters: DiscoveryFilters, params: dict[str, Any]) -> list[str]:
         if value:
             clauses.append(f"{column} = :filter_{field}")
             params[f"filter_{field}"] = value
+    for field, column in (
+        ("hometown_province_code", "p.hometown_province_code"),
+        ("hometown_city_code", "p.hometown_city_code"),
+        ("hometown_district_code", "p.hometown_district_code"),
+    ):
+        value = getattr(filters, field)
+        if value:
+            clauses.append(f"{column} = :filter_{field}")
+            params[f"filter_{field}"] = value
+    if filters.certified_only:
+        clauses.append("COALESCE(ua.realname_status, 0) = 2")
     if filters.marriage_status:
         clauses.append("u.is_married = :filter_marriage")
         params["filter_marriage"] = filters.marriage_status
@@ -542,21 +687,44 @@ def _candidate_snapshot(
     nickname: str | None,
     tag: str | None,
     respect_preferences: bool,
+    apply_intent_gender_gate: bool = True,
+    force_skip_completion_gate: bool = False,
+    completion_gate_mode: str | None = None,
 ) -> CandidateQuerySnapshot:
     """Build one server-owned candidate SELECT/count pair.
 
     Both statements consume the same visibility and filter clauses.  The
     query fingerprint deliberately excludes the page and cursor so a cursor
     can advance through one logical result set without changing its identity.
+
+    ``apply_intent_gender_gate`` 只由调用方显式关闭（当前仅「按昵称/标签搜索」
+    关闭）：搜索是用户指名找人的动作，不该被身份口径限制成搜不到同性。
+    推荐流与广场保持默认 True。
+
+    ``completion_gate_mode``：
+    - ``full``：候选须完整度 100（或 grandfather）——搜索等仍可显式指定
+    - ``recommend_min``：候选须性别+年龄+现居地——首页推荐 / 广场 / BOT 推荐默认
+    - ``none``：不查完整度（历史访客等）
+    ``force_skip_completion_gate`` 仍兼容旧调用，等价于 mode=none，且关闭异性门禁。
     """
     scene = VisibilityScene.SEARCH if nickname or tag else VisibilityScene.DISCOVERY
-    skip_gates = _skip_discovery_gates()
+    env_skip = _skip_discovery_gates()
+    if completion_gate_mode is None:
+        if env_skip or force_skip_completion_gate:
+            resolved_mode = "none"
+        else:
+            # 首页推荐与广场默认：性别 + 年龄 + 现居地即可出池
+            resolved_mode = "recommend_min"
+    else:
+        resolved_mode = "none" if env_skip else completion_gate_mode
+    # 仅「完全跳过完整度」时同步关掉异性门禁（旧 BOT skip 行为）；recommend_min 仍按性别推。
+    skip_gender_gate = resolved_mode == "none" and (env_skip or force_skip_completion_gate)
     visibility = _visibility_predicate(
         viewer_id,
         viewer,
         viewer_is_vip,
         scene,
-        skip_completion_gate=skip_gates,
+        completion_gate_mode=resolved_mode,
     )
     params: dict[str, Any] = {
         "viewer_id": viewer_id,
@@ -575,7 +743,16 @@ def _candidate_snapshot(
         )"""
         )
         params["search_tag"] = tag
-    if not skip_gates and viewer.get("gender") in (1, 2):
+    # 身份决定性别门禁（2026-11-14）：找对象只推异性，找搭子同性异性都推。
+    # 显式筛了性别（filters.gender）时以用户筛选为准，否则「找对象 + 筛同性」会恒空。
+    # apply_intent_gender_gate=False（搜索）时整段不生效：搜索按用户输入找人，
+    # 不套身份口径，否则找对象用户按昵称永远搜不到同性好友。
+    only_opposite_gender = (
+        apply_intent_gender_gate
+        and _only_opposite_gender(viewer)
+        and not filters.gender
+    )
+    if not skip_gender_gate and viewer.get("gender") in (1, 2) and only_opposite_gender:
         clauses.append("u.gender <> :opposite_gender")
         params["opposite_gender"] = viewer["gender"]
     if respect_preferences:
@@ -603,9 +780,11 @@ def _candidate_snapshot(
     filter_facts.pop("cursor", None)
     filter_facts.pop("page", None)
     viewer_predicate_facts: dict[str, Any] = {
-        "gender": viewer.get("gender"),
+        # 事实记录「实际生效的性别门禁」：找搭子不筛性别时记 None，
+        # 让同一用户身份切换前后的游标指纹不同，不会把上一条口径的 cursor 续用。
+        "gender": viewer.get("gender") if only_opposite_gender else None,
     }
-    if skip_gates:
+    if skip_gender_gate:
         viewer_predicate_facts["gender"] = None
     if respect_preferences:
         viewer_predicate_facts["partner_preferences"] = {
@@ -634,8 +813,9 @@ def _candidate_snapshot(
         "filters": filter_facts,
         "policy_revision": visibility.policy_revision,
         "sort_version": SORT_VERSION,
+        "completion_gate_mode": resolved_mode,
     }
-    if skip_gates:
+    if resolved_mode == "none":
         fingerprint_payload["skip_gates"] = True
     query_fingerprint = build_query_fingerprint(fingerprint_payload)
     return CandidateQuerySnapshot(
@@ -657,6 +837,9 @@ async def _candidate_query_page(
     nickname: str | None = None,
     tag: str | None = None,
     respect_preferences: bool = True,
+    apply_intent_gender_gate: bool = True,
+    force_skip_completion_gate: bool = False,
+    completion_gate_mode: str | None = None,
 ) -> tuple[dict[str, Any], bool, CandidatePage]:
     viewer = await _viewer_context(db, viewer_id)
     viewer_is_vip = await _is_vip(db, viewer_id)
@@ -669,6 +852,9 @@ async def _candidate_query_page(
         nickname=nickname,
         tag=tag,
         respect_preferences=respect_preferences,
+        apply_intent_gender_gate=apply_intent_gender_gate,
+        force_skip_completion_gate=force_skip_completion_gate,
+        completion_gate_mode=completion_gate_mode,
     )
     try:
         page = await candidate_query_service.fetch_page(
@@ -691,6 +877,7 @@ async def _fetch_rows(
     nickname: str | None = None,
     tag: str | None = None,
     respect_preferences: bool = True,
+    apply_intent_gender_gate: bool = True,
 ) -> list[dict[str, Any]]:
     """Compatibility wrapper for callers that still need a candidate list."""
     _, _, page = await _candidate_query_page(
@@ -701,18 +888,35 @@ async def _fetch_rows(
         nickname=nickname,
         tag=tag,
         respect_preferences=respect_preferences,
+        apply_intent_gender_gate=apply_intent_gender_gate,
     )
     return page.items
 
 
-async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: DiscoveryFilters, *, plaza: bool) -> DiscoveryPage:
+async def get_discovery_page(
+    db: AsyncSession,
+    viewer_id: int,
+    filters: DiscoveryFilters,
+    *,
+    plaza: bool,
+    relax_viewer_completion: bool = False,
+) -> DiscoveryPage:
     if not await platform_browse_open(db):
         raise HTTPException(403, detail=await platform_maintenance_message(db))
     viewer = await _viewer_context(db, viewer_id)
-    if not _skip_discovery_gates() and viewer["completion_score"] < 100:
+    if (
+        not relax_viewer_completion
+        and not _skip_discovery_gates()
+        and not _viewer_completion_ok(viewer)
+    ):
         raise HTTPException(403, detail="请先完善资料后再进入推荐")
+    # 首页推荐与广场候选门槛一致：性别+年龄+现居地；BOT / 软浏览同口径。
     _, viewer_is_vip, candidate_page = await _candidate_query_page(
-        db, viewer_id, filters, plaza=plaza
+        db,
+        viewer_id,
+        filters,
+        plaza=plaza,
+        completion_gate_mode="recommend_min",
     )
     items = [
         _card(
@@ -735,6 +939,21 @@ async def get_discovery_page(db: AsyncSession, viewer_id: int, filters: Discover
     )
 
 
+async def get_aibot_recommendations_page(
+    db: AsyncSession,
+    viewer_id: int,
+    filters: DiscoveryFilters,
+) -> DiscoveryPage:
+    """恋 AI BOT / 首页软浏览推荐：浏览方可后置完善；候选须性别+年龄+现居地。"""
+    return await get_discovery_page(
+        db,
+        viewer_id,
+        filters,
+        plaza=False,
+        relax_viewer_completion=True,
+    )
+
+
 async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySearch) -> DiscoveryPage:
     if not await platform_browse_open(db):
         raise HTTPException(403, detail=await platform_maintenance_message(db))
@@ -744,7 +963,7 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         page_size=query.page_size,
     )
     viewer = await _viewer_context(db, viewer_id)
-    if not _skip_discovery_gates() and viewer["completion_score"] < 100:
+    if not _skip_discovery_gates() and not _viewer_completion_ok(viewer):
         raise HTTPException(403, detail="请先完善资料后再搜索用户")
     _, viewer_is_vip, candidate_page = await _candidate_query_page(
         db,
@@ -754,6 +973,11 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         nickname=query.nickname,
         tag=query.tag,
         respect_preferences=False,
+        # 搜索单独放开性别（产品确认 2026-11-14）：按昵称/标签找人是明确的指名动作，
+        # 找对象用户也要能搜到同性好友。推荐流与广场不受影响，仍按身份口径过滤。
+        apply_intent_gender_gate=False,
+        # 搜索仍要求完整度 100，与首页/广场的 recommend_min 出池门槛分开。
+        completion_gate_mode="full",
     )
     items = [
         _card(
@@ -794,6 +1018,7 @@ async def get_filter_options() -> FilterOptionsResponse:
         ],
         cities=sorted(DISCOVERY_CITY_OPTIONS),
         mbti_types=[{"value": code, "label": label} for code, label in MBTI_TYPE_OPTIONS],
+        certification_options=[{"value": "realname", "label": "实名认证"}],
     )
 
 
@@ -1028,18 +1253,26 @@ async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> Publ
         raise HTTPException(403, detail=await platform_maintenance_message(db))
     if viewer_id == target_id:
         raise HTTPException(422, detail="不能浏览自己的名片")
+    # 服务红娘代管的会员本就多为半成品，先按代管关系拿到完整度豁免再判可见性。
+    waiver = await _serving_matchmaker_waiver(db, viewer_id)
     skip = _skip_discovery_gates()
-    await _ensure_target(db, viewer_id, target_id, skip_completion_gate=skip)
-    rows = await _target_rows(db, viewer_id, [target_id], skip_completion_gate=skip)
+    await _ensure_target(db, viewer_id, target_id, completion_waiver=waiver, skip_completion_gate=skip)
+    rows = await _target_rows(db, viewer_id, [target_id], completion_waiver=waiver, skip_completion_gate=skip)
     row = rows.get(target_id)
     if not row:
         raise HTTPException(404, detail="用户不存在或当前不可见")
     viewer = await _viewer_context(db, viewer_id)
     score, reason = _candidate_score(viewer, row)
     vip = await _is_vip(db, viewer_id)
-    privacy_locked = bool(row.get("only_vip_can_see_detail")) and not vip
-    quota = None if privacy_locked else await _consume_browse(db, viewer_id, score, vip, target_id)
-    full = vip or (not privacy_locked and quota is not None)
+    # 服务红娘在管理中心查看会员公开档案时不受会员/浏览额度限制。
+    is_matchmaker = waiver is not None
+    privacy_locked = bool(row.get("only_vip_can_see_detail")) and not vip and not is_matchmaker
+    quota = (
+        None
+        if privacy_locked
+        else (None if is_matchmaker else await _consume_browse(db, viewer_id, score, vip, target_id))
+    )
+    full = vip or is_matchmaker or (not privacy_locked and quota is not None)
     await _record_browse(db, viewer_id, target_id)
     card = _card(row, score, reason, detail_locked=not full)
     await _attach_card_qa_media(db, [card])
@@ -1057,7 +1290,7 @@ async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> Publ
     # 「Ta的理想型」与 profile 同门禁：未解锁（full=False）不查库、不下发。
     preference = await _public_preference(db, target_id) if full else None
     await db.commit()
-    return PublicProfileResponse(user_id=target_id, card=card, profile=profile, is_vip_viewer=vip, browse_quota_remaining=quota, can_apply=viewer["completion_score"] >= 100, preference=preference)
+    return PublicProfileResponse(user_id=target_id, card=card, profile=profile, is_vip_viewer=vip, browse_quota_remaining=quota, can_apply=_viewer_completion_ok(viewer), preference=preference)
 
 
 async def preview_card(db: AsyncSession, viewer_id: int, target_id: int) -> DiscoveryCardPreviewResponse:
@@ -1106,18 +1339,31 @@ async def preview_card(db: AsyncSession, viewer_id: int, target_id: int) -> Disc
 
 
 async def _target_rows(
-    db: AsyncSession, viewer_id: int, target_ids: list[int], *, skip_completion_gate: bool = False
+    db: AsyncSession,
+    viewer_id: int,
+    target_ids: list[int],
+    *,
+    completion_waiver: CompletionWaiver | None = None,
+    skip_completion_gate: bool = False,
+    completion_gate_mode: str | None = None,
 ) -> dict[int, dict[str, Any]]:
     if not target_ids:
         return {}
     placeholders = ", ".join(f":target_{index}" for index in range(len(target_ids)))
     viewer = await _viewer_context(db, viewer_id)
+    # 详情/点进主页默认与首页推荐、广场出池一致（recommend_min），
+    # 否则列表能出人、点详情却因完整度 <100 被 404。
+    resolved_mode = completion_gate_mode
+    if resolved_mode is None and not skip_completion_gate:
+        resolved_mode = "recommend_min"
     visibility = _visibility_predicate(
         viewer_id,
         viewer,
         await _is_vip(db, viewer_id),
         VisibilityScene.PROFILE,
+        completion_waiver=completion_waiver,
         skip_completion_gate=skip_completion_gate,
+        completion_gate_mode=resolved_mode,
     )
     params = {
         "viewer_id": viewer_id,
@@ -1283,19 +1529,32 @@ async def visitor_count(db: AsyncSession, viewer_id: int, target_id: int) -> dic
 
 
 async def _ensure_target(
-    db: AsyncSession, viewer_id: int, target_id: int, *, skip_completion_gate: bool | None = None
+    db: AsyncSession,
+    viewer_id: int,
+    target_id: int,
+    *,
+    completion_waiver: CompletionWaiver | None = None,
+    skip_completion_gate: bool | None = None,
+    completion_gate_mode: str | None = None,
 ) -> None:
     """Raise 404 when the target is not visible to the viewer.
 
     ``skip_completion_gate=None`` follows the test-only DISCOVERY_SKIP_GATES
-    switch, so展示链路（推荐/广场/搜索/详情）与交互链路（申请/收藏/爆灯/海报）
-    使用同一套可见性口径：否则测试号在推荐里能看到对方、点进去却是 404。
+    switch。展示链路（推荐/广场/详情）与交互链路（申请/收藏/爆灯）共用
+    ``_target_rows`` 默认 ``recommend_min``，避免推荐能见、点详情 404。
     """
     if skip_completion_gate is None:
         skip_completion_gate = _skip_discovery_gates()
     if viewer_id == target_id:
         raise HTTPException(422, detail="不能对自己执行此操作")
-    if target_id not in await _target_rows(db, viewer_id, [target_id], skip_completion_gate=skip_completion_gate):
+    if target_id not in await _target_rows(
+        db,
+        viewer_id,
+        [target_id],
+        completion_waiver=completion_waiver,
+        skip_completion_gate=skip_completion_gate,
+        completion_gate_mode=completion_gate_mode,
+    ):
         raise HTTPException(404, detail="目标用户不存在或当前不可见")
 
 
@@ -1446,7 +1705,7 @@ async def create_application(db: AsyncSession, viewer_id: int, target_id: int, r
     await _ensure_target(db, viewer_id, target_id)
     await _expire_pending_applications(db)
     viewer = await _viewer_context(db, viewer_id)
-    if not _skip_discovery_gates() and viewer["completion_score"] < 100:
+    if not _skip_discovery_gates() and not _viewer_completion_ok(viewer):
         raise _forbidden("PROFILE_INCOMPLETE", "请先完善资料后再申请认识")
     if not viewer.get("phone"):
         raise _forbidden("PHONE_REQUIRED", "请先绑定手机号")
@@ -1463,8 +1722,26 @@ async def create_application(db: AsyncSession, viewer_id: int, target_id: int, r
     target_status = int((target_auth.mappings().first() or {}).get("realname_status") or 0)
     target_realname_required = target_status != 2
     existing = await db.execute(text("SELECT id, status FROM match_apply WHERE ((from_user_id = :from_id AND to_user_id = :to_id) OR (from_user_id = :to_id AND to_user_id = :from_id)) AND status IN (0, 1) LIMIT 1"), {"from_id": viewer_id, "to_id": target_id})
-    if existing.first():
-        raise HTTPException(409, detail="双方已有进行中的认识申请或匹配")
+    existing_row = existing.mappings().first()
+    if existing_row is not None:
+        # status 0=待对方回应；1=双方已同意。勿把「申请或匹配」糊成一句，前端曾因文案含「匹配」误报「对方已同意」。
+        if int(existing_row.get("status") or 0) == 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "ALREADY_ACCEPTED",
+                    "message": "双方已互相同意认识，可去消息页真人聊天",
+                    "retryable": False,
+                },
+            )
+        raise HTTPException(
+            409,
+            detail={
+                "code": "ALREADY_PENDING",
+                "message": "认识申请已发送，请等待对方同意后再真人聊天",
+                "retryable": False,
+            },
+        )
     quota_key = await _quota_key("apply", viewer_id)
     vip = await _is_vip(db, viewer_id)
     if await _consume_apply_quota(db, viewer_id, vip):
@@ -1473,6 +1750,8 @@ async def create_application(db: AsyncSession, viewer_id: int, target_id: int, r
     try:
         result = await db.execute(text("INSERT INTO match_apply (from_user_id, to_user_id, message, status, expire_at) VALUES (:from_id, :to_id, :message, 0, :expire_at)"), {"from_id": viewer_id, "to_id": target_id, "message": request.message, "expire_at": expire_at})
         await db.execute(text("INSERT IGNORE INTO user_swipe_record (user_id, target_user_id, action, scene) VALUES (:user_id, :target_id, 3, 'recommend')"), {"user_id": viewer_id, "target_id": target_id})
+        # 会员自己发起的认识申请同时是红娘的一条「申请牵线」，落待牵线，由申请人的服务红娘介入撮合。
+        await record_member_application_introduction(db, int(result.lastrowid), viewer_id, target_id)
         await _notify(db, target_id, "match_application", "收到新的认识申请", request.message or "有人申请认识你", viewer_id, result.lastrowid)
         await db.commit()
     except Exception:
@@ -1592,6 +1871,15 @@ async def respond_application(db: AsyncSession, viewer_id: int, application_id: 
             raise _forbidden("REALNAME_REQUIRED", "请先完成实名认证后再回应认识申请")
     status = 1 if accepted else 2
     await db.execute(text("UPDATE match_apply SET status = :status, responded_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP() WHERE id = :id"), {"status": status, "id": application_id})
+    # 同意直接牵线成功；拒绝记为牵线失败，同时保留会员回应原因。
+    await sync_member_application_introduction(
+        db,
+        int(row["from_user_id"]),
+        viewer_id,
+        application_id=application_id,
+        succeeded=accepted,
+        failure_reason=None if accepted else (request.reason if request is not None else None),
+    )
     if accepted:
         for left, right in ((row["from_user_id"], row["to_user_id"]), (row["to_user_id"], row["from_user_id"])):
             await db.execute(text("INSERT INTO user_match (user_id, target_user_id, status) VALUES (:left, :right, 1) ON DUPLICATE KEY UPDATE status = 1, updated_at = UTC_TIMESTAMP()"), {"left": left, "right": right})
@@ -1644,12 +1932,14 @@ async def _expire_pending_applications(db: AsyncSession) -> None:
     await db.execute(text("""UPDATE match_apply
         SET status = 3, updated_at = UTC_TIMESTAMP()
         WHERE status = 0 AND expire_at IS NOT NULL AND expire_at <= UTC_TIMESTAMP()"""))
+    # 认识申请过期仍是「未回应」；不替红娘判定失败，也不重置正在跟进的牵线。
 
 
 async def create_superlike(db: AsyncSession, viewer_id: int, target_id: int, idempotency_key: str) -> SuperLikeResponse:
     await _lock_user_pair(db, viewer_id, target_id)
     await _ensure_target(db, viewer_id, target_id)
     viewer_result = await db.execute(text("""SELECT u.phone, COALESCE(c.score, 0) AS completion_score,
+        COALESCE(c.completion_grandfathered, 0) AS completion_grandfathered,
         COALESCE(ua.realname_status, 0) AS realname_status
         FROM users u LEFT JOIN user_profile_completion c ON c.user_id = u.id
         LEFT JOIN user_auth ua ON ua.user_id = u.id
@@ -1657,7 +1947,7 @@ async def create_superlike(db: AsyncSession, viewer_id: int, target_id: int, ide
     viewer = viewer_result.mappings().first()
     if not viewer or not viewer["phone"]:
         raise HTTPException(403, detail="请先绑定手机号")
-    if not _skip_discovery_gates() and float(viewer["completion_score"] or 0) < 100:
+    if not _skip_discovery_gates() and not _viewer_completion_ok(viewer):
         raise HTTPException(403, detail="请先完善资料后再爆灯")
     if int(viewer["realname_status"] or 0) != 2:
         raise HTTPException(403, detail="请先完成实名认证后再爆灯")

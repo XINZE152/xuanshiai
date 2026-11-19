@@ -1,14 +1,21 @@
-"""填充本地开发库的完整会员数据，使 C 端功能（除红娘）全部可验证。
+"""填充完整测试种子会员数据，使 C 端功能（除红娘）全部可验证。
 
 与 ``seed_community_demo.py`` 的分工：
     - ``seed_community_demo.py`` 负责社区内容演示行（话题/动态/活动/纸飞机/Banner）。
-    - 本脚本负责"会员本身"：16 位演示会员的完整资料、认证材料、会员权益、
+    - 本脚本负责"会员本身"：14 位种子会员的完整资料、认证材料、会员权益、
       积分账本、关系链、聊天、通知，以及发现页可见性所需的全部前置条件。
 
 设计要点：
-    - 只在 development/testing 执行，其它环境直接拒绝。
+    - 默认只在 development/testing 执行；生产需显式 ``--allow-production``
+      （或环境变量 ``XUANSHIAI_ALLOW_SEED_PRODUCTION=1``），且只动这 14 个手机号。
+    - 写入 ``users.is_test_seed=1``，与真实会员同表共存，清理时按该标记过滤。
     - 幂等：所有写入以手机号 / user_id / 自然键做 UPSERT；日志型表按业务键判重后追加。
-    - 生成的素材统一写入 ``storage/uploads/<user_id>/demo-*``，可安全重复执行。
+    - 生成的素材统一写入 ``storage/uploads/<user_id>/``，可安全重复执行。
+
+用法::
+
+    python scripts/seed_community_members.py
+    python scripts/seed_community_members.py --allow-production
 """
 
 from __future__ import annotations
@@ -27,9 +34,32 @@ if __package__ in {None, ""}:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FRONTEND_STATIC = ROOT.parent / "xuanshiai-vue" / "static"
 DEMO_PASSWORD = "password123"
 DEMO_SLUG = "demo"
+
+# 素材后缀按顺序试：仓库里的演示图在某一轮统一压成了 .webp（原本是 .jpg），
+# 写死单一后缀会让脚本和契约测试一起误报「缺少素材」。
+_ASSET_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def _frontend_static_root() -> Path | None:
+    """定位前端仓库的 ``static`` 目录；找不到返回 None。
+
+    原实现写死 ``ROOT.parent / "xuanshiai-vue" / "static"``，隐含「前后端是同级
+    目录」的单仓布局。实际常见的是两处独立 checkout（后端在
+    ``<workspace>/xuanshiai``、前端在别处），此时所有素材判断都指向不存在的
+    目录、批量误报缺图。优先读 ``XUANSHIAI_FRONTEND_ROOT``（指向前端仓库根），
+    其次才试同级目录。
+    """
+    override = os.environ.get("XUANSHIAI_FRONTEND_ROOT")
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override) / "static")
+    candidates.append(ROOT.parent / "xuanshiai-vue" / "static")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
 
 # 已存在的演示会员（补全，不新建）。
 EXISTING_PHONES = (
@@ -87,6 +117,8 @@ def _member(**kwargs: Any) -> dict[str, Any]:
         "house": "暂无房",
         "car": "暂无车",
         "smoking": "不吸烟",
+        "drinking": "不喝酒",
+        "religion": "无宗教信仰",
         "single_reason": "工作节奏较快，希望认真开始一段关系。",
         "family_background": "家庭氛围平和，父母尊重我的选择。",
         "children_intention": "顺其自然",
@@ -493,11 +525,52 @@ def _connect() -> Any:
     )
 
 
-def _assert_environment(environment: str | None) -> None:
-    """Refuse to run anywhere but a local development/testing database."""
+def _assert_environment(
+    environment: str | None,
+    *,
+    allow_production: bool = False,
+) -> str:
+    """允许 development/testing；生产需显式放行。返回归一化后的环境名。"""
     env = (environment or os.getenv("ENV") or os.getenv("ENVIRONMENT") or "development").lower()
-    if env not in {"development", "testing"}:
-        raise RuntimeError("会员演示数据只允许在 development/testing 环境执行")
+    if env in {"development", "testing"}:
+        return env
+    allow = allow_production or os.getenv("XUANSHIAI_ALLOW_SEED_PRODUCTION", "").strip() in {
+        "1", "true", "yes", "on",
+    }
+    if allow and env in {"production", "prod", "staging"}:
+        return env
+    raise RuntimeError(
+        "会员种子数据默认只允许在 development/testing 执行；"
+        "生产/预发请加 --allow-production 或设置 XUANSHIAI_ALLOW_SEED_PRODUCTION=1"
+    )
+
+
+def _ensure_is_test_seed_column(cur: Any) -> None:
+    """幂等补齐 ``users.is_test_seed``，避免未跑迁移时 seed 直接报错。"""
+    cur.execute(
+        """SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'users'
+          AND COLUMN_NAME = 'is_test_seed'"""
+    )
+    row = cur.fetchone()
+    count = int(row["c"] if isinstance(row, dict) else row[0])
+    if count == 0:
+        cur.execute(
+            """ALTER TABLE `users`
+            ADD COLUMN `is_test_seed` tinyint NOT NULL DEFAULT 0
+            COMMENT '是否测试种子账号 0否 1是；清理时只删此标记' AFTER `status`"""
+        )
+    cur.execute(
+        """SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'users'
+          AND INDEX_NAME = 'idx_users_is_test_seed'"""
+    )
+    row = cur.fetchone()
+    count = int(row["c"] if isinstance(row, dict) else row[0])
+    if count == 0:
+        cur.execute("ALTER TABLE `users` ADD KEY `idx_users_is_test_seed` (`is_test_seed`)")
 
 
 # --------------------------------------------------------------------------- #
@@ -506,11 +579,28 @@ def _assert_environment(environment: str | None) -> None:
 
 
 def _asset_source(token: str) -> Path:
+    """素材标记 → 前端仓库里的真实文件。
+
+    - ``anime:001`` → ``static/avatars/matchmaking-anime-001.<后缀>``，后缀按
+      ``_ASSET_SUFFIXES`` 依次试（仓库现存的是 .webp）。
+    - ``portrait:profile-woman-main.webp`` → ``static/portraits/<原文件名>``，
+      标记自带后缀，原样拼。
+
+    一个候选都不存在时返回首个候选，交给调用方的 ``.exists()`` 判定，避免这里
+    静默吞掉缺图。
+    """
+    root = _frontend_static_root() or (ROOT.parent / "xuanshiai-vue" / "static")
     if token.startswith("anime:"):
-        return FRONTEND_STATIC / "avatars" / f"matchmaking-anime-{token.split(':', 1)[1]}.jpg"
-    if token.startswith("portrait:"):
-        return FRONTEND_STATIC / "portraits" / token.split(":", 1)[1]
-    raise ValueError(f"未知素材标记：{token}")
+        stem = f"matchmaking-anime-{token.split(':', 1)[1]}"
+        candidates = [root / "avatars" / f"{stem}{suffix}" for suffix in _ASSET_SUFFIXES]
+    elif token.startswith("portrait:"):
+        candidates = [root / "portraits" / token.split(":", 1)[1]]
+    else:
+        raise ValueError(f"未知素材标记：{token}")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _render_image(source: Path, directory: Path, name: str, *, thumbnail: bool) -> dict[str, Any]:
@@ -549,7 +639,13 @@ def _render_certificate(directory: Path, name: str, title: str, lines: tuple[str
     draw.rectangle((46, 46, 954, 654), outline=(216, 202, 178), width=1)
 
     def font(size: int) -> Any:
-        for candidate in ("C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf"):
+        for candidate in (
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+        ):
             try:
                 return ImageFont.truetype(candidate, size)
             except OSError:
@@ -571,6 +667,17 @@ def _render_certificate(directory: Path, name: str, title: str, lines: tuple[str
     return {"url": f"/storage/uploads/{directory.name}/{path.name}", "size": path.stat().st_size}
 
 
+def _album_tokens(member: dict[str, Any]) -> tuple[str, ...]:
+    """相册至少 3 张：生产完整度规则 ``album_count >= 3``，不足时用头像/已有图补齐。"""
+    tokens = list(member["photos"])
+    fillers = (member["avatar"], *member["photos"])
+    filler_index = 0
+    while len(tokens) < 3:
+        tokens.append(fillers[filler_index % len(fillers)])
+        filler_index += 1
+    return tuple(tokens)
+
+
 def _prepare_assets(member: dict[str, Any], user_id: int) -> dict[str, Any]:
     """Create every image this member needs and return their public URLs."""
     directory = Path("storage/uploads") / str(user_id)
@@ -578,7 +685,7 @@ def _prepare_assets(member: dict[str, Any], user_id: int) -> dict[str, Any]:
     avatar = _render_image(_asset_source(member["avatar"]), directory, f"{tag}-avatar", thumbnail=True)
     album = [
         _render_image(_asset_source(extra), directory, f"{tag}-photo-{index}", thumbnail=True)
-        for index, extra in enumerate(member["photos"], start=1)
+        for index, extra in enumerate(_album_tokens(member), start=1)
     ]
     background = _render_image(_asset_source(member["photos"][0]), directory, f"{tag}-background", thumbnail=False)
     certificates = {
@@ -645,8 +752,8 @@ def _ensure_user(cur: Any, member: dict[str, Any], now: datetime) -> tuple[int, 
     if row:
         user_id = int(row["id"])
         cur.execute(
-            """UPDATE users SET nickname=%s, gender=%s, birthday=%s, status=1, is_real_name=1,
-            is_married=%s, is_single_pledge=1, risk_status=0,
+            """UPDATE users SET nickname=%s, gender=%s, birthday=%s, status=1, is_test_seed=1,
+            is_real_name=1, is_married=%s, is_single_pledge=1, risk_status=0,
             phone_verified_at=COALESCE(phone_verified_at, UTC_TIMESTAMP()),
             openid=COALESCE(NULLIF(openid,''), %s), password=%s,
             register_ip='127.0.0.1', updated_at=%s
@@ -659,9 +766,9 @@ def _ensure_user(cur: Any, member: dict[str, Any], now: datetime) -> tuple[int, 
         return user_id, False
     cur.execute(
         """INSERT INTO users (openid, phone, phone_verified_at, nickname, gender, birthday,
-        status, is_real_name, is_married, is_single_pledge, data_complete_rate, register_ip,
-        password, created_at, updated_at)
-        VALUES (%s,%s,UTC_TIMESTAMP(),%s,%s,%s,1,1,%s,1,0,'127.0.0.1',%s,%s,%s)""",
+        status, is_test_seed, is_real_name, is_married, is_single_pledge, data_complete_rate,
+        register_ip, password, created_at, updated_at)
+        VALUES (%s,%s,UTC_TIMESTAMP(),%s,%s,%s,1,1,1,%s,1,0,'127.0.0.1',%s,%s,%s)""",
         (
             _slug(member["phone"]), member["phone"], member["nickname"], member["gender"],
             member["birthday_date"], member["is_married"], password, now, now,
@@ -684,11 +791,11 @@ def _upsert_profile(cur: Any, member: dict[str, Any], user_id: int, assets: dict
          self_intro, love_view, ideal_partner, single_reason, family_background, hobbies, photos,
          occupation, industry, education_level, hometown_province_code, hometown_city_code,
          residence_province_code, residence_city_code, residence_district_code, household,
-         ethnicity, house, car, smoking, community_city_name, community_city_code,
+         ethnicity, house, car, smoking, drinking, religion, community_city_name, community_city_code,
          community_city_updated_at, online_status, last_active_at, interest_tags,
          personality_tags, location_consent, location_visible, location_source, location_updated_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,'汉族',%s,%s,%s,%s,%s,%s,1,%s,%s,%s,1,1,'manual',%s)
+                %s,'汉族',%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,1,1,'manual',%s)
         ON DUPLICATE KEY UPDATE height=VALUES(height), weight=VALUES(weight), income=VALUES(income),
         hometown=VALUES(hometown), residence=VALUES(residence), mbti=VALUES(mbti),
         constellation=VALUES(constellation), zodiac=VALUES(zodiac), tags=VALUES(tags),
@@ -701,6 +808,7 @@ def _upsert_profile(cur: Any, member: dict[str, Any], user_id: int, assets: dict
         residence_city_code=VALUES(residence_city_code),
         residence_district_code=VALUES(residence_district_code), household=VALUES(household),
         house=VALUES(house), car=VALUES(car), smoking=VALUES(smoking),
+        drinking=VALUES(drinking), religion=VALUES(religion),
         community_city_name=VALUES(community_city_name), community_city_code=VALUES(community_city_code),
         community_city_updated_at=VALUES(community_city_updated_at), online_status=1,
         last_active_at=VALUES(last_active_at), interest_tags=VALUES(interest_tags),
@@ -715,7 +823,8 @@ def _upsert_profile(cur: Any, member: dict[str, Any], user_id: int, assets: dict
             member["occupation"], member["industry"], member["education_level"],
             member["hometown_province_code"], member["hometown_code"], member["province_code"],
             member["city_code"], member["district_code"], f"{member['hometown']}市",
-            member["house"], member["car"], member["smoking"], member["city"], member["city_code"],
+            member["house"], member["car"], member["smoking"], member["drinking"], member["religion"],
+            member["city"], member["city_code"],
             now, now, json.dumps(member["interest_tags"], ensure_ascii=False),
             json.dumps(member["personality_tags"], ensure_ascii=False), now,
         ),
@@ -905,7 +1014,9 @@ def _refresh_completion(cur: Any, user_id: int) -> float:
         p.ethnicity, p.house, p.car, p.smoking, p.drinking, p.religion,
         p.mbti, p.tags, pref.age_min, pref.age_max,
         EXISTS (SELECT 1 FROM user_media m WHERE m.user_id = u.id AND m.media_type='photo'
-                AND m.deleted_at IS NULL) AS album_done
+                AND m.deleted_at IS NULL) AS album_done,
+        (SELECT COUNT(*) FROM user_media m WHERE m.user_id = u.id AND m.media_type='photo'
+                AND m.deleted_at IS NULL) AS album_count
         FROM users u
         LEFT JOIN user_profile p ON p.user_id = u.id
         LEFT JOIN user_partner_preference pref ON pref.user_id = u.id
@@ -1678,6 +1789,7 @@ def seed_community_members(
     connection: Any = None,
     *,
     environment: str | None = None,
+    allow_production: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """填充完整会员数据；返回各表写入统计。
@@ -1685,17 +1797,20 @@ def seed_community_members(
     步骤：素材生成 → 用户与资料 → 认证 → 媒体 → 完整度 → 权益 → 关系链 →
     社区补充 → 通知。全部在一条事务内提交，失败回滚。
     """
-    _assert_environment(environment)
+    env = _assert_environment(environment, allow_production=allow_production)
     owned = connection is None
     if owned:
         connection = _connect()
     moment = (now or datetime.now(UTC)).replace(tzinfo=None)
     cur = connection.cursor()
     stats: dict[str, Any] = {
+        "environment": env,
+        "roster_size": len(MEMBERS),
         "created": [], "updated": [], "profiles": 0, "certifications": 0, "media": 0,
         "completion_100": 0, "memberships": 0, "extras": 0,
     }
     try:
+        _ensure_is_test_seed_column(cur)
         for kind, name, days, price, sort in _BOOST_PACKAGES:
             cur.execute(
                 """INSERT INTO config_boost_package (type, name, duration_days, price, sort, is_active)
@@ -1779,5 +1894,22 @@ def _first_boost_package(cur: Any) -> int | None:
 
 
 if __name__ == "__main__":
-    result = seed_community_members()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="写入 14 位测试种子会员（同表 + is_test_seed=1）")
+    parser.add_argument(
+        "--allow-production",
+        action="store_true",
+        help="允许在 production/staging 执行（仅写入名单内手机号并打 is_test_seed=1）",
+    )
+    parser.add_argument(
+        "--environment",
+        default=None,
+        help="覆盖 ENV/ENVIRONMENT（默认读环境变量，缺省 development）",
+    )
+    args = parser.parse_args()
+    result = seed_community_members(
+        environment=args.environment,
+        allow_production=args.allow_production,
+    )
     print("会员数据已写入: " + json.dumps(result, ensure_ascii=False, default=str))

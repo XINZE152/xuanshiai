@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import uuid
 from datetime import UTC, datetime
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
 
 from fastapi import HTTPException
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +19,8 @@ from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser
 from app.core.config import settings
 from app.schemas.finance import (
     AccountBalanceResponse,
+    UserFinancePage,
+    UserFinanceRecord,
     BalanceAdjustmentRequest,
     BalanceAdjustmentResult,
     CommissionEntryResponse,
@@ -431,6 +436,9 @@ async def refund_order(db: AsyncSession, admin: CurrentUser, order_id: int, requ
         raise HTTPException(404, detail="支付订单不存在")
     if order["status"] != 1:
         raise HTTPException(409, detail="只有支付成功订单才能退款")
+    # D4（方案 33）：积分充值不走系统退款（本旧接口不回收积分），统一人工工单。
+    if int(order["type"]) == 7:
+        raise HTTPException(409, detail="积分充值订单不支持系统退款，请走人工工单处理")
     entries = await db.execute(text("""SELECT id, beneficiary_type, beneficiary_id, amount, status
         FROM commission_entry WHERE order_id = :order_id AND status <> 'REVERSED' FOR UPDATE"""), {"order_id": order_id})
     for entry in entries.mappings().all():
@@ -495,11 +503,89 @@ async def get_balance(db: AsyncSession, account_type: str, account_id: int) -> A
     return AccountBalanceResponse(account_type=account_type, account_id=account_id, pending_amount=row["pending_amount"], available_amount=row["available_amount"])
 
 
-async def request_withdrawal(db: AsyncSession, current: CurrentUser, request: WithdrawalCreate) -> WithdrawalResponse:
+async def list_user_finance_records(db: AsyncSession, user_id: int, kind: str, page: int, page_size: int) -> UserFinancePage:
+    params = {"user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size}
+    if kind == "balance":
+        base = "FROM account_ledger al LEFT JOIN withdrawal_request wr ON al.source_type IN ('withdrawal','withdrawal_reversal') AND wr.id=al.source_id AND wr.account_type=al.account_type AND wr.account_id=al.account_id WHERE al.account_type='user' AND al.account_id=:user_id"
+        selection = "al.id, al.amount, al.direction, al.state, al.source_type, al.created_at, wr.status"
+        order = "al.created_at DESC, al.id DESC"
+    elif kind == "expense":
+        base = "FROM payment_order po WHERE po.user_id=:user_id AND po.status IN (1,3) AND po.pay_time IS NOT NULL AND po.pay_type IN (1,2) AND COALESCE(po.channel,'legacy') <> 'mock'"
+        selection = "po.id, COALESCE(po.paid_amount,po.amount) AS amount, 'DEBIT' AS direction, 'AVAILABLE' AS state, 'payment_order' AS source_type, po.pay_time AS created_at, CASE WHEN po.status=3 OR po.refund_status='FULL' THEN 'REFUNDED' WHEN po.refund_status='PARTIAL' THEN 'PARTIAL_REFUND' ELSE 'PAID' END AS status, po.product_name AS title"
+        order = "po.pay_time DESC, po.id DESC"
+    else:
+        raise ValueError('unknown finance record kind')
+    total = int(await db.scalar(text(f"SELECT COUNT(*) {base}"), {"user_id": user_id}) or 0)
+    rows = (await db.execute(text(f"SELECT {selection} {base} ORDER BY {order} LIMIT :limit OFFSET :offset"), params)).mappings().all()
+    labels = {"commission": "分成收入", "withdrawal": "提现申请", "withdrawal_reversal": "提现退回", "membership_order": "会员消费", "admin_balance_adjust": "余额调整", "commission_refund": "分成冲正"}
+    items = [UserFinanceRecord(id=int(row['id']), title=str(row.get('title') or labels.get(str(row['source_type']), '余额变动')),
+        amount=row['amount'], direction=row['direction'], state=str(row['state']), source_type=str(row['source_type']),
+        created_at=_dt(row['created_at']), status=str(row['status']) if row['status'] is not None else None) for row in rows]
+    return UserFinancePage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
+
+
+def _withdrawal_cipher() -> Fernet:
+    key = settings.withdrawal_payee_encryption_key
+    if key is None:
+        raise HTTPException(503, detail="提现收款信息加密尚未配置")
+    try:
+        return Fernet(key.get_secret_value().encode())
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(503, detail="提现收款信息加密配置无效") from exc
+
+
+def encrypt_sensitive(value: str) -> str:
+    return _withdrawal_cipher().encrypt(value.encode()).decode()
+
+
+def decrypt_sensitive(value: str) -> str:
+    try:
+        return _withdrawal_cipher().decrypt(value.encode()).decode()
+    except (InvalidToken, ValueError) as exc:
+        raise HTTPException(503, detail="收款信息暂不可读取，请联系管理员") from exc
+
+
+async def request_withdrawal(db: AsyncSession, current: CurrentUser, request: WithdrawalCreate, idempotency_key: str) -> WithdrawalResponse:
+    # Lock a stable account row before any consistent read: this also serializes
+    # retries when there are no ledger rows to lock.
+    await db.execute(text("SELECT id FROM users WHERE id = :id FOR UPDATE"), {"id": current.id})
+    key_digest = hashlib.sha256(f"{current.id}:{idempotency_key}".encode()).hexdigest()
+    event_key = f"withdrawal-request:{key_digest}"
+    canonical = request.model_dump(mode="json")
+    canonical["amount"] = f"{request.amount:.2f}"
+    if request.account:
+        _withdrawal_cipher()
+    hash_key = settings.withdrawal_payee_encryption_key.get_secret_value() if settings.withdrawal_payee_encryption_key else settings.secret_key
+    fingerprint = hmac.new(hash_key.encode(), json.dumps(canonical, sort_keys=True, ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
+    prior = (await db.execute(text("""SELECT we.payload_hash, wr.id, wr.account_type, wr.account_id,
+        wr.amount, wr.status, wr.payee_masked, wr.failure_reason, wr.created_at, wr.updated_at
+        FROM withdrawal_event we JOIN withdrawal_request wr ON wr.id = we.withdrawal_id
+        WHERE we.provider_event_id = :key AND wr.account_type = 'user' AND wr.account_id = :user_id"""),
+        {"key": event_key, "user_id": current.id})).mappings().first()
+    if prior is not None:
+        if not hmac.compare_digest(str(prior["payload_hash"] or ""), fingerprint):
+            raise HTTPException(409, detail="该提现请求编号已用于其他申请，请先查看提现记录")
+        return _withdrawal(prior)
     # 财务配置：提现开关与单笔最低金额（后台「系统配置」页实时可调）
     policy = await withdrawal_policy(db)
     if not policy["enabled"]:
         raise HTTPException(403, detail="提现功能暂未开放，请联系平台客服")
+    if policy.get("fee_mode", "none") != "none":
+        raise HTTPException(503, detail="当前提现手续费规则暂不支持，请联系平台客服")
+    methods = policy.get("withdraw_methods")
+    method_name = f"manual_{request.method}"
+    method_policy = methods.get(method_name) if isinstance(methods, dict) else None
+    if not isinstance(method_policy, dict) or method_policy.get("enabled") is not True:
+        raise HTTPException(403, detail="当前提现方式暂未开放")
+    try:
+        method_min = Decimal(str(method_policy["min_amount"]))
+        method_max = Decimal(str(method_policy["max_amount"]))
+        if not method_min.is_finite() or not method_max.is_finite() or method_min < 0 or method_max < method_min:
+            raise ValueError("invalid amount limits")
+    except (KeyError, InvalidOperation, ValueError, TypeError) as exc:
+        raise HTTPException(503, detail="提现方式金额配置无效，请联系平台客服") from exc
+    if request.amount < method_min or request.amount > method_max:
+        raise HTTPException(422, detail=f"该提现方式的金额范围为 {method_min:.2f} 至 {method_max:.2f} 元")
     min_amount = Decimal(str(policy["min_amount"] or "0"))
     if request.amount < min_amount:
         raise HTTPException(422, detail=f"单笔提现金额不能低于 {min_amount:.2f} 元")
@@ -509,20 +595,51 @@ async def request_withdrawal(db: AsyncSession, current: CurrentUser, request: Wi
     balance = await get_balance(db, "user", current.id)
     if Decimal(str(balance.available_amount)) < request.amount:
         raise HTTPException(409, detail="可提现余额不足")
+    masked = request.payee_masked
+    if request.account and request.method and request.payee_name:
+        masked = f"{request.method} / ****{request.account.strip()[-4:]}"
     result = await db.execute(text("""INSERT INTO withdrawal_request
         (account_type, account_id, amount, payee_masked) VALUES ('user', :user_id, :amount, :payee)"""), {
-        "user_id": current.id, "amount": request.amount, "payee": request.payee_masked,
+        "user_id": current.id, "amount": request.amount, "payee": masked,
     })
     withdrawal_id = int(result.lastrowid)
+    if request.account and request.method and request.payee_name:
+        encrypted = encrypt_sensitive(json.dumps({"method": request.method, "account": request.account.strip(), "payee_name": request.payee_name.strip()}, ensure_ascii=False))
+        await db.execute(text("INSERT INTO withdrawal_payee_secret (withdrawal_id, ciphertext) VALUES (:id, :ciphertext)"), {"id": withdrawal_id, "ciphertext": encrypted})
     await db.execute(text("""INSERT INTO account_ledger
         (account_type, account_id, direction, amount, state, source_type, source_id, idempotency_key)
         VALUES ('user', :user_id, 'DEBIT', :amount, 'AVAILABLE', 'withdrawal', :source_id, :key)"""), {
         "user_id": current.id, "amount": request.amount, "source_id": withdrawal_id, "key": f"ledger:withdrawal:{withdrawal_id}",
     })
+    await db.execute(text("""INSERT INTO withdrawal_event (withdrawal_id, event_type, provider_event_id, payload_hash)
+        VALUES (:id, 'REQUEST', :key, :fingerprint)"""),
+        {"id": withdrawal_id, "key": event_key, "fingerprint": fingerprint})
     await db.commit()
     result = await db.execute(text("""SELECT id, account_type, account_id, amount, status,
         payee_masked, failure_reason, created_at, updated_at FROM withdrawal_request WHERE id = :id"""), {"id": withdrawal_id})
     return _withdrawal(result.mappings().one())
+
+
+async def list_my_withdrawals(db: AsyncSession, user_id: int, page: int = 1, page_size: int = 100) -> list[WithdrawalResponse]:
+    result = await db.execute(text("""SELECT id, account_type, account_id, amount, status, payee_masked,
+        failure_reason, created_at, updated_at FROM withdrawal_request
+        WHERE account_type = 'user' AND account_id = :user_id ORDER BY id DESC LIMIT :limit OFFSET :offset"""), {"user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size})
+    return [_withdrawal(row) for row in result.mappings().all()]
+
+
+async def get_withdrawal_payee(db: AsyncSession, withdrawal_id: int, admin: CurrentMatchmakerAdmin) -> dict:
+    params: dict[str, object] = {"id": withdrawal_id}
+    scope = _account_anchor_scope(admin, params, type_column="wr.account_type", account_column="wr.account_id")
+    result = await db.execute(text(f"""SELECT s.ciphertext FROM withdrawal_request wr
+        JOIN withdrawal_payee_secret s ON s.withdrawal_id = wr.id WHERE wr.id = :id AND ({scope})"""), params)
+    encrypted = result.scalar()
+    if not encrypted:
+        raise HTTPException(404, detail="收款信息不存在或无权查看")
+    value = json.loads(decrypt_sensitive(encrypted))
+    await db.execute(text("""INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id)
+        VALUES (:actor, 'finance.withdrawal_payee.view', 'withdrawal_request', :id)"""), {"actor": admin.account.id, "id": withdrawal_id})
+    await db.commit()
+    return value
 
 
 async def review_withdrawal(db: AsyncSession, admin: CurrentUser, withdrawal_id: int, request: WithdrawalReview, *, scope_admin: CurrentMatchmakerAdmin | None = None) -> WithdrawalResponse:
@@ -536,7 +653,7 @@ async def review_withdrawal(db: AsyncSession, admin: CurrentUser, withdrawal_id:
     if not row:
         raise HTTPException(404, detail="提现申请不存在")
     allowed = {
-        "PENDING_REVIEW": {"APPROVED", "REJECTED"},
+        "PENDING_REVIEW": {"APPROVED", "REJECTED", "SUCCEEDED"},
         "APPROVED": {"PROCESSING", "FAILED", "REJECTED"},
         "PROCESSING": {"SUCCEEDED", "FAILED"},
     }
@@ -1213,10 +1330,12 @@ async def admin_create_commission_entry(
     actor: CurrentUser,
     body: MatchmakerCommissionEntryCreate,
 ) -> MatchmakerCommissionEntryCreateResult:
-    """后台手工录入一笔服务红娘分成：只写 commission_entry（PENDING）+ 审计日志，不动余额账本。
+    """后台手工录入一笔服务红娘分成：写 commission_entry（PENDING）+ 待结算余额明细 + 审计日志。
 
-    与合伙人手工录入同源，但按 2026-10-28 决策不写 account_ledger（不凭空增加可提现余额）；
-    记录落入「红娘线上分成明细」页供展示与事后核对。
+    2026-11-14 调整：录入即写 account_ledger（CREDIT/PENDING，source_type='commission'），
+    与订单结算同键位（ledger:commission:{entry_id}）；释放结算（release_commission）
+    翻转 AVAILABLE 后计入红娘可提现余额。小程序 /finance/balance 与后台钱包
+    同口径读 account_ledger，不另写余额字段。
     """
     matchmaker = await db.scalar(
         text("SELECT id FROM users WHERE id = :id"), {"id": body.matchmaker_user_id}
@@ -1266,6 +1385,20 @@ async def admin_create_commission_entry(
         },
     )
     entry_id = int(result.lastrowid)
+
+    # 余额明细与分成明细同事务生成：待结算 CREDIT，释放结算时由 release_commission 翻转为 AVAILABLE。
+    await db.execute(
+        text("""INSERT INTO account_ledger
+            (account_type, account_id, direction, amount, state, source_type, source_id, idempotency_key)
+            VALUES ('user', :account_id, 'CREDIT', :amount, 'PENDING', 'commission', :source_id, :key)
+            ON DUPLICATE KEY UPDATE id = id"""),
+        {
+            "account_id": body.matchmaker_user_id,
+            "amount": f"{amount:.2f}",
+            "source_id": entry_id,
+            "key": f"ledger:commission:{entry_id}",
+        },
+    )
 
     await db.execute(
         text("""INSERT INTO business_audit_log

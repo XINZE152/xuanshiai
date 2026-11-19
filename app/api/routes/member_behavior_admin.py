@@ -9,13 +9,13 @@
 > 保持旧接口不动以避免破坏既有调用方。
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin
 from app.db.session import get_db
-from app.schemas.member_behavior_admin import MemberBehaviorPage
+from app.schemas.member_behavior_admin import MemberBehaviorPage, ReportStatusUpdate
 from app.services import member_behavior_admin as service
 
 router = APIRouter(prefix="/admin/members")
@@ -213,6 +213,17 @@ async def list_member_behavior_events(
         db, page, page_size, category, min_times=min_times,
         report_status=status, pay_status=pay_status, member_id=member_id,
     )
+
+
+@router.patch("/behavior-events/report/{event_id}/status", summary="标记网友举报为已处理/待处理")
+async def update_report_status(
+    event_id: int = Path(..., ge=1),
+    body: ReportStatusUpdate = Body(...),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    current.require("matchmaker.member.manage")
+    return await service.update_report_status(db, event_id, body.status, current.account.id, body.result)
 
 
 @router.delete("/behavior-events/{category}/{event_id}", summary="删除线上行为记录（爆灯/礼物/举报）")

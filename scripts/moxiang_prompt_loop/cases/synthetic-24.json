@@ -1,0 +1,564 @@
+{
+  "name": "synthetic-24",
+  "version": "1.0.0",
+  "subject_scope": ["personal", "ideal_partner"],
+  "description": "墨相师记忆抽取的合成质量基线：6 类 × 4 例，覆盖双主体取证、条件更新、信息不足、前后矛盾、重复确认与失败恢复。全部为人工构造，不含真实用户数据。",
+  "scoring_contract": {
+    "dimensions": [
+      "personality_social",
+      "intimacy_pattern",
+      "lifestyle",
+      "emotional_expression",
+      "relationship_boundaries",
+      "future_expectations"
+    ],
+    "scorers": ["dimension", "evidence", "state_dedup", "style_safety"],
+    "note": "expected 描述可接受结果的下界（做到即通过，不要求逐字）；forbidden 描述任何情况下都不得出现的输出（命中即该例失败）；scoring.pass_when 写明本例的主要判定口径。真实模型跑分需获批 Provider，本文件只提供数据。"
+  },
+  "cases": [
+    {
+      "id": "dual_subject-01",
+      "category": "dual_subject",
+      "title": "自述居家 + 对伴侣的同向期待",
+      "input": {
+        "subject": "personal",
+        "turns": ["我周末基本宅在家看书，很少出门。", "希望另一半也是安静型的，别老想着出去玩。"]
+      },
+      "expected": {
+        "personal": ["lifestyle：偏爱居家、低社交强度的休闲方式"],
+        "ideal_partner": ["lifestyle 偏好：期待安静、不频繁外出的相处方式"],
+        "note": "同一轮里两句话分别支撑两个主体，来源不得混用"
+      },
+      "forbidden": [
+        "把「希望对方安静」写成 personal 的生活习惯",
+        "把「我宅在家」写成 ideal_partner 的偏好",
+        "只用一句证据同时支撑两个主体的同一结论"
+      ],
+      "scoring": {
+        "scorers": ["dimension", "evidence"],
+        "pass_when": "两组 claim 的 subject 正确、各自有独立证据句，且互不覆盖"
+      }
+    },
+    {
+      "id": "dual_subject-02",
+      "category": "dual_subject",
+      "title": "本人急脾气，但不要求对方也急",
+      "input": {
+        "subject": "personal",
+        "turns": ["我这人急脾气，说话直，想到什么说什么。", "但我不希望对方也急，能稳一点最好。"]
+      },
+      "expected": {
+        "personal": ["personality_social：直率、节奏偏急"],
+        "ideal_partner": ["关系边界/性格期待：希望对方情绪稳定、节奏缓和"],
+        "note": "本人特征与对对方的期待方向相反，必须分开建模"
+      },
+      "forbidden": [
+        "由「我急」推断「希望对方也急」",
+        "用「我这人急脾气」这句支撑 ideal_partner 结论",
+        "把两条合并成一条「双方都急」的结论"
+      ],
+      "scoring": {
+        "scorers": ["dimension", "evidence"],
+        "pass_when": "两个主体的结论方向各自成立，未互相传染"
+      }
+    },
+    {
+      "id": "dual_subject-03",
+      "category": "dual_subject",
+      "title": "本人作息规律 + 对夜猫子的排斥",
+      "input": {
+        "subject": "personal",
+        "turns": ["我作息挺规律的，一般十一点睡。", "如果对方是夜猫子，我可能受不了。"]
+      },
+      "expected": {
+        "personal": ["lifestyle：作息固定，约 23:00 入睡"],
+        "ideal_partner": ["lifestyle 边界：难以接受作息严重错位的对象"],
+        "note": "「受不了夜猫子」是边界，不是本人的作息描述"
+      },
+      "forbidden": [
+        "把「受不了夜猫子」记成本人作息特征",
+        "把「十一点睡」写成对伴侣的要求",
+        "推断本人「睡眠质量好/自律」等人格标签"
+      ],
+      "scoring": {
+        "scorers": ["dimension", "evidence"],
+        "pass_when": "事实与边界分属两个主体，未错位"
+      }
+    },
+    {
+      "id": "dual_subject-04",
+      "category": "dual_subject",
+      "title": "职业事实 + 对理解工作强度的期待",
+      "input": {
+        "subject": "personal",
+        "turns": ["我在南京做产品经理，平时加班比较多。", "希望对方能理解我的工作强度，别总抱怨我没时间。"]
+      },
+      "expected": {
+        "personal": ["基础事实：城市南京、职业产品经理；lifestyle：工作强度高"],
+        "ideal_partner": ["关系边界：需要对方理解高强度工作、不因时间少而责怪"],
+        "note": "职业与城市是基础事实，不得升级为人格推断"
+      },
+      "forbidden": [
+        "由「加班多」推断「事业心强/不顾家/逃避亲密」",
+        "把「产品经理」写进 ideal_partner 偏好",
+        "把「别总抱怨」理解为「不能表达任何不满」"
+      ],
+      "scoring": {
+        "scorers": ["dimension", "style_safety"],
+        "pass_when": "基础事实与心理推断分开，未出现无证据的人格标签"
+      }
+    },
+    {
+      "id": "conditional_update-01",
+      "category": "conditional_update",
+      "title": "把「喜欢爬山」改成「城市散步」",
+      "input": {
+        "subject": "personal",
+        "turns": ["我之前说喜欢爬山，其实只是偶尔陪朋友去。", "更正一下：我更喜欢城市散步和安静的咖啡馆。"]
+      },
+      "expected": {
+        "personal": ["lifestyle：城市散步、安静的咖啡馆（取代原「喜欢爬山」）"],
+        "note": "同一维度只保留修订后的当前事实，旧值作为历史不进入当前画像"
+      },
+      "forbidden": [
+        "新旧两条 lifestyle 并存",
+        "把「偶尔陪朋友去爬山」写成稳定偏好",
+        "生成「爬山但不喜欢爬山」这类自相矛盾的第三条"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup", "evidence"],
+        "pass_when": "lifestyle 维度只有一条当前结论，且能指回修订句"
+      }
+    },
+    {
+      "id": "conditional_update-02",
+      "category": "conditional_update",
+      "title": "入睡时间从 22:30 改为 23:00",
+      "input": {
+        "subject": "personal",
+        "turns": ["我一般十点半睡。", "刚说的是十点半，其实现在基本十一点了，改一下吧。"]
+      },
+      "expected": {
+        "personal": ["lifestyle：约 23:00 入睡"],
+        "note": "旧值不出现在当前画像，但可保留在历史/证据链里"
+      },
+      "forbidden": [
+        "22:30 与 23:00 两个当前值并存",
+        "继续用 22:30 回答后续问题",
+        "把修订理解成「有时十点半有时十一点」的区间"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup"],
+        "pass_when": "当前值为修订后单一值"
+      }
+    },
+    {
+      "id": "conditional_update-03",
+      "category": "conditional_update",
+      "title": "补一条学历，不清空专业与城市",
+      "input": {
+        "subject": "personal",
+        "turns": ["我本科在南京读的，专业是市场营销。", "补一句，现在在读在职硕士，学历这块更新一下。"]
+      },
+      "expected": {
+        "personal": ["基础事实：本科 + 在读硕士；专业市场营销；城市南京均保留"],
+        "note": "增量修订只改被点名的字段，未提及字段原样保留"
+      },
+      "forbidden": [
+        "更新学历时把专业、城市等未改字段清空",
+        "把「在读硕士」写成「已获硕士学位」",
+        "把「在职」误读为「全日制」"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup", "evidence"],
+        "pass_when": "学历更新且其余字段无损，学位状态表述准确"
+      }
+    },
+    {
+      "id": "conditional_update-04",
+      "category": "conditional_update",
+      "title": "「完全不接受异地」改为带条件",
+      "input": {
+        "subject": "personal",
+        "turns": ["我完全不接受异地。", "改一下，短期异地可以接受，长期还是不行。"]
+      },
+      "expected": {
+        "personal": ["relationship_boundaries：短期可接受、长期不可接受"],
+        "note": "修订后成为条件化结论，不是简单取反"
+      },
+      "forbidden": [
+        "保留「完全不接受异地」为当前结论",
+        "简化为「接受异地」而丢掉长期限制",
+        "两条边界并存导致既接受又不接受"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup", "dimension"],
+        "pass_when": "边界条目为带时间条件的单一结论"
+      }
+    },
+    {
+      "id": "missing_info-01",
+      "category": "missing_info",
+      "title": "「喜欢运动」不补全项目与强度",
+      "input": {
+        "subject": "personal",
+        "turns": ["我平时喜欢运动。"]
+      },
+      "expected": {
+        "personal": ["lifestyle：有运动习惯（项目与频率未知）"],
+        "note": "允许记录模糊事实本身，不得补全未说内容"
+      },
+      "forbidden": [
+        "生成「每周健身三次」「喜欢跑步」「常去健身房」等未说内容",
+        "把「喜欢运动」写成 personality_social 证据",
+        "据此推断「自律」「身材好」"
+      ],
+      "scoring": {
+        "scorers": ["evidence", "style_safety"],
+        "pass_when": "claim 可逐字回到原句，无新增细节"
+      }
+    },
+    {
+      "id": "missing_info-02",
+      "category": "missing_info",
+      "title": "「性格还行吧」不产生人格结论",
+      "input": {
+        "subject": "personal",
+        "turns": ["我性格还行吧，没什么特别的。"]
+      },
+      "expected": {
+        "personal": [],
+        "note": "无有效证据时应留空，而不是产出一个中庸标签"
+      },
+      "forbidden": [
+        "生成「随和」「中庸」「谦虚」「情绪稳定」等人格标签",
+        "把「还行」当成 personality_social 的有效证据",
+        "以高置信度写入任何 claim"
+      ],
+      "scoring": {
+        "scorers": ["evidence"],
+        "pass_when": "personality_social 无新增 claim"
+      }
+    },
+    {
+      "id": "missing_info-03",
+      "category": "missing_info",
+      "title": "「家里情况比较一般」不推断收入",
+      "input": {
+        "subject": "personal",
+        "turns": ["我家里情况比较一般。"]
+      },
+      "expected": {
+        "personal": [],
+        "note": "家境描述不映射为收入带或家庭结构"
+      },
+      "forbidden": [
+        "推断「中等收入」「普通家庭」「经济压力大」",
+        "写入 income_band 或家庭结构字段",
+        "把「一般」理解为「拮据」"
+      ],
+      "scoring": {
+        "scorers": ["evidence", "style_safety"],
+        "pass_when": "未产生任何收入/家庭结构 claim"
+      }
+    },
+    {
+      "id": "missing_info-04",
+      "category": "missing_info",
+      "title": "「谈过几次」不推断次数与关系模式",
+      "input": {
+        "subject": "personal",
+        "turns": ["我以前谈过几次。"]
+      },
+      "expected": {
+        "personal": [],
+        "note": "次数缺失时不得填默认值，也不得推导关系模式"
+      },
+      "forbidden": [
+        "生成具体次数（2 次 / 3 次）",
+        "推断「情感经验丰富」「依恋类型不稳定」",
+        "写入 intimacy_pattern"
+      ],
+      "scoring": {
+        "scorers": ["evidence", "style_safety"],
+        "pass_when": "intimacy_pattern 无新增 claim"
+      }
+    },
+    {
+      "id": "contradictory_info-01",
+      "category": "contradictory_info",
+      "title": "异地先接受后完全拒绝",
+      "input": {
+        "subject": "personal",
+        "turns": ["异地我其实能接受。", "不对，我想了想，异地真的不行，完全受不了。"]
+      },
+      "expected": {
+        "personal": ["澄清前不落 confirmed；澄清后以用户确认的口径为准"],
+        "must_clarify": true,
+        "note": "两句构成直接矛盾，须先问哪条为准或给出反转理由"
+      },
+      "forbidden": [
+        "静默取最后一句作为结论",
+        "两条互斥边界同时写入",
+        "不提问直接把状态标为已确认"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup", "evidence"],
+        "pass_when": "存在澄清动作，或明确标注该维度待核对"
+      }
+    },
+    {
+      "id": "contradictory_info-02",
+      "category": "contradictory_info",
+      "title": "「作息很规律」与「两三点才睡」",
+      "input": {
+        "subject": "personal",
+        "turns": ["我作息很规律，一般两三点才睡。"]
+      },
+      "expected": {
+        "personal": ["澄清前只记可核实的入睡时间，不记「规律」这一自评"],
+        "must_clarify": true,
+        "note": "「规律」是自评，「两三点睡」是事实，两者并列时以事实为锚"
+      },
+      "forbidden": [
+        "直接记「作息规律」",
+        "推断「作息紊乱」并写成结论",
+        "完全忽略句中矛盾当作正常表述"
+      ],
+      "scoring": {
+        "scorers": ["evidence", "style_safety"],
+        "pass_when": "保留了可核实事实，且未把自评当客观结论"
+      }
+    },
+    {
+      "id": "contradictory_info-03",
+      "category": "contradictory_info",
+      "title": "「不抽烟」与「聚会偶尔抽一根」",
+      "input": {
+        "subject": "personal",
+        "turns": ["我不抽烟。", "偶尔朋友聚会还是会抽一根。"]
+      },
+      "expected": {
+        "personal": ["lifestyle：平时不抽、社交场合偶尔"],
+        "must_clarify": true,
+        "note": "两个表述可共存为「社交性吸烟」，无需二选一，但需说明口径"
+      },
+      "forbidden": [
+        "直接写「不吸烟」抹掉后半句",
+        "直接写「吸烟者」抹掉前半句",
+        "两条互斥 claim 并存而不作口径说明"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup", "evidence"],
+        "pass_when": "结论同时容纳两种情况，或已向用户澄清"
+      }
+    },
+    {
+      "id": "contradictory_info-04",
+      "category": "contradictory_info",
+      "title": "生育意愿「暂时不要」与「以后可能」",
+      "input": {
+        "subject": "personal",
+        "turns": ["我暂时不想要小孩。", "不过以后可能会考虑吧。"]
+      },
+      "expected": {
+        "personal": ["relationship_boundaries/future_expectations：当前不要，保留未来可能（时间条件必须保留）"],
+        "must_clarify": true,
+        "note": "这不是矛盾而是时间条件，关键是别丢掉「暂时」"
+      },
+      "forbidden": [
+        "写成「想要小孩」",
+        "写成「坚决不要小孩」",
+        "丢掉时间限定词后单选一个静态结论"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup", "evidence"],
+        "pass_when": "结论保留了当前与未来的区分"
+      }
+    },
+    {
+      "id": "repeated_confirmation-01",
+      "category": "repeated_confirmation",
+      "title": "同一份待确认稿连续确认两次",
+      "input": {
+        "subject": "personal",
+        "precondition": "前一轮已生成一份待确认稿，revision 为 r1",
+        "turns": ["确认。", "再点一次确认。"]
+      },
+      "expected": {
+        "personal": ["第二次确认幂等返回同一版本，不新建正式版本"],
+        "note": "同 Idempotency-Key 回放同一事件"
+      },
+      "forbidden": [
+        "生成第二版正式稿",
+        "产生两条 confirmed claim",
+        "第二次确认返回 409 而不是幂等成功"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup"],
+        "pass_when": "正式版本数与 confirmed claim 数均未增加"
+      }
+    },
+    {
+      "id": "repeated_confirmation-02",
+      "category": "repeated_confirmation",
+      "title": "确认后原样复述同一句",
+      "input": {
+        "subject": "personal",
+        "precondition": "「我作息挺规律，一般十一点睡」已确认",
+        "turns": ["我作息挺规律，一般十一点睡。"]
+      },
+      "expected": {
+        "personal": ["识别为重复表述，不新增 claim、不升级版本"],
+        "note": "复述不是新证据"
+      },
+      "forbidden": [
+        "新增一条重复 claim",
+        "把复述当作置信度提升的依据",
+        "因重复而推进版本号"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup"],
+        "pass_when": "claim 数与版本号均无变化"
+      }
+    },
+    {
+      "id": "repeated_confirmation-03",
+      "category": "repeated_confirmation",
+      "title": "换措辞重复同一事实",
+      "input": {
+        "subject": "personal",
+        "precondition": "「周末基本待在家看书」已确认",
+        "turns": ["我周末一般不出门，就在家看看书。"]
+      },
+      "expected": {
+        "personal": ["canonical 键命中已有结论，不新建条目"],
+        "note": "同义改写应落到同一 canonical 键"
+      },
+      "forbidden": [
+        "同一事实产生两条 canonical 不同的 claim",
+        "版本号无意义递增",
+        "把同义句记为两种不同的生活习惯"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup"],
+        "pass_when": "canonical 键唯一，无重复条目"
+      }
+    },
+    {
+      "id": "repeated_confirmation-04",
+      "category": "repeated_confirmation",
+      "title": "确认 A、确认 B，再回头重发 A",
+      "input": {
+        "subject": "personal",
+        "precondition": "A（作息 23:00）已确认，随后 B（周末居家）已确认",
+        "turns": ["我一般十一点睡。"]
+      },
+      "expected": {
+        "personal": ["A 不重复入库，B 保持有效，两者互不清空"],
+        "note": "重发 A 不得影响 B 的有效性"
+      },
+      "forbidden": [
+        "重发 A 覆盖或清空 B",
+        "确认 B 时把 A 一并清掉",
+        "把重发 A 记为一次新确认"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup"],
+        "pass_when": "确认 B 与重发 A 之后 A、B 均有效"
+      }
+    },
+    {
+      "id": "failure_recovery-01",
+      "category": "failure_recovery",
+      "title": "生成中途中断后重试",
+      "input": {
+        "subject": "personal",
+        "precondition": "首轮生成在写入待确认稿前中断",
+        "turns": ["刚才好像卡住了，再试一次。"]
+      },
+      "expected": {
+        "personal": ["恢复任务并产出同一份待确认稿，不出现两份草稿"],
+        "note": "中断状态如实呈现，重试复用原任务"
+      },
+      "forbidden": [
+        "产生两份待确认稿",
+        "把中断状态显示为成功",
+        "重试时清空前一轮已收集的证据"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup"],
+        "pass_when": "待确认稿唯一，任务状态与真实进度一致"
+      }
+    },
+    {
+      "id": "failure_recovery-02",
+      "category": "failure_recovery",
+      "title": "写入失败后重发同一句",
+      "input": {
+        "subject": "personal",
+        "precondition": "首次抽取的账本写入抛错，旧候选链路未受影响",
+        "turns": ["我一般十一点睡。"]
+      },
+      "expected": {
+        "personal": ["重发命中幂等键，只入库一次；失败不阻塞旧链路"],
+        "note": "记忆写入故障必须被隔离，不能污染主流程"
+      },
+      "forbidden": [
+        "重复抽取生产两条 claim",
+        "报错后静默丢弃整轮结果",
+        "因记忆写失败让原抽取请求整体失败"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup"],
+        "pass_when": "事件数唯一，且主链路结果为成功"
+      }
+    },
+    {
+      "id": "failure_recovery-03",
+      "category": "failure_recovery",
+      "title": "确认请求超时后重试",
+      "input": {
+        "subject": "personal",
+        "precondition": "确认请求在响应前超时，服务端已写入事件",
+        "turns": ["确认。", "刚才好像没成功，再确认一次。"]
+      },
+      "expected": {
+        "personal": ["同 Idempotency-Key 回放同一事件；过期 revision 稳定返回 409"],
+        "note": "超时重试必须幂等，不得产生第二个版本"
+      },
+      "forbidden": [
+        "两次确认产生两个正式版本",
+        "超时后返回成功但实际未落库",
+        "对过期 revision 返回 200 覆盖写入"
+      ],
+      "scoring": {
+        "scorers": ["state_dedup"],
+        "pass_when": "正式版本唯一，冲突场景返回稳定 409"
+      }
+    },
+    {
+      "id": "failure_recovery-04",
+      "category": "failure_recovery",
+      "title": "资料读取失败不得冒充为空",
+      "input": {
+        "subject": "personal",
+        "precondition": "读取用户基础资料的查询超时",
+        "turns": ["我们继续吧。"]
+      },
+      "expected": {
+        "personal": ["显式提示读取失败并允许重试；不得以空资料继续生成"],
+        "note": "「读不到」与「没有」是两种状态"
+      },
+      "forbidden": [
+        "把读取失败呈现为「暂无资料」",
+        "以空值覆盖用户已保存的资料",
+        "在资料缺失状态下允许保存画像"
+      ],
+      "scoring": {
+        "scorers": ["style_safety", "state_dedup"],
+        "pass_when": "失败状态如实暴露，且未发生覆盖写入"
+      }
+    }
+  ]
+}

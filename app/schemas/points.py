@@ -1,6 +1,7 @@
 from datetime import datetime
+from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PointsSummary(BaseModel):
@@ -76,6 +77,12 @@ class PointProduct(BaseModel):
 
 class RedeemRequest(BaseModel):
     product_code: str
+    count: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="本次兑换数量，1~10；总价 = 单价 × count",
+    )
 
 
 class RedeemResponse(BaseModel):
@@ -83,5 +90,19 @@ class RedeemResponse(BaseModel):
     product_code: str
     product_name: str
     points_cost: int
+    count: int = 1
     status: int
     balance: int
+
+
+class PointRechargePackage(BaseModel):
+    """人民币积分充值商品（admin_recharge_item，resource_type='points'）。"""
+
+    id: int
+    name: str
+    points: int = Field(description="到账积分数")
+    price: Decimal = Field(description="售价（元），服务端定价，客户端不可传")
+
+
+class CreatePointRechargeOrderRequest(BaseModel):
+    package_id: int = Field(ge=1, description="充值商品 ID；数量固定 1，金额由服务端按目录计算")

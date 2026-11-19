@@ -286,3 +286,47 @@ async def delete_behavior_event(db: AsyncSession, category: str, event_id: int, 
     )
     await db.commit()
     return {"id": event_id, "deleted": True}
+
+
+_REPORT_STATUS_LABEL = {0: "待处理", 1: "已处理", 2: "已驳回"}
+
+
+async def update_report_status(
+    db: AsyncSession, event_id: int, status: int, actor_id: int, result: str | None = None
+) -> dict[str, Any]:
+    """把网友举报标记为已处理（1）或退回待处理（0）。
+
+    已处理会记录处理说明、处理人与处理时间；退回待处理则清空这三项，
+    便于运营改错后重新排队。状态变更写入 business_audit_log。
+    """
+    if status not in (0, 1):
+        raise HTTPException(400, detail="仅支持标记为待处理或已处理")
+    exists = await db.scalar(text("SELECT 1 FROM user_report WHERE id = :id"), {"id": event_id})
+    if not exists:
+        raise HTTPException(404, detail="举报记录不存在")
+    if status == 1:
+        summary = (result or "").strip() or "已处理"
+        await db.execute(
+            text(
+                "UPDATE user_report SET status = 1, result = :result, action = 'none', "
+                "reviewed_by = :actor, reviewed_at = NOW() WHERE id = :id"
+            ),
+            {"id": event_id, "result": summary[:255], "actor": actor_id},
+        )
+    else:
+        await db.execute(
+            text(
+                "UPDATE user_report SET status = 0, result = NULL, action = 'none', "
+                "reviewed_by = NULL, reviewed_at = NULL WHERE id = :id"
+            ),
+            {"id": event_id},
+        )
+    await db.execute(
+        text(
+            "INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) "
+            "VALUES (:actor, :action, :rtype, :rid)"
+        ),
+        {"actor": actor_id, "action": f"member.report.status.{status}", "rtype": "user_report", "rid": event_id},
+    )
+    await db.commit()
+    return {"id": event_id, "status": status, "status_label": _REPORT_STATUS_LABEL[status]}

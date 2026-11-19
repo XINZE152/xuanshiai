@@ -84,6 +84,25 @@ def _guard_sql_and_params(db: StubDB) -> tuple[str, dict]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(('value', 'expected'), [(0, 'PENDING'), (1, 'REJECTED'), (2, 'PASSED'), (3, 'STORE_VERIFIED')])
+async def test_profile_review_write_uses_shared_table_without_changing_realname(value, expected):
+    db = StubDB([StubResult(first=_member_row()), StubResult(), StubResult(), StubResult(first=_member_row())])
+    await routes.update(member_id=9, body=MatchmakerMemberUpdate(profile_review_status=value), current=_admin('SELF'), db=db)
+    writes = [(sql, params) for sql, params in db.statements if 'INSERT INTO matchmaker_member_review' in sql]
+    assert len(writes) == 1 and writes[0][1]['status'] == expected
+    assert not any('INSERT INTO user_auth' in sql or 'UPDATE user_auth' in sql for sql, _ in db.statements)
+    assert db.committed
+
+
+def test_profile_review_filter_uses_shared_status():
+    from app.services.member_crm_filter import build_member_filter
+    for value, expected in [(0, 'PENDING'), (1, 'REJECTED'), (2, 'PASSED'), (3, 'STORE_VERIFIED')]:
+        where, params = build_member_filter({'profile_review_status': value}, frozenset())
+        assert "COALESCE(mr.status, 'PENDING')" in where
+        assert params['profile_review_status'] == expected
+
+
+@pytest.mark.asyncio
 async def test_every_scope_tier_binds_all_placeholders() -> None:
     """三档普通账号 + ALL 档：守卫 SQL 的占位符必须全部有绑定值。"""
     for data_scope in ("SELF", "STORE", "ORGANIZATION", "ALL"):

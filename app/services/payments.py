@@ -17,6 +17,7 @@ from app.schemas.payments import (
     CreateBoostOrderRequest,
     PaidOrderResponse,
     SpotlightPaymentRequest,
+    SpotlightPriceResponse,
     TestPaymentRequest,
     TestPaymentResponse,
 )
@@ -30,6 +31,12 @@ BOOST_PACKAGES = {
     "boost_7d": BoostPackage(code="boost_7d", name="置顶7天", days=7, price=Decimal("5.00"), recommended=True),
     "boost_30d": BoostPackage(code="boost_30d", name="置顶30天", days=30, price=Decimal("15.00"), recommended=False),
 }
+
+# 爆灯单价的运行期配置坐标。展示接口与下单共用这两个常量，
+# 改价只需改运营配置，不要在代码里再写第二个字面量。
+SPOTLIGHT_PRICE_NAMESPACE = "finance"
+SPOTLIGHT_PRICE_KEY = "spotlight_price"
+SPOTLIGHT_PRICE_FALLBACK = "9.90"
 
 
 def _paid_order(row) -> PaidOrderResponse:
@@ -63,12 +70,17 @@ async def _create_order(
     expire_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=30)
     # real 模式下这些订单会走真实微信预支付，标记为微信支付而不是测试支付。
     pay_type = 1 if settings.wechat_pay_mode == "real" else 4
+    # 置顶/爆灯同属虚拟商品：建单即落 wechat_xpay，让旧 JSAPI ``/prepay``
+    # 的 ``channel != 'wechat'`` 校验直接 409，堵住普通微信支付下单。
+    # 函数内导入，避免 services.payments ↔ payment.xpay 的循环依赖。
+    from app.services.payment.xpay import XPAY_CHANNEL
+
     await db.execute(text("""INSERT INTO payment_order
-        (user_id, order_no, type, product_id, product_type, product_name, amount, pay_type, status, expire_at, idempotency_key)
-        VALUES (:user_id, :order_no, :type, :product_id, :product_type, :product_name, :amount, :pay_type, 0, :expire_at, :key)"""), {
+        (user_id, order_no, type, product_id, product_type, product_name, amount, pay_type, channel, status, expire_at, idempotency_key)
+        VALUES (:user_id, :order_no, :type, :product_id, :product_type, :product_name, :amount, :pay_type, :channel, 0, :expire_at, :key)"""), {
         "user_id": user_id, "order_no": order_no, "type": order_type, "product_id": product_id,
         "product_type": product_code, "product_name": product_name, "amount": amount,
-        "pay_type": pay_type,
+        "pay_type": pay_type, "channel": XPAY_CHANNEL,
         "expire_at": expire_at, "key": idempotency_key,
     })
     await db.commit()
@@ -108,11 +120,43 @@ async def get_paid_order(db: AsyncSession, user_id: int, order_no: str, order_ty
     return _paid_order(row)
 
 
+async def get_spotlight_price(db: AsyncSession) -> SpotlightPriceResponse:
+    """爆灯单价。展示与下单读同一处运行期配置，前端不要用常量兜底成另一个价。"""
+    amount = Decimal(
+        str(
+            await get_runtime_value(
+                db,
+                SPOTLIGHT_PRICE_NAMESPACE,
+                SPOTLIGHT_PRICE_KEY,
+                SPOTLIGHT_PRICE_FALLBACK,
+            )
+        )
+    )
+    return SpotlightPriceResponse(amount=amount)
+
+
+async def _ensure_realname_verified(db: AsyncSession, user_id: int) -> None:
+    """付费爆灯与免费爆灯（``create_superlike``）共用同一道实名门禁。
+
+    免费路径在后端强制实名；若付费路径不校验，用户额度用完后花 9.9 就能绕过，
+    既与产品规则冲突，也不符合实名制要求。
+    """
+    status = (
+        await db.execute(
+            text("SELECT COALESCE(realname_status, 0) FROM user_auth WHERE user_id = :user_id"),
+            {"user_id": user_id},
+        )
+    ).scalar()
+    if int(status or 0) != 2:
+        raise HTTPException(403, detail="请先完成实名认证后再爆灯")
+
+
 async def create_spotlight_order(db: AsyncSession, user_id: int, body: SpotlightPaymentRequest, idempotency_key: str) -> PaidOrderResponse:
     await _ensure_target(db, user_id, body.target_user_id)
+    await _ensure_realname_verified(db, user_id)
     # 单价走运行期配置，代码只留兜底 —— 避免再次出现「后端写死 5.00、前端 9.9」的口径分裂。
     # 历史订单金额不回改：payment_order.amount 已落库，改价只影响新订单。
-    spot_price = Decimal(str(await get_runtime_value(db, "finance", "spotlight_price", "9.90")))
+    spot_price = (await get_spotlight_price(db)).amount
     return await _create_order(db, user_id, 2, body.target_user_id, "superlike", "爆灯", spot_price, idempotency_key)
 
 

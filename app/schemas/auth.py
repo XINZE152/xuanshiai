@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -90,6 +90,28 @@ class WechatLoginRequest(BaseModel):
     app_version: str | None = Field(default=None, max_length=32)
 
 
+class WechatPhoneLoginRequest(BaseModel):
+    """微信一键手机号登录：login code 换 openid，phone_code 换手机号。"""
+
+    code: str = Field(min_length=1, max_length=512)
+    phone_code: str = Field(
+        min_length=1,
+        max_length=512,
+        description="button open-type=getPhoneNumber 回调里的 e.detail.code",
+    )
+    nickname: str | None = Field(default=None, max_length=64)
+    avatar: str | None = Field(default=None, max_length=255)
+    device_id: str | None = Field(default=None, max_length=128)
+    platform: str | None = Field(default=None, max_length=32)
+    app_version: str | None = Field(default=None, max_length=32)
+
+
+class WechatPhoneBindRequest(BaseModel):
+    """已登录的微信账号补绑手机号，无需短信验证码。"""
+
+    phone_code: str = Field(min_length=1, max_length=512)
+
+
 class ExistingAccountLoginRequest(BaseModel):
     """Login an existing local account with its phone and password."""
 
@@ -166,13 +188,25 @@ class ProfileUpdateRequest(BaseModel):
 
     gender: Literal[1, 2] | None = None
     birthday: date | None = None
+    # 写入域只有 1/2/3，与会员端「我的-资料编辑」的婚况选项同一套；库里 4~7 是旧的离异细分档，
+    # 只读展示继续按原文案渲染，但不再允许新写入。
     is_married: Literal[1, 2, 3] | None = None
     height: int | None = Field(default=None, ge=140, le=220)
-    weight: int | None = Field(default=None, ge=40, le=120)
+    weight: int | None = Field(default=None, ge=30, le=150)
     occupation: str | None = Field(default=None, max_length=128)
     industry: str | None = Field(default=None, max_length=128)
     education_level: int | None = Field(default=None, ge=1, le=8)
     income: float | None = Field(default=None, ge=0, le=1_000_000)
+    # 恋 AI BOT 模糊采集原样（选项 id/文案）；与精准字段双轨并存，合并写入不覆盖未传键
+    bot_intake: dict[str, Any] | None = Field(
+        default=None,
+        description="BOT 采集快照，字段值为 {id,label} 或字符串选项 id；服务端合并进 bot_intake_json",
+    )
+    # true：按 bot_intake 中可对齐项回填当前为空的精准字段（不取中值、不覆盖已有精准值）
+    sync_precise_from_bot: bool | None = Field(
+        default=None,
+        description="是否用 bot_intake 回填空的精准字段",
+    )
     hometown_province_code: str | None = Field(default=None, max_length=32)
     hometown_city_code: str | None = Field(default=None, max_length=32)
     hometown_district_code: str | None = Field(default=None, max_length=32)
@@ -343,6 +377,14 @@ class ProfileResponse(BaseModel):
     education_level: int | None
     income: float | None
     income_display: str | None = None
+    bot_intake: dict[str, Any] | None = Field(
+        default=None,
+        description="BOT 模糊采集原样；有精准字段时业务侧优先读精准",
+    )
+    house: str | None = None
+    car: str | None = None
+    ethnicity: str | None = None
+    ideal_partner: str | None = None
     hometown_province_code: str | None
     hometown_city_code: str | None
     hometown_district_code: str | None
@@ -502,6 +544,9 @@ class PreferenceUpdateRequest(BaseModel):
     education_min: int | None = Field(default=None, ge=1, le=5)
     income_min: float | None = Field(default=None, ge=0, le=1_000_000)
     marriage_status: Literal[0, 1, 2, 3] | None = None
+    occupation_requirement: str | None = Field(default=None, max_length=64)
+    marriage_accept: Literal["不接受离异", "可接受离异未育", "接受离异带娃", "视情况而定"] | None = None
+    wedding_plan: Literal["不限", "计划一年内", "计划两年内", "计划三年内", "时机成熟时结婚", "不婚"] | None = None
     preferred_province_code: str | None = Field(default=None, max_length=32)
     preferred_city_codes: list[str] | None = Field(default=None, max_length=20)
     accept_long_distance: bool | None = None
@@ -541,6 +586,11 @@ class PreferenceResponse(BaseModel):
     education_min: int | None
     income_min: float | None
     marriage_status: int | None
+    # 这三列只在会员侧有；未入库客源的暂存表 customer_lead_preference 没有它们，
+    # 读取时按「未填」返回，所以给默认值而不是必填——否则暂存表整行反序列化 500。
+    occupation_requirement: str | None = None
+    marriage_accept: str | None = None
+    wedding_plan: str | None = None
     preferred_province_code: str | None
     preferred_city_codes: list[str]
     accept_long_distance: bool
@@ -590,6 +640,12 @@ class MatchmakerSuccessCase(BaseModel):
     images: list[str] = Field(default_factory=list, max_length=3)
 
 
+class MatchmakerSuccessCaseInput(MatchmakerSuccessCase):
+    """提交口径：案例说明 50 字以内；读取仍用宽松模型，历史长案例要能读出来。"""
+
+    description: str = Field(min_length=1, max_length=50)
+
+
 class MatchmakerApplicationDetails(BaseModel):
     """审核资料；仅返回给申请人本人或管理员，不用于公开红娘资料。"""
 
@@ -608,13 +664,19 @@ class MatchmakerApplicationDetails(BaseModel):
         return cleaned
 
 
+class MatchmakerApplicationDetailsInput(MatchmakerApplicationDetails):
+    success_cases: list[MatchmakerSuccessCaseInput] = Field(default_factory=list, max_length=3)
+
+
 class MatchmakerApplicationCreate(BaseModel):
     application_type: Literal["promoter", "partner", "service_matchmaker"]
     real_name: str = Field(min_length=2, max_length=64)
     phone: str = Field(pattern=r"^1[3-9]\d{9}$")
     intro: str = Field(min_length=10, max_length=2000)
     cert_images: list[str] = Field(default_factory=list, max_length=6)
-    application_details: MatchmakerApplicationDetails = Field(default_factory=MatchmakerApplicationDetails)
+    application_details: MatchmakerApplicationDetailsInput = Field(
+        default_factory=MatchmakerApplicationDetailsInput
+    )
 
     @model_validator(mode="before")
     @classmethod

@@ -13,6 +13,7 @@ from app.schemas.matchmaker_staff_admin import (
     CommonUploadResponse,
     MatchmakerDeleteResponse,
     MatchmakerDetailReport,
+    MatchmakerFrontPreview,
     MatchmakerLockUpdate,
     MatchmakerPermissions,
     MatchmakerPermissionsUpdate,
@@ -226,6 +227,18 @@ async def create_platform_token(
 ) -> MatchmakerPlatformTokenResponse:
     _guard(current)
     return await service.platform_token(db, matchmaker_id)
+
+
+@router.get(
+    "/matchmakers/{matchmaker_id}/frontend-preview", response_model=MatchmakerFrontPreview
+)
+async def get_frontend_preview(
+    matchmaker_id: int = Path(..., ge=1),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MatchmakerFrontPreview:
+    _guard(current)
+    return await service.front_preview(db, matchmaker_id, current)
 
 
 @router.get("/dict/commission-levels", response_model=list[CommissionLevelItem])

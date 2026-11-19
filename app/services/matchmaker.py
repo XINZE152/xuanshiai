@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+import json
 import secrets
 from typing import Any
 
@@ -16,6 +17,7 @@ from app.api.dependencies import CurrentMatchmakerAdmin, CurrentUser
 from app.schemas.matchmaker import (
     MatchmakerAdminServiceRequestUpdate,
     MatchmakerCard,
+    MatchmakerCaseCard,
     MatchmakerPage,
     MatchmakerContactResponse,
     MatchmakerContactExchangeCreate,
@@ -37,6 +39,15 @@ from app.schemas.matchmaker import (
 )
 from app.services.notifications import emit_notification
 from app.services.social import ensure_users_can_interact
+from app.services.matchmaker_staff_admin import STAFF_BASE, STAFF_SUCCESS_COUNT
+
+# 公开端（小程序红娘列表/详情）统计口径，2026-11-14 调整：
+# 牵线成功数该红娘牵线记录（SUCCEEDED），不再用付费服务完成单；
+# 累计服务数该红娘名下当前归属会员（resource_assignment 每会员最新有效行）。
+PUBLIC_SUCCESS_COUNT = "(SELECT COUNT(*) FROM matchmaker_introduction mi WHERE mi.matchmaker_id = u.id AND mi.status = 'SUCCEEDED')"
+PUBLIC_SERVED_MEMBER_COUNT = """(SELECT COUNT(*) FROM resource_assignment a JOIN users member ON member.id = a.user_id
+    WHERE a.matchmaker_id = u.id AND a.status = 1 AND member.deleted_at IS NULL
+    AND a.id = (SELECT MAX(latest.id) FROM resource_assignment latest WHERE latest.user_id = a.user_id AND latest.status = 1))"""
 
 
 def _datetime(value: Any) -> datetime:
@@ -45,15 +56,54 @@ def _datetime(value: Any) -> datetime:
     return datetime.fromisoformat(str(value))
 
 
+def _application_details(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _case_cards(raw: Any) -> list[MatchmakerCaseCard]:
+    items = raw if isinstance(raw, list) else []
+    result: list[MatchmakerCaseCard] = []
+    for entry in items[:3]:
+        if not isinstance(entry, dict):
+            continue
+        description = str(entry.get("description") or "").strip()
+        if not description:
+            continue
+        images = entry.get("images") if isinstance(entry.get("images"), list) else []
+        result.append(
+            MatchmakerCaseCard(
+                description=description,
+                images=[str(image).strip() for image in images if str(image).strip()][:3],
+            )
+        )
+    return result
+
+
+def _specialties(raw: Any) -> list[str]:
+    items = raw if isinstance(raw, list) else []
+    return [str(item).strip() for item in items if str(item).strip()][:5]
+
+
 def _card(row: Any) -> MatchmakerCard:
+    details = _application_details(row["application_details"])
     return MatchmakerCard(
         user_id=int(row["user_id"]),
         nickname=row["nickname"],
         avatar=row["avatar"],
         application_type="service_matchmaker",
         intro=row["intro"] or "",
+        slogan=row["slogan"],
+        specialties=_specialties(details.get("specialties")),
+        cases=_case_cards(details.get("success_cases")),
         certification_tags=["平台认证"],
         success_count=int(row["success_count"] or 0),
+        served_member_count=int(row.get("served_member_count") or 0),
+        successful_meeting_member_count=int(row.get("successful_meeting_member_count") or 0),
         rating_score=float(row["rating_score"] or 0),
         rating_count=int(row["rating_count"] or 0),
         is_available=bool(row["role_status"] == 1),
@@ -69,6 +119,8 @@ async def list_matchmakers(
     available: bool | None = None,
     admin: CurrentMatchmakerAdmin | None = None,
 ) -> MatchmakerPage:
+    if ranking:
+        return await _list_public_ranking(db, page, page_size)
     order = "success_count DESC, rating_score DESC, app.reviewed_at DESC, app.id DESC" if ranking else "app.reviewed_at DESC, app.id DESC"
     params = {"limit": page_size, "offset": (page - 1) * page_size}
     filters = ["app.application_type = 'service_matchmaker'", "app.status = 1"]
@@ -97,8 +149,19 @@ async def list_matchmakers(
         filters.append("role.status = :role_status")
         params["role_status"] = 1 if available else 2
     filter_sql = " AND ".join(filters)
-    query = text(f"""SELECT app.user_id, u.nickname, u.avatar, app.intro, app.cert_images,
-        COALESCE(service_stats.success_count, 0) AS success_count,
+    if admin is None:
+        stats_select = f"{PUBLIC_SUCCESS_COUNT} AS success_count,\n        {PUBLIC_SERVED_MEMBER_COUNT} AS served_member_count,"
+        stats_join = ""
+    else:
+        stats_select = "COALESCE(service_stats.success_count, 0) AS success_count,"
+        stats_join = """LEFT JOIN (SELECT ms.matchmaker_id, COUNT(*) AS success_count
+          FROM matchmaker_service ms
+          JOIN payment_order po ON po.id = ms.order_id AND po.type = 3 AND po.status = 1
+          WHERE ms.status = 2 GROUP BY ms.matchmaker_id) service_stats
+          ON service_stats.matchmaker_id = app.user_id"""
+    query = text(f"""SELECT app.user_id, u.nickname, u.avatar, app.intro, app.slogan, app.cert_images,
+        app.application_details,
+        {stats_select}
         COALESCE(rating_stats.rating_score, 0) AS rating_score,
         COALESCE(rating_stats.rating_count, 0) AS rating_count,
         role.status AS role_status
@@ -106,11 +169,7 @@ async def list_matchmakers(
         JOIN users u ON u.id = app.user_id AND u.status = 1
         JOIN user_role role ON role.user_id = app.user_id
           AND role.role_code = 'service_matchmaker' AND role.status IN (1, 2)
-        LEFT JOIN (SELECT ms.matchmaker_id, COUNT(*) AS success_count
-          FROM matchmaker_service ms
-          JOIN payment_order po ON po.id = ms.order_id AND po.type = 3 AND po.status = 1
-          WHERE ms.status = 2 GROUP BY ms.matchmaker_id) service_stats
-          ON service_stats.matchmaker_id = app.user_id
+        {stats_join}
         LEFT JOIN (SELECT matchmaker_id, AVG(score) AS rating_score, COUNT(*) AS rating_count
           FROM matchmaker_rating GROUP BY matchmaker_id) rating_stats
           ON rating_stats.matchmaker_id = app.user_id
@@ -128,11 +187,49 @@ async def list_matchmakers(
     return MatchmakerPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 
+async def _list_public_ranking(db: AsyncSession, page: int, page_size: int) -> MatchmakerPage:
+    """Public projection of the admin staff roster; never expose admin fields."""
+    params = {"limit": page_size, "offset": (page - 1) * page_size}
+    base = f"{STAFF_BASE} WHERE p.deleted_at IS NULL"
+    result = await db.execute(text(f"""SELECT u.id AS user_id, u.nickname, u.avatar,
+        ma.intro, ma.slogan, ma.application_details,
+        {STAFF_SUCCESS_COUNT} AS success_count,
+        {PUBLIC_SERVED_MEMBER_COUNT} AS served_member_count,
+        (SELECT COUNT(*) FROM resource_assignment a JOIN users member ON member.id = a.user_id
+          WHERE a.matchmaker_id = u.id AND a.status = 1 AND member.deleted_at IS NULL
+          AND a.id = (SELECT MAX(latest.id) FROM resource_assignment latest WHERE latest.user_id = a.user_id AND latest.status = 1)
+          AND EXISTS (SELECT 1 FROM meeting_request rq JOIN meeting_record mr ON mr.request_id = rq.id
+            WHERE mr.status = 'COMPLETED' AND (rq.user_id = a.user_id OR rq.target_user_id = a.user_id))) AS successful_meeting_member_count,
+        COALESCE((SELECT AVG(score) FROM matchmaker_rating WHERE matchmaker_id = u.id), 0) AS rating_score,
+        (SELECT COUNT(*) FROM matchmaker_rating WHERE matchmaker_id = u.id) AS rating_count,
+        (SELECT MAX(status) FROM user_role WHERE user_id = u.id AND role_code = 'service_matchmaker') AS role_status
+        {base}
+        ORDER BY served_member_count DESC, rating_score DESC, ma.reviewed_at DESC, ma.id DESC
+        LIMIT :limit OFFSET :offset"""), params)
+    count = await db.execute(text(f"SELECT COUNT(*) {base}"))
+    total = int(count.scalar() or 0)
+    return MatchmakerPage(items=[_card(row) for row in result.mappings().all()], page=page,
+                         page_size=page_size, total=total, has_more=page * page_size < total)
+
+
 async def get_matchmaker(
     db: AsyncSession,
     matchmaker_id: int,
     admin: CurrentMatchmakerAdmin | None = None,
 ) -> MatchmakerCard:
+    if admin is None:
+        result = await db.execute(text(f"""SELECT u.id AS user_id, u.nickname, u.avatar,
+            ma.intro, ma.slogan, ma.application_details, {PUBLIC_SUCCESS_COUNT} AS success_count,
+            {PUBLIC_SERVED_MEMBER_COUNT} AS served_member_count,
+            COALESCE((SELECT AVG(score) FROM matchmaker_rating WHERE matchmaker_id = u.id), 0) AS rating_score,
+            (SELECT COUNT(*) FROM matchmaker_rating WHERE matchmaker_id = u.id) AS rating_count,
+            (SELECT MAX(status) FROM user_role WHERE user_id = u.id AND role_code = 'service_matchmaker') AS role_status
+            {STAFF_BASE} WHERE p.deleted_at IS NULL AND u.id = :matchmaker_id"""),
+            {"matchmaker_id": matchmaker_id})
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(404, detail="服务红娘不存在或暂不可用")
+        return _card(row)
     params: dict[str, object] = {"matchmaker_id": matchmaker_id}
     scope_sql = ""
     if admin is not None:
@@ -152,7 +249,8 @@ async def get_matchmaker(
                 "AND scope_member.role_code = 'store_matchmaker' "
                 "AND scope_member.status = 1 AND " + scope + ")"
             )
-    result = await db.execute(text("""SELECT app.user_id, u.nickname, u.avatar, app.intro, app.cert_images,
+    result = await db.execute(text("""SELECT app.user_id, u.nickname, u.avatar, app.intro, app.slogan,
+        app.cert_images, app.application_details,
         COALESCE(service_stats.success_count, 0) AS success_count,
         COALESCE(rating_stats.rating_score, 0) AS rating_score,
         COALESCE(rating_stats.rating_count, 0) AS rating_count,

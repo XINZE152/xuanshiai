@@ -397,8 +397,8 @@ async def test_profile_mutation_enqueues_before_its_existing_commit(
     db = MutationSession()
     events: list[tuple[int, RevisionKind, tuple[str, ...], str, int]] = []
 
-    async def fake_recalculate(_db: object, _user_id: int) -> float:
-        return 100.0
+    async def fake_recalculate(_db: object, _user_id: int) -> tuple[float, dict[str, bool]]:
+        return 100.0, {}
 
     async def fake_profile(_db: object, _user_id: int) -> dict[str, Any]:
         return {"user_id": 10}
@@ -415,7 +415,7 @@ async def test_profile_mutation_enqueues_before_its_existing_commit(
         events.append((user_id, kind, changed_fields, event_type, priority))
         return RevisionVector(profile=1, preference=0, privacy=0, relationship=0, policy=1)
 
-    monkeypatch.setattr(profile_service, "recalculate_completion", fake_recalculate)
+    monkeypatch.setattr(profile_service, "recalculate_completion_state", fake_recalculate)
     monkeypatch.setattr(profile_service, "get_profile", fake_profile)
     monkeypatch.setattr(profile_service, "increment_revision_and_enqueue", fake_increment)
 

@@ -1,11 +1,14 @@
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_user
 from app.db.session import get_db
-from app.schemas.points import CheckinResponse, ClaimTaskResponse, InvitePage, PointLedgerPage, PointProduct, PointsSummary, RedeemRequest, RedeemResponse, TaskItem
+from app.schemas.payments import PaidOrderResponse
+from app.schemas.points import CheckinResponse, ClaimTaskResponse, CreatePointRechargeOrderRequest, InvitePage, PointLedgerPage, PointProduct, PointRechargePackage, PointsSummary, RedeemRequest, RedeemResponse, TaskItem
 from app.schemas.quotas import QuotaSummary
+from app.services.payments import get_paid_order
 from app.services.points import checkin, claim_task, invites, ledger, products, redeem, summary, tasks
+from app.services.points_recharge import create_recharge_order, list_recharge_packages
 from app.services.quotas import summary as quota_summary
 
 router = APIRouter()
@@ -37,3 +40,17 @@ async def product_list(db: AsyncSession = Depends(get_db)) -> list[PointProduct]
 
 @router.post("/users/me/points/redeem", response_model=RedeemResponse, summary="兑换积分商品或权益")
 async def product_redeem(body: RedeemRequest, idempotency_key: str | None = Header(None, alias="Idempotency-Key"), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> RedeemResponse: return await redeem(db, current.id, body, idempotency_key)
+
+@router.get("/points/recharge-packages", response_model=list[PointRechargePackage], summary="查询积分充值商品")
+async def recharge_packages(current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> list[PointRechargePackage]: return await list_recharge_packages(db)
+
+@router.post("/points/recharge/orders", response_model=PaidOrderResponse, status_code=201, summary="创建积分充值订单")
+async def recharge_order(
+    body: CreatePointRechargeOrderRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=128),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PaidOrderResponse: return await create_recharge_order(db, current.id, body, idempotency_key)
+
+@router.get("/points/recharge/orders/{order_no}", response_model=PaidOrderResponse, summary="查询积分充值订单")
+async def recharge_order_detail(order_no: str = Path(..., min_length=8, max_length=64), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> PaidOrderResponse: return await get_paid_order(db, current.id, order_no, 7)

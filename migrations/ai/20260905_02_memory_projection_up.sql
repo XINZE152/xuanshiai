@@ -54,6 +54,5 @@ CREATE TABLE IF NOT EXISTS `ai_memory_projection` (
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_ai_memory_projection_id` (`projection_id`),
     UNIQUE KEY `uk_ai_memory_projection_version` (`owner_user_id`, `function_key`, `purpose`, `data_category`, `projection_version`),
-    UNIQUE KEY `uk_ai_memory_projection_input` (`owner_user_id`, `function_key`, `purpose`, `data_category`, `projection_input_hash`),
     KEY `idx_ai_memory_projection_owner_status` (`owner_user_id`, `function_key`, `purpose`, `data_category`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='记忆投影读取视图（confirmed Claim 派生）';

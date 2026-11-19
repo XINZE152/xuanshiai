@@ -121,7 +121,7 @@ def test_legacy_read_deduplicates_and_reclassifies_without_inference():
 @pytest.mark.parametrize("selected", [[], ["科幻小说", "有幽默感"], list(TAG_CATEGORIES[1][2][:10]), ["熟人面前话多", "云吸猫", "周末煲汤", "去看Livehouse"]])
 async def test_unified_write_uses_existing_columns_and_invalidates_existing_consumers(monkeypatch, selected):
     db = AsyncMock()
-    monkeypatch.setattr(profile, "recalculate_completion", AsyncMock())
+    monkeypatch.setattr(profile, "recalculate_completion_state", AsyncMock(return_value=(0.0, {})))
     monkeypatch.setattr(profile, "get_profile", AsyncMock(return_value={"personal_tags": selected}))
     revision = AsyncMock()
     monkeypatch.setattr(profile, "increment_revision_and_enqueue", revision)
@@ -162,7 +162,7 @@ async def test_custom_write_is_moderated_and_persisted_in_explicit_group(monkeyp
     db = AsyncMock()
     moderate = AsyncMock(return_value=MagicMock(action="allow"))
     monkeypatch.setattr(profile, "moderate_text", moderate)
-    monkeypatch.setattr(profile, "recalculate_completion", AsyncMock())
+    monkeypatch.setattr(profile, "recalculate_completion_state", AsyncMock(return_value=(0.0, {})))
     monkeypatch.setattr(profile, "get_profile", AsyncMock(return_value={"personal_tags": selected, "custom_tags": ["手碟", "城市骑行"]}))
     monkeypatch.setattr(profile, "increment_revision_and_enqueue", AsyncMock())
 

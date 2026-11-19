@@ -35,6 +35,8 @@ jobs:
           enable-cache: true
       - name: Install backend and dev dependencies
         run: uv sync --locked --extra dev
+      - name: Migration layout, checksum and pairing gate
+        run: uv run --no-sync python scripts/check_migrations.py
       - name: Bootstrap schema from code
         run: uv run --no-sync python database_setup_marriage.py
       - name: Diff live schema against code contract

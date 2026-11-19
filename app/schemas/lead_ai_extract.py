@@ -5,11 +5,9 @@
 创建接口。字段口径与 ``CustomerLeadCreate`` 对齐，全部为可选（文本未提及即 None）。
 """
 
-from typing import Literal
-
 from pydantic import BaseModel, Field
 
-from app.schemas.customer_lead_admin import LeadGender
+from app.schemas.customer_lead_admin import LeadGender, LeadIntentionGrade
 
 # 抽取白名单：与前端录入表单可回填的客源字段一一对应，模型输出仅此键集。
 LEAD_EXTRACT_FIELDS: tuple[str, ...] = (
@@ -21,9 +19,6 @@ LEAD_EXTRACT_FIELDS: tuple[str, ...] = (
     "gender",
     "remark",
 )
-
-# 客户意向 A-G 七档（与 customer_lead.intention_level 同语义）。
-LeadIntentionGrade = Literal[1, 2, 3, 4, 5, 6, 7]
 
 
 class LeadExtractRequest(BaseModel):

@@ -125,6 +125,24 @@ class CommentCursorPage(BaseModel):
 CommunityCommentResponse.model_rebuild()
 
 
+class CommunityTopicCreate(BaseModel):
+    """会员自建话题。
+
+    只收名称：icon 留空、sort=0，由服务端决定——自建话题不该挤掉运营配置的排序位。
+    名称首尾空白与前导 `#` 在此剥掉，避免「#健身」和「健身」落成两个话题。
+    """
+
+    name: str = Field(min_length=2, max_length=20)
+
+    @field_validator("name")
+    @classmethod
+    def _normalize_name(cls, value: str) -> str:
+        cleaned = value.strip().lstrip("#").strip()
+        if len(cleaned) < 2:
+            raise ValueError("话题名称至少 2 个字")
+        return cleaned
+
+
 class CommunityTopicResponse(BaseModel):
     id: int
     name: str
@@ -207,6 +225,8 @@ class CommunityBannerResponse(BaseModel):
     link_value: str | None
     sort: int
     position: str
+    start_at: datetime | None = None
+    end_at: datetime | None = None
 
 
 class CommunityQuotaItem(BaseModel):
@@ -324,7 +344,14 @@ class PaperPlaneResponse(BaseModel):
     reply_count: int
     voice_url: str | None = None
     voice_duration_sec: int | None = None
+    picked: bool = Field(default=False, description="当前查看者今天是否已捡过这条纸飞机")
     created_at: datetime
+
+
+class PaperPlaneCatchResponse(BaseModel):
+    plane_id: int
+    already_picked: bool = Field(description="今天是否此前已经捡过；true 表示本次为幂等重放")
+    picked_today: int = Field(ge=0, description="今天已捡的不同纸飞机数量")
 
 
 class PaperPlaneReplyCreate(BaseModel):

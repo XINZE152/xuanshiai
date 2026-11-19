@@ -36,6 +36,7 @@ from app.schemas.community import (
     CommunityTopicJoinResponse,
     CommunityTopicPage,
     CommunityTopicResponse,
+    PaperPlaneCatchResponse,
     PaperPlaneConversationResponse,
     PaperPlaneCreate,
     PaperPlaneMessageCreate,
@@ -301,7 +302,7 @@ async def create_post(
     from app.services.content_filter import moderate_text
 
     content = (request.content or "").strip()
-    decision = await moderate_text(db, content, field="动态内容")
+    decision = await moderate_text(db, content, field="动态内容", scene=3)
     if decision.action == "reject":
         await _notify_moderation_rejected(db, user_id, "post")
         if commit:
@@ -451,7 +452,7 @@ async def update_post(
     if not result.scalar():
         raise HTTPException(404, detail="动态不存在或无权修改")
     content = (request.content or "").strip()
-    decision = await moderate_text(db, content, field="动态内容")
+    decision = await moderate_text(db, content, field="动态内容", scene=3)
     if decision.action == "reject":
         await _notify_moderation_rejected(db, user_id, "post")
         if commit:
@@ -591,13 +592,14 @@ def _normalize_city_display_name(name: str | None) -> str:
 
 
 def _feed_clauses(
-    mode: Literal["latest", "following", "city", "liked_users", "following_and_liked", "mine", "topic"],
+    mode: Literal["latest", "following", "city", "liked_users", "following_and_liked", "mine", "topic", "user"],
     *,
     city: str | None,
     city_code: str | None,
     topic_id: int | None,
     filter_key: str | None,
     me: dict[str, Any] | None,
+    target_user_id: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     params: dict[str, Any] = {}
     clauses: list[str] = []
@@ -608,6 +610,11 @@ def _feed_clauses(
         )
     elif mode == "mine":
         clauses.append(" AND p.user_id = :user_id")
+    elif mode == "user":
+        if target_user_id is None:
+            raise HTTPException(422, detail="按人查看动态需要提供 target_user_id")
+        params["target_user_id"] = target_user_id
+        clauses.append(" AND p.user_id = :target_user_id")
     elif mode == "liked_users":
         clauses.append(
             " AND EXISTS (SELECT 1 FROM user_favorite f WHERE f.user_id = :user_id AND f.target_user_id = p.user_id AND f.type = 1)"
@@ -707,7 +714,7 @@ async def list_posts(
     db: AsyncSession,
     user_id: int,
     mode: Literal[
-        "latest", "following", "city", "liked_users", "following_and_liked", "mine", "topic"
+        "latest", "following", "city", "liked_users", "following_and_liked", "mine", "topic", "user"
     ] = "latest",
     page: int = 1,
     page_size: int = 20,
@@ -717,6 +724,7 @@ async def list_posts(
     topic_id: int | None = None,
     filter_key: str | None = None,
     sort: Literal["latest", "hot"] = "latest",
+    target_user_id: int | None = None,
 ) -> CommunityPostPage:
     need_me = filter_key in {"mbti", "alumni", "hometown"} or mode == "city"
     me = await _viewer_profile(db, user_id) if need_me else {}
@@ -733,6 +741,7 @@ async def list_posts(
         topic_id=topic_id,
         filter_key=filter_key,
         me=me,
+        target_user_id=target_user_id,
     )
     extra_where = f"{_post_visibility_clause()}{extra_where}"
     order_sql = (
@@ -755,6 +764,10 @@ async def list_posts(
         LEFT JOIN user_privacy pr ON pr.user_id = p.user_id
         WHERE p.status = 1 AND COALESCE(p.moderation_status, 1) = 1
           AND p.deleted_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM user_restriction ban
+                          WHERE ban.user_id = p.user_id AND ban.restriction_type = 'TOTAL_BAN'
+                            AND ban.status = 1 AND ban.starts_at <= UTC_TIMESTAMP()
+                            AND (ban.ends_at IS NULL OR ban.ends_at > UTC_TIMESTAMP()))
           AND NOT EXISTS (
             SELECT 1 FROM user_block b
             WHERE (b.user_id = :user_id AND b.target_user_id = p.user_id)
@@ -1085,7 +1098,7 @@ async def create_comment(
     await ensure_user_allowed(db, user_id, "COMMENT_RESTRICTED")
     from app.services.content_filter import moderate_text
 
-    decision = await moderate_text(db, request.content, field="评论内容")
+    decision = await moderate_text(db, request.content, field="评论内容", scene=2)
     if decision.action == "reject":
         await _notify_moderation_rejected(db, user_id, "comment")
         if commit:
@@ -1317,6 +1330,84 @@ async def get_topic(db: AsyncSession, user_id: int, topic_id: int) -> CommunityT
     if not row:
         raise HTTPException(404, detail="话题不存在")
     return _topic_response(dict(row))
+
+
+# 会员自建话题的每日上限。话题会进入公共列表，必须有额度兜底，否则可被刷成话题墙。
+TOPIC_CREATE_DAILY_LIMIT = 3
+
+
+async def create_user_topic(
+    db: AsyncSession,
+    user_id: int,
+    name: str,
+    *,
+    commit: bool = True,
+    quota_key: str | None = None,
+) -> CommunityTopicResponse:
+    """会员自建话题。
+
+    约束：
+    - 同名话题直接复用（含被停用的），既保证重试幂等，也避免「健身」「健身 」刷出重复行；
+    - 名称过内容安全，命中高危词直接 422；
+    - 每人每日 ``TOPIC_CREATE_DAILY_LIMIT`` 条，防刷公共话题池；
+    - 新话题 ``is_active=1``：发布动态时的校验要求 ``is_active=1``，否则建完也用不了。
+      代价是自建话题立即可见，运营侧仍需有下架手段（``is_active=0``）。
+    """
+    from app.core.redis import daily_quota_key
+    from app.services.content_filter import moderate_text
+
+    await ensure_user_allowed(db, user_id, "POST_RESTRICTED")
+    normalized = (name or "").strip().lstrip("#").strip()
+    if len(normalized) < 2 or len(normalized) > 20:
+        raise HTTPException(422, detail="话题名称需 2-20 个字")
+
+    existing = await db.execute(
+        text(
+            "SELECT id, is_active FROM community_topic WHERE name = :name "
+            "ORDER BY is_active DESC, id ASC LIMIT 1"
+        ),
+        {"name": normalized},
+    )
+    existing_row = existing.mappings().first()
+    if existing_row is not None:
+        # 复用已存在的话题：停用的顺手重新启用，用户不该因为运营下架过就建不出来。
+        if int(existing_row["is_active"]) != 1:
+            await db.execute(
+                text("UPDATE community_topic SET is_active = 1 WHERE id = :id"),
+                {"id": int(existing_row["id"])},
+            )
+        if commit:
+            await db.commit()
+        return await get_topic(db, user_id, int(existing_row["id"]))
+
+    key = quota_key or daily_quota_key("community-topic", user_id)
+    allowed = await consume_daily(key, TOPIC_CREATE_DAILY_LIMIT)
+    if not allowed:
+        raise HTTPException(429, detail="今天创建的话题已达上限，明天再来")
+
+    try:
+        decision = await moderate_text(db, normalized, field="话题名称", scene=3)
+    except Exception:
+        await _refund_quota_after_failure(key)
+        raise
+    if decision.action in {"reject", "manual_review"}:
+        await _refund_quota_after_failure(key)
+        raise HTTPException(422, detail="话题名称含违规信息，请修改后重试")
+
+    result = await db.execute(
+        text(
+            "INSERT INTO community_topic (name, icon, sort, is_active) "
+            "VALUES (:name, '', 0, 1)"
+        ),
+        {"name": normalized},
+    )
+    topic_id = int(result.lastrowid or 0)
+    if topic_id <= 0:
+        await _refund_quota_after_failure(key)
+        raise HTTPException(500, detail="话题创建失败，请重试")
+    if commit:
+        await db.commit()
+    return await get_topic(db, user_id, topic_id)
 
 
 async def get_topic_detail(
@@ -1607,7 +1698,7 @@ async def list_my_activities(
 async def list_banners(db: AsyncSession, position: str = "community") -> list[CommunityBannerResponse]:
     result = await db.execute(
         text(
-            """SELECT id, title, image_url, link_type, link_value, sort, position
+            """SELECT id, title, image_url, link_type, link_value, sort, position, start_at, end_at
             FROM config_banner
             WHERE is_active = 1 AND position = :position
               AND (start_at IS NULL OR start_at <= UTC_TIMESTAMP())
@@ -1625,6 +1716,8 @@ async def list_banners(db: AsyncSession, position: str = "community") -> list[Co
             link_value=row.get("link_value"),
             sort=int(row.get("sort") or 0),
             position=row.get("position") or position,
+            start_at=row.get("start_at"),
+            end_at=row.get("end_at"),
         )
         for row in result.mappings().all()
     ]
@@ -1837,6 +1930,7 @@ async def _paper_response(row: dict[str, Any], viewer: int) -> PaperPlaneRespons
         reply_count=int(row.get("reply_count") or 0),
         voice_url=voice_url,
         voice_duration_sec=int(duration) if duration is not None else None,
+        picked=bool(row.get("picked")),
         created_at=row["created_at"],
     )
 
@@ -1870,7 +1964,7 @@ async def create_paper_plane(
 
     content = (request.content or "").strip()
     try:
-        decision = await moderate_text(db, content, field="纸飞机内容")
+        decision = await moderate_text(db, content, field="纸飞机内容", scene=3)
     except Exception:
         if used_daily:
             await _refund_quota_after_failure(key)
@@ -1982,7 +2076,10 @@ async def list_paper_planes(db: AsyncSession, user_id: int, page: int, page_size
     result = await db.execute(
         text(
             f"""SELECT p.id, p.content, p.images, p.city, p.tags, p.is_anonymous, p.reply_count,
-            p.voice_url, p.voice_duration_sec, p.created_at
+            p.voice_url, p.voice_duration_sec, p.created_at,
+            EXISTS (SELECT 1 FROM paper_plane_catch pc
+                    WHERE pc.user_id = :user_id AND pc.plane_id = p.id
+                      AND pc.caught_date = UTC_DATE()) AS picked
             FROM paper_plane p
             WHERE {own_clause}
               AND p.status = 1
@@ -1997,6 +2094,77 @@ async def list_paper_planes(db: AsyncSession, user_id: int, page: int, page_size
         {"user_id": user_id, "limit": page_size, "offset": (page - 1) * page_size},
     )
     return [await _paper_response(dict(row), viewer=user_id) for row in result.mappings().all()]
+
+
+async def catch_paper_plane(db: AsyncSession, user_id: int, plane_id: int) -> PaperPlaneCatchResponse:
+    """Mark one visible paper plane as caught today.
+
+    The unique key ``(user_id, plane_id, caught_date)`` makes the operation
+    idempotent: re-catching the same plane on the same UTC day returns
+    ``already_picked=true`` without inflating the count.
+    """
+
+    await ensure_user_allowed(db, user_id, "POST_RESTRICTED")
+    visible = (
+        await db.execute(
+            text(
+                """SELECT 1 FROM paper_plane p
+                WHERE p.id = :plane_id
+                  AND p.user_id <> :user_id
+                  AND p.status = 1
+                  AND COALESCE(p.moderation_status, 1) = 1
+                  AND (p.expire_at IS NULL OR p.expire_at > UTC_TIMESTAMP())
+                  AND NOT EXISTS (SELECT 1 FROM user_restriction ban
+                                  WHERE ban.user_id = p.user_id AND ban.restriction_type = 'TOTAL_BAN'
+                                    AND ban.status = 1 AND ban.starts_at <= UTC_TIMESTAMP()
+                                    AND (ban.ends_at IS NULL OR ban.ends_at > UTC_TIMESTAMP()))"""
+            ),
+            {"plane_id": plane_id, "user_id": user_id},
+        )
+    ).first()
+    if visible is None:
+        raise HTTPException(404, detail="纸飞机不存在或已过期")
+    inserted = await db.execute(
+        text(
+            """INSERT IGNORE INTO paper_plane_catch (user_id, plane_id, caught_date)
+            VALUES (:user_id, :plane_id, UTC_DATE())"""
+        ),
+        {"user_id": user_id, "plane_id": plane_id},
+    )
+    picked_today = int(
+        (
+            await db.execute(
+                text(
+                    """SELECT COUNT(DISTINCT plane_id) FROM paper_plane_catch
+                    WHERE user_id = :user_id AND caught_date = UTC_DATE()"""
+                ),
+                {"user_id": user_id},
+            )
+        ).scalar()
+        or 0
+    )
+    await db.commit()
+    return PaperPlaneCatchResponse(
+        plane_id=plane_id,
+        already_picked=int(getattr(inserted, "rowcount", 0) or 0) == 0,
+        picked_today=picked_today,
+    )
+
+
+async def paper_plane_catch_summary(db: AsyncSession, user_id: int) -> PaperPlaneCatchResponse:
+    picked_today = int(
+        (
+            await db.execute(
+                text(
+                    """SELECT COUNT(DISTINCT plane_id) FROM paper_plane_catch
+                    WHERE user_id = :user_id AND caught_date = UTC_DATE()"""
+                ),
+                {"user_id": user_id},
+            )
+        ).scalar()
+        or 0
+    )
+    return PaperPlaneCatchResponse(plane_id=0, already_picked=False, picked_today=picked_today)
 
 
 def _conversation_response(row: dict[str, Any], viewer_id: int) -> PaperPlaneConversationResponse:
@@ -2104,7 +2272,7 @@ async def reply_paper_plane(
     await ensure_user_allowed(db, user_id, "COMMENT_RESTRICTED")
     from app.services.content_filter import moderate_text
 
-    decision = await moderate_text(db, request.content, field="纸飞机回复")
+    decision = await moderate_text(db, request.content, field="纸飞机回复", scene=3)
     if decision.action == "reject":
         await _notify_moderation_rejected(db, user_id, "paper_plane_reply")
         if commit:
@@ -2279,7 +2447,7 @@ async def send_paper_plane_message(
 
     # 文本消息过滤敏感词；媒体消息 content 为空，无需过滤
     if request.type == 1 and (request.content or "").strip():
-        decision = await moderate_text(db, request.content, field="会话消息")
+        decision = await moderate_text(db, request.content, field="会话消息", scene=4)
         if decision.action == "reject":
             await _notify_moderation_rejected(db, user_id, "paper_plane_message")
             if commit:

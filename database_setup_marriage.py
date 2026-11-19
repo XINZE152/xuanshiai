@@ -152,6 +152,25 @@ def get_logger(name):
 logger = get_logger(__name__)
 
 
+def _column_collation(column: object) -> str:
+    """读取 SHOW FULL COLUMNS 行里的 Collation。
+
+    初始化脚本使用 DictCursor，行是 dict；但 pymysql 的 DictCursor 会**丢弃
+    重复列名**，而 SHOW FULL COLUMNS 同时含 `Field` 和 `Type`（恰好都是 'Type'
+    时会冲突），因此按名字取可能取不到。这里同时兼容 dict 与 tuple 两种游标。
+    """
+    if isinstance(column, dict):
+        for key in ("Collation", "collation"):
+            if key in column:
+                value = column[key]
+                return "" if value is None else str(value)
+        return ""
+    if isinstance(column, (list, tuple)) and len(column) > 2:
+        value = column[2]
+        return "" if value is None else str(value)
+    return ""
+
+
 class DatabaseManager:
     def __init__(self):
         # 结构收敛过程中的失败统一记在这里，启动结束前一次性决定是否阻断（见 _raise_on_schema_failures）。
@@ -345,6 +364,7 @@ class DatabaseManager:
                 "drinking": "`drinking` varchar(32) DEFAULT NULL COMMENT '饮酒情况'",
                 "religion": "`religion` varchar(32) DEFAULT NULL COMMENT '宗教信仰'",
                 "marriage_plan": "`marriage_plan` varchar(64) DEFAULT NULL COMMENT '结婚计划'",
+                "bot_intake_json": "`bot_intake_json` json DEFAULT NULL COMMENT '恋AI BOT采集原样：{field:{id,label,source,updated_at}}'",
                 "hometown": "`hometown` varchar(128) DEFAULT NULL COMMENT '家乡展示名称'",
                 "residence": "`residence` varchar(128) DEFAULT NULL COMMENT '现居展示名称'",
                 "household_province_code": "`household_province_code` varchar(32) DEFAULT NULL",
@@ -393,6 +413,7 @@ class DatabaseManager:
                 "hometown_completed": "`hometown_completed` tinyint NOT NULL DEFAULT '0'",
                 "mbti_completed": "`mbti_completed` tinyint NOT NULL DEFAULT '0'",
                 "single_pledge_completed": "`single_pledge_completed` tinyint NOT NULL DEFAULT '0'",
+                "completion_grandfathered": "`completion_grandfathered` tinyint NOT NULL DEFAULT '0' COMMENT '1=保留旧完整度规则直到下次主动编辑'",
             },
             "user_privacy": {
                 "profile_visibility": "`profile_visibility` varchar(16) NOT NULL DEFAULT 'all' COMMENT '资料可见性：all/friends/only_me'",
@@ -574,6 +595,16 @@ class DatabaseManager:
         - 旧库已有的 active_phone / active_wechat 生成列定义不含 deleted_at，
           需检测并重建为「软删除也置 NULL」，才能让删除后的客源不再占用联系方式；
         - 新建 customer_lead_source 字典表并幂等播种常见来源（INSERT IGNORE）。
+
+        同时镜像 migrations/customer_lead_gaps/20261029_01_lead_profile_columns_up.sql：
+        customer_lead 补 real_name / photo / birthday。三列在 2026-10-24 快照 035efa9
+        只加进了 app/db/business_schema.py 的建表语句，旧库既没有列也没有补列入口，
+        而后台与红娘工作台的客源查询无条件 SELECT 它们，于是列表接口报 1054 → 500。
+
+        还镜像 migrations/customer_lead_profile/20261028_01_lead_profile_up.sql（上游
+        2026-10-28 的「本人资料」扩展，列名是 birth_date / photos 那一套）：服务层靠
+        information_schema 探测列、缺列静默降级不报错，但操作员在后台填了资料而库里
+        没列时值会被丢掉，只能反查数据库才发现，所以这里一并补齐。
         """
         try:
             cursor.execute("SHOW TABLES LIKE 'customer_lead'")
@@ -583,6 +614,20 @@ class DatabaseManager:
                 "gender": "tinyint NOT NULL DEFAULT 0 COMMENT '性别 0未知 1男 2女（A13）'",
                 "deleted_at": "datetime DEFAULT NULL COMMENT '软删除时间；空为有效'",
                 "deleted_by": "bigint unsigned DEFAULT NULL COMMENT '删除操作人 matchmaker_admin_account.id'",
+                "real_name": "varchar(64) DEFAULT NULL COMMENT '客源真实姓名（选填）'",
+                "photo": "varchar(512) DEFAULT NULL COMMENT '客源照片URL'",
+                "birthday": "date DEFAULT NULL",
+                "birth_date": "date DEFAULT NULL COMMENT '出生日期；age 由此派生'",
+                "weight": "int DEFAULT NULL COMMENT '体重kg'",
+                "income": "varchar(32) DEFAULT NULL COMMENT '年收入档位'",
+                "house": "varchar(32) DEFAULT NULL COMMENT '购房情况'",
+                "car": "varchar(32) DEFAULT NULL COMMENT '购车情况'",
+                "smoking": "varchar(32) DEFAULT NULL COMMENT '吸烟情况'",
+                "drinking": "varchar(32) DEFAULT NULL COMMENT '饮酒情况'",
+                "ethnicity": "varchar(32) DEFAULT NULL COMMENT '民族'",
+                "school": "varchar(128) DEFAULT NULL COMMENT '毕业学校'",
+                "company": "varchar(128) DEFAULT NULL COMMENT '工作单位'",
+                "photos": "json DEFAULT NULL COMMENT '相册图片URL列表'",
             }))
             self._ensure_optional_index(cursor, "customer_lead", "idx_customer_lead_deleted", "(`deleted_at`)")
             # 生成列旧定义不引用 deleted_at，软删除后仍会占用联系方式唯一键；
@@ -1126,6 +1171,8 @@ class DatabaseManager:
             ("community_like", "user_id"),
             ("community_media", "user_id"),
             ("paper_plane", "user_id"),
+            ("paper_plane_catch", "user_id"),
+            ("paper_plane_catch", "plane_id"),
             ("paper_plane_reply", "user_id"),
             ("matchmaker_service", "user_id"),
             ("matchmaker_service", "matchmaker_id"),
@@ -1262,6 +1309,7 @@ class DatabaseManager:
                     `gender` tinyint DEFAULT NULL COMMENT '性别 1男 2女',
                     `birthday` date DEFAULT NULL COMMENT '出生日期',
                     `status` tinyint DEFAULT '1' COMMENT '状态 1正常 2冻结 3注销',
+                    `is_test_seed` tinyint NOT NULL DEFAULT 0 COMMENT '是否测试种子账号 0否 1是；清理时只删此标记',
                     `is_real_name` tinyint DEFAULT '0' COMMENT '是否实名认证 0否 1是',
                     `is_married` tinyint DEFAULT '0' COMMENT '婚姻状态 0未知 1未婚 2离异 3丧偶',
                     `is_single_pledge` tinyint DEFAULT '0' COMMENT '是否签署单身承诺 0否 1是',
@@ -1398,6 +1446,9 @@ class DatabaseManager:
                     `housing_requirement` tinyint DEFAULT NULL COMMENT '0不限 1有房 2无房',
                     `smoking_requirement` tinyint DEFAULT NULL COMMENT '0不限 1不抽烟 2可接受',
                     `drinking_requirement` tinyint DEFAULT NULL COMMENT '0不限 1不饮酒 2可接受',
+                    `occupation_requirement` varchar(64) DEFAULT NULL COMMENT '期望职业：不限/具体职业',
+                    `marriage_accept` varchar(32) DEFAULT NULL COMMENT '婚况接受度：不接受离异/可接受离异未育/接受离异带娃/视情况而定',
+                    `wedding_plan` varchar(32) DEFAULT NULL COMMENT '结婚计划：不限/计划一年内/计划两年内/计划三年内/时机成熟时结婚/不婚',
                     `dating_goal` varchar(32) DEFAULT NULL COMMENT '交友目标：倾向恋爱/倾向结婚',
                     `meeting_pace` varchar(64) DEFAULT NULL COMMENT '见面节奏',
                     `children_intention` varchar(64) DEFAULT NULL COMMENT '生育意愿',
@@ -1906,6 +1957,7 @@ class DatabaseManager:
                     `product_id` bigint unsigned NOT NULL,
                     `product_code` varchar(64) NOT NULL,
                     `points_cost` int unsigned NOT NULL,
+                    `count` int unsigned NOT NULL DEFAULT '1' COMMENT '兑换数量',
                     `status` tinyint NOT NULL DEFAULT '0',
                     `idempotency_key` varchar(128) NOT NULL,
                     `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
@@ -2504,6 +2556,18 @@ class DatabaseManager:
                     KEY `idx_moderation_status` (`moderation_status`),
                     KEY `idx_created` (`created_at`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='纸飞机（漂流瓶）'
+            """,
+            "paper_plane_catch": """
+                CREATE TABLE IF NOT EXISTS `paper_plane_catch` (
+                    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+                    `user_id` bigint unsigned NOT NULL COMMENT '捡取人',
+                    `plane_id` bigint unsigned NOT NULL COMMENT '纸飞机',
+                    `caught_date` date NOT NULL COMMENT 'UTC 日期',
+                    `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_paper_plane_catch_user_plane_date` (`user_id`,`plane_id`,`caught_date`),
+                    KEY `idx_paper_plane_catch_user_date` (`user_id`,`caught_date`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='纸飞机捡取记录（按 UTC 日期去重）'
             """,
             # ============================================
             # 27. 纸飞机回复
@@ -3423,6 +3487,130 @@ class DatabaseManager:
                     KEY `idx_status_time` (`status`,`start_at`,`end_at`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户置顶曝光购买记录'
             """,
+            # ============================================
+            # 恋 AI BOT：专属红娘绑定、会话轮次与恋爱报告
+            # 与 migrations/business/20261117_01_aibot_chat_up.sql、
+            # 20261117_03_aibot_love_report_up.sql 同源：迁移只负责给既有库
+            # 做增量升级，全新库必须由 bootstrap 直接建出，否则全新部署会缺表。
+            # ============================================
+            "aibot_user_assignment": """
+                CREATE TABLE IF NOT EXISTS `aibot_user_assignment` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `user_id` BIGINT UNSIGNED NOT NULL,
+                    `agent_id` VARCHAR(32) NOT NULL,
+                    `assigned_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `welcome_seen_at` DATETIME NULL,
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_assignment_user` (`user_id`),
+                    KEY `idx_aibot_assignment_agent` (`agent_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            "aibot_session": """
+                CREATE TABLE IF NOT EXISTS `aibot_session` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `session_id` VARCHAR(64) NOT NULL,
+                    `user_id` BIGINT UNSIGNED NOT NULL,
+                    `agent_id` VARCHAR(32) NOT NULL,
+                    `mode` VARCHAR(16) NOT NULL DEFAULT 'free',
+                    `status` VARCHAR(16) NOT NULL DEFAULT 'active',
+                    `needs_welcome` TINYINT NOT NULL DEFAULT 1,
+                    `last_intent` VARCHAR(32) NULL,
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_session_id` (`session_id`),
+                    KEY `idx_aibot_session_user_status` (`user_id`, `status`, `updated_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            "aibot_turn": """
+                CREATE TABLE IF NOT EXISTS `aibot_turn` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `session_id` VARCHAR(64) NOT NULL,
+                    `turn_id` VARCHAR(64) NOT NULL,
+                    `role` VARCHAR(16) NOT NULL,
+                    `content` TEXT NOT NULL,
+                    `intent` VARCHAR(32) NULL,
+                    `choices_json` JSON NULL,
+                    `actions_json` JSON NULL,
+                    `cards_json` JSON NULL,
+                    `idempotency_key` VARCHAR(128) NULL,
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_turn_id` (`turn_id`),
+                    UNIQUE KEY `uk_aibot_turn_idem` (`session_id`, `idempotency_key`),
+                    KEY `idx_aibot_turn_session` (`session_id`, `id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            "aibot_love_report": """
+                CREATE TABLE IF NOT EXISTS `aibot_love_report` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `user_id` BIGINT UNSIGNED NOT NULL,
+                    `version` INT UNSIGNED NOT NULL,
+                    `agent_id` VARCHAR(32) NOT NULL,
+                    `scene` VARCHAR(16) NOT NULL DEFAULT 'ai',
+                    `score_total` INT NOT NULL DEFAULT 0,
+                    `love_index` DECIMAL(5,2) NOT NULL DEFAULT 0,
+                    `emotion_label` VARCHAR(32) NULL,
+                    `emotion_score` DECIMAL(5,2) NULL,
+                    `payload_json` JSON NOT NULL,
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_report_user_version` (`user_id`, `version`),
+                    KEY `idx_aibot_report_user_created` (`user_id`, `created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            # 20261118_01_aibot_timeline_up.sql 同源：完整聊天时间线可上翻
+            "aibot_timeline_message": """
+                CREATE TABLE IF NOT EXISTS `aibot_timeline_message` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `message_id` VARCHAR(64) NOT NULL,
+                    `user_id` BIGINT UNSIGNED NOT NULL,
+                    `agent_id` VARCHAR(32) NOT NULL,
+                    `session_id` VARCHAR(64) NULL,
+                    `role` VARCHAR(16) NOT NULL,
+                    `kind` VARCHAR(32) NOT NULL DEFAULT 'text',
+                    `content` TEXT NOT NULL,
+                    `payload_json` JSON NULL,
+                    `client_msg_id` VARCHAR(128) NULL,
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_timeline_msg` (`message_id`),
+                    UNIQUE KEY `uk_aibot_timeline_client` (`user_id`, `agent_id`, `client_msg_id`),
+                    KEY `idx_aibot_timeline_user_agent_id` (`user_id`, `agent_id`, `id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            # 20261119_01_aibot_story_play_up.sql 同源：剧本游玩 + 同好已推
+            "aibot_story_play": """
+                CREATE TABLE IF NOT EXISTS `aibot_story_play` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `user_id` BIGINT UNSIGNED NOT NULL,
+                    `task_id` VARCHAR(64) NOT NULL,
+                    `status` VARCHAR(16) NOT NULL DEFAULT 'playing',
+                    `chapter_idx` INT NOT NULL DEFAULT 0,
+                    `started_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `last_active_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `finished_at` DATETIME NULL,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_story_play_user_task` (`user_id`, `task_id`),
+                    KEY `idx_aibot_story_play_task_active` (`task_id`, `last_active_at`),
+                    KEY `idx_aibot_story_play_task_finished` (`task_id`, `finished_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            "aibot_story_peer_shown": """
+                CREATE TABLE IF NOT EXISTS `aibot_story_peer_shown` (
+                    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    `user_id` BIGINT UNSIGNED NOT NULL,
+                    `task_id` VARCHAR(64) NOT NULL,
+                    `peer_user_id` BIGINT UNSIGNED NOT NULL,
+                    `shown_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (`id`),
+                    UNIQUE KEY `uk_aibot_story_peer_shown` (`user_id`, `task_id`, `peer_user_id`),
+                    KEY `idx_aibot_story_peer_shown_user_task` (`user_id`, `task_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
         }
 
         # 本次一期商业化领域表与基础用户表保持同一初始化入口。
@@ -3444,6 +3632,7 @@ class DatabaseManager:
             AI_TABLES,
             ensure_ai_compatibility_engine_columns,
             ensure_ai_legacy_columns,
+            ensure_ai_memory_projection_unique_keys,
             ensure_ai_profile_entry_columns,
             ensure_ai_profile_journey_columns,
             ensure_ai_profile_session_columns,
@@ -3556,10 +3745,14 @@ class DatabaseManager:
         # NOT EXISTS 直接创建（与 reviewed migration 同源）。
         ensure_ai_profile_journey_columns(cursor)
         # Task 2 additive AI fields are safe to backfill during bootstrap;
-        # constraint/index changes remain in the reviewed migration runner.
+        # constraint/index changes remain in the reviewed migration runner
+        # —— 但投影表的两个唯一键是例外：reviewed migration 里同名的
+        # CREATE TABLE IF NOT EXISTS 在“表已由 bootstrap 建出”时是空操作，
+        # 迁移永远补不上这两个键，必须在这里补齐（见 ai_schema 函数注释）。
         ensure_ai_legacy_columns(cursor)
         ensure_derivation_task10_columns(cursor)
         ensure_ai_retention_indexes(cursor)
+        ensure_ai_memory_projection_unique_keys(cursor)
         ensure_derivation_retention_indexes(cursor)
 
         self._backfill_comment_roots(cursor)
@@ -3605,6 +3798,7 @@ class DatabaseManager:
                 "drinking": "varchar(32) DEFAULT NULL COMMENT '饮酒情况'",
                 "religion": "varchar(32) DEFAULT NULL COMMENT '宗教信仰'",
                 "marriage_plan": "varchar(64) DEFAULT NULL COMMENT '结婚计划'",
+                "bot_intake_json": "json DEFAULT NULL COMMENT '恋AI BOT采集原样'",
             },
             "user_auth": {
                 "education": "varchar(64) DEFAULT NULL COMMENT '学历'",
@@ -3640,7 +3834,7 @@ class DatabaseManager:
                 "varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL "
                 "COMMENT '客户端消息幂等键' AFTER `media_url`"
             )
-        elif column["Collation"] != "utf8mb4_bin":
+        elif _column_collation(column) != "utf8mb4_bin":
             cursor.execute(
                 "ALTER TABLE `chat_message` MODIFY COLUMN `client_message_id` "
                 "varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL "
@@ -3818,7 +4012,10 @@ class DatabaseManager:
             "activity_signup": "tinyint NOT NULL DEFAULT 0 COMMENT '活动报名 0否 1是'",
             "level": "varchar(32) DEFAULT NULL COMMENT '会员级别'",
             "fetched_at": "datetime DEFAULT NULL COMMENT '最近一次被红娘捞取的时间'",
+            # 镜像 migrations/business/20261119_02_users_is_test_seed_up.sql
+            "is_test_seed": "tinyint NOT NULL DEFAULT 0 COMMENT '是否测试种子账号 0否 1是；清理时只删此标记'",
         }))
+        self._ensure_optional_index(cursor, "users", "idx_users_is_test_seed", "(`is_test_seed`)")
         self._ensure_table_columns(cursor, "`user_profile`", self._named_columns({
             "car": "varchar(32) DEFAULT NULL COMMENT '购车情况'",
             "household": "varchar(128) DEFAULT NULL COMMENT '户口所在地'",

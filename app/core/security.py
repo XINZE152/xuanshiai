@@ -168,6 +168,17 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
+def lead_convert_password_fields() -> dict[str, str | None]:
+    """Initial password columns for member accounts created by 一键入库.
+
+    配置为空时返回 NULL 列值，新账号只有验证码/微信登录方式。
+    """
+    password = settings.lead_convert_initial_password.strip()
+    if not password:
+        return {"password": None, "password_algo": None}
+    return {"password": hash_password(password), "password_algo": "bcrypt"}
+
+
 def encrypt_sensitive(value: str) -> str:
     key = base64.urlsafe_b64encode(hashlib.sha256(settings.secret_key.encode()).digest())
     return Fernet(key).encrypt(value.encode()).decode()

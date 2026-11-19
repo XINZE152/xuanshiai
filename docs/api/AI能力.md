@@ -106,6 +106,7 @@ AI 自然语言搜索入口；草稿、快照、搜索建议和异步任务契�
 | `master` | boolean | 是 | AI 总闸；为 `false` 时其余字段恒为 `false` |
 | `profile` | boolean | 是 | AI 画像 / 用心度 / 资料卡是否可用 |
 | `search` | boolean | 是 | AI 搜索与自然语言筛选是否可用 |
+| `compatibility` | boolean | 是 | 资料合拍参考（首页「看看合拍度」）是否可用；**2026-11-07 新增** |
 | `voice` | boolean | 是 | 语音播报 / 语音输入是否可用 |
 | `advisor` | boolean | 是 | AI 军师是否可用 |
 | `avatar` | boolean | 是 | AI 分身是否可用 |
@@ -113,7 +114,7 @@ AI 自然语言搜索入口；草稿、快照、搜索建议和异步任务契�
 返回示例（默认关闭）：
 
 ```json
-{ "master": false, "profile": false, "search": false, "voice": false, "advisor": false, "avatar": false }
+{ "master": false, "profile": false, "search": false, "compatibility": false, "voice": false, "advisor": false, "avatar": false }
 ```
 
 **业务规则**
@@ -150,6 +151,10 @@ WebSocket 路径不会出现在 OpenAPI `paths`，但属于同一发布边界：
 
 ### 变更记录
 
+- 2026-11-07（AIT-07 / BE-01）：`GET /ai/capabilities` 响应**新增 `compatibility` 字段**。
+  - 变更前：只下发 `master/profile/search/voice/advisor/avatar`，首页「看看合拍度」入口不受探测覆盖，用户点进去才收到 `503 AI_FEATURE_DISABLED`（`app/services/ai/flags.py` 的 `AiFeature.COMPATIBILITY_SHADOW` 门禁）。
+  - 变更后：新增 `compatibility: boolean`，取值同样由 `require_ai_feature(COMPATIBILITY_SHADOW, settings)` 判定（master 总闸 + `AI_COMPATIBILITY_SHADOW_ENABLED` + 生产审批门 + `AI_TEST_ONLY_USER_IDS` 范围），与 `GET /ai/compatibility/{id}` 会不会 503 严格等价。
+  - 影响范围：**响应字段新增，向后兼容**，URL/Method/认证/权限/既有字段语义均不变；旧客户端忽略该字段即可，行为与变更前一致。前端可用它在渲染前隐藏或标注合拍度入口。
 - 2026-11-06（UT-2026-11-02-DOC-02，Q35/Q49/Q24）：①`POST /ai/profile/polish` 新增 `changed`、`fallback` 字段，用于前端识别 mock 回显“未产生改写”；②用心度/润色改为按 `AiFeature.PROFILE` 门禁，与 `GET /ai/capabilities.profile` 一致；③门禁失败统一返回 `AI_FEATURE_DISABLED`，模型连续两次非 JSON 返回 `AI_OUTPUT_INVALID`（`retryable=true`）；④`detail` 由字符串改为对象，旧客户端请改读 `detail.code` 或顶层 `message`。
 - 2026-11-02：新增 `GET /ai/capabilities` 运行时能力探测。此前前端无法预知 AI 开关，四个症状（AI 搜索不可用 / 画像不可用 / 语音不可用 / 用心度 503）实为同一事实。
 - 2026-09-25：按当前运行时 OpenAPI 重建路径索引；AI 默认关闭和生产 fail-closed 配置改为实际 `ai_*` 字段，移除旧的 `AI_ENABLED=true` 示例。

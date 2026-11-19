@@ -120,6 +120,19 @@
       }
     },
     {
+      "version": "20261101_01_short_video_comment_reply",
+      "up": "20261101_01_short_video_comment_reply_up.sql",
+      "down": "20261101_01_short_video_comment_reply_down.sql",
+      "verify": "20261101_01_short_video_comment_reply_verify.sql",
+      "verify_previous": "20261101_01_short_video_comment_reply_verify_previous.sql",
+      "sha256": {
+        "up": "4710378b8defe3d796c9c5ac1337c4e5e56ca8d7f66510209e63f57b67e7f84e",
+        "down": "efded5c1de8a1adba59b4a14a196256ebeba946690fb101ff53801043a724f45",
+        "verify": "469910ec35290621475b0425328289ecaa2d76e4fb580d6e49eecbbdbc981530",
+        "verify_previous": "cdb17dbd40212b2925da0575b3cfd78e6317e5cfca33543df5804af992bcb15b"
+      }
+    },
+    {
       "version": "20261102_01_user_feedback",
       "up": "20261102_01_user_feedback_up.sql",
       "down": "20261102_01_user_feedback_down.sql",
@@ -128,8 +141,8 @@
       "sha256": {
         "up": "93526e9ff58c59780bdcf7b33d6ab2974e26b3c9506819b6e5f7d14c508bfdd1",
         "down": "d5a15c40b2b2b28137cd7801661b9df2a800452848f7b6703e7159c51938989d",
-        "verify": "0e56f1df512f5adc31474d629e4118f644aadf890ee94aac98791736797705ca",
-        "verify_previous": "e9160d54bb483e03b76c368de185aa110db41aad7ddfd1ab9fcbbd8cfa4f40ef"
+        "verify": "f1da3191a8e758c87cf2ea3867809cce4da86c4199bf73d5caa63a89457ae7a6",
+        "verify_previous": "2beac3b4e0a5f02f1339119151388e6ff192e116cb82d122291e1c46d2e2ec12"
       }
     },
     {
@@ -141,7 +154,7 @@
       "sha256": {
         "up": "781e4dc662542f0176b08a74f4a2f8f2022b1b63fa6e3a6f7f4aff8904dc407a",
         "down": "3951a2ef31c4010f0cd2e5215781e261afedabe711e68acfb55b75d136bb2378",
-        "verify": "20b09becb29f8ec027e749335fa30d489eee3cf028cf08e14b0ddb63408eb5bd",
+        "verify": "7e1701f2cc7c24687c74566044bbd298424d0191f8267bf33aaa572ae4f0cdba",
         "verify_previous": "525125a135af71e3282ed80d1f4a1d83d0f2063e08879f04c30e27c3cc84c38f"
       }
     },
@@ -154,8 +167,8 @@
       "sha256": {
         "up": "ffb95cc6250364013a6cdb44596f2aa0a75217d8ce89df28e069314725fa9cbf",
         "down": "019a2062984e3c5ffdaa7e995a3a1af06bf297ead5290f0cdcc4d7193981a402",
-        "verify": "4c39699e5bc4d2bfb5d94e309dcff48b86d8b595532785e8da6d7d25e53d10ff",
-        "verify_previous": "1c365e522b1ae092c56ef5bbbdcdb03e337cc14226cf8534cf9760d96fa66699"
+        "verify": "f91023611eb8f0085d7aba737c4fb87c1719f3f189df1464351cecdd944bc135",
+        "verify_previous": "302afe5a7da57bef964c8650484d5b923c50190d2eafb4e3cea2fd9b26cddf23"
       }
     },
     {
@@ -167,8 +180,112 @@
       "sha256": {
         "up": "20898c82ade64f94c7c43624ab1ed05312d02e55fdf589417377e3908bcc2176",
         "down": "f8fc283fc197a4d6fbcf97b7101bbbd10e5119870f8297c7c15037995c5756e2",
-        "verify": "778ffd3635cd0525914588f1ebb3c87e1744617fbaec4dcf441e45903c346124",
-        "verify_previous": "9d33bd746ca1231b595c7b1209e48d73bd0c7d4ebfe019cd876bb4def20a3951"
+        "verify": "7ec91752f26f7a657cba3ce86fa8d0741a3847b2bf1fdc9fc5c76fad9166cf39",
+        "verify_previous": "e2ef098e209256431da345dfa1e8cbf01c4dedf49bbf305bc19390559735ae38"
+      }
+    },
+    {
+      "version": "20261109_01_profile_completion_missing_rows",
+      "up": "20261109_01_profile_completion_missing_rows_up.sql",
+      "down": "20261109_01_profile_completion_missing_rows_down.sql",
+      "verify": "20261109_01_profile_completion_missing_rows_verify.sql",
+      "verify_previous": "20261109_01_profile_completion_missing_rows_verify_previous.sql",
+      "sha256": {
+        "up": "ccfb5d98699a39ee8a6831205798be5044fc29f7f16188b3b1e4c4be13cbf204",
+        "down": "512da333a90c0b6045f3c6aa754010d66810a2d174f394fec12c8135cf31bdce",
+        "verify": "e8becac9785cf62fc8577b753215563b937903ba17ac73df4c49ba1932c0d58b",
+        "verify_previous": "d61bbe7bcba4a38e5536d76ce9ddf196864998812d1e4b574478156e778cc1e1"
+      }
+    },
+    {
+      "version": "20261116_01_withdrawal_payee",
+      "up": "20261116_01_withdrawal_payee_up.sql",
+      "down": "20261116_01_withdrawal_payee_down.sql",
+      "verify": "20261116_01_withdrawal_payee_verify.sql",
+      "verify_previous": "20261116_01_withdrawal_payee_verify_previous.sql",
+      "sha256": {
+        "up": "2392d44c481ac219a8c62c3ab704bc1b5c928583dbdab7bc710de749080de2f7",
+        "down": "9c242a500faf2c5b2a7b89be092a40ad0d8758342db56ae98a90c1eaf57cbe74",
+        "verify": "ef91b964c6c2118470dabf5136460b6dbfea81623bccc57fb3eebbcb17928f5b",
+        "verify_previous": "57b43e882977be0414321054b5234a8c5621670b5b11fd4973b48be1680d7256"
+      }
+    },
+    {
+      "version": "20261110_01_point_redeem_order_count",
+      "up": "20261110_01_point_redeem_order_count_up.sql",
+      "down": "20261110_01_point_redeem_order_count_down.sql",
+      "verify": "20261110_01_point_redeem_order_count_verify.sql",
+      "verify_previous": "20261110_01_point_redeem_order_count_verify_previous.sql",
+      "sha256": {
+        "up": "e3ebc3e5574936207e3f2629c179abd9905cc62d85eda7cb22b79eff37299050",
+        "down": "382b5715a733d5bbafae3a30d62f061d1ef496f3681a56107a3fcf8249249830",
+        "verify": "42a0ee83ee94aa3c58507507dcc2d1566038cb6989301a2c5d6527bca49476de",
+        "verify_previous": "14fd0a048032d3fc7b4cffa1118a1b4eeb1022005e4758803305a7ae856470ca"
+      }
+    },
+    {
+      "version": "20261117_01_aibot_chat",
+      "up": "20261117_01_aibot_chat_up.sql",
+      "down": "20261117_01_aibot_chat_down.sql",
+      "verify": "20261117_01_aibot_chat_verify.sql",
+      "verify_previous": "20261117_01_aibot_chat_verify_previous.sql",
+      "sha256": {
+        "up": "635281aacf0eb7b72abe1ecd9477dd26a31afd1d12086b2188019dbe68861cb0",
+        "down": "045459aa4a596e9c9e862eafa52793d73d20cf222def3defd6eb6f6130a6f1cf",
+        "verify": "05a2e07388af8732f6cc347adbf12c1c15b77d49fc0465754aac034c1aaaa4c5",
+        "verify_previous": "e308abf3b87e3a91a4c5a424f86ea2d10b5155754d5c6f96819a5637c1f5b0b4"
+      }
+    },
+    {
+      "version": "20261117_02_bot_intake",
+      "up": "20261117_02_bot_intake_up.sql",
+      "down": "20261117_02_bot_intake_down.sql",
+      "verify": "20261117_02_bot_intake_verify.sql",
+      "verify_previous": "20261117_02_bot_intake_verify_previous.sql",
+      "sha256": {
+        "up": "ecded91833255ae1262b7ee2878dae1087356f86f49e2b312c6b3ffb78d79d8b",
+        "down": "5ca0b6e0cefd22a651f6ef52fa2507f81a4e04e324bd4e09af27a9ad572413dc",
+        "verify": "a1aeeab676c85d30e4b9c56992c13802bd6239e96ce49a23282952ba86e829d5",
+        "verify_previous": "bb51cd91c62352ff5fbe456e4ab25bdfe229417322561375533d1a02f8b7784a"
+      }
+    },
+    {
+      "version": "20261117_03_aibot_love_report",
+      "up": "20261117_03_aibot_love_report_up.sql",
+      "down": "20261117_03_aibot_love_report_down.sql",
+      "verify": "20261117_03_aibot_love_report_verify.sql",
+      "verify_previous": "20261117_03_aibot_love_report_verify_previous.sql",
+      "sha256": {
+        "up": "34a3f3a6a35a08040a16207a1572e8dd5fd2715a499d46a6ec2e16eb0b6f94fd",
+        "down": "782350862d3e805a6d641dd5fdd54d0fb94872782eececac88445605aa53bf68",
+        "verify": "a804a15469c317503df1ae0b6bb05470340ca2bb74260565984c562a77e0f44c",
+        "verify_previous": "fde4792f87b1e5ff1f26f8bbd8d08fb87b1488dfc8f95acdbdcc04deafb0cfae"
+      }
+    },
+    {
+      "version": "20261118_01_aibot_timeline",
+      "up": "20261118_01_aibot_timeline_up.sql",
+      "down": "20261118_01_aibot_timeline_down.sql",
+      "verify": "20261118_01_aibot_timeline_verify.sql",
+      "verify_previous": "20261118_01_aibot_timeline_verify_previous.sql",
+      "sha256": {
+        "up": "4531b8fc6a76e8813ed6020cf17b120b5a53e9aa075a5f1b957cb16bdec7fd95",
+        "down": "55fd174c3052416906995a4994f3670317f084ce5d9857cc2b54eaec2fa2acc8",
+        "verify": "56a946558f8568da20d94ee5bc4125e5771129e28b92791ba78b373cf0d7b402",
+        "verify_previous": "42f1bd9254009a4e8e1f3bf8522429b1975c0dba322048659adadac4e336e1e9"
+      }
+    },
+    {
+      "version": "20261119_01_aibot_story_play",
+      "up": "20261119_01_aibot_story_play_up.sql",
+      "down": "20261119_01_aibot_story_play_down.sql",
+      "verify": "20261119_01_aibot_story_play_verify.sql",
+      "verify_previous": "20261119_01_aibot_story_play_verify_previous.sql",
+      "sha256": {
+        "up": "3146a8855e8dea8eb9675be227e8970e83c184861e33023c9a5f5bb531ba956c",
+        "down": "7b84010bb934ae6dde13a27ab18e97a77eb5bedc77c70cfb6833e172d23bdfc2",
+        "verify": "0de0494ae11bd46ee321ad44a081812dfba14eb674217fb447d15bc0d5592d82",
+        "verify_previous": "7fdc8e9b14cb68e2f8d95a18f14a2b47af32a94a49b2fcab3d44e54592ad970e"
       }
     }
   ]

@@ -45,6 +45,7 @@ def test_master_off_disables_everything(monkeypatch: pytest.MonkeyPatch) -> None
             ai_master_enabled=False,
             ai_profile_enabled=True,
             ai_search_enabled=True,
+            ai_compatibility_shadow_enabled=True,
             ai_voice_enabled=True,
             ai_enabled=True,
             ai_avatar_provider="qwen",
@@ -53,6 +54,7 @@ def test_master_off_disables_everything(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert route._usable(AiFeature.PROFILE) is False
     assert route._usable(AiFeature.SEARCH) is False
+    assert route._usable(AiFeature.COMPATIBILITY_SHADOW) is False
     assert route._usable(AiFeature.VOICE) is False
     assert route._usable(AiFeature.ADVISOR) is False
     assert route._usable(AiFeature.AVATAR) is False
@@ -66,6 +68,7 @@ def test_master_on_follows_each_feature_switch(monkeypatch: pytest.MonkeyPatch) 
             ai_master_enabled=True,
             ai_profile_enabled=True,
             ai_search_enabled=False,
+            ai_compatibility_shadow_enabled=True,
             ai_voice_enabled=True,
             ai_enabled=True,
             ai_avatar_provider="disabled",
@@ -74,6 +77,7 @@ def test_master_on_follows_each_feature_switch(monkeypatch: pytest.MonkeyPatch) 
 
     assert route._usable(AiFeature.PROFILE) is True
     assert route._usable(AiFeature.SEARCH) is False
+    assert route._usable(AiFeature.COMPATIBILITY_SHADOW) is True
     assert route._usable(AiFeature.VOICE) is True
     assert route._usable(AiFeature.ADVISOR) is True
     assert route._usable(AiFeature.AVATAR) is False, "avatar provider 为 disabled 时不可用"
@@ -88,6 +92,7 @@ async def test_endpoint_reports_master_flag(monkeypatch: pytest.MonkeyPatch) -> 
         "master": False,
         "profile": False,
         "search": False,
+        "compatibility": False,
         "voice": False,
         "advisor": False,
         "avatar": False,

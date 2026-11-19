@@ -111,6 +111,8 @@
 | system-setting-admin-user-edit | `POST /admin/matchmaker/accounts/{id}/reset-password` | `matchmaker.account.manage` | 密码重置 |
 | system-setting-admin-user-edit | `GET /admin/matchmaker/accounts` | `matchmaker.account.manage` | 分组下拉（admin_groups） |
 
+人工转账审核变更：待处理（`PENDING_REVIEW`）可直接转为 `SUCCEEDED`，表示管理员确认线下转账已完成；也可转为 `REJECTED`，原申请扣减的金额通过账本冲正退回。原有 `APPROVED`、`PROCESSING` 流程保持兼容。请求仍需 `confirm=true` 和 `Idempotency-Key`，终态不能重复流转。
+
 ---
 
 ## 四、后端代码

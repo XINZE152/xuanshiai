@@ -41,6 +41,35 @@ class JsapiPayParams(BaseModel):
         }
 
 
+class VirtualPayParamsRequest(BaseModel):
+    """虚拟支付签名参数请求：需要新鲜的 ``uni.login`` code 换 session_key。"""
+
+    js_code: str = Field(min_length=1, max_length=256, description="wx.login / uni.login 返回的 code")
+
+
+class VirtualPayParamsResponse(BaseModel):
+    """小程序 ``wx.requestVirtualPayment`` 所需参数（snake_case）。"""
+
+    sign_data: str = Field(min_length=1, description="原样透传给客户端的 signData 字符串")
+    mode: Literal["short_series_goods"] = "short_series_goods"
+    pay_sig: str = Field(min_length=1, max_length=128)
+    signature: str = Field(min_length=1, max_length=128)
+    offer_id: str = Field(min_length=1, max_length=64)
+    product_id: str = Field(min_length=1, max_length=128)
+    goods_price: int = Field(ge=1, description="单价（分），须与 MP 道具价格一致")
+    out_trade_no: str = Field(min_length=8, max_length=64)
+    env: Literal[0, 1] = 0
+
+
+class XpayStatusResponse(BaseModel):
+    """前端据此决定走虚拟支付还是旧 JSAPI。"""
+
+    enabled: bool
+    mode: Literal["disabled", "mock", "real"]
+    env: Literal[0, 1]
+    offer_id_configured: bool
+
+
 class RefundCreateRequest(BaseModel):
     """后台发起微信退款。"""
 

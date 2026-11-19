@@ -17,12 +17,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.sensitive_fields import REDACTION_LEVEL_STANDARD, is_masked_value, mask_contact
+from app.core.security import lead_convert_password_fields
 # 复用登录注册链路的默认角色发放实现，避免入库账号缺少默认 user_role。
 from app.services.auth import ensure_default_user_role
 from app.schemas.auth import PreferenceUpdateRequest
 
 from app.schemas.customer_lead_admin import (
-    CustomerLead, CustomerLeadAbandonment, CustomerLeadAssignment, CustomerLeadCreate, CustomerLeadCreateResult, CustomerLeadFollowUp,
+    CustomerLead, CustomerLeadAbandonment, CustomerLeadAssignment,
+    LeadFollowTemplate, LeadReportCountItem, LeadReportOverview,
+    CustomerLeadCreate, CustomerLeadCreateResult, CustomerLeadFollowUp,
     CustomerLeadBatchImportResult, CustomerLeadConvertRequest, CustomerLeadFollowUpCreate, CustomerLeadImportRow, CustomerLeadImportSummary,
     CustomerLeadOption, CustomerLeadOptions,
     CustomerLeadPage, CustomerLeadStatistics, CustomerLeadUpdate,
@@ -50,17 +53,21 @@ from app.services.member_follow_up_admin import (
 )
 
 LEAD_SELECT = """SELECT id, name, phone, wechat, source, intention_level, status, audit_status, matchmaker_id,
-    organization_id, promoter_id, next_follow_at, converted_user_id, remark, created_by, created_at, updated_at
+    organization_id, promoter_id, next_follow_at, converted_user_id, remark, created_by, created_at, updated_at,
+    wechat_added, assigned_at
     FROM customer_lead"""
 
 _LEAD_FROM_RE = re.compile(r"\bFROM customer_lead\b")
 
 # 客源「本人资料」可读写列（与 _LeadProfileFields 一一对应）。gender/age 单列处理：
 # gender 沿用 CAST，age 由 birth_date 派生。列不存在时读写均静默降级（先发版后迁移）。
+# photo/birthday 是 2026-10-29 为红娘工作台卡片补的单值列（后台表单用 photos/birth_date），
+# 一并列入后两套字段都能读写，读取方按各自口径取值，不会因为列名分叉丢数据。
 _LEAD_PROFILE_COLUMNS: tuple[str, ...] = (
     "real_name", "birth_date", "marriage", "occupation", "income", "height",
     "weight", "education", "hometown", "residence", "house", "car",
     "smoking", "drinking", "ethnicity", "school", "company", "photos",
+    "photo", "birthday",
 )
 
 
@@ -122,6 +129,7 @@ _INTENTION_ALIASES: dict[str, int] = {
     "中": 4,
     "高": 6,
 }
+_PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
 
 
 def _lead(row: Any, redaction_level: str = REDACTION_LEVEL_STANDARD) -> CustomerLead:
@@ -130,11 +138,14 @@ def _lead(row: Any, redaction_level: str = REDACTION_LEVEL_STANDARD) -> Customer
     `wechat` 按敏感等级掩码后返回（审计第 1 项：完整微信号不得返回）；默认标准级，
     调用方忘记传等级时落到最严格一档，不会泄露完整值。`photos` 为 JSON 列，
     raw SQL 取回的是文本，归一化为 URL 列表（NULL 保持 None）。
+    `gender` 历史行有 NULL（A13 加列前的数据），CustomerLead 是 Literal[0,1,2]
+    不接受 None，这里归一为 0（未知），否则整行序列化 500。
     """
     from app.services.profile import _json_list  # 延迟导入避免模块级循环依赖
 
     payload = dict(row)
     payload["wechat"] = mask_contact(payload.get("wechat"), redaction_level)
+    payload["gender"] = payload.get("gender") or 0
     if payload.get("photos") is not None:
         payload["photos"] = _json_list(payload["photos"])
     return CustomerLead(**payload)
@@ -312,9 +323,13 @@ async def convert_lead(
     phone = normalize_contact(await _raw_contact(db, lead_id, "phone"))
     if not phone:
         raise HTTPException(409, detail="线索未登记手机号，无法生成账号，请先补充电话")
+    # 历史线索里还有微信-only/占位号码；入库会直接拿手机号建会员账号，必须当场拦住而不是留下登不进来的号。
+    if not _PHONE_PATTERN.fullmatch(phone):
+        raise HTTPException(422, detail=f"手机号「{phone}」不是有效的 11 位号码，请先修正线索电话后再入库")
+    # users.phone 唯一，撞号时先给出可读提示，而不是让整条入库挂在数据库异常上。
     existing = await db.execute(text("SELECT id FROM users WHERE phone = :phone LIMIT 1"), {"phone": phone})
     if existing.scalar():
-        raise HTTPException(409, detail="该手机号已注册会员，不能重复入库")
+        raise HTTPException(409, detail=f"手机号 {phone} 已是会员（ID {int(existing.scalar())}），请到会员CRM维护，不要重复入库")
     target_organization_id = lead.organization_id or organization_id
     target_matchmaker_id = lead.matchmaker_id or matchmaker_user_id
     try:
@@ -325,6 +340,11 @@ async def convert_lead(
             "openid": f"lead-convert-{lead_id}", "phone": phone,
             "nickname": lead.name, "gender": request.gender,
         }
+        password_fields = lead_convert_password_fields()
+        for key, value in password_fields.items():
+            user_columns.append(key)
+            user_values.append(':' + key)
+            user_payload[key] = value
         # 与后台建档（后台添加）、自助注册（自己注册）区分；users.source 未迁移时静默不写。
         if "source" in await _table_columns(db, "users"):
             user_columns.append("source")
@@ -348,15 +368,17 @@ async def convert_lead(
             "residence": lead.residence, "ethnicity": lead.ethnicity, "house": lead.house,
             "car": lead.car, "smoking": lead.smoking, "drinking": lead.drinking,
             "occupation": lead.occupation,
-            "photos": _json_value(lead.photos) if lead.photos else None,
+            # 后台表单存 photos 数组，工作台线索可能只有单值 photo：两者都搬，别让只填了一个的线索入库后丢头像。
+            "photos": _json_value(lead.photos) if lead.photos else (_json_value([lead.photo]) if lead.photo else None),
         }, profile_cols)
         await _upsert_profile_row(db, "user_auth", user_id, {
             "real_name": lead.real_name, "education": lead.education, "school": lead.school,
             "company": lead.company, "job": lead.occupation,
         }, auth_cols)
         user_patch: dict[str, Any] = {}
-        if lead.birth_date is not None:
-            user_patch["birthday"] = lead.birth_date
+        birth = lead.birth_date or lead.birthday
+        if birth is not None:
+            user_patch["birthday"] = birth
         mapped_marriage = _map_lead_marriage(lead.marriage)
         if mapped_marriage is not None:
             user_patch["is_married"] = mapped_marriage
@@ -1136,23 +1158,47 @@ async def matchmaker_follow_stats(
         where.append("cl.matchmaker_id = :matchmaker_id")
         params["matchmaker_id"] = matchmaker_id
     clause = " AND ".join(where)
+    # 跟进条数：直接按跟进表聚合（不进客户表 JOIN，避免一人多跟进把客源数放大）
+    follow_rows = (await db.execute(text(f"""SELECT cl.matchmaker_id AS matchmaker_id,
+        COUNT(fu.id) AS total_count,
+        SUM(fu.created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')) AS month_count
+        FROM customer_lead cl
+        JOIN customer_lead_follow_up fu ON fu.lead_id = cl.id
+        WHERE {clause}
+        GROUP BY cl.matchmaker_id"""), params)).mappings().all()
+    follow_map = {int(r["matchmaker_id"]): (int(r["total_count"] or 0), int(r["month_count"] or 0)) for r in follow_rows}
+    # 名下客源 / 从未跟进 / 超 N 天未跟进：每个客源取「最后一次跟进时间」，无跟进时回退录入时间
     rows = (await db.execute(text(f"""SELECT cl.matchmaker_id AS matchmaker_id,
         COALESCE(NULLIF(u.nickname, ''), u.phone, CONCAT('红娘', cl.matchmaker_id)) AS matchmaker_name,
-        COUNT(DISTINCT cl.id) AS lead_count,
-        COUNT(fu.id) AS total_count,
-        SUM(fu.created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')) AS month_count,
-        COUNT(DISTINCT CASE WHEN NOT EXISTS (SELECT 1 FROM customer_lead_follow_up fx WHERE fx.lead_id = cl.id) THEN cl.id END) AS unfollowed_count
+        COUNT(*) AS lead_count,
+        SUM(CASE WHEN lf.last_at IS NULL THEN 1 ELSE 0 END) AS unfollowed_count,
+        SUM(CASE WHEN COALESCE(lf.last_at, cl.created_at) < DATE_SUB(NOW(), INTERVAL 3 DAY) THEN 1 ELSE 0 END) AS overdue_3d,
+        SUM(CASE WHEN COALESCE(lf.last_at, cl.created_at) < DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS overdue_7d,
+        SUM(CASE WHEN COALESCE(lf.last_at, cl.created_at) < DATE_SUB(NOW(), INTERVAL 15 DAY) THEN 1 ELSE 0 END) AS overdue_15d,
+        SUM(CASE WHEN COALESCE(lf.last_at, cl.created_at) < DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS overdue_30d
         FROM customer_lead cl
-        LEFT JOIN customer_lead_follow_up fu ON fu.lead_id = cl.id
+        LEFT JOIN (SELECT lead_id, MAX(created_at) AS last_at FROM customer_lead_follow_up GROUP BY lead_id) lf
+               ON lf.lead_id = cl.id
         LEFT JOIN users u ON u.id = cl.matchmaker_id
         WHERE {clause}
         GROUP BY cl.matchmaker_id, matchmaker_name
-        ORDER BY total_count DESC, lead_count DESC"""), params)).mappings().all()
-    return [MatchmakerFollowStat(
-        matchmaker_id=int(r["matchmaker_id"]), matchmaker_name=str(r["matchmaker_name"] or ""),
-        total_count=int(r["total_count"] or 0), month_count=int(r["month_count"] or 0),
-        unfollowed_count=int(r["unfollowed_count"] or 0),
-    ) for r in rows]
+        ORDER BY lead_count DESC"""), params)).mappings().all()
+    out: list[MatchmakerFollowStat] = []
+    for r in rows:
+        mid = int(r["matchmaker_id"])
+        total_count, month_count = follow_map.get(mid, (0, 0))
+        out.append(MatchmakerFollowStat(
+            matchmaker_id=mid, matchmaker_name=str(r["matchmaker_name"] or ""),
+            total_count=total_count, month_count=month_count,
+            unfollowed_count=int(r["unfollowed_count"] or 0),
+            lead_count=int(r["lead_count"] or 0),
+            overdue_3d=int(r["overdue_3d"] or 0),
+            overdue_7d=int(r["overdue_7d"] or 0),
+            overdue_15d=int(r["overdue_15d"] or 0),
+            overdue_30d=int(r["overdue_30d"] or 0),
+        ))
+    out.sort(key=lambda item: (item.total_count, item.lead_count), reverse=True)
+    return out
 
 
 async def promoter_acquisition_stats(
@@ -1242,10 +1288,11 @@ async def restore_lead(
     if not active:
         raise HTTPException(409, detail="该客源不在弃海池")
     # 恢复后线索回到有效状态，先确认联系方式没有被其它有效线索占用。
+    # get_lead 返回的 wechat 已按敏感等级脱敏，比对必须用库里的原值。
     await ensure_contact_available(
         db,
         normalize_contact(current.phone),
-        normalize_contact(current.wechat),
+        normalize_contact(await _raw_contact(db, lead_id, "wechat")),
         exclude_lead_id=lead_id,
         detail="该客源的联系方式已被其他有效线索占用，无法恢复",
     )
@@ -1355,8 +1402,13 @@ async def list_abandonments(
         where.append("ab.restored_at IS NULL")
     _merge_scope(where, params, scope, scope_params)
     rows = await db.execute(text(f"""SELECT ab.id, ab.lead_id, ab.reason, ab.abandoned_by, ab.abandoned_at,
-        ab.restored_by, ab.restored_at, ab.restore_reason
+        ab.restored_by, ab.restored_at, ab.restore_reason,
+        COALESCE(NULLIF(au.nickname, ''), au.phone, CONCAT('账号 #', ab.abandoned_by)) AS abandoned_by_name,
+        CASE WHEN ab.restored_by IS NULL THEN NULL
+             ELSE COALESCE(NULLIF(ru.nickname, ''), ru.phone, CONCAT('账号 #', ab.restored_by)) END AS restored_by_name
         FROM customer_lead_abandonment ab JOIN customer_lead cl ON cl.id = ab.lead_id
+        LEFT JOIN users au ON au.id = ab.abandoned_by
+        LEFT JOIN users ru ON ru.id = ab.restored_by
         WHERE {' AND '.join(where)} ORDER BY ab.id DESC"""), params)
     return [CustomerLeadAbandonment(**dict(row)) for row in rows.mappings().all()]
 
@@ -1382,20 +1434,27 @@ async def _insert_leads(
     await _ensure_user_in_scope(db, default_promoter_id, assignment_scope, assignment_scope_params)
     columns = await _lead_columns(db)
     for index, row in enumerate(rows, start=start_index):  # Excel 数据从第 2 行起
-        if not row.phone and not row.wechat:
+        # 业务口径：线索必须有有效手机号，否则联系不上人、也无法一键入库成会员。
+        phone = normalize_contact(row.phone)
+        if not phone:
             failed += 1
-            errors.append(f"第 {index} 行：phone 或 wechat 至少提供一个")
+            errors.append(f"第 {index} 行：缺少手机号")
             continue
+        if not _PHONE_PATTERN.fullmatch(phone):
+            failed += 1
+            errors.append(f"第 {index} 行：手机号「{phone}」不是有效的 11 位号码")
+            continue
+        wechat = normalize_contact(row.wechat)
         try:
             if dup_mode == "skip":
                 contact_conditions: list[str] = []
                 dup_params: dict[str, Any] = {}
-                if row.phone:
+                if phone:
                     contact_conditions.append("phone = :phone")
-                    dup_params["phone"] = row.phone
-                if row.wechat:
+                    dup_params["phone"] = phone
+                if wechat:
                     contact_conditions.append("wechat = :wechat")
-                    dup_params["wechat"] = row.wechat
+                    dup_params["wechat"] = wechat
                 duplicate = await db.execute(
                     text("SELECT id FROM customer_lead WHERE status NOT IN ('LOST', 'CLOSED') AND ("
                          + " OR ".join(contact_conditions) + ") LIMIT 1"),
@@ -1407,7 +1466,7 @@ async def _insert_leads(
             insert_columns = ["name", "phone", "wechat", "source", "intention_level", "remark",
                               "matchmaker_id", "promoter_id", "audit_status", "created_by"]
             insert_payload: dict[str, Any] = {
-                "name": row.name, "phone": row.phone, "wechat": row.wechat,
+                "name": row.name, "phone": phone, "wechat": wechat,
                 "source": (row.source or "").strip() or default_source,
                 "intention_level": row.intention_level, "remark": row.remark,
                 "matchmaker_id": default_matchmaker_id, "promoter_id": default_promoter_id,
@@ -1612,4 +1671,158 @@ async def lead_options(
             FROM user_matchmaker_apply a JOIN users u ON u.id = a.user_id
             WHERE a.application_type = 'promoter' AND a.status = 1 ORDER BY u.id"""))).mappings().all()
     ]
-    return CustomerLeadOptions(sources=sources, matchmakers=matchmakers, promoters=promoters)
+    stores = [
+        CustomerLeadOption(value=str(row["id"]), label=row["label"])
+        for row in (await db.execute(text("""SELECT id, COALESCE(NULLIF(display_name, ''), name) AS label
+            FROM organization WHERE org_type = 'store' AND status = 1 ORDER BY id"""))).mappings().all()
+    ]
+    return CustomerLeadOptions(sources=sources, matchmakers=matchmakers, promoters=promoters, stores=stores)
+
+
+# ─────────────── 2026-11-11 跟进模板 / 数据报表 ───────────────
+
+
+async def list_follow_templates(db: AsyncSession) -> list[LeadFollowTemplate]:
+    """跟进内容模板列表（按 sort_order 升序，供「从模板选择」与「管理模板」）。"""
+    rows = (await db.execute(text(
+        "SELECT id, name, content, sort_order FROM lead_follow_template ORDER BY sort_order ASC, id ASC"
+    ))).mappings().all()
+    return [LeadFollowTemplate(**dict(r)) for r in rows]
+
+
+async def create_follow_template(db: AsyncSession, name: str, content: str) -> LeadFollowTemplate:
+    """新增模板：排序值接在最大值之后，避免每次都要手动调整顺序。"""
+    max_order = (await db.execute(text("SELECT COALESCE(MAX(sort_order), 0) FROM lead_follow_template"))).scalar() or 0
+    result = await db.execute(text(
+        "INSERT INTO lead_follow_template (name, content, sort_order) VALUES (:name, :content, :sort_order)"
+    ), {"name": name, "content": content, "sort_order": int(max_order) + 10})
+    await db.commit()
+    new_id = int(result.lastrowid)
+    rows = (await db.execute(text(
+        "SELECT id, name, content, sort_order FROM lead_follow_template WHERE id = :id"
+    ), {"id": new_id})).mappings().all()
+    return LeadFollowTemplate(**dict(rows[0]))
+
+
+async def update_follow_template(db: AsyncSession, template_id: int, name: str | None, content: str | None) -> LeadFollowTemplate:
+    exists = (await db.execute(text("SELECT 1 FROM lead_follow_template WHERE id = :id"), {"id": template_id})).scalar()
+    if not exists:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    sets, params = [], {"id": template_id}
+    if name is not None:
+        sets.append("name = :name")
+        params["name"] = name
+    if content is not None:
+        sets.append("content = :content")
+        params["content"] = content
+    if sets:
+        await db.execute(text(f"UPDATE lead_follow_template SET {', '.join(sets)} WHERE id = :id"), params)
+        await db.commit()
+    rows = (await db.execute(text(
+        "SELECT id, name, content, sort_order FROM lead_follow_template WHERE id = :id"
+    ), {"id": template_id})).mappings().all()
+    return LeadFollowTemplate(**dict(rows[0]))
+
+
+async def delete_follow_template(db: AsyncSession, template_id: int) -> None:
+    result = await db.execute(text("DELETE FROM lead_follow_template WHERE id = :id"), {"id": template_id})
+    await db.commit()
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="模板不存在")
+
+
+async def move_follow_template(db: AsyncSession, template_id: int, direction: str) -> list[LeadFollowTemplate]:
+    """上移/下移：与相邻模板交换 sort_order（不重排全部行，避免并发写打架）。"""
+    rows = (await db.execute(text(
+        "SELECT id, sort_order FROM lead_follow_template ORDER BY sort_order ASC, id ASC"
+    ))).mappings().all()
+    ids = [int(r["id"]) for r in rows]
+    if template_id not in ids:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    idx = ids.index(template_id)
+    target = idx - 1 if direction == "up" else idx + 1
+    if 0 <= target < len(ids):
+        a, b = rows[idx], rows[target]
+        await db.execute(text("UPDATE lead_follow_template SET sort_order = :o WHERE id = :i"),
+                         {"o": int(b["sort_order"]), "i": int(a["id"])})
+        await db.execute(text("UPDATE lead_follow_template SET sort_order = :o WHERE id = :i"),
+                         {"o": int(a["sort_order"]), "i": int(b["id"])})
+        await db.commit()
+    return await list_follow_templates(db)
+
+
+async def lead_report_overview(
+    db: AsyncSession,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    scope: str | None = None,
+    scope_params: dict[str, Any] | None = None,
+) -> LeadReportOverview:
+    """线索库数据报表：意向/来源/状态分布、月度增量、分派统计一次取全。
+
+    与前端口径一致：全部基于未删除线索；日期区间只作用于「增量 / 分派」两个按时间维度的页签，
+    意向/来源/状态是当前存量快照。
+    """
+    if scope_params is None:
+        scope_params = {}
+    columns = await _lead_columns(db)
+    where = ["1=1"]
+    params: dict[str, Any] = {}
+    if "deleted_at" in columns:
+        where.append("cl.deleted_at IS NULL")
+    if scope:
+        where.append(f"({scope})")
+        params.update(scope_params)
+    clause = " AND ".join(where)
+
+    def _date_clause(field: str) -> str:
+        extra = ""
+        if start_date:
+            extra += f" AND DATE({field}) >= :start_date"
+            params["start_date"] = start_date
+        if end_date:
+            extra += f" AND DATE({field}) <= :end_date"
+            params["end_date"] = end_date
+        return extra
+
+    total = int((await db.execute(text(f"SELECT COUNT(*) FROM customer_lead cl WHERE {clause}"), params)).scalar() or 0)
+
+    intent_rows = (await db.execute(text(
+        f"SELECT intention_level AS lv, COUNT(*) AS n FROM customer_lead cl WHERE {clause} GROUP BY intention_level"
+    ), params)).mappings().all()
+    intent_map = {int(r["lv"] or 1): int(r["n"]) for r in intent_rows}
+    intent = [LeadReportCountItem(label=LEAD_INTENTION_GRADES.get(lv, f"{lv}类"), value=intent_map.get(lv, 0))
+              for lv in LEAD_INTENTION_GRADES]
+
+    source_rows = (await db.execute(text(
+        f"SELECT COALESCE(NULLIF(source, ''), '未填写来源') AS label, COUNT(*) AS n FROM customer_lead cl "
+        f"WHERE {clause} GROUP BY label ORDER BY n DESC"
+    ), params)).mappings().all()
+    source = [LeadReportCountItem(label=str(r["label"]), value=int(r["n"])) for r in source_rows]
+
+    status_rows = (await db.execute(text(
+        f"SELECT status AS label, COUNT(*) AS n FROM customer_lead cl WHERE {clause} GROUP BY status"
+    ), params)).mappings().all()
+    status_map = {str(r["label"]): int(r["n"]) for r in status_rows}
+    status = [LeadReportCountItem(label=label, value=status_map.get(code, 0))
+              for code, label in (("NEW", "找对象中"), ("CONTACTED", "接触中"), ("INTENDED", "恋爱中"),
+                                  ("CONVERTED", "已到门店"), ("CLOSED", "已结婚"), ("LOST", "已弃海"))]
+
+    month_rows = (await db.execute(text(
+        f"SELECT DATE_FORMAT(created_at, '%Y-%m') AS label, COUNT(*) AS n FROM customer_lead cl "
+        f"WHERE {clause}{_date_clause('cl.created_at')} GROUP BY label ORDER BY label ASC"
+    ), params)).mappings().all()
+    monthly = [LeadReportCountItem(label=str(r["label"]), value=int(r["n"])) for r in month_rows]
+
+    assign_rows = (await db.execute(text(
+        f"SELECT COALESCE(NULLIF(u.nickname, ''), u.phone, CONCAT('红娘', cl.matchmaker_id)) AS label, "
+        f"cl.matchmaker_id AS mid, COUNT(*) AS n FROM customer_lead cl "
+        f"LEFT JOIN users u ON u.id = cl.matchmaker_id WHERE {clause} AND cl.matchmaker_id IS NOT NULL"
+        f"{_date_clause('cl.assigned_at')} GROUP BY cl.matchmaker_id, label ORDER BY n DESC"
+    ), params)).mappings().all()
+    assignee = [LeadReportCountItem(label=str(r["label"]), value=int(r["n"]), extra=str(r["mid"])) for r in assign_rows]
+
+    follow = await matchmaker_follow_stats(db, scope=scope, scope_params=scope_params)
+    return LeadReportOverview(total=total, intent=intent, source=source, status=status,
+                              monthly=monthly, assignee=assignee, follow=follow)

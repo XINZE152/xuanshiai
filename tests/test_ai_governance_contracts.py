@@ -1,16 +1,19 @@
 from pathlib import Path
 
+from tests._workspace_paths import require_frontend_root
+
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 def find_workspace_root() -> Path:
-    """向上查找包含 PRODUCT.md 的工作区根（兼容 worktree 目录深度）。"""
-    current = BACKEND_ROOT
-    for _ in range(5):
-        if (current / "PRODUCT.md").exists():
-            return current
-        current = current.parent
-    raise FileNotFoundError("PRODUCT.md not found above backend root")
+    """定位存放 ``PRODUCT.md`` 的工作区根。
+
+    ``PRODUCT.md`` 维护在前端仓库，后端单独 checkout 时它既不在后端根、也不一定在
+    后端根的上级。解析顺序（环境变量 → 后端 ``.env`` → 逐级向上 → 同级
+    ``xuanshiai-vue``）统一由 ``tests/_workspace_paths.py`` 实现，两处不要各写一份
+    不同的查找规则。
+    """
+    return require_frontend_root(BACKEND_ROOT)
 
 
 def test_ai_product_and_security_decisions_are_frozen() -> None:

@@ -221,7 +221,12 @@ async def test_delete_login_log_writes_audit_and_commits() -> None:
     assert deleted == 1
     assert db.committed is True
     delete_sql = db.statements[0][0]
-    assert delete_sql.strip().upper().startswith("DELETE l FROM user_login_log")
+    # 只删一条：必须带 JOIN users，作用域谓词才挂得到 users 上。
+    # 这里统一转小写再比：原先写的是 `delete_sql.upper().startswith("DELETE l FROM user_login_log")`，
+    # 左边被大写、右边是混合大小写，这条断言从写下那天起就不可能成立。
+    delete_sql = delete_sql.strip().lower()
+    assert delete_sql.startswith("delete l from user_login_log")
+    assert "join users u" in delete_sql and "l.id = :id" in delete_sql
     audit_sql = db.statements[1][0]
     assert "member.login_log.delete" in audit_sql and "user_login_log" in audit_sql
 
@@ -269,7 +274,12 @@ def test_members_route_projects_points_subquery() -> None:
 
 
 def test_login_log_routes_registered_on_member_prefix() -> None:
-    paths = {r.path: set(r.methods) for r in member_vip_admin.router.routes}
+    # 同一路径会挂多个方法（GET /login-logs + DELETE /login-logs），必须按路径合并
+    # methods，不能写成 {r.path: set(r.methods)} 的字典推导——后一条会把前一条覆盖掉，
+    # 于是「GET 也在」这条断言永远失败（路由本身是对的）。
+    paths: dict[str, set[str]] = {}
+    for route in member_vip_admin.router.routes:
+        paths.setdefault(route.path, set()).update(route.methods or set())
     # 兼容 APIRouter.prefix 是否已并入 route.path 两种形态，只断言尾段与工具。
     assert any(p.endswith("/login-logs") for p in paths)
     assert any(p.endswith("/login-logs/{log_id}") for p in paths)

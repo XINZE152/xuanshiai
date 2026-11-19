@@ -267,3 +267,66 @@ def test_every_memory_table_has_owner_scoping(table: str) -> None:
     assert "`owner_user_id` bigint unsigned NOT NULL" in block, (
         f"{table} must be owner-scoped"
     )
+
+
+# ---------------------------------------------------------------------------
+# bootstrap 与迁移的命名/约束对齐（全新库只能由 bootstrap 建表）
+# ---------------------------------------------------------------------------
+
+
+def test_verify_tolerates_bootstrap_index_names() -> None:
+    """校验器容忍的索引名里必须包含 bootstrap 实际建出的那一个。
+
+    全新库的 ``ai_memory_event`` / ``ai_memory_projection_grant`` 由
+    ``app/db/ai_schema.py`` 建出，迁移文件里的 ``CREATE TABLE IF NOT EXISTS``
+    是空操作——所以校验器只认迁移里的名字时，刚 bootstrap 完的库永远过不了。
+    """
+    from app.db.ai_schema import AI_TABLES
+    from scripts.manage_ai_migration import (
+        MEMORY_EVENT_IDEM_INDEX_NAMES,
+        PROJECTION_GRANT_UNIQUE_INDEX_NAMES,
+    )
+
+    pairs = (
+        (MEMORY_EVENT_IDEM_INDEX_NAMES, AI_TABLES["ai_memory_event"], "ai_memory_event"),
+        (
+            PROJECTION_GRANT_UNIQUE_INDEX_NAMES,
+            AI_TABLES["ai_memory_projection_grant"],
+            "ai_memory_projection_grant",
+        ),
+    )
+    for names, ddl, table in pairs:
+        assert len(names) >= 2, f"{table} 必须同时容忍迁移名与 bootstrap 名"
+        assert any(f"`{name}`" in ddl for name in names), (
+            f"{table} 的 bootstrap DDL 里的唯一键名字不在容忍集合内：{sorted(names)}"
+        )
+
+
+def test_bootstrap_projection_declares_concurrency_unique_keys() -> None:
+    """投影表只用版本唯一键做并发护栏，输入哈希不得建唯一键。
+
+    写入侧（``app/services/ai/memory/projections.py``）先取 MAX(version) 再 INSERT，
+    ``FOR UPDATE`` 在该维度还没有投影行时锁不住任何行，靠版本唯一键把同版本并发写
+    压成 IntegrityError 再回读先到者。
+
+    但不能对 ``projection_input_hash`` 建唯一键：同一内容在换授权代
+    （``consent_snapshot_id`` / ``policy_revision`` 变化）时必须新建版本，哈希唯一
+    会让合法重建撞 1062（集成用例
+    ``test_same_hash_projection_rebinds_current_authorization``）。
+    """
+    from app.db.ai_schema import AI_MEMORY_PROJECTION_LEGACY_UNIQUE_KEYS, AI_TABLES
+
+    ddl = AI_TABLES["ai_memory_projection"]
+    version_cols = "(`owner_user_id`, `function_key`, `purpose`, `data_category`, `projection_version`)"
+    input_cols = "(`owner_user_id`, `function_key`, `purpose`, `data_category`, `projection_input_hash`)"
+    assert f"UNIQUE KEY `uk_ai_memory_projection_version` {version_cols}" in ddl
+    assert f"UNIQUE KEY `uk_ai_memory_projection_input` {input_cols}" not in ddl
+    assert (
+        "owner_user_id",
+        "function_key",
+        "purpose",
+        "data_category",
+        "projection_input_hash",
+    ) in AI_MEMORY_PROJECTION_LEGACY_UNIQUE_KEYS
+    reviewed = _read(MIGRATION_ROOT / "20260905_02_memory_projection_up.sql")
+    assert f"UNIQUE KEY `uk_ai_memory_projection_input` {input_cols}" not in reviewed

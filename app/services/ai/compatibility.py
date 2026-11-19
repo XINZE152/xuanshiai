@@ -294,14 +294,19 @@ class CompatibilityInputInvalid(CompatibilityError):
 
 
 class CandidateNotVisible(CompatibilityError):
-    """404 CANDIDATE_NOT_VISIBLE：门禁失败，不返回具体拒绝原因（§11.2）。"""
+    """404 CANDIDATE_NOT_VISIBLE：门禁失败，不返回具体拒绝原因（§11.2）。
+
+    ``denial_code`` 只供服务端日志排障（AIT-08），**不得**进入任何对外响应：
+    可见性拒绝原因本身会泄露「对方把我隐藏了 / 对方资料不全」这类归属信息。
+    """
 
     code = "CANDIDATE_NOT_VISIBLE"
     status_code = 404
 
-    def __init__(self) -> None:
+    def __init__(self, denial_code: str | None = None) -> None:
         super().__init__("目标用户当前不可见")
         self.message = "目标用户当前不可见"
+        self.denial_code = denial_code
 
 
 class CompatibilityConsentRequired(CompatibilityError):
@@ -1501,12 +1506,12 @@ async def read_compatibility_snapshot(
     归属；版本/隐私变化或结果过期 → ``stale``（不能当最新解释）。
     """
     if int(viewer_id) == int(target_user_id):
-        raise CandidateNotVisible()
+        raise CandidateNotVisible("SELF_REFERENCE")
     decision = await candidate_visibility_service.decide(
         db, viewer_id, target_user_id, VisibilityScene.PROFILE
     )
     if not decision.allowed:
-        raise CandidateNotVisible()
+        raise CandidateNotVisible(decision.denial_code)
 
     row = await _load_latest_snapshot(db, viewer_id, target_user_id)
     if row is None:
@@ -1616,12 +1621,12 @@ async def request_compatibility_recompute(
     不 commit。
     """
     if int(owner_user_id) == int(target_user_id):
-        raise CandidateNotVisible()
+        raise CandidateNotVisible("SELF_REFERENCE")
     decision = await candidate_visibility_service.decide(
         db, owner_user_id, target_user_id, VisibilityScene.PROFILE
     )
     if not decision.allowed:
-        raise CandidateNotVisible()
+        raise CandidateNotVisible(decision.denial_code)
 
     owner_rev = await _load_revision_vector(db, owner_user_id)
     target_rev = await _load_revision_vector(db, target_user_id)
@@ -1995,12 +2000,12 @@ async def request_compatibility_llm_refresh(
     不 commit。
     """
     if int(viewer_id) == int(target_user_id):
-        raise CandidateNotVisible()
+        raise CandidateNotVisible("SELF_REFERENCE")
     decision = await candidate_visibility_service.decide(
         db, viewer_id, target_user_id, VisibilityScene.PROFILE
     )
     if not decision.allowed:
-        raise CandidateNotVisible()
+        raise CandidateNotVisible(decision.denial_code)
     viewer_consent = await _load_active_consent(
         db, viewer_id, COMPATIBILITY_CONSENT_SCOPE
     )

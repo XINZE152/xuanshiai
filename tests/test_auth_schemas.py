@@ -49,3 +49,13 @@ def test_realname_rejects_underage_id_card() -> None:
 def test_profile_rejects_invalid_height() -> None:
     with pytest.raises(ValidationError):
         ProfileUpdateRequest(height=99)
+
+
+def test_profile_marriage_write_domain_is_the_three_profile_page_levels() -> None:
+    """婚况写入域与资料编辑页那三档一致；库里 0 与 4~7 是历史值，只读展示仍支持，写入必须 422。"""
+    for level in (1, 2, 3):
+        assert ProfileUpdateRequest(is_married=level).is_married == level
+    assert ProfileUpdateRequest(is_married=None).is_married is None
+    for legacy in (0, 4, 5, 6, 7):
+        with pytest.raises(ValidationError):
+            ProfileUpdateRequest(is_married=legacy)

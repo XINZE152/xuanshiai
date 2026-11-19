@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -325,11 +325,28 @@ class NarrativeHistoryObservation(BaseModel):
     observation: str = Field(..., min_length=1, max_length=300)
 
 
+class NarrativeEmotionalInsight(BaseModel):
+    """个人情感气质透视（仅 personal 主体生成，extra='forbid'）。
+
+    对齐 PRODUCT.md「情感气质透视（Emotional Insight）」：四型依恋风格 +
+    依恋诠释 + 相处闪光点 + 相处安全边界 + 知遇寄语。``extra='forbid'``
+    确保模型多吐的键被校验拦下，不会静默落进 summary_text。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    attachment_style: Literal["secure", "anxious", "avoidant", "fearful"]
+    attachment_summary: str = Field(..., min_length=1, max_length=60)
+    highlights: tuple[str, ...] = Field(..., min_length=2, max_length=4)
+    boundaries: tuple[str, ...] = Field(..., min_length=1, max_length=3)
+    master_message: str = Field(..., min_length=1, max_length=80)
+
+
 class NarrativeResult(BaseModel):
     """Typed provider result for narrative generation (画像叙事层)."""
 
     schema_version: str = Field(default="profile-narrative-v1", min_length=1, max_length=32)
-    prompt_version: str = Field(default="profile-narrative-prompt-v4", min_length=1, max_length=32)
+    prompt_version: str = Field(default="profile-narrative-prompt-v5", min_length=1, max_length=32)
     persona_title: str = Field(..., min_length=1, max_length=64)
     persona_tags: tuple[str, ...] = ()
     insight: str = Field(..., min_length=1, max_length=500)
@@ -339,6 +356,9 @@ class NarrativeResult(BaseModel):
     history_observations: tuple[NarrativeHistoryObservation, ...] = ()
     # 写在最后：整份画像的概括性收束（prompt v3 起生成；旧数据无此字段为 None）。
     conclusion: str | None = Field(default=None, min_length=1, max_length=300)
+    # 个人情感气质透视（仅 personal 生成；ideal_partner 由 Worker 复核剥离为
+    # None；旧数据无此字段为 None，前端整块隐藏）。
+    emotional_insight: NarrativeEmotionalInsight | None = None
 
 
 @dataclass(frozen=True)

@@ -12,6 +12,8 @@ Markdown 围栏、前后解释文字或尾逗号就整条判失败；再叠加 d
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from fastapi import HTTPException
 
@@ -81,3 +83,46 @@ def test_parse_json_does_not_log_raw_content(caplog: pytest.LogCaptureFixture) -
     joined = "\n".join(record.getMessage() for record in caplog.records)
     assert "ai_json_parse_failed" in joined
     assert "len=" in joined
+    # reason 只带 json 模块的定位信息，不能因为"为了好排查"把原文写进去。
+    body = joined.split("head=")[0]
+    assert secret not in body
+
+
+@pytest.mark.parametrize(
+    ("payload", "expect_truncated"),
+    [
+        # 命中 max_tokens：以 { 开头、没有 } 收尾
+        ('{"score":80,"summary":"你的资料还', True),
+        ('{"score":80,"todos":[{"key":"a"', True),
+        # 格式错乱而非截断：有收尾括号，中间的逗号/引号坏了
+        ('{"score":80,,"summary":"ok"}', False),
+        # 顶层数组：不是截断
+        ("[1,2,3]", False),
+    ],
+)
+def test_parse_json_logs_truncation_hint(
+    payload: str, expect_truncated: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """失败日志要能直接分辨「被截断」和「格式错乱」，否则无法定因。"""
+    caplog.set_level(logging.WARNING, logger="app.services.ai_provider")
+
+    with pytest.raises(HTTPException):
+        parse_json(payload)
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "ai_json_parse_failed" in joined
+    assert f"truncated={str(expect_truncated).lower()}" in joined.lower()
+    # reason 必须非空，便于确认是哪一层的 json 校验先失败
+    assert "reason=" in joined
+    assert "reason=no_candidate_parsed" not in joined
+
+
+def test_parse_json_logs_json_error_position(caplog: pytest.LogCaptureFixture) -> None:
+    """reason 要带 char 偏移，能直接对照 tail 判断断在哪里。"""
+    caplog.set_level(logging.WARNING, logger="app.services.ai_provider")
+
+    with pytest.raises(HTTPException):
+        parse_json('{"score":80 "summary":"ok"}')
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "@char" in joined

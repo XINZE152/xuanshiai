@@ -1,0 +1,29 @@
+{
+  "name": "chat",
+  "versions": [
+    {
+      "version": "20260923_01_chat_message_idempotency",
+      "up": "20260923_01_chat_message_idempotency_up.sql",
+      "down": "20260923_01_chat_message_idempotency_down.sql",
+      "verify": "20260923_01_chat_message_idempotency_verify.sql",
+      "verify_mode": "info",
+      "sha256": {
+        "up": "5c5b27d8e721988ace5fea723ecd616d0bcc6f8af240970b2b5fb26c2a94550c",
+        "down": "ac5d619eeb5fea59ac6e781b30e34887a97a589a7d2efe678c2be20f7e239b20",
+        "verify": "5158932c73841d7a6a5c265c9d171646da705332168ec0b0019e39a1ed49a4a9"
+      }
+    },
+    {
+      "version": "20261106_01_chat_message_hidden",
+      "up": "20261106_01_chat_message_hidden_up.sql",
+      "down": "20261106_01_chat_message_hidden_down.sql",
+      "verify": "20261106_01_chat_message_hidden_verify.sql",
+      "verify_mode": "info",
+      "sha256": {
+        "up": "b27f4dec4b0ccafb0421b2c23dff07b83556a1f3c37a4907237df2c12e496f3d",
+        "down": "4b9b923906dac73032311602c8b91b3bc49f20b7bf325c1c308a1e89664d4a41",
+        "verify": "3696bcddd9dbeee803c515bff739c79930e0c74dfc8ce2f93100a087e29864c1"
+      }
+    }
+  ]
+}

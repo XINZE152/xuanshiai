@@ -13,6 +13,7 @@ from enum import Enum
 from app.core.config import Settings
 from app.core.request_context import current_user_id_context
 from app.schemas.ai_common import AiErrorCode
+from app.services.ai import runtime_gates
 
 
 class AiFeature(str, Enum):
@@ -112,13 +113,44 @@ def require_ai_feature(feature: AiFeature, settings: Settings) -> None:
 
     The production Settings validator already rejects invalid combinations at
     boot; this guard re-checks at runtime so a stale configuration can never
-    silently route traffic to a disabled feature.
+    silently route traffic to a disabled feature.  ``ai_runtime`` 运行时 kill
+    只关不开（PAGE-SWITCH-20261116）：应急关停优先于一切 env 开关。
     """
+    if runtime_gates.is_killed(feature):
+        raise AiFeatureDisabledError(feature)
     if not is_ai_feature_enabled(feature, settings):
         raise AiFeatureDisabledError(feature)
     if not _production_approvals_ok(settings, feature):
         raise AiFeatureDisabledError(feature)
     _require_ai_test_scope(settings, feature)
+
+
+def public_ai_capabilities(settings: Settings) -> dict[str, bool]:
+    """匿名公开基准位（GET /public/page-switches 的 ai 块）。
+
+    与 ``/ai/capabilities`` 共用同一套判定（master + 功能开关 + 生产审批门
+    + 运行时 kill），但**不含** ``ai_test_only_user_ids`` 用户范围检查——
+    匿名请求没有用户上下文。登录用户的权威判定仍是 ``/ai/capabilities``。
+    """
+    master = bool(settings.ai_master_enabled) and not runtime_gates.master_killed()
+
+    def usable(feature: AiFeature) -> bool:
+        return (
+            master
+            and is_ai_feature_enabled(feature, settings)
+            and _production_approvals_ok(settings, feature)
+            and not runtime_gates.is_killed(feature)
+        )
+
+    return {
+        "master": master,
+        "profile": usable(AiFeature.PROFILE),
+        "search": usable(AiFeature.SEARCH),
+        "compatibility": usable(AiFeature.COMPATIBILITY_SHADOW),
+        "voice": usable(AiFeature.VOICE),
+        "advisor": usable(AiFeature.ADVISOR),
+        "avatar": usable(AiFeature.AVATAR),
+    }
 
 
 # ----------------------------------------------------------------------

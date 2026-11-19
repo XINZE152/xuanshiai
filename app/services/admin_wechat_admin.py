@@ -28,6 +28,7 @@ from app.schemas.admin_wechat_admin import (
     WechatMenuPublish,
     WechatMessageItem,
     WechatMessagePage,
+    WechatQrcodeResult,
     WechatReplyRuleCreate,
     WechatReplyRuleItem,
     WechatReplyRuleUpdate,
@@ -92,6 +93,22 @@ async def update_config(
     return await get_config(db)
 
 
+async def create_qrcode(db: AsyncSession, admin_id: int) -> WechatQrcodeResult:
+    """生成公众号带参二维码，并把图片地址落库到 wechat_mp 配置域（qrcode_url）。"""
+    ensure_wechat_mp_configured()
+    scene = f"admin-{uuid.uuid4().hex[:12]}"
+    try:
+        url = await get_wechat_mp_provider().create_qrcode(scene)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(502, detail="公众号二维码生成失败")
+    await config_service.patch_config(
+        db, admin_id, _CONFIG_NAMESPACE, {"qrcode_url": url}, summary="生成公众号二维码"
+    )
+    return WechatQrcodeResult(qrcode_url=url, scene_str=scene)
+
+
 # ─────────────────────────── 粉丝 ───────────────────────────
 
 
@@ -106,6 +123,7 @@ async def list_fans(
     keyword: str | None,
     group_id: int | None,
     subscribe_status: int | None,
+    subscribe_date: str | None = None,
 ) -> WechatFanPage:
     where: list[str] = []
     params: dict[str, Any] = {}
@@ -118,6 +136,9 @@ async def list_fans(
     if subscribe_status in (0, 1):
         where.append("f.subscribe_status = :subscribe_status")
         params["subscribe_status"] = subscribe_status
+    if subscribe_date:
+        where.append("DATE(f.subscribe_at) = :subscribe_date")
+        params["subscribe_date"] = subscribe_date
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     total = int(
         (
@@ -387,11 +408,39 @@ async def publish_menu(db: AsyncSession, admin_id: int, body: WechatMenuPublish)
 # ─────────────────────────── 自动回复 ───────────────────────────
 
 
-_RULE_SELECT = """SELECT id, name, match_type, keyword, reply_type, content, status, sort,
+_RULE_SELECT = """SELECT id, name, match_type, keyword, match_mode, reply_type, content, status, sort,
     created_at, updated_at FROM admin_wechat_autoreply_rule"""
+
+_rule_columns_ready = False
+
+
+async def _ensure_rule_columns(db: AsyncSession) -> None:
+    """幂等补列：早期建的表没有 match_mode（contain 包含 / equal 等于）。"""
+    global _rule_columns_ready
+    if _rule_columns_ready:
+        return
+    try:
+        exists = (
+            await db.execute(
+                text("SHOW COLUMNS FROM admin_wechat_autoreply_rule LIKE 'match_mode'")
+            )
+        ).first()
+        if not exists:
+            await db.execute(
+                text(
+                    "ALTER TABLE admin_wechat_autoreply_rule ADD COLUMN match_mode"
+                    " varchar(16) NOT NULL DEFAULT 'contain' COMMENT 'contain 包含 / equal 等于'"
+                )
+            )
+            await db.commit()
+        _rule_columns_ready = True
+    except Exception:
+        # 表不存在（尚未建表）等场景静默跳过，建表 DDL 已带完整列
+        return
 
 
 async def _get_rule(db: AsyncSession, rule_id: int) -> WechatReplyRuleItem:
+    await _ensure_rule_columns(db)
     row = (
         await db.execute(text(f"{_RULE_SELECT} WHERE id = :id"), {"id": rule_id})
     ).mappings().first()
@@ -403,6 +452,7 @@ async def _get_rule(db: AsyncSession, rule_id: int) -> WechatReplyRuleItem:
 async def list_rules(
     db: AsyncSession, match_type: str | None, status: int | None
 ) -> list[WechatReplyRuleItem]:
+    await _ensure_rule_columns(db)
     where: list[str] = []
     params: dict[str, Any] = {}
     if match_type in {"keyword", "subscribe", "default"}:
@@ -424,8 +474,8 @@ async def create_rule(
     result = await db.execute(
         text(
             "INSERT INTO admin_wechat_autoreply_rule"
-            " (name, match_type, keyword, reply_type, content, status, sort, created_by)"
-            " VALUES (:name, :match_type, :keyword, :reply_type, :content, :status, :sort, :actor)"
+            " (name, match_type, keyword, match_mode, reply_type, content, status, sort, created_by)"
+            " VALUES (:name, :match_type, :keyword, :match_mode, :reply_type, :content, :status, :sort, :actor)"
         ),
         {**body.model_dump(), "actor": admin_id},
     )

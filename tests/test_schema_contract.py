@@ -5,6 +5,7 @@ from __future__ import annotations
 from scripts.schema_contract import (
     bootstrap_only_columns,
     diff,
+    diff_constraints,
     normalize_type,
     parse_code_schema,
 )
@@ -24,8 +25,16 @@ def test_code_schema_covers_every_table_with_a_primary_key() -> None:
     # payment_notify_log / payment_reconcile_batch / payment_reconcile_diff）
     # + 红娘菜单权限已配置标记表（F15）+ C 端反馈表 user_feedback（Q54）
     # + 红娘喜讯 5 张关系表（meta / consent / blessing / report / audit）
-    # + Q63 chat_message_hidden + Q74 community_post_remind，合计 271。
-    assert len(schema) == 271
+    # + Q63 chat_message_hidden + Q74 community_post_remind
+    # + Q69 paper_plane_catch
+    # + 原站资源镜像 5 表（ref_teacher / ref_product / ref_guide /
+    #   ref_instruction / ref_material）
+    # + 人工提现收款信息表 withdrawal_payee_secret（WITHDRAWAL-MANUAL-20261116）
+    # + 恋 AI BOT 4 张表（aibot_user_assignment / aibot_session /
+    #   aibot_turn / aibot_love_report，20261117_01/03）
+    # + aibot_timeline_message（20261118_01）
+    # + aibot_story_play / aibot_story_peer_shown（20261119_01），合计 285。
+    assert len(schema) == 285
     assert all(spec["has_primary_key"] for spec in schema.values()), "所有表都应有主键"
     assert "paper_plane_profile_unlock" in schema
     assert "payment_refund" in schema
@@ -46,7 +55,9 @@ def test_multiline_generated_column_is_not_parsed_as_column() -> None:
 def test_bootstrap_only_columns_exclude_base_ddl_columns() -> None:
     gaps = bootstrap_only_columns()
     total = sum(len(columns) for columns in gaps.values())
-    assert total == 101
+    # 101 基线 + user_profile.bot_intake_json（恋 AI BOT 采集原样，
+    # 20261117_02_bot_intake_up.sql 覆盖，2026-11-18）。
+    assert total == 102
     assert "deleted_at" in {name for name, _ in gaps["users"]}
     assert "realname_status" in {name for name, _ in gaps["user_auth"]}
     # 基础 DDL 已有的列不应算作补列。
@@ -83,3 +94,36 @@ def test_diff_flags_missing_tables_only_for_expected_ones() -> None:
     expected = {"users": {"columns": {}, "indexes": [], "has_primary_key": True, "source": "code"}}
     report = diff(expected, {})
     assert report["missing_tables"] == ["users"]
+
+
+def test_diff_constraints_reports_default_and_check_mismatches() -> None:
+    report = diff_constraints(
+        {
+            "defaults": {"paper_plane_profile_unlock": {"points_cost": "80"}},
+            "checks": {},
+        }
+    )
+    assert report["default_mismatches"] == [
+        "paper_plane_profile_unlock.points_cost: expected 50, got 80"
+    ]
+    assert report["missing_checks"] == [
+        "paper_plane_profile_unlock.ck_paper_plane_unlock_cost"
+    ]
+
+
+def test_diff_constraints_accepts_widened_check() -> None:
+    report = diff_constraints(
+        {
+            "defaults": {"paper_plane_profile_unlock": {"points_cost": "50"}},
+            "checks": {
+                "paper_plane_profile_unlock": {
+                    "ck_paper_plane_unlock_cost": "(`points_cost` in (50,80))"
+                }
+            },
+        }
+    )
+    assert report == {
+        "default_mismatches": [],
+        "missing_checks": [],
+        "check_mismatches": [],
+    }

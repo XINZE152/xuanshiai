@@ -8,12 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentMatchmakerAdmin, declare_permission, get_current_matchmaker_admin, require_sensitive_operation
 from app.core.sensitive_fields import redaction_level_from_permissions
 from app.db.session import get_db
-from app.schemas.customer_lead_admin import CustomerLead, CustomerLeadAbandonment, CustomerLeadAbandonRequest, CustomerLeadBatchDeleteFailure, CustomerLeadBatchDeleteRequest, CustomerLeadBatchDeleteResult, CustomerLeadBatchImportRequest, CustomerLeadAssignment, CustomerLeadConvertRequest, CustomerLeadConvertResult, CustomerLeadCreate, CustomerLeadCreateResult, LeadAutoAssignRequest, CustomerLeadBatchImportResult, CustomerLeadFollowUp, CustomerLeadFollowUpCreate, CustomerLeadFollowUpRecordPage, CustomerLeadFollowBucket, MatchmakerFollowStat, CustomerLeadPromoterStat, CustomerLeadImportSummary, CustomerLeadOptions, CustomerLeadPage, CustomerLeadRestoreRequest, CustomerLeadStatistics, CustomerLeadUpdate, LeadPreferenceResponse
+from app.schemas.customer_lead_admin import CustomerLead, CustomerLeadAbandonment, LeadFollowTemplate, LeadFollowTemplateCreate, LeadFollowTemplateUpdate, LeadReportOverview, CustomerLeadAbandonRequest, CustomerLeadBatchDeleteFailure, CustomerLeadBatchDeleteRequest, CustomerLeadBatchDeleteResult, CustomerLeadBatchImportRequest, CustomerLeadAssignment, CustomerLeadConvertRequest, CustomerLeadConvertResult, CustomerLeadCreate, CustomerLeadCreateResult, LeadAutoAssignRequest, CustomerLeadBatchImportResult, CustomerLeadFollowUp, CustomerLeadFollowUpCreate, CustomerLeadFollowUpRecordPage, CustomerLeadFollowBucket, MatchmakerFollowStat, CustomerLeadPromoterStat, CustomerLeadImportSummary, CustomerLeadOptions, CustomerLeadPage, CustomerLeadRestoreRequest, CustomerLeadStatistics, CustomerLeadUpdate, LeadPreferenceResponse
 from app.schemas.auth import PreferenceUpdateRequest
 from app.schemas.customer_lead_dict_admin import LeadDictCreate, LeadDictItem, LeadDictOrder, LeadDictUpdate
 from app.schemas.lead_ai_extract import LeadExtractRequest, LeadExtractResult
 from app.services.lead_ai_extract import extract_lead_fields
-from app.services.customer_lead_admin import abandon_lead, add_follow_up, assign_lead, auto_assign_lead, batch_delete_leads, batch_import_leads, build_import_template, convert_lead, create_lead, create_follow_up_with_media, delete_lead, get_lead, get_lead_preferences, import_leads_file, lead_options, lead_statistics, lead_follow_statistics, list_abandonments, list_follow_ups, list_follow_up_records, list_leads, matchmaker_follow_stats, promoter_acquisition_stats, restore_lead, update_lead, update_lead_preferences
+from app.services.customer_lead_admin import abandon_lead, add_follow_up, create_follow_template, delete_follow_template, lead_report_overview, list_follow_templates, move_follow_template, update_follow_template, assign_lead, auto_assign_lead, batch_delete_leads, batch_import_leads, build_import_template, convert_lead, create_lead, create_follow_up_with_media, delete_lead, get_lead, get_lead_preferences, import_leads_file, lead_options, lead_statistics, lead_follow_statistics, list_abandonments, list_follow_ups, list_follow_up_records, list_leads, matchmaker_follow_stats, promoter_acquisition_stats, restore_lead, update_lead, update_lead_preferences
 from app.services import customer_lead_dict_admin as dict_service
 from app.services.sensitive_operations import (
     abort_sensitive_operation,
@@ -191,6 +191,57 @@ async def follow_records(
 
 
 @declare_permission("customer_lead.manage")
+@router.get("/follow-templates", response_model=list[LeadFollowTemplate], summary="跟进内容模板列表")
+async def follow_templates(current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[LeadFollowTemplate]:
+    current.require("customer_lead.manage")
+    return await list_follow_templates(db)
+
+
+@declare_permission("customer_lead.manage")
+@router.post("/follow-templates", response_model=LeadFollowTemplate, status_code=201, summary="新增跟进内容模板")
+async def follow_template_create(body: LeadFollowTemplateCreate, current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> LeadFollowTemplate:
+    current.require("customer_lead.manage")
+    return await create_follow_template(db, body.name.strip(), body.content.strip())
+
+
+@declare_permission("customer_lead.manage")
+@router.put("/follow-templates/{template_id}", response_model=LeadFollowTemplate, summary="修改跟进内容模板")
+async def follow_template_update(template_id: int = Path(..., ge=1), body: LeadFollowTemplateUpdate | None = None, current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> LeadFollowTemplate:
+    current.require("customer_lead.manage")
+    return await update_follow_template(db, template_id, body.name.strip() if body and body.name else None,
+                                        body.content.strip() if body and body.content else None)
+
+
+@declare_permission("customer_lead.manage")
+@router.delete("/follow-templates/{template_id}", status_code=204, summary="删除跟进内容模板")
+async def follow_template_delete(template_id: int = Path(..., ge=1), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> Response:
+    current.require("customer_lead.manage")
+    await delete_follow_template(db, template_id)
+    return Response(status_code=204)
+
+
+@declare_permission("customer_lead.manage")
+@router.post("/follow-templates/{template_id}/move", response_model=list[LeadFollowTemplate], summary="模板上移/下移")
+async def follow_template_move(template_id: int = Path(..., ge=1), direction: str = Query("up", pattern="^(up|down)$"), current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[LeadFollowTemplate]:
+    current.require("customer_lead.manage")
+    return await move_follow_template(db, template_id, direction)
+
+
+@declare_permission("customer_lead.manage")
+@router.get("/report-overview", response_model=LeadReportOverview, summary="线索库数据报表聚合")
+async def report_overview(
+    start_date: str | None = Query(None, max_length=10),
+    end_date: str | None = Query(None, max_length=10),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> LeadReportOverview:
+    current.require("customer_lead.manage")
+    scope, scope_params = _lead_scope(current)
+    return await lead_report_overview(db, start_date=start_date or None, end_date=end_date or None,
+                                      scope=scope, scope_params=scope_params)
+
+
+@declare_permission("customer_lead.manage")
 @router.get("/follow-statistics", response_model=CustomerLeadFollowBucket, summary="客源跟进时间卡片计数")
 async def follow_statistics(
     start_date: str | None = Query(None, max_length=10),
@@ -330,6 +381,42 @@ async def lead_import(
         assignment_scope=assignment_scope,
         assignment_scope_params=params,
     )
+
+
+@declare_permission("customer_lead.manage")
+@router.post("/batch-delete", response_model=CustomerLeadBatchDeleteResult, summary="批量删除客源（幂等 + 二次确认）")
+async def lead_batch_delete(
+    body: CustomerLeadBatchDeleteRequest,
+    idempotency_key: str = Depends(require_sensitive_operation),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CustomerLeadBatchDeleteResult:
+    """A16：软删除多条客源，需 confirm=true + Idempotency-Key；单事务 + 一份汇总审计。
+
+    越权/不存在/已删除的线索归入 failed，不整体报错；同键重放不重复删除。
+    静态路径 /batch-delete 必须先于 /{lead_id} 系列注册——本函数因此在写操作区
+    （{lead_id}/convert 之前）定义，不要挪到文件末尾，否则 POST 会先命中
+    带 int 路径参数的动态路由并以 422 结束。
+    """
+    current.require("customer_lead.manage")
+    scope, scope_params = _lead_scope(current)
+    reservation, replayed = await begin_sensitive_operation(
+        db,
+        actor_id=current.account.id,
+        operation="customer_lead.batch_delete",
+        idempotency_key=idempotency_key,
+        payload={"body": body.model_dump(mode="json")},
+    )
+    if replayed is not None:
+        return CustomerLeadBatchDeleteResult(**replayed)
+    try:
+        deleted, failed = await batch_delete_leads(db, current.account.id, body.lead_ids, scope=scope, scope_params=scope_params)
+    except Exception:
+        await abort_sensitive_operation(db, reservation)
+        raise
+    result = CustomerLeadBatchDeleteResult(deleted=deleted, failed=[CustomerLeadBatchDeleteFailure(**item) for item in failed])
+    await finish_sensitive_operation(db, reservation, result.model_dump(mode="json"))
+    return result
 
 
 @declare_permission("customer_lead.manage")
@@ -495,40 +582,6 @@ async def lead_restore(lead_id: int = Path(..., ge=1), body: CustomerLeadRestore
     current.require("customer_lead.manage")
     scope, scope_params = _lead_scope(current)
     return await restore_lead(db, current.account.id, lead_id, body.reason, redaction_level_from_permissions(current.permissions), scope=scope, scope_params=scope_params)
-
-
-@declare_permission("customer_lead.manage")
-@router.post("/batch-delete", response_model=CustomerLeadBatchDeleteResult, summary="批量删除客源（幂等 + 二次确认）")
-async def lead_batch_delete(
-    body: CustomerLeadBatchDeleteRequest,
-    idempotency_key: str = Depends(require_sensitive_operation),
-    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
-    db: AsyncSession = Depends(get_db),
-) -> CustomerLeadBatchDeleteResult:
-    """A16：软删除多条客源，需 confirm=true + Idempotency-Key；单事务 + 一份汇总审计。
-
-    越权/不存在/已删除的线索归入 failed，不整体报错；同键重放不重复删除。
-    静态路径 /batch-delete 必须先于 /{lead_id} 系列注册。
-    """
-    current.require("customer_lead.manage")
-    scope, scope_params = _lead_scope(current)
-    reservation, replayed = await begin_sensitive_operation(
-        db,
-        actor_id=current.account.id,
-        operation="customer_lead.batch_delete",
-        idempotency_key=idempotency_key,
-        payload={"body": body.model_dump(mode="json")},
-    )
-    if replayed is not None:
-        return CustomerLeadBatchDeleteResult(**replayed)
-    try:
-        deleted, failed = await batch_delete_leads(db, current.account.id, body.lead_ids, scope=scope, scope_params=scope_params)
-    except Exception:
-        await abort_sensitive_operation(db, reservation)
-        raise
-    result = CustomerLeadBatchDeleteResult(deleted=deleted, failed=[CustomerLeadBatchDeleteFailure(**item) for item in failed])
-    await finish_sensitive_operation(db, reservation, result.model_dump(mode="json"))
-    return result
 
 
 @declare_permission("customer_lead.manage")

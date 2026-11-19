@@ -1,6 +1,7 @@
 """Environment-backed application settings."""
 
 from functools import lru_cache
+import json
 from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
@@ -31,6 +32,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
 
     secret_key: str = "change-me-in-local-env"
+    withdrawal_payee_encryption_key: SecretStr | None = None
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 30
@@ -76,6 +78,25 @@ class Settings(BaseSettings):
     wechat_pay_timeout_seconds: float = Field(default=10, gt=0, le=60)
     wechat_pay_max_clock_skew_seconds: int = Field(default=300, ge=0, le=3600)
 
+    # ── 小程序虚拟支付（米大师 / wx.requestVirtualPayment）──────────
+    # 会员/置顶/爆灯/积分充值等虚拟商品须走本通道；与上面 JSAPI 网关独立，
+    # 便于灰度：XPAY=real 时 C 端优先拉虚拟支付，JSAPI 仍可作非虚拟或回滚。
+    # disabled=不启用；mock=本地联调（不调微信）；real=真实虚拟支付。
+    wechat_xpay_mode: Literal["disabled", "mock", "real"] = "disabled"
+    wechat_xpay_offer_id: str | None = None
+    # env=0 用现网 AppKey；env=1 用沙箱 AppKey。
+    wechat_xpay_app_key: SecretStr | None = None
+    wechat_xpay_app_key_sandbox: SecretStr | None = None
+    wechat_xpay_env: Literal[0, 1] = 0
+    # 业务 product_type → MP 道具 productId；JSON 对象字符串，如
+    # {"monthly":"vip_monthly","boost_1d":"boost_1d","superlike":"superlike"}。
+    # 未配置时默认 productId=product_type（需在 MP 用同名道具发布）。
+    wechat_xpay_product_map_json: str = "{}"
+    # 发货推送（消息推送）校验；与 MP「虚拟支付 → 发货推送配置」一致。
+    wechat_xpay_push_token: str | None = None
+    wechat_xpay_push_aes_key: SecretStr | None = None
+    wechat_xpay_push_encrypt_mode: Literal["plaintext", "compatible", "aes"] = "aes"
+
     # D-14：人脸认证供应商。disabled 时门禁 fail-closed（不可发帖），
     # mock 仅允许 development/testing。
     face_provider: str = "disabled"
@@ -113,7 +134,7 @@ class Settings(BaseSettings):
     public_base_url: str = "http://127.0.0.1:8000"
     wechat_mini_program_page: str = "pages/profile/profile"
     recommendation_page_size: int = 20
-    browse_daily_limit: int = 8
+    browse_daily_limit: int = 20
     browse_high_match_bonus: int = 5
     apply_daily_free_limit: int = 3
     apply_daily_vip_limit: int = 10
@@ -121,6 +142,13 @@ class Settings(BaseSettings):
     community_city_cooldown_days: int = Field(default=7, ge=0)
     # 红娘服务只能通过现金订单获得，不为新用户自动发放免费次数。
     matchmaker_service_default_quota: int = 0
+    # 会员自己填完基础信息（性别/生日/现居/家乡/婚姻/学历/职业/收入/身高/体重）就自动分派进
+    # member_auto_assign_organization_id 那家门店并进入资料待审；门店 id 不配置时不自动分派，
+    # 自然注册的会员只能等在后台手工分派。
+    member_auto_assign_organization_id: int | None = Field(default=None, ge=1)
+    # 一键入库生成会员账号时写入的初始登录密码（库里只存 bcrypt 哈希）。
+    # 置空 = 不设密码，新账号只能走手机号验证码/微信登录；改这里要同步后台客源页的入库须知文案。
+    lead_convert_initial_password: str = "abc123"
     superlike_daily_free_limit: int = 1
     superlike_daily_vip_limit: int = 3
     paper_plane_daily_limit: int = 3
@@ -234,7 +262,8 @@ class Settings(BaseSettings):
     ai_avatar_timeout_seconds: float = Field(default=20, gt=0, le=60)
     ai_avatar_max_output_tokens: int = Field(default=500, ge=64, le=2000)
     ai_avatar_max_context_messages: int = Field(default=12, ge=2, le=30)
-    ai_avatar_daily_limit: int = Field(default=20, ge=1, le=200)
+    # 测试期临时放宽到 100；上线前按产品口径回调
+    ai_avatar_daily_limit: int = Field(default=100, ge=1, le=200)
 
     # Optional second-layer text moderation. The provider is disabled until
     # the purchased marketplace API path and AppCode are configured.
@@ -253,6 +282,18 @@ class Settings(BaseSettings):
     aliyun_content_moderation_default_action: Literal[
         "manual_review", "reject", "replace"
     ] = "manual_review"
+
+    # 微信官方内容安全（msgSecCheck 文本 / imgSecCheck 图片）。默认关闭，
+    # 关闭时所有检测直接放行，不改变既有审核链路；开启需小程序为企业主体并
+    # 完成微信认证。复用 wechat_app_id/wechat_app_secret 换取的全局 access_token。
+    wechat_sec_check_enabled: bool = False
+    wechat_sec_check_fail_mode: Literal["manual_review", "reject"] = "manual_review"
+    wechat_sec_check_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    wechat_sec_check_max_retries: int = Field(default=1, ge=0, le=3)
+    wechat_sec_check_max_width: int = 750
+    wechat_sec_check_max_height: int = 1334
+    wechat_sec_check_max_bytes: int = 900000
+    wechat_sec_check_mock: bool = False
 
     # Optional environment overrides for commercial configuration. When unset,
     # the corresponding database configuration remains the fallback.
@@ -445,6 +486,8 @@ class Settings(BaseSettings):
     ai_search_suggest_daily_limit: int = Field(default=5, gt=0, le=50)
     ai_profile_session_expire_days: int = Field(default=7, gt=0)
     ai_search_draft_expire_hours: int = Field(default=24, gt=0)
+    # 安全自动确认：仅当全部已知条件置信度不低于该阈值时才允许跳过确认卡。
+    ai_search_auto_confirm_min_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     ai_compatibility_snapshot_ttl_minutes: int = Field(default=10, gt=0)
     # WP-C1：llm 精算快照 TTL（默认 7 天）——命中期内二次查看不再触发精算。
     ai_compatibility_llm_ttl_minutes: int = Field(default=10080, gt=0)
@@ -786,7 +829,59 @@ class Settings(BaseSettings):
             ):
                 raise ValueError("staging/production 的 AI_AVATAR_BASE_URL 必须使用 HTTPS")
         self._validate_wechat_pay_gateway()
+        self._validate_wechat_xpay()
         return self
+
+    def wechat_xpay_product_map(self) -> dict[str, str]:
+        """解析 ``WECHAT_XPAY_PRODUCT_MAP_JSON``；非法 JSON 视为空映射。"""
+        raw = (self.wechat_xpay_product_map_json or "").strip() or "{}"
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(key).strip(): str(value).strip()
+            for key, value in data.items()
+            if str(key).strip() and str(value).strip()
+        }
+
+    def wechat_xpay_app_key_for_env(self) -> str | None:
+        """按 ``wechat_xpay_env`` 选择现网/沙箱 AppKey。"""
+        secret = (
+            self.wechat_xpay_app_key_sandbox
+            if int(self.wechat_xpay_env) == 1
+            else self.wechat_xpay_app_key
+        )
+        if secret is None:
+            return None
+        value = secret.get_secret_value().strip()
+        return value or None
+
+    def _validate_wechat_xpay(self) -> None:
+        """虚拟支付配置校验：mock 仅测试环境；real 必须配 OfferID + AppKey。"""
+        mode = self.wechat_xpay_mode
+        if mode == "mock" and not self.is_test_mode:
+            raise ValueError("staging/production 环境禁止启用虚拟支付 Mock 模式")
+        if mode != "real":
+            return
+        if not (self.wechat_xpay_offer_id or "").strip():
+            raise ValueError("虚拟支付 real 模式必须配置 WECHAT_XPAY_OFFER_ID")
+        if not self.wechat_xpay_app_key_for_env():
+            raise ValueError(
+                "虚拟支付 real 模式必须配置对应环境的 AppKey"
+                "（env=0 → WECHAT_XPAY_APP_KEY；env=1 → WECHAT_XPAY_APP_KEY_SANDBOX）"
+            )
+        if not (self.wechat_app_id or "").strip() or not (self.wechat_app_secret or "").strip():
+            raise ValueError("虚拟支付 real 模式必须配置 WECHAT_APP_ID / WECHAT_APP_SECRET")
+        raw = (self.wechat_xpay_product_map_json or "").strip() or "{}"
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("WECHAT_XPAY_PRODUCT_MAP_JSON 必须是合法 JSON 对象") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("WECHAT_XPAY_PRODUCT_MAP_JSON 必须是 JSON 对象")
 
     def ai_approvals_complete(self) -> bool:
         """Return whether all three production approval gates are satisfied."""

@@ -93,7 +93,7 @@ class PaymentOrderResponse(BaseModel):
 
 class CommissionEntryResponse(BaseModel):
     id: int
-    order_id: int
+    order_id: int | None  # 手工录入分成无关联订单，为 NULL
     beneficiary_type: str
     beneficiary_id: int
     base_amount: Decimal
@@ -105,9 +105,9 @@ class CommissionEntryResponse(BaseModel):
 class MatchmakerCommissionEntryCreate(BaseModel):
     """后台手工录入一笔服务红娘分成。
 
-    口径（与合伙人人手工录入同源，2026-10-28 决策）：只写 commission_entry + 审计日志，
-    **不动余额账本**（不写 account_ledger，不凭空增加可提现余额）；默认 PENDING，
-    供红娘线上分成明细页展示与事后核对。
+    口径（2026-11-14 调整）：写 commission_entry（PENDING）+ account_ledger
+    待结算余额明细（CREDIT/PENDING）+ 审计日志；释放结算后翻转 AVAILABLE
+    计入红娘可提现余额（小程序与后台同口径读账本）。
     """
 
     matchmaker_user_id: int = Field(ge=1, description="服务红娘 user id")
@@ -189,9 +189,46 @@ class AccountBalanceResponse(BaseModel):
     available_amount: Decimal
 
 
+class UserFinanceRecord(BaseModel):
+    id: int
+    title: str
+    amount: Decimal
+    direction: Literal["CREDIT", "DEBIT"]
+    state: str
+    source_type: str
+    created_at: datetime
+    status: str | None = None
+
+
+class UserFinancePage(BaseModel):
+    items: list[UserFinanceRecord]
+    page: int
+    page_size: int
+    total: int
+    has_more: bool
+
+
 class WithdrawalCreate(BaseModel):
     amount: Decimal = Field(gt=0, le=1000000, decimal_places=2)
-    payee_masked: str = Field(min_length=1, max_length=128)
+    payee_masked: str | None = Field(default=None, min_length=1, max_length=128)
+    method: Literal["wechat", "bank", "alipay"] | None = None
+    account: str | None = Field(default=None, min_length=1, max_length=100)
+    payee_name: str | None = Field(default=None, min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def validate_payee(self):
+        if any(value is not None for value in (self.method, self.account, self.payee_name)):
+            if not self.method or not self.account or not self.account.strip() or not self.payee_name or not self.payee_name.strip():
+                raise ValueError("请填写完整收款信息")
+        else:
+            raise ValueError("请填写完整收款账号和收款人姓名")
+        return self
+
+
+class WithdrawalPayeeResponse(BaseModel):
+    method: Literal["wechat", "bank", "alipay"]
+    account: str
+    payee_name: str
 
 
 class WithdrawalResponse(BaseModel):
@@ -470,7 +507,7 @@ CREDIT_MEMBER_SCOPE_SQL: dict[str, str] = {
 
 # 积分类别 -> user_points.source_type。
 CREDIT_CATEGORY_SOURCES: dict[str, tuple[str, ...]] = {
-    "recharge": ("admin_grant",),
+    "recharge": ("admin_grant", "points_recharge"),
     "gift_exchange": ("gift_exchange",),
     "gift_received": ("gift_received",),
     "gift_sent": ("gift_sent",),

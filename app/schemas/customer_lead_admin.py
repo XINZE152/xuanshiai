@@ -11,8 +11,15 @@ from app.schemas.auth import PreferenceResponse
 LeadStatus = Literal["NEW", "CONTACTED", "INTENDED", "CONVERTED", "LOST", "CLOSED"]
 # 客源审核状态：active 有效 / pending 待核 / rejected 无效
 LeadAuditStatus = Literal["active", "pending", "rejected"]
+# 入库后会员公开资料的审核状态
+LeadReviewStatus = Literal["PENDING", "PASSED", "REJECTED"]
 # 客源性别（A13）：0未知 1男 2女，与 users.gender 同语义
 LeadGender = Literal[0, 1, 2]
+# 客户意向 A-G 七档（migrations/customer_lead_intention_grades/20261027_05）：
+# 1 A未接 2 B初步沟通 3 C深入沟通未缔结 4 D待确定到店 5 E已确定到店 6 F预约需二邀 7 G已到店未签约。
+# 读写 customer_lead / customer_lead_follow_up 的 intention_level 必须复用本别名：
+# 2026-11-07 工作台列表 500 就是因为消费方还留着旧的 Literal[1, 2, 3]。
+LeadIntentionGrade = Literal[1, 2, 3, 4, 5, 6, 7]
 
 
 def _strip_contact(value: object) -> object:
@@ -58,10 +65,15 @@ class CustomerLeadCreate(_LeadProfileFields):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=128)
-    phone: str | None = Field(default=None, max_length=32)
+    real_name: str | None = Field(default=None, max_length=64)
+    phone: str | None = Field(default=None, pattern=r"^1[3-9]\d{9}$")
     wechat: str | None = Field(default=None, max_length=128)
     source: str = Field(min_length=1, max_length=64)
-    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] = 1
+    # photo/birthday 是 2026-10-29 为红娘工作台卡片补的单值列，与 photos/birth_date 同义；
+    # 两套都收（后台表单发 photos/birth_date，工作台读 photo/birthday），读取侧由服务层回退。
+    photo: str | None = Field(default=None, max_length=512)
+    birthday: date | None = None
+    intention_level: LeadIntentionGrade = 1
     gender: LeadGender = Field(default=0, description="性别 0未知 1男 2女（A13）")
     remark: str | None = Field(default=None, max_length=2000)
     promoter_id: int | None = Field(default=None, ge=1, description="推广红娘用户ID")
@@ -77,19 +89,23 @@ class CustomerLeadCreate(_LeadProfileFields):
         return _strip_contact(value)
 
     @model_validator(mode="after")
-    def require_contact(self) -> "CustomerLeadCreate":
-        if not self.phone and not self.wechat:
-            raise ValueError("phone 或 wechat 至少提供一个")
+    def require_phone(self) -> "CustomerLeadCreate":
+        # 业务口径：线索必须能联系到人，且只有手机号能一键入库成会员（微信号只是文本备注）。
+        if not self.phone:
+            raise ValueError("必须登记 11 位手机号")
         return self
 
 
 class CustomerLeadUpdate(_LeadProfileFields):
     name: str | None = Field(default=None, min_length=1, max_length=128)
-    phone: str | None = Field(default=None, max_length=32)
+    real_name: str | None = Field(default=None, max_length=64)
+    phone: str | None = Field(default=None, pattern=r"^1[3-9]\d{9}$")
     wechat: str | None = Field(default=None, max_length=128)
-    # 客源来源在创建时必填，编辑时同样允许修改（此前只在 Create 里，编辑被静默丢弃）。
+    # 来源在录入时必填，编辑表单与录入同口径，所以也允许改（原站「编辑客源」可重选来源渠道）。
     source: str | None = Field(default=None, min_length=1, max_length=64)
-    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] | None = None
+    photo: str | None = Field(default=None, max_length=512)
+    birthday: date | None = None
+    intention_level: LeadIntentionGrade | None = None
     gender: LeadGender | None = None
     status: LeadStatus | None = None
     remark: str | None = Field(default=None, max_length=2000)
@@ -105,6 +121,17 @@ class CustomerLeadUpdate(_LeadProfileFields):
             raise ValueError("客源标签功能已下线，不支持提交 tags")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def exempt_masked_phone(cls, data: object) -> object:
+        # 旧值豁免：后台表单预填的是脱敏展示值（139****0101），原样提交视同「没有改手机号」，
+        # 既不能过格式校验，也不能把库里的真实号码覆盖成掩码串。
+        if isinstance(data, dict):
+            value = data.get("phone")
+            if isinstance(value, str) and "*" in value:
+                return {key: item for key, item in data.items() if key != "phone"}
+        return data
+
     @field_validator("phone", "wechat", mode="before")
     @classmethod
     def normalize_contact(cls, value: object) -> object:
@@ -112,6 +139,9 @@ class CustomerLeadUpdate(_LeadProfileFields):
 
     @model_validator(mode="after")
     def require_update(self) -> "CustomerLeadUpdate":
+        # 显式传 phone=null/"" 会被归一化成 None：那等于把线索改成联系不上人的死数据。
+        if "phone" in self.model_fields_set and not self.phone:
+            raise ValueError("手机号不能清空，只能改成有效的 11 位手机号")
         # 部分更新：任意字段（含新增资料字段）显式给出非 None 值即可；
         # 仅提交空白联系方式（归一化后为 None）等价于没有修改项 → 422。
         if all(value is None for value in self.model_dump().values()):
@@ -133,7 +163,7 @@ class CustomerLeadAssignment(BaseModel):
 class CustomerLeadFollowUpCreate(BaseModel):
     method: Literal["PHONE", "WECHAT", "VISIT", "OTHER"]
     content: str = Field(min_length=1, max_length=2000)
-    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] | None = None
+    intention_level: LeadIntentionGrade | None = None
     next_follow_at: datetime | None = None
 
 
@@ -156,10 +186,13 @@ class CustomerLeadFollowUp(BaseModel):
 class CustomerLead(_LeadProfileFields):
     id: int
     name: str
+    real_name: str | None = None
     phone: str | None
     wechat: str | None
     source: str
-    intention_level: Literal[1, 2, 3, 4, 5, 6, 7]
+    photo: str | None = None
+    birthday: date | None = None
+    intention_level: LeadIntentionGrade
     gender: LeadGender = 0
     # age 只读：由服务层从 birth_date 派生（无 birth_date 时回退 raw age 列），不接受写入。
     age: int | None = Field(default=None, description="年龄（由出生日期派生，只读）")
@@ -174,6 +207,18 @@ class CustomerLead(_LeadProfileFields):
     created_by: int
     created_at: datetime
     updated_at: datetime
+    # 2026-11-11：列表「来源/注册/最后/分派时间」列与详情「加上了吗」下拉需要
+    assigned_at: datetime | None = None
+    wechat_added: int = 0
+
+
+class CustomerLeadConvertRequest(BaseModel):
+    """一键入库：性别可当场指定（缺省沿用线索），备注写入会员备注；归属由线索分派或 PATCH assignment 决定。"""
+
+    matchmaker_id: int | None = Field(default=None, ge=1)
+    organization_id: int | None = Field(default=None, ge=1)
+    gender: Literal[1, 2] | None = None
+    remark: str | None = Field(default=None, max_length=500)
 
 
 class CustomerLeadCreateResult(CustomerLead):
@@ -237,11 +282,6 @@ class CustomerLeadBatchDeleteResult(BaseModel):
     failed: list[CustomerLeadBatchDeleteFailure] = Field(default_factory=list)
 
 
-class CustomerLeadConvertRequest(BaseModel):
-    gender: Literal[1, 2] | None = None
-    remark: str | None = Field(default=None, max_length=500)
-
-
 class CustomerLeadConvertResult(BaseModel):
     lead: CustomerLead
     user_id: int
@@ -258,6 +298,9 @@ class CustomerLeadAbandonment(BaseModel):
     restored_by: int | None
     restored_at: datetime | None
     restore_reason: str | None
+    # 2026-11-11：弃海记录页要显示「放弃人 / 捞取人」姓名而不是账号 ID
+    abandoned_by_name: str | None = None
+    restored_by_name: str | None = None
 
 
 class CustomerLeadImportRow(BaseModel):
@@ -265,7 +308,7 @@ class CustomerLeadImportRow(BaseModel):
     phone: str | None = Field(default=None, max_length=32)
     wechat: str | None = Field(default=None, max_length=128)
     source: str = Field(min_length=1, max_length=64)
-    intention_level: Literal[1, 2, 3, 4, 5, 6, 7] = 1
+    intention_level: LeadIntentionGrade = 1
     gender: LeadGender = Field(default=0, description="性别 0未知 1男 2女（A13）")
     remark: str | None = Field(default=None, max_length=2000)
 
@@ -301,6 +344,7 @@ class CustomerLeadOptions(BaseModel):
     sources: list[CustomerLeadOption] = Field(default_factory=list)
     matchmakers: list[CustomerLeadOption] = Field(default_factory=list)
     promoters: list[CustomerLeadOption] = Field(default_factory=list)
+    stores: list[CustomerLeadOption] = Field(default_factory=list)
 
 
 class CustomerLeadFollowUpRecord(BaseModel):
@@ -349,6 +393,11 @@ class MatchmakerFollowStat(BaseModel):
     total_count: int = 0
     month_count: int = 0
     unfollowed_count: int = 0
+    lead_count: int = 0
+    overdue_3d: int = 0
+    overdue_7d: int = 0
+    overdue_15d: int = 0
+    overdue_30d: int = 0
 
 
 class CustomerLeadPromoterStat(BaseModel):
@@ -380,3 +429,45 @@ class LeadPreferenceResponse(BaseModel):
     converted_user_id: int | None = None
     editable: bool = False
     preference: PreferenceResponse | None = None
+
+
+# ─────────────── 2026-11-11 客源跟进模板 / 数据报表 ───────────────
+
+
+class LeadFollowTemplate(BaseModel):
+    """跟进内容模板（后台「从模板选择」与「管理模板」抽屉）。"""
+
+    id: int
+    name: str
+    content: str
+    sort_order: int = 0
+
+
+class LeadFollowTemplateCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class LeadFollowTemplateUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
+class LeadReportCountItem(BaseModel):
+    """报表通用「标签 + 数量」行；extra 放可下钻的 id（分派人 user_id 等）。"""
+
+    label: str
+    value: int = 0
+    extra: str | None = None
+
+
+class LeadReportOverview(BaseModel):
+    """线索库数据报表一次取全（7 个页签）：意向 / 来源 / 状态 / 月度增量 / 分派 / 跟进。"""
+
+    total: int = 0
+    intent: list[LeadReportCountItem] = []
+    source: list[LeadReportCountItem] = []
+    status: list[LeadReportCountItem] = []
+    monthly: list[LeadReportCountItem] = []
+    assignee: list[LeadReportCountItem] = []
+    follow: list[MatchmakerFollowStat] = []

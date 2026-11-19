@@ -172,7 +172,7 @@ class Snapshot:
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         lines: list[str] = []
-        lines.append(f"-- moxiang-prompt-loop snapshot")
+        lines.append("-- moxiang-prompt-loop snapshot")
         lines.append(f"-- user_id={self.user_id} session_id={self.session_id or ''}")
         lines.append(f"-- captured_at={self.captured_at}")
         lines.append("SET NAMES utf8mb4;")

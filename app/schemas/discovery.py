@@ -17,6 +17,10 @@ class DiscoveryFilters(BaseModel):
     province_code: str | None = Field(default=None, max_length=32)
     city_code: str | None = Field(default=None, max_length=32)
     district_code: str | None = Field(default=None, max_length=32)
+    hometown_province_code: str | None = Field(default=None, max_length=32)
+    hometown_city_code: str | None = Field(default=None, max_length=32)
+    hometown_district_code: str | None = Field(default=None, max_length=32)
+    certified_only: bool = Field(default=False, description="仅展示实名认证通过的用户")
     marriage_status: int | None = Field(default=None, ge=1, le=3)
     mbti: list[MbtiType] | None = Field(
         default=None, max_length=16, description="MBTI 人格类型多选；空列表等价于不筛选"
@@ -72,6 +76,7 @@ class DiscoveryCard(BaseModel):
     user_id: int
     nickname: str | None
     avatar: str | None
+    gender: int | None = None
     age: int | None
     height: int | None
     education_level: int | None
@@ -89,6 +94,9 @@ class DiscoveryCard(BaseModel):
     hometown_display: str | None = None
     residence_display: str | None = None
     zodiac: str | None = None
+    # 首页「基础资料」第 4 格展示星座（2026-11-14）：优先取 user_profile.constellation，
+    # 老数据没填时由生日推导，与详情页 same 口径；detail_locked 时置 None。
+    constellation: str | None = None
     self_intro: str | None = None
     qa_answers: list[dict[str, object]] = Field(default_factory=list, description="首页卡片展示的公开问答，最多 3 条")
     personal_tags: list[str] = Field(default_factory=list, description="合并后的兴趣标签，受资料可见性约束")
@@ -102,6 +110,9 @@ class DiscoveryCard(BaseModel):
     # 当前登录用户是否「喜欢」该用户（user_favorite.type=1），与 GET /relations/likes 同源。
     # 关系字段：锁定/隐私不影响本字段；is_favorite 是 type=2 旧收藏，两者不混用。
     is_liked: bool = False
+    # 与当前登录用户之间的认识申请关系（match_apply / user_match），不受 detail_locked 影响。
+    # none=无申请；pending=已申请待回应；accepted=双方已同意可真人聊；rejected/expired=终态。
+    apply_status: str = "none"
     is_vip: bool = False
     is_pure_free: bool
     is_boosted: bool
@@ -126,6 +137,10 @@ class FilterOptionsResponse(BaseModel):
     cities: list[str]
     mbti_types: list[dict[str, str]] = Field(
         default_factory=list, description="MBTI 筛选维度；value 用于 filters.mbti"
+    )
+    certification_options: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="认证筛选维度；value=realname 对应 filters.certified_only",
     )
 
 

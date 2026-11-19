@@ -96,7 +96,9 @@ def test_change_requires_one_proof() -> None:
 
 @pytest.mark.asyncio
 async def test_bind_rejects_already_bound_account() -> None:
-    db = _Db(_Result(scalar="13900000000"))
+    # bind_phone 先 FOR UPDATE 取当前用户行再判断绑定态，
+    # 因此首个结果必须是 {id, phone} 行（不是 scalar 预检）。
+    db = _Db(_Result({"id": 7, "phone": "13900000000"}))
 
     with pytest.raises(HTTPException) as error:
         await service.bind_phone(db, 7, _bind(), None)
@@ -108,9 +110,9 @@ async def test_bind_rejects_already_bound_account() -> None:
 @pytest.mark.asyncio
 async def test_bind_still_works_for_unbound_account(_no_real_sms: list[tuple[str, str]]) -> None:
     db = _Db(
-        _Result(scalar=None),                       # 预检：未绑定
-        _Result({"id": 7, "phone": None}),          # 事务内 FOR UPDATE
+        _Result({"id": 7, "phone": None}),           # FOR UPDATE 当前用户：未绑定
         _Result(None),                              # 新号未被占用
+        _Result(None),                              # phone_region 列探测
     )
 
     await service.bind_phone(db, 7, _bind(), None)

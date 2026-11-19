@@ -8,6 +8,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.schemas.matchmaker_workspace import (
+    MatchmakerWorkspaceDashboard,
+    WorkspaceLevel,
+    WorkspaceScope,
+)
+
 
 class CommissionLevelItem(BaseModel):
     id: int
@@ -242,6 +248,19 @@ class MatchmakerPlatformTokenResponse(BaseModel):
     token_type: Literal["bearer"] = "bearer"
     expires_in: int
     jump_url: str
+
+
+class MatchmakerFrontPreview(BaseModel):
+    """后台「预览前台」载荷：按被查看红娘的工作台身份返回小程序红娘管理中心首页数据。
+
+    `dashboard` 与会员侧 `GET /matchmaker/management-center/dashboard` 同一模型、同一口径，
+    后台只做只读展示，不产生红娘会话，也不写任何业务数据。
+    """
+
+    matchmaker_id: int
+    workspace_level: WorkspaceLevel
+    workspace_scope: WorkspaceScope
+    dashboard: MatchmakerWorkspaceDashboard
 
 
 class MatchmakerTutorial(BaseModel):

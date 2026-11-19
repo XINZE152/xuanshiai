@@ -149,13 +149,41 @@ async def get_browsable_user(
     current: CurrentUser = Depends(get_verified_user),
     db: AsyncSession = Depends(get_db),
 ) -> CurrentUser:
-    """Require the single server-side gate shared by homepage discovery APIs."""
+    """首页推荐/广场/搜索的浏览方门槛，与出池 recommend_min 对齐。
+
+    具备性别、生日（年龄）、现居地即可浏览；不再要求资料完整度 100。
+    完整度 100 / grandfather 仍直接放行。手机号绑定由 get_verified_user 处理。
+    """
+    from app.services.profile import recommend_min_completed
+
     result = await db.execute(
-        text("SELECT COALESCE(score, 0) FROM user_profile_completion WHERE user_id = :user_id"),
+        text(
+            """SELECT COALESCE(score, 0) AS score,
+                      COALESCE(completion_grandfathered, 0) AS completion_grandfathered,
+                      COALESCE(gender_completed, 0) AS gender_completed,
+                      COALESCE(birthday_completed, 0) AS birthday_completed,
+                      COALESCE(location_completed, 0) AS location_completed
+               FROM user_profile_completion WHERE user_id = :user_id"""
+        ),
         {"user_id": current.id},
     )
-    if not settings.discovery_skip_gates_enabled and float(result.scalar() or 0) < 100:
-        raise HTTPException(status_code=403, detail="请先完善资料后再进入首页")
+    row = result.mappings().first() or {}
+    completion_score = float(row.get("score") or 0)
+    grandfathered = bool(row.get("completion_grandfathered"))
+    min_ok = recommend_min_completed(
+        {
+            "gender": bool(row.get("gender_completed")),
+            "birthday": bool(row.get("birthday_completed")),
+            "location": bool(row.get("location_completed")),
+        }
+    )
+    if (
+        not settings.discovery_skip_gates_enabled
+        and completion_score < 100
+        and not grandfathered
+        and not min_ok
+    ):
+        raise HTTPException(status_code=403, detail="请先完善性别、年龄和现居地后再浏览")
     return current
 
 
@@ -520,6 +548,9 @@ def _matchmaker_admin_permission(request: Request) -> str | None:
         return "matchmaker.member.manage" if method != "GET" else "matchmaker.member.read"
     if "/tickets" in path:
         return "matchmaker.system.manage" if method != "GET" else "matchmaker.system.read"
+    # 原站资源镜像（应用中心/婚创学苑/红娘课堂/用好系统/云端图库，均为只读）
+    if "/ref/" in path:
+        return "matchmaker.system.read"
     return None
 
 

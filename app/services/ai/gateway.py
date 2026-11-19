@@ -219,9 +219,15 @@ class AIGateway:
         try:
             handler = getattr(active_provider, method)
             last_token_usage.set(None)
-            raw_result = await asyncio.wait_for(
-                handler(*args), timeout=self._timeout_seconds
-            )
+            # 这里必须用 asyncio.timeout，不能用 asyncio.wait_for：wait_for 会把传入的
+            # 协程 ensure_future 成一个新 Task（3.11 的实现仍是如此），provider 在子任务
+            # 私有上下文里写的 ContextVar 不会回传，行 227 读到的一直是 None——
+            # token 计量整条链路会静默失效（有测试兜底）。asyncio.timeout 只给当前任务
+            # 挂超时回调，协程在本任务内 await，ContextVar 才能透传。
+            # 超时同样抛 TimeoutError，由下面的 (ConnectionError, TimeoutError, OSError)
+            # 分支转成 retryable 的 AI_TEMPORARILY_UNAVAILABLE，语义不变。
+            async with asyncio.timeout(self._timeout_seconds):
+                raw_result = await handler(*args)
             record = self._record(
                 context, method, started, error_code=None, succeeded=True,
                 token_usage=last_token_usage.get(),
@@ -420,9 +426,10 @@ class AIGateway:
                     error_code = "AI_TIMEOUT"
                     raise TimeoutError("AI provider stream timed out")
                 try:
-                    item = await asyncio.wait_for(
-                        iterator.__anext__(), timeout=remaining
-                    )
+                    # 同理：wait_for 会把 __anext__ 包成子任务，provider 在流里发布的
+                    # token 用量会留在子任务上下文，finally 里读不到。
+                    async with asyncio.timeout(remaining):
+                        item = await iterator.__anext__()
                 except StopAsyncIteration:
                     stream_exhausted = True
                     break
@@ -596,10 +603,12 @@ class AIGateway:
         started = time.monotonic()
         try:
             last_token_usage.set(None)
-            raw_result = await asyncio.wait_for(
-                getattr(active_provider, "chat")(messages, json_mode=json_mode),
-                timeout=self._timeout_seconds,
-            )
+            # 同 invoke()：wait_for 会把 provider 调用丢进子任务，ContextVar 里的
+            # 用量读不回来；用 asyncio.timeout 让协程留在本任务内。
+            async with asyncio.timeout(self._timeout_seconds):
+                raw_result = await getattr(active_provider, "chat")(
+                    messages, json_mode=json_mode
+                )
             if response_type is not None:
                 payload: Any = raw_result
                 if isinstance(raw_result, str):

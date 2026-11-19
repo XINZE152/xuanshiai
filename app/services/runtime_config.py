@@ -140,6 +140,8 @@ async def withdrawal_policy(db: AsyncSession) -> dict[str, Any]:
     return {
         "enabled": _bool_of(wd, "enabled", True),
         "min_amount": str(wd.get("min_amount") or "0.00"),
+        "fee_mode": str(wd.get("fee_mode") or "none"),
+        "withdraw_methods": cfg.get("withdraw_methods"),
     }
 
 

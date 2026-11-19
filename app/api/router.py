@@ -9,6 +9,8 @@ from app.api.routes import (
     ai_recommend,
     ai_profile,
     ai_profile_card,
+    ai_profile_metrics,
+    ai_roleplay,
     ai_search,
     ai_tasks,
     ai_moxiang,
@@ -26,6 +28,7 @@ from app.api.routes import (
     admin_cms,
     admin_user_feedback,
     ai_avatar,
+    aibot,
     auth,
     ai,
     compatibility,
@@ -89,6 +92,8 @@ from app.api.routes import (
     paper_plane_contact_exchange,
     presence,
     profile,
+    public_page_switches,
+    public_preview,
     regions,
     reward_rule_admin,
     apportion_config_admin,
@@ -102,6 +107,7 @@ from app.api.routes import (
     users,
     user_cancellation_admin as user_cancellation_router,
     admin_ticket as admin_ticket_router,
+    admin_ref as admin_ref_router,
     voice,
     voice_moxiang,
     voice_ws,
@@ -122,6 +128,7 @@ api_router.include_router(app_version.router, tags=["系统"])
 api_router.include_router(auth.router, tags=["账号与认证"])
 api_router.include_router(ai.router, tags=["AI能力"])
 api_router.include_router(ai_advisor.router, tags=["AIAdvisor"])
+api_router.include_router(aibot.router, tags=["恋 AI BOT"])
 api_router.include_router(ai_avatar.router, tags=["AI 分身"])
 api_router.include_router(ai_avatar.memory_router, tags=["AI 分身"])
 api_router.include_router(users.router, tags=["账号与认证"])
@@ -140,6 +147,8 @@ api_router.include_router(identity.router, tags=["账号与认证"])
 api_router.include_router(profile.router, tags=["首页与资料"])
 api_router.include_router(discovery.router, tags=["首页与资料"])
 api_router.include_router(discovery.users_router, tags=["首页与资料"])
+api_router.include_router(public_preview.router, tags=["游客预览"])
+api_router.include_router(public_page_switches.router, tags=["游客预览"])
 api_router.include_router(matchmaker.router, tags=["红娘"])
 # 静态 /matchmaker/workbench/good-news 必须先于工作台动态路由挂载。
 api_router.include_router(good_news_workspace.router, tags=["红娘"])
@@ -210,6 +219,7 @@ api_router.include_router(meeting.admin_router, tags=["管理后台"])
 api_router.include_router(promotion_order_admin.router, tags=["管理后台"])
 api_router.include_router(user_cancellation_router.router, tags=["管理后台"])
 api_router.include_router(admin_ticket_router.router, tags=["管理后台"])
+api_router.include_router(admin_ref_router.router, tags=["管理后台"])
 api_router.include_router(admin_user_feedback.router, tags=["管理后台"])
 api_router.include_router(finance.admin_router, tags=["管理后台"])
 # A4/A5/A7/A8/A10：后台运营工具（素材库 / 二维码 / 话术库 / 相亲卡 / 互动内容 / 联盟活动）
@@ -236,11 +246,13 @@ api_router.include_router(ai_consents.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_capabilities.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_profile.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_profile_card.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_roleplay.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_search.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_compatibility.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_recommend.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_moxiang.router, prefix="/ai", tags=["AI"])
 api_router.include_router(ai_memory.router, prefix="/ai", tags=["AI"])
+api_router.include_router(ai_profile_metrics.router, prefix="/ai", tags=["AI"])
 api_router.include_router(voice.router, prefix="/voice", tags=["语音"])
 api_router.include_router(voice_ws.router, prefix="/voice", tags=["语音"])
 api_router.include_router(
