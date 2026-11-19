@@ -70,12 +70,17 @@ async def _create_order(
     expire_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=30)
     # real 模式下这些订单会走真实微信预支付，标记为微信支付而不是测试支付。
     pay_type = 1 if settings.wechat_pay_mode == "real" else 4
+    # 置顶/爆灯同属虚拟商品：建单即落 wechat_xpay，让旧 JSAPI ``/prepay``
+    # 的 ``channel != 'wechat'`` 校验直接 409，堵住普通微信支付下单。
+    # 函数内导入，避免 services.payments ↔ payment.xpay 的循环依赖。
+    from app.services.payment.xpay import XPAY_CHANNEL
+
     await db.execute(text("""INSERT INTO payment_order
-        (user_id, order_no, type, product_id, product_type, product_name, amount, pay_type, status, expire_at, idempotency_key)
-        VALUES (:user_id, :order_no, :type, :product_id, :product_type, :product_name, :amount, :pay_type, 0, :expire_at, :key)"""), {
+        (user_id, order_no, type, product_id, product_type, product_name, amount, pay_type, channel, status, expire_at, idempotency_key)
+        VALUES (:user_id, :order_no, :type, :product_id, :product_type, :product_name, :amount, :pay_type, :channel, 0, :expire_at, :key)"""), {
         "user_id": user_id, "order_no": order_no, "type": order_type, "product_id": product_id,
         "product_type": product_code, "product_name": product_name, "amount": amount,
-        "pay_type": pay_type,
+        "pay_type": pay_type, "channel": XPAY_CHANNEL,
         "expire_at": expire_at, "key": idempotency_key,
     })
     await db.commit()

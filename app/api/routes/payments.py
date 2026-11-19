@@ -283,33 +283,26 @@ async def xpay_notify(
 @router.post(
     "/payments/orders/{order_no}/prepay",
     response_model=JsapiPayParams,
-    summary="微信支付预下单",
+    deprecated=True,
+    summary="【已下线】旧版微信支付预下单（虚拟商品请使用虚拟支付）",
 )
 async def prepay_order(
     order_no: str = Path(..., min_length=8, max_length=64),
     current: CurrentUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ) -> JsapiPayParams:
-    """为当前用户的待支付订单创建微信预支付单。
+    """旧版 JSAPI 预下单，已整体下线。
 
-    新链路独立于旧测试支付；``WECHAT_PAY_MODE != real`` 时返回 503。
+    会员/置顶/爆灯/积分均为微信定义的**虚拟商品**，只能通过小程序虚拟支付
+    （``POST /payments/orders/{order_no}/virtual-pay-params`` + 前端
+    ``wx.requestVirtualPayment``）完成。保留该路径而非直接删除，是为了让
+    存量客户端与脚本拿到明确的 410，而不是含糊的 404。
+
+    仍需登录态，避免未授权探测。
     """
-    try:
-        runtime = build_payment_runtime()
-    except PaymentConfigError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    try:
-        service = PaymentOrderService(runtime.gateway, runtime.crypto)
-        return await service.prepay(db, current.id, order_no)
-    except PaymentValidationError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except PaymentError as exc:
-        # 微信 4xx/5xx、网络超时、配置错误统一映射为 503；订单状态错误由上面的
-        # HTTPException 直接透传。
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    finally:
-        await runtime.gateway.aclose()
+    raise HTTPException(
+        status_code=410,
+        detail="旧版微信支付通道已下线，虚拟商品请使用小程序虚拟支付",
+    )
 
 
 @router.post(

@@ -204,7 +204,12 @@ async def create_order(db: AsyncSession, user_id: int, body: CreateMembershipOrd
     # ENVIRONMENT=development 就写成 4（测试支付），否则对账/报表会把真实
     # 订单误判为测试单。
     pay_type = 1 if settings.wechat_pay_mode == "real" else (4 if settings.is_test_mode else 1)
-    await db.execute(text("INSERT INTO payment_order (user_id,order_no,type,product_id,product_type,product_name,amount,pay_type,status,expire_at,idempotency_key) VALUES (:uid,:order_no,1,:pid,:code,:name,:amount,:pay_type,0,:expire_at,:key)"), {"uid": user_id, "order_no": order_no, "pid": package["id"], "code": package["code"], "name": package["name"], "amount": price, "pay_type": pay_type, "expire_at": expire_at, "key": idempotency_key})
+    # 会员属虚拟商品：建单即落 wechat_xpay，使旧 JSAPI ``/prepay`` 的
+    # ``channel != 'wechat'`` 校验直接 409，从接口层堵住「普通微信支付买会员」。
+    # 函数内导入，避免 membership ↔ payment.xpay 的循环依赖。
+    from app.services.payment.xpay import XPAY_CHANNEL
+
+    await db.execute(text("INSERT INTO payment_order (user_id,order_no,type,product_id,product_type,product_name,amount,pay_type,channel,status,expire_at,idempotency_key) VALUES (:uid,:order_no,1,:pid,:code,:name,:amount,:pay_type,:channel,0,:expire_at,:key)"), {"uid": user_id, "order_no": order_no, "pid": package["id"], "code": package["code"], "name": package["name"], "amount": price, "pay_type": pay_type, "channel": XPAY_CHANNEL, "expire_at": expire_at, "key": idempotency_key})
     await db.commit()
     return MembershipOrderResponse(order_no=order_no, package_code=package["code"], product_name=package["name"], amount=price, pay_type=pay_type, status=0, expire_at=expire_at, payment_required=True)
 
