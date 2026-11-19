@@ -180,3 +180,53 @@ class AibotStoryPeerResponse(BaseModel):
     """演完后同本同好；无合适人选时 peer 为 null。"""
 
     peer: dict[str, Any] | None = None
+
+
+class AibotInterestTagIn(BaseModel):
+    tag: str = Field(..., min_length=1, max_length=16)
+    category: str | None = Field(default=None, max_length=16)
+    heat: float | None = Field(default=None, ge=0, le=1)
+    level: str | None = Field(default=None, max_length=8)
+
+
+class AibotInterestQuizRequest(BaseModel):
+    """第 2 轮起兴趣连问出题：前端传入已有标签与已问题干。"""
+
+    agent_id: str | None = Field(default=None, max_length=32)
+    session_count: int = Field(1, ge=0, le=99)
+    interests: list[AibotInterestTagIn] = Field(default_factory=list, max_length=40)
+    asked_questions: list[str] = Field(default_factory=list, max_length=40)
+    willingness: str | None = Field(default=None, max_length=120)
+
+
+class AibotInterestQuizQuestion(BaseModel):
+    q: str
+    category: str = "生活"
+    opts: list[str] = Field(default_factory=list)
+    anchor_tags: list[str] = Field(default_factory=list)
+
+
+class AibotInterestQuizResponse(BaseModel):
+    session_theme: str = ""
+    question_count: int = 0
+    why_count: str = ""
+    source: str = "ai"
+    questions: list[AibotInterestQuizQuestion] = Field(default_factory=list)
+    agent_id: str = ""
+    agent_name: str = ""
+
+
+class AibotProfileBasicParseRequest(BaseModel):
+    """经典模式基础信息：从恋爱报告/BOT 采集解析可填字段（不落库）。"""
+
+    bot_intake: dict[str, Any] | None = None
+    precise: dict[str, Any] | None = None
+    report_profile: list[dict[str, Any]] | None = None
+
+
+class AibotProfileBasicParseResponse(BaseModel):
+    fills: dict[str, Any] = Field(default_factory=dict)
+    filled_keys: list[str] = Field(default_factory=list)
+    skipped: list[dict[str, str]] = Field(default_factory=list)
+    summary: str = ""
+    source: str = "ai"

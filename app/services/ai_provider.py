@@ -278,6 +278,57 @@ def _mock_response(messages: list[dict[str, str]], *, json_mode: bool) -> str:
         scenario = _prompt_value(user, "Scenario") or "reply"
         tone = _prompt_value(user, "Tone") or "natural"
         return json.dumps(_advisor_mock_advice(scenario, tone), ensure_ascii=False)
+    if "INTEREST_QUIZ" in user:
+        return json.dumps(
+            {
+                "session_theme": "顺着爱好再挖深",
+                "question_count": 3,
+                "why_count": "本地 mock 扩维",
+                "questions": [
+                    {
+                        "q": "这块爱好里你更在意哪一点？",
+                        "category": "生活",
+                        "opts": ["氛围感", "有人一起", "自己节奏", "新鲜尝试", "看心情"],
+                        "anchor_tags": ["兴趣"],
+                    },
+                    {
+                        "q": "如果约人一起，你更想怎么玩？",
+                        "category": "情感社交",
+                        "opts": ["短途出门", "宅家轻松", "学习体验", "吃一顿", "先线上聊"],
+                        "anchor_tags": ["社交"],
+                    },
+                    {
+                        "q": "最近还想多了解哪一类新兴趣？",
+                        "category": "生活",
+                        "opts": ["美食探店", "户外走走", "看展听演", "运动打卡", "暂时不扩"],
+                        "anchor_tags": ["扩展"],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+    if "PROFILE_BASIC_PARSE" in user:
+        return json.dumps(
+            {
+                "fills": {
+                    "gender": None,
+                    "birthday": None,
+                    "height_cm": None,
+                    "weight_kg": None,
+                    "education_level": None,
+                    "occupation": None,
+                    "income_label": None,
+                    "is_married": None,
+                    "company": None,
+                    "mbti": None,
+                    "city_name": None,
+                },
+                "filled_keys": [],
+                "skipped": [{"key": "*", "reason": "本地 mock：无真实模型，不臆造字段"}],
+                "summary": "本地 mock 未解析字段，请接真实模型后再试",
+            },
+            ensure_ascii=False,
+        )
     if any(
         "Use only this authorized public profile context" in str(message.get("content") or "")
         for message in messages

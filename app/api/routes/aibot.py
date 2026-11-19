@@ -10,6 +10,10 @@ from app.db.session import get_db
 from app.schemas.aibot import (
     AibotAssignmentResponse,
     AibotAssignmentUpdate,
+    AibotInterestQuizRequest,
+    AibotInterestQuizResponse,
+    AibotProfileBasicParseRequest,
+    AibotProfileBasicParseResponse,
     AibotReportListItem,
     AibotReportListResponse,
     AibotReportRequest,
@@ -43,6 +47,8 @@ from app.services.aibot_report import (
     latest_report,
 )
 from app.services.aibot_story_play import match_story_peer, upsert_story_play
+from app.services.aibot_interest_quiz import generate_interest_quiz
+from app.services.aibot_profile_basic_parse import parse_profile_basic_from_report
 from app.services.discovery import get_aibot_recommendations_page
 
 router = APIRouter(prefix="/ai/aibot", tags=["恋 AI BOT"])
@@ -224,6 +230,46 @@ async def read_aibot_story_peer(
 ) -> AibotStoryPeerResponse:
     peer = await match_story_peer(db, current.id, task_id, task_title=title)
     return AibotStoryPeerResponse(peer=peer)
+
+
+@router.post(
+    "/profile-basic-parse",
+    response_model=AibotProfileBasicParseResponse,
+    summary="经典模式基础信息：AI 解析恋爱报告/BOT 采集为可填字段（不落库）",
+)
+async def parse_profile_basic(
+    body: Annotated[AibotProfileBasicParseRequest, Body()] = AibotProfileBasicParseRequest(),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AibotProfileBasicParseResponse:
+    payload = await parse_profile_basic_from_report(
+        db,
+        current.id,
+        bot_intake=body.bot_intake,
+        precise=body.precise,
+        report_profile=body.report_profile,
+    )
+    return AibotProfileBasicParseResponse(**payload)
+
+
+@router.post(
+    "/interest-quiz",
+    response_model=AibotInterestQuizResponse,
+    summary="兴趣连问出题（第 2 轮起：按已有标签生成新题，禁止复读固定卷）",
+)
+async def create_interest_quiz(
+    body: Annotated[AibotInterestQuizRequest, Body()] = AibotInterestQuizRequest(),
+    current: CurrentUser = Depends(get_current_user),
+) -> AibotInterestQuizResponse:
+    _ = current
+    payload = await generate_interest_quiz(
+        agent_id=body.agent_id or "anian",
+        session_count=body.session_count,
+        interests=[item.model_dump() for item in body.interests],
+        asked_questions=list(body.asked_questions or []),
+        willingness=body.willingness or "",
+    )
+    return AibotInterestQuizResponse(**payload)
 
 
 @router.post(
