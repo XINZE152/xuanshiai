@@ -1,7 +1,16 @@
 """为小程序调试生成可重复的本地社区演示数据。
 
-本脚本只操作下方定义的演示数据行，不会删除用户数据，
-且拒绝在 development/testing 之外的环境运行。"""
+本脚本只操作下方定义的演示数据行，不会删除用户数据。
+
+环境约束：
+    - 默认只在 development/testing 执行。
+    - production/staging 需显式 ``--allow-production``（或环境变量
+      ``XUANSHIAI_ALLOW_SEED_PRODUCTION=1``），与
+      ``seed_community_members.py`` 保持同一套放行口径。
+
+前提：演示数据引用的手机号（13800001001 等 7 个）必须已存在，
+生产执行前须先跑 ``scripts/seed_community_members.py --allow-production``。
+"""
 
 from __future__ import annotations
 
@@ -417,6 +426,26 @@ _BANNERS = (
 )
 
 
+def _assert_environment(
+    environment: str | None,
+    *,
+    allow_production: bool = False,
+) -> str:
+    """允许 development/testing；生产需显式放行。返回归一化后的环境名。"""
+    env = (environment or os.getenv("ENV") or os.getenv("ENVIRONMENT") or "development").lower()
+    if env in {"development", "testing"}:
+        return env
+    allow = allow_production or os.getenv("XUANSHIAI_ALLOW_SEED_PRODUCTION", "").strip() in {
+        "1", "true", "yes", "on",
+    }
+    if allow and env in {"production", "prod", "staging"}:
+        return env
+    raise RuntimeError(
+        "社区演示数据默认只允许在 development/testing 执行；"
+        "生产/预发请加 --allow-production 或设置 XUANSHIAI_ALLOW_SEED_PRODUCTION=1"
+    )
+
+
 def _user_id_by_phone(cursor: Any, phone: str) -> int:
     """根据手机号查询用户 ID，并确认已实名认证。"""
     cursor.execute(
@@ -780,6 +809,7 @@ def seed_community_demo(
     connection: Any = None,
     *,
     environment: str | None = None,
+    allow_production: bool = False,
     now: datetime | None = None,
 ) -> dict[str, int]:
     """填充社区演示数据的主入口。
@@ -790,15 +820,14 @@ def seed_community_demo(
 
     参数:
         connection: 数据库连接；为空时自动创建。
-        environment: 环境标识；仅在 development/testing 下执行。
+        environment: 环境标识；默认仅 development/testing，生产需显式放行。
+        allow_production: 允许在 production/prod/staging 执行。
         now: 基准时间；为空时取当前 UTC。
 
     返回:
         各类型数据的写入数量统计。
     """
-    env = (environment or os.getenv("ENV") or os.getenv("ENVIRONMENT") or "development").lower()
-    if env not in {"development", "testing"}:
-        raise RuntimeError("社区演示数据只允许在 development/testing 环境执行")
+    _assert_environment(environment, allow_production=allow_production)
 
     owned_connection = connection is None
     if owned_connection:
@@ -932,5 +961,22 @@ def seed_community_demo(
 
 
 if __name__ == "__main__":
-    result = seed_community_demo()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="写入社区演示数据（话题/动态/活动/纸飞机/Banner）")
+    parser.add_argument(
+        "--allow-production",
+        action="store_true",
+        help="允许在 production/staging 执行（仅写入脚本内定义的演示行，不删除用户数据）",
+    )
+    parser.add_argument(
+        "--environment",
+        default=None,
+        help="覆盖 ENV/ENVIRONMENT（默认读环境变量，缺省 development）",
+    )
+    args = parser.parse_args()
+    result = seed_community_demo(
+        environment=args.environment,
+        allow_production=args.allow_production,
+    )
     print("社区演示数据已写入: " + json.dumps(result, ensure_ascii=False))
