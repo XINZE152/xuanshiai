@@ -338,6 +338,7 @@ jobs:
           app/schemas/matchmaker_workspace.py app/services/matchmaker_workspace.py
           tests/test_workspace_lead_intention_grades_20261107.py
           app/services/idempotency.py app/services/matchmaker_member_admin.py
+          app/services/member_auth_admin.py app/services/certifications.py
           app/services/promoter_staff_admin.py app/services/user_columns.py
           app/services/message_admin.py
           scripts/region_preflight.py

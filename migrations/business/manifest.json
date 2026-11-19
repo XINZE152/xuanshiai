@@ -287,6 +287,19 @@
         "verify": "0de0494ae11bd46ee321ad44a081812dfba14eb674217fb447d15bc0d5592d82",
         "verify_previous": "7fdc8e9b14cb68e2f8d95a18f14a2b47af32a94a49b2fcab3d44e54592ad970e"
       }
+    },
+    {
+      "version": "20261119_01_emotion_lab_sessions",
+      "up": "20261119_01_emotion_lab_sessions_up.sql",
+      "down": "20261119_01_emotion_lab_sessions_down.sql",
+      "verify": "20261119_01_emotion_lab_sessions_verify.sql",
+      "verify_previous": "20261119_01_emotion_lab_sessions_verify_previous.sql",
+      "sha256": {
+        "up": "d2a51dcc2dcde2eba362f54fd5662b6974c16837eb439ab45ce825a472df3036",
+        "down": "d9ee7f68b0d8d14231a9df12e2405ec2afc0062c5aee977b71d09101c10d7d77",
+        "verify": "04f3b6303f53d5ebdab5789d77b5434a242af0026ebaf35833b9e40ef8443cbe",
+        "verify_previous": "6ca121dbc782a9ab84bfe0f856e8c3c456c95b4e4921912bc15c13694d5a97ca"
+      }
     }
   ]
 }

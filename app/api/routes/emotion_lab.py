@@ -1,11 +1,4 @@
-"""情感实验室（MBTI）路由。
-
-- ``PUT /emotion-lab/profile-source``：把端侧测出的结果同步进资料（E1.5）。
-- ``GET  /emotion-lab/matches``：合拍的人，算法与首页卡片同源（此前前端走 mock）。
-
-前端 ``api/emotionLab.uts`` 已按这两个路径与 camelCase 出入参写好，因此本模块
-落地后前端不需要改路径。
-"""
+"""情感实验室（MBTI）真实会话、计分、资料同步和合拍推荐接口。"""
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,10 +9,67 @@ from app.schemas.emotion_lab import (
     EmotionLabMatchesResponse,
     EmotionLabProfileSourceRequest,
     EmotionLabProfileSourceResponse,
+    EmotionLabAnswersRequest,
+    EmotionLabSession,
+    EmotionLabSummaryResponse,
 )
-from app.services.emotion_lab import matches, sync_profile_source
+from app.services.emotion_lab import (
+    discard_session,
+    matches,
+    save_answers,
+    start_session,
+    submit_session,
+    summary,
+    sync_profile_source,
+)
 
 router = APIRouter()
+
+
+@router.get("/emotion-lab/summary", response_model=EmotionLabSummaryResponse, summary="读取情感实验室状态")
+async def get_summary(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmotionLabSummaryResponse:
+    return await summary(db, current.id)
+
+
+@router.post("/emotion-lab/sessions", response_model=EmotionLabSession, summary="开始或恢复 MBTI 测试")
+async def post_session(
+    body: dict,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmotionLabSession:
+    return await start_session(db, current.id, str(body.get("assessmentId") or body.get("assessment_id") or "mbti-core"))
+
+
+@router.put("/emotion-lab/sessions/{session_id}/answers", response_model=EmotionLabSession, summary="保存 MBTI 答案")
+async def put_answers(
+    session_id: str,
+    body: EmotionLabAnswersRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmotionLabSession:
+    return await save_answers(db, current.id, session_id, body)
+
+
+@router.post("/emotion-lab/sessions/{session_id}/submit", response_model=EmotionLabSession, summary="提交阶段或完整 MBTI 结果")
+async def post_submit(
+    session_id: str,
+    body: EmotionLabAnswersRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmotionLabSession:
+    return await submit_session(db, current.id, session_id, body)
+
+
+@router.post("/emotion-lab/sessions/{session_id}/discard", response_model=EmotionLabSession, summary="放弃 MBTI 草稿")
+async def post_discard(
+    session_id: str,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EmotionLabSession:
+    return await discard_session(db, current.id, session_id)
 
 
 @router.put(

@@ -365,8 +365,10 @@ async def submit_single_pledge(
 
 async def submit_house(db: AsyncSession, user_id: int, file: UploadFile) -> CertificationsResponse:
     material = await _store_certification_image(user_id, "house-cert", file)
-    await db.execute(text("""INSERT INTO user_auth (user_id, house_cert, house_verified)
-        VALUES (:id,:material,1) ON DUPLICATE KEY UPDATE house_cert=:material, house_verified=1, house_fail_reason=NULL, house_submitted_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP()"""), {"id": user_id, "material": material})
+    await db.execute(text("""INSERT INTO user_auth (user_id, house_cert, house_verified, house_submitted_at)
+        VALUES (:id,:material,1,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE house_cert=:material, house_verified=1,
+        house_fail_reason=NULL, house_submitted_at=UTC_TIMESTAMP(), house_reviewed_at=NULL,
+        reviewed_by=NULL, updated_at=UTC_TIMESTAMP()"""), {"id": user_id, "material": material})
     await db.commit()
     return await get_certifications(db, user_id)
 

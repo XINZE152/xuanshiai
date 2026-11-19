@@ -217,6 +217,29 @@ async def list_materials(
     )
 
 
+async def get_material_source_url(db: AsyncSession, material_id: int) -> str:
+    row = (
+        await db.execute(
+            text("SELECT url FROM admin_material WHERE id = :id AND deleted_at IS NULL"),
+            {"id": material_id},
+        )
+    ).mappings().first()
+    if not row:
+        raise HTTPException(404, detail="素材不存在")
+    return str(row["url"])
+
+
+async def record_material_public_copy(db: AsyncSession, actor_id: int, material_id: int) -> None:
+    await db.execute(
+        text(
+            "INSERT INTO business_audit_log (actor_user_id, action, resource_type, resource_id) "
+            "VALUES (:actor, 'material.copy_to_common', 'admin_material', :id)"
+        ),
+        {"actor": actor_id, "id": material_id},
+    )
+    await db.commit()
+
+
 async def _get_material(db: AsyncSession, material_id: int) -> MaterialItem:
     row = (
         await db.execute(

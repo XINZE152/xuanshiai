@@ -86,6 +86,22 @@ async def checkin(db: AsyncSession, user_id: int) -> CheckinResponse:
     return CheckinResponse(checked_in=True, points=reward, balance=balance, checkin_date=today.isoformat())
 
 
+async def checkin_status(db: AsyncSession, user_id: int) -> CheckinResponse:
+    """Return today's check-in state without creating a check-in record."""
+    today = date.today()
+    row = (await db.execute(
+        text("SELECT points FROM user_checkin WHERE user_id=:id AND checkin_date=:day LIMIT 1"),
+        {"id": user_id, "day": today},
+    )).mappings().first()
+    balance = await _balance(db, user_id)
+    return CheckinResponse(
+        checked_in=row is not None,
+        points=int(row["points"] or 0) if row is not None else 0,
+        balance=balance,
+        checkin_date=today.isoformat(),
+    )
+
+
 async def tasks(db: AsyncSession, user_id: int) -> list[TaskItem]:
     result = await db.execute(text("SELECT task_code,status,completed_at FROM user_task WHERE user_id=:id"), {"id": user_id})
     saved = {r["task_code"]: r for r in result.mappings()}

@@ -7,7 +7,7 @@ from app.schemas.payments import PaidOrderResponse
 from app.schemas.points import CheckinResponse, ClaimTaskResponse, CreatePointRechargeOrderRequest, InvitePage, PointLedgerPage, PointProduct, PointRechargePackage, PointsSummary, RedeemRequest, RedeemResponse, TaskItem
 from app.schemas.quotas import QuotaSummary
 from app.services.payments import get_paid_order
-from app.services.points import checkin, claim_task, invites, ledger, products, redeem, summary, tasks
+from app.services.points import checkin, checkin_status, claim_task, invites, ledger, products, redeem, summary, tasks
 from app.services.points_recharge import create_recharge_order, list_recharge_packages
 from app.services.quotas import summary as quota_summary
 
@@ -25,6 +25,9 @@ async def point_ledger(page: int = Query(1, ge=1), page_size: int = Query(20, ge
 
 @router.post("/users/me/checkin", response_model=CheckinResponse, summary="每日签到")
 async def daily_checkin(current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> CheckinResponse: return await checkin(db, current.id)
+
+@router.get("/users/me/checkin", response_model=CheckinResponse, summary="查询今日签到状态")
+async def daily_checkin_status(current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> CheckinResponse: return await checkin_status(db, current.id)
 
 @router.get("/users/me/tasks", response_model=list[TaskItem], summary="查询积分任务")
 async def task_list(current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> list[TaskItem]: return await tasks(db, current.id)

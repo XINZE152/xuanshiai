@@ -119,7 +119,7 @@ def test_shared_review_rejects_unsupported_status() -> None:
 
 
 def test_member_auth_backend_realname_approval_sets_both_columns() -> None:
-    db = StubDB(results=[_Mapping({"id": REVIEW_ID, "user_id": USER_ID})])
+    db = StubDB(results=[_Mapping({"id": REVIEW_ID, "user_id": USER_ID, "face_verified": 0})])
     asyncio.run(member_auth.review_auth(db, "realname", REVIEW_ID, ReviewActionRequest(status=1), 99))
     params = db.params_of("UPDATE user_auth SET")[0]
     assert params["status"] == 2, "会员认证后台通过实名必须写 realname_status=2"
@@ -128,12 +128,49 @@ def test_member_auth_backend_realname_approval_sets_both_columns() -> None:
 
 
 def test_member_auth_backend_realname_rejection_sets_both_columns() -> None:
-    db = StubDB(results=[_Mapping({"id": REVIEW_ID, "user_id": USER_ID})])
+    db = StubDB(results=[_Mapping({"id": REVIEW_ID, "user_id": USER_ID, "face_verified": 0})])
     asyncio.run(
         member_auth.review_auth(db, "realname", REVIEW_ID, ReviewActionRequest(status=2, remark="照片不符"), 99)
     )
     params = db.params_of("UPDATE user_auth SET")[0]
     assert params["status"] == 3 and params["face"] == 2
+
+
+def test_member_auth_backend_house_approval_maps_to_public_verified_state() -> None:
+    db = StubDB(results=[_Mapping({"id": REVIEW_ID, "house_cert": "/proof.jpg", "house_verified": 1})])
+    asyncio.run(member_auth.review_auth(db, "house", REVIEW_ID, ReviewActionRequest(status=1), 99))
+    update = db.params_of("UPDATE user_auth SET house_verified")[0]
+    assert update["st"] == 2
+    assert update["remark"] is None
+    assert "house_reviewed_at = UTC_TIMESTAMP()" in db.sql()
+
+
+@pytest.mark.parametrize(
+    ("stored_status", "expected_result"),
+    [(0, "pending"), (1, "pending"), (2, "pass"), (3, "fail")],
+)
+def test_house_admin_list_uses_public_four_state_mapping(stored_status: int, expected_result: str) -> None:
+    item = member_auth._build_house({
+        "id": REVIEW_ID,
+        "user_id": USER_ID,
+        "member_code": "G000007",
+        "nickname": "Member",
+        "avatar": None,
+        "real_name": None,
+        "id_card": None,
+        "house_cert": "/proof.jpg",
+        "house_verified": stored_status,
+        "created_at": None,
+    })
+    assert item.result == expected_result
+
+
+def test_member_auth_backend_house_review_rejects_non_pending_state() -> None:
+    db = StubDB(results=[_Mapping({"id": REVIEW_ID, "house_cert": "/proof.jpg", "house_verified": 2})])
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(member_auth.review_auth(db, "house", REVIEW_ID, ReviewActionRequest(status=1), 99))
+    assert exc.value.status_code == 409
+    assert "UPDATE user_auth SET house_verified" not in db.sql()
 
 
 def test_old_backend_realname_approval_does_not_grant_face_marker() -> None:

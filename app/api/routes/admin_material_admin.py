@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import shutil
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, File, Path as PathParam, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Path as PathParam, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, declare_permission, get_current_matchmaker_admin
@@ -18,6 +20,7 @@ from app.schemas.admin_material_admin import (
     MaterialCategoryUpdate,
     MaterialItem,
     MaterialPage,
+    MaterialPublicCopyResponse,
     MaterialUpdate,
     MaterialUploadResponse,
 )
@@ -26,6 +29,41 @@ from app.services.media_access import MEDIA_CATEGORY_ADMIN, sign_media_url
 from app.services.profile import IMAGE_MAX_BYTES, _image_outputs, _read_limited
 
 router = APIRouter(prefix="/admin/materials")
+
+
+def _copy_material_to_common(upload_dir: str, source_url: str) -> str:
+    parsed = urlsplit(source_url)
+    prefix = "/storage/uploads/admin/"
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or not parsed.path.startswith(prefix):
+        raise HTTPException(422, detail="素材路径无效")
+
+    root = Path(upload_dir).resolve()
+    admin_root = (root / "admin").resolve()
+    try:
+        admin_root.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(500, detail="素材目录配置无效") from exc
+    source = (root / parsed.path.removeprefix("/storage/uploads/")).resolve()
+    try:
+        source.relative_to(admin_root)
+    except ValueError as exc:
+        raise HTTPException(422, detail="素材路径无效") from exc
+    if source.suffix.lower() != ".webp":
+        raise HTTPException(422, detail="仅支持 WebP 素材")
+    if not source.is_file():
+        raise HTTPException(404, detail="素材文件不存在")
+    if source.stat().st_size > IMAGE_MAX_BYTES:
+        raise HTTPException(413, detail="素材文件超出大小限制")
+
+    common_dir = root / "common"
+    common_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        common_dir.resolve().relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(500, detail="公共图片目录配置无效") from exc
+    name = f"{uuid.uuid4().hex}.webp"
+    shutil.copyfile(source, common_dir / name)
+    return f"/storage/uploads/common/{name}"
 
 
 def _signed(items: list[MaterialItem], viewer: int) -> list[MaterialItem]:
@@ -52,6 +90,29 @@ async def materials_list(
     result = await service.list_materials(db, page, page_size, keyword, category_id)
     result.items = _signed(result.items, current.account.id)
     return result
+
+
+@declare_permission("platform.material.write")
+@router.post(
+    "/{material_id}/copy-to-common",
+    response_model=MaterialPublicCopyResponse,
+    status_code=201,
+    summary="复制素材到公共配置图片目录",
+)
+async def material_copy_to_common(
+    material_id: int = PathParam(..., ge=1),
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MaterialPublicCopyResponse:
+    current.require("platform.material.write")
+    source_url = await service.get_material_source_url(db, material_id)
+    url = _copy_material_to_common(settings.upload_dir, source_url)
+    try:
+        await service.record_material_public_copy(db, current.account.id, material_id)
+    except Exception:
+        (Path(settings.upload_dir) / url.removeprefix("/storage/uploads/")).unlink(missing_ok=True)
+        raise
+    return MaterialPublicCopyResponse(material_id=material_id, url=url)
 
 
 @declare_permission("platform.material.write")

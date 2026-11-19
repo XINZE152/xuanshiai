@@ -376,7 +376,7 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 
 #### 返回参数差异
 
-- **house**：`items[].file_url` = `user_auth.house_cert`（文件凭证）；无附加字段。
+- **house**：`items[].file_url` = `user_auth.house_cert`（文件凭证）；底层四态为 0未提交、1审核中、2通过、3未通过，并映射为 `pending/pass/fail`。
 - **education**：只返回 `education_cert IS NOT NULL` 的已提交记录；`items[].degree`（学历）、`items[].school`（毕业学校）；`file_url` = `education_cert`。底层四态为 0未提交、1审核中、2通过、3未通过，并映射为 `pending/pass/fail`。
 - **other**：`items[].auth_type_id`（int）、`items[].auth_type_name`（string）；`file_url` = `user_auth_extra.file_url`。
 
@@ -630,7 +630,7 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 
 #### 使用方法与业务规则
 
-- `kind=commitment/house/education/other/realname`：更新对应表 `status`/`verified` 并写审计。承诺通过/驳回同时更新单身承诺完成标记；学历将后台动作 `1/2` 映射为用户侧 `2通过/3未通过`。
+- `kind=commitment/house/education/other/realname`：更新对应表状态并写审计；审核动作 `status=1/2` 分别表示通过/未通过。承诺通过/驳回同时更新单身承诺完成标记；学历和房产将后台动作 `1/2` 映射为用户侧 `2通过/3未通过`。实名仅接受 `face_verified=0` 的待审记录；房产仅接受凭证存在且 `house_verified=1` 的待审记录；其他认证仅接受 `status=0` 的待审记录，重复或过期审核返回 `409`。房产提交时进入 `house_verified=1` 待审状态。
 - `kind=marriage`：**不支持**，返回 `400`（婚姻核验结果为 married/no_record/divorced，无通过/未通过语义）。
 - `kind` 非法值（如 `foo`）被路径正则拦截，返回 `404`（未匹配到路由）。
 
@@ -640,7 +640,7 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 | --- | --- | --- |
 | 400 | `kind=marriage` | 提示婚姻核验不可审核 |
 | 404 | 记录不存在 / kind 非法 | 提示 |
-| 409 | 承诺或学历记录已不在审核中 | 刷新列表，不允许重复改判 |
+| 409 | 实名、承诺、房产、学历或其他认证记录已不在审核中 | 刷新列表，不允许重复改判 |
 | 422 | `status` 非法，或驳回承诺/学历时未填写原因 | 提示并保留当前审核输入 |
 
 #### 文档完成自检清单
@@ -650,6 +650,10 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 - [x] 返回示例
 - [x] 使用方法（含 marriage 不支持说明）
 - [x] 错误表
+
+#### 变更记录
+
+- 2026-11-18（M3-1）：房产认证列表和审核统一按用户侧四态处理；新提交的房产资料进入待审状态，审核成功/失败分别落为 2/3。审核接口增加实名、房产、其他认证的待审状态校验，避免重复审核。请求与响应结构保持兼容。
 
 ---
 

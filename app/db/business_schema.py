@@ -2404,6 +2404,25 @@ BUSINESS_TABLES = {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
           COMMENT='C 端用户反馈/意见箱'
     """,
+    # 迁移镜像：migrations/business/20261119_01_emotion_lab_sessions_*.sql
+    "emotion_lab_session": """
+        CREATE TABLE IF NOT EXISTS `emotion_lab_session` (
+            `id` char(36) NOT NULL,
+            `user_id` bigint unsigned NOT NULL,
+            `assessment_id` varchar(64) NOT NULL,
+            `assessment_version` varchar(64) NOT NULL,
+            `result_copy_version` varchar(64) NOT NULL,
+            `status` varchar(16) NOT NULL DEFAULT 'in_progress',
+            `payload` json NOT NULL,
+            `result` json DEFAULT NULL,
+            `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            `completed_at` datetime DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `idx_emotion_lab_user_status` (`user_id`, `status`, `updated_at`),
+            CONSTRAINT `fk_emotion_lab_session_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='情感实验室 MBTI 测试会话与阶段结果'
+    """,
     "ref_teacher": """
         CREATE TABLE IF NOT EXISTS `ref_teacher` (
             `id` bigint unsigned NOT NULL AUTO_INCREMENT,

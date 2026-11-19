@@ -133,6 +133,8 @@ async def list_realname_reviews(
         where.append("ua.face_verified = 1")
     elif status == "fail":
         where.append("ua.face_verified = 2")
+    elif status == "pending":
+        where.append("ua.face_verified = 0")
     # status=all（默认）包含 verified 0/1/2，待审行 result 记为 pending
     if keyword:
         where.append(
@@ -342,14 +344,14 @@ async def list_house_reviews(
     status: str,
     keyword: str | None,
 ) -> HouseReviewPage:
-    where = ["1=1"]
+    where = ["ua.house_cert IS NOT NULL", "ua.house_cert <> ''"]
     params: dict[str, Any] = {}
     if status == "pass":
-        where.append("ua.house_verified = 1")
-    elif status == "pending":
-        where.append("ua.house_verified = 0")
-    elif status == "fail":
         where.append("ua.house_verified = 2")
+    elif status == "pending":
+        where.append("ua.house_verified = 1")
+    elif status == "fail":
+        where.append("ua.house_verified = 3")
     if keyword:
         where.append(
             "(u.nickname LIKE CONCAT('%', :kw, '%') OR u.phone LIKE CONCAT('%', :kw, '%') "
@@ -374,7 +376,7 @@ async def list_house_reviews(
 
 def _build_house(r: dict[str, Any]) -> HouseReviewItem:
     v = int(r["house_verified"] or 0)
-    result, label = _verify_result(v)
+    result, label = _qualification_result(v)
     return HouseReviewItem(
         id=int(r["id"]),
         user_id=int(r["user_id"]),
@@ -536,10 +538,12 @@ async def review_auth(
         raise HTTPException(422, detail="审核未通过时必须填写原因")
     if kind == "realname":
         resource_type = "user_auth"
-        exists = await db.execute(text("SELECT id, user_id FROM user_auth WHERE id = :id"), {"id": review_id})
+        exists = await db.execute(text("SELECT id, user_id, face_verified FROM user_auth WHERE id = :id FOR UPDATE"), {"id": review_id})
         realname_row = exists.mappings().first()
         if not realname_row:
             raise HTTPException(404, detail="实名认证记录不存在")
+        if int(realname_row["face_verified"] or 0) != 0:
+            raise HTTPException(409, detail="当前实名认证不在审核中")
         # D-14：实名审核统一走 auth.apply_realname_review，同源写入 realname_status（门禁读取列）
         # 与 face_verified（人脸标记），避免两个后台入口双写分裂导致门禁不可达。
         from app.services import auth as auth_service
@@ -571,12 +575,18 @@ async def review_auth(
         raise HTTPException(400, detail="婚姻核验记录不支持通过/未通过审核，仅可查看或删除")
     elif kind == "house":
         resource_type = "user_auth"
-        exists = await db.execute(text("SELECT id FROM user_auth WHERE id = :id"), {"id": review_id})
-        if not exists.scalar():
+        exists = await db.execute(text("SELECT id, house_cert, house_verified FROM user_auth WHERE id = :id FOR UPDATE"), {"id": review_id})
+        house_review = exists.mappings().first()
+        if not house_review or not house_review["house_cert"]:
             raise HTTPException(404, detail="房产认证记录不存在")
+        if int(house_review["house_verified"] or 0) != 1:
+            raise HTTPException(409, detail="当前房产认证不在审核中")
+        qualification_status = 2 if new_status == 1 else 3
         await db.execute(
-            text("UPDATE user_auth SET house_verified = :st, reviewed_by = :actor, reviewed_at = UTC_TIMESTAMP() WHERE id = :id"),
-            {"st": new_status, "actor": actor_id, "id": review_id},
+            text("""UPDATE user_auth SET house_verified = :st, house_fail_reason = :remark,
+                house_reviewed_at = UTC_TIMESTAMP(), reviewed_by = :actor, reviewed_at = UTC_TIMESTAMP(),
+                updated_at = UTC_TIMESTAMP() WHERE id = :id"""),
+            {"st": qualification_status, "remark": body.remark if qualification_status == 3 else None, "actor": actor_id, "id": review_id},
         )
     elif kind == "education":
         resource_type = "user_auth"
@@ -596,9 +606,12 @@ async def review_auth(
         )
     elif kind == "other":
         resource_type = "user_auth_extra"
-        exists = await db.execute(text("SELECT id FROM user_auth_extra WHERE id = :id"), {"id": review_id})
-        if not exists.scalar():
+        exists = await db.execute(text("SELECT id, status FROM user_auth_extra WHERE id = :id FOR UPDATE"), {"id": review_id})
+        other_review = exists.mappings().first()
+        if not other_review:
             raise HTTPException(404, detail="其他认证记录不存在")
+        if int(other_review["status"] or 0) != 0:
+            raise HTTPException(409, detail="当前其他认证不在审核中")
         await db.execute(
             text("UPDATE user_auth_extra SET status = :st, reviewed_by = :actor, reviewed_at = UTC_TIMESTAMP(), remark = :remark WHERE id = :id"),
             {"st": new_status, "actor": actor_id, "id": review_id, "remark": body.remark},
