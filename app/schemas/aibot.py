@@ -160,3 +160,23 @@ class AibotTimelinePageResponse(BaseModel):
     oldest_id: int | None = None
     newest_id: int | None = None
     limit: int = 40
+
+
+class AibotStoryPlayUpsert(BaseModel):
+    task_id: str = Field(..., min_length=1, max_length=64)
+    status: str = Field("playing", max_length=16)
+    chapter_idx: int = Field(0, ge=0, le=200)
+
+
+class AibotStoryPlayResponse(BaseModel):
+    ok: bool = True
+    task_id: str = ""
+    status: str = "playing"
+    chapter_idx: int = 0
+    reason: str | None = None
+
+
+class AibotStoryPeerResponse(BaseModel):
+    """演完后同本同好；无合适人选时 peer 为 null。"""
+
+    peer: dict[str, Any] | None = None

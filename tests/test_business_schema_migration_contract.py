@@ -73,6 +73,7 @@ def test_manifest_checksums_are_lf_normalised() -> None:
         "20261117_02_bot_intake",
         "20261117_03_aibot_love_report",
         "20261118_01_aibot_timeline",
+        "20261119_01_aibot_story_play",
     ]
     for entry in manifest["versions"]:
         for direction in ("up", "down", "verify", "verify_previous"):

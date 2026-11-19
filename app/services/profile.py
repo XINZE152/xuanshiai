@@ -881,6 +881,14 @@ async def update_profile(
             "profile_updated",
             50,
         )
+    # 恋爱报告 PART01：资料一变就落库刷新基础信息（无 AI、不升版本）；
+    # 半填 bot_intake 也走这里。整体分析正文等用户拉开报告时再生成。
+    try:
+        from app.services.aibot_report import persist_latest_report_basics
+
+        await persist_latest_report_basics(db, user_id, commit=False)
+    except Exception:
+        logger.exception("persist love report basics after profile update failed user=%s", user_id)
     if commit:
         await db.commit()
     return await get_profile(db, user_id)
@@ -904,6 +912,12 @@ async def update_nickname(
         text("UPDATE users SET nickname = :nickname, updated_at = UTC_TIMESTAMP() WHERE id = :user_id"),
         {"user_id": user_id, "nickname": nickname},
     )
+    try:
+        from app.services.aibot_report import persist_latest_report_basics
+
+        await persist_latest_report_basics(db, user_id, commit=False)
+    except Exception:
+        logger.exception("persist love report basics after nickname update failed user=%s", user_id)
     await db.commit()
     result = await db.execute(
         text("SELECT id, nickname, updated_at FROM users WHERE id = :user_id"),

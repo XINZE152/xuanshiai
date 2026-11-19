@@ -274,6 +274,19 @@
         "verify": "56a946558f8568da20d94ee5bc4125e5771129e28b92791ba78b373cf0d7b402",
         "verify_previous": "42f1bd9254009a4e8e1f3bf8522429b1975c0dba322048659adadac4e336e1e9"
       }
+    },
+    {
+      "version": "20261119_01_aibot_story_play",
+      "up": "20261119_01_aibot_story_play_up.sql",
+      "down": "20261119_01_aibot_story_play_down.sql",
+      "verify": "20261119_01_aibot_story_play_verify.sql",
+      "verify_previous": "20261119_01_aibot_story_play_verify_previous.sql",
+      "sha256": {
+        "up": "3146a8855e8dea8eb9675be227e8970e83c184861e33023c9a5f5bb531ba956c",
+        "down": "7b84010bb934ae6dde13a27ab18e97a77eb5bedc77c70cfb6833e172d23bdfc2",
+        "verify": "0de0494ae11bd46ee321ad44a081812dfba14eb674217fb447d15bc0d5592d82",
+        "verify_previous": "7fdc8e9b14cb68e2f8d95a18f14a2b47af32a94a49b2fcab3d44e54592ad970e"
+      }
     }
   ]
 }

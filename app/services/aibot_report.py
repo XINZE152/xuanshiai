@@ -38,7 +38,8 @@ _REPORT_QUOTA_PREFIX = "aibot-report"
 # 生成次数限制（查看历史不受限）；一人一天 100 次，覆盖反复改资料/调试，
 # 仍保留软上限避免异常刷模型。
 _REPORT_DAILY_LIMIT = 100
-_CHAT_DIGEST_LIMIT = 40
+# 与时间线上拉页同量级；再长由模型窗口截断，优先最近
+_CHAT_DIGEST_LIMIT = 60
 
 # 情绪兜底判词：模型不可用时也不能让报告缺这一块。
 _NEGATIVE_WORDS = (
@@ -159,8 +160,71 @@ async def _load_ai_profile_lines(db: AsyncSession, user_id: int) -> list[str]:
     return lines
 
 
-async def _load_chat_digest(db: AsyncSession, user_id: int) -> tuple[list[str], int]:
-    """最近一轮会话里的真实对话摘录（用户 + 红娘），供模型判断情绪。"""
+def _digest_lines_from_rows(rows: list[Any]) -> tuple[list[str], int]:
+    """把 role/content 行折成「用户：/红娘：」摘录（时间升序）。"""
+    lines: list[str] = []
+    for row in reversed(list(rows)):
+        content = str(row.get("content") or "").strip()
+        if not content:
+            continue
+        who = "用户" if str(row.get("role")) == "user" else "红娘"
+        lines.append(f"{who}：{content[:160]}")
+    user_turns = sum(1 for line in lines if line.startswith("用户："))
+    return lines, user_turns
+
+
+async def _load_chat_digest(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    agent_id: str | None = None,
+) -> tuple[list[str], int]:
+    """与用户可见时间线同源的对话摘录，供报告全量再分析。
+
+    优先 ``aibot_timeline_message``（多端同步 / 上拉历史）；无数据再回落
+    最近 ``aibot_session`` 的 ``aibot_turn``，避免老会话空时间线时报告完全失语。
+    """
+    aid = (agent_id or "").strip()[:32]
+    # 1) 时间线：有 agent 先按 agent；为空再放宽到该用户全部红娘
+    try:
+        params: dict[str, Any] = {"uid": user_id, "lim": _CHAT_DIGEST_LIMIT}
+        agent_sql = ""
+        if aid:
+            agent_sql = " AND agent_id = :aid"
+            params["aid"] = aid
+        rows = (
+            await db.execute(
+                text(
+                    f"""SELECT role, content FROM aibot_timeline_message
+                        WHERE user_id = :uid{agent_sql}
+                          AND role IN ('user', 'assistant')
+                          AND kind = 'text'
+                          AND TRIM(content) <> ''
+                        ORDER BY id DESC LIMIT :lim"""
+                ),
+                params,
+            )
+        ).mappings().all()
+        if not rows and aid:
+            rows = (
+                await db.execute(
+                    text(
+                        """SELECT role, content FROM aibot_timeline_message
+                           WHERE user_id = :uid
+                             AND role IN ('user', 'assistant')
+                             AND kind = 'text'
+                             AND TRIM(content) <> ''
+                           ORDER BY id DESC LIMIT :lim"""
+                    ),
+                    {"uid": user_id, "lim": _CHAT_DIGEST_LIMIT},
+                )
+            ).mappings().all()
+        if rows:
+            return _digest_lines_from_rows(list(rows))
+    except Exception:
+        logger.debug("aibot report timeline digest skipped", exc_info=True)
+
+    # 2) 回落 turn
     try:
         session_row = (
             await db.execute(
@@ -186,15 +250,17 @@ async def _load_chat_digest(db: AsyncSession, user_id: int) -> tuple[list[str], 
     except Exception:
         logger.debug("aibot report chat lookup skipped", exc_info=True)
         return [], 0
-    lines: list[str] = []
-    for row in reversed(list(rows)):
-        content = str(row.get("content") or "").strip()
-        if not content:
-            continue
-        who = "用户" if str(row.get("role")) == "user" else "红娘"
-        lines.append(f"{who}：{content[:160]}")
-    user_turns = sum(1 for line in lines if line.startswith("用户："))
-    return lines, user_turns
+    return _digest_lines_from_rows(list(rows))
+
+
+def _member_title(gender: Any) -> str:
+    """报告称呼：仅在明确男女时用先生/女士，未知不默认女。"""
+    g = str(gender or "").strip()
+    if g == "男":
+        return "先生"
+    if g == "女":
+        return "女士"
+    return ""
 
 
 def _rule_emotion(chat_lines: list[str]) -> dict[str, Any]:
@@ -322,8 +388,11 @@ def build_report_messages(
 
     system = (
         f"你是恋 AI BOT 的专属红娘【{meta['name']}】，现在要为会员「{nickname}」写一份婚恋分析报告。\n"
-        "报告要给本人看，也要能被下载保存，因此必须只依据下面三块真实材料，"
+        "本版是全量再分析，不是局部润色：letter、emotion 与 part01～part07 都必须基于"
+        "下面三块材料整体重写；禁止只改情绪标签而沿用旧的单身原因/情感经历套话。\n"
+        "报告要给本人看，也要能被下载保存，因此必须只依据真实材料，"
         "不得编造用户没有提供的经历、收入、家庭细节；材料不足就写「待补充」。\n"
+        "性别等精准字段以「会员资料」为准；对话说法与资料冲突时以资料为准，可在 note 点出对话说法。\n"
         "平台红线：不承诺关系结果，不制造年龄焦虑，不使用「命中注定」「最后机会」这类表述，"
         "不做心理诊断，不评价外貌高低。\n"
         "只输出一个 JSON 对象，不要 Markdown 代码块，不要任何解释性文字。\n"
@@ -333,7 +402,10 @@ def build_report_messages(
     user = (
         f"【会员资料（精准优先；bot 来源若是区间/手输原文，正文必须原样引用，禁止取中值）】\n{facts_block}\n\n"
         f"【已发布的 AI 画像】\n{ai_block}\n\n"
-        f"【最近对话摘录（用于判断情绪，不要复述原文）】\n{chat_block}\n\n"
+        f"【最新 BOT 聊天记录（与用户可见时间线一致，按时间截断；须驱动整份分析）】\n"
+        f"{chat_block}\n"
+        "要求：据此整体重写 letter / emotion / part02～part07 中与经历、顾虑、节奏、破局相关的结论；"
+        "聊天未出现的经历写「待补充」，禁止脑补；不要大段复述原文。\n\n"
         f"【系统已算好的分数，不得改写】竞争力 {score_total} 分；恋爱意愿「{love_index_label}」。\n\n"
         "请输出精简 JSON（缺失也保留键，数组宁可短）：\n"
         "{\n"
@@ -666,10 +738,13 @@ async def _compose_and_store(
     nickname = await _load_nickname(db, user_id)
     member_facts = await _load_member_facts(db, user_id)
     ai_lines = await _load_ai_profile_lines(db, user_id)
-    chat_lines, user_turns = await _load_chat_digest(db, user_id)
 
     resolved_agent = agent_id or getattr(assignment, "agent_id", None) or "anian"
     meta = get_agent_meta(resolved_agent)
+    chat_lines, user_turns = await _load_chat_digest(
+        db, user_id, agent_id=resolved_agent
+    )
+    member_title = _member_title(member_facts.get("gender"))
 
     score = client_score if isinstance(client_score, dict) else {}
     bars = _normalize_bars(score.get("bars"))
@@ -723,7 +798,7 @@ async def _compose_and_store(
         source = "rule"
         narrative = _rule_narrative(
             nickname=nickname,
-            title="先生" if str(member_facts.get("gender") or "女") == "男" else "女士",
+            title=member_title,
             member_facts=member_facts,
             ai_lines=ai_lines,
             emotion=_rule_emotion(chat_lines),
@@ -739,7 +814,7 @@ async def _compose_and_store(
         "brand": {"org": "宣誓爱", "advisor": meta["name"], "title": "AI 婚恋顾问"},
         "member": {
             "name": nickname,
-            "title": "先生" if str(member_facts.get("gender") or "女") == "男" else "女士",
+            "title": member_title,
             "id": f"XS-{user_id}",
         },
         "date": _report_date(),
@@ -777,7 +852,7 @@ async def _compose_and_store(
             },
         },
         "matchFocus": narrative["match_focus"],
-        "changelog": "按最新资料、AI 画像与最近对话重新整理" if version > 1 else None,
+        "changelog": "按最新资料、AI 画像与时间线聊天全量再分析" if version > 1 else None,
         "generatedAt": int(datetime.now().timestamp() * 1000),
     }
 
@@ -836,6 +911,89 @@ async def list_reports(db: AsyncSession, user_id: int, limit: int = 20) -> list[
     return out
 
 
+def _parse_payload_json(raw: Any) -> dict[str, Any]:
+    payload = raw
+    if isinstance(payload, (bytes, bytearray)):
+        payload = payload.decode("utf-8", errors="ignore")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception as exc:
+            raise HTTPException(500, detail="报告数据损坏") from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def apply_live_member_basics(
+    payload: dict[str, Any],
+    *,
+    nickname: str,
+    member_facts: dict[str, Any],
+) -> dict[str, Any]:
+    """用当前会员事实覆盖报告里的基础信息块；不改 AI 正文、不升版本。
+
+    半填资料也只展示已有字段（``_profile_rows`` 跳过空值）。
+    """
+    out = dict(payload or {})
+    member = dict(out.get("member") or {}) if isinstance(out.get("member"), dict) else {}
+    member["name"] = (nickname or "").strip() or str(member.get("name") or "会员")
+    member["title"] = _member_title(member_facts.get("gender"))
+    if member.get("id") in (None, ""):
+        # 保留原 id；没有则留给调用方
+        pass
+    out["member"] = member
+    part01 = dict(out.get("part01") or {}) if isinstance(out.get("part01"), dict) else {}
+    part01["profile"] = _profile_rows(member_facts)
+    # strengths / summary 仍属 AI 正文，打开报告时再整体重写；此处不动
+    out["part01"] = part01
+    return out
+
+
+async def persist_latest_report_basics(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    commit: bool = False,
+) -> bool:
+    """资料变更后：把最新基础信息写入最新一版报告 payload（无 AI、不升 version）。
+
+    用户填一半就停，已填字段也会进 PART01。无无报告时返回 False。
+    """
+    row = (
+        await db.execute(
+            text(
+                """SELECT id, payload_json FROM aibot_love_report
+                   WHERE user_id = :uid ORDER BY version DESC LIMIT 1"""
+            ),
+            {"uid": user_id},
+        )
+    ).mappings().first()
+    if not row:
+        return False
+    try:
+        payload = _parse_payload_json(row.get("payload_json"))
+    except HTTPException:
+        return False
+    nickname = await _load_nickname(db, user_id)
+    member_facts = await _load_member_facts(db, user_id)
+    refreshed = apply_live_member_basics(
+        payload, nickname=nickname, member_facts=member_facts
+    )
+    await db.execute(
+        text(
+            """UPDATE aibot_love_report
+               SET payload_json = :payload
+               WHERE id = :id"""
+        ),
+        {
+            "id": int(row["id"]),
+            "payload": json.dumps(refreshed, ensure_ascii=False),
+        },
+    )
+    if commit:
+        await db.commit()
+    return True
+
+
 async def get_report(db: AsyncSession, user_id: int, version: int) -> dict[str, Any]:
     row = (
         await db.execute(
@@ -848,18 +1006,11 @@ async def get_report(db: AsyncSession, user_id: int, version: int) -> dict[str, 
     ).mappings().first()
     if not row:
         raise HTTPException(404, detail="报告版本不存在")
-    payload = row["payload_json"]
-    if isinstance(payload, (bytes, bytearray)):
-        payload = payload.decode("utf-8", errors="ignore")
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception as exc:
-            raise HTTPException(500, detail="报告数据损坏") from exc
-    return payload if isinstance(payload, dict) else {}
+    return _parse_payload_json(row["payload_json"])
 
 
 async def latest_report(db: AsyncSession, user_id: int) -> dict[str, Any] | None:
+    """最新一版报告；PART01/称呼始终按当前会员资料覆盖后再返回（展示及时）。"""
     row = (
         await db.execute(
             text(
@@ -871,7 +1022,12 @@ async def latest_report(db: AsyncSession, user_id: int) -> dict[str, Any] | None
     ).mappings().first()
     if not row:
         return None
-    return await get_report(db, user_id, int(row["version"]))
+    payload = await get_report(db, user_id, int(row["version"]))
+    nickname = await _load_nickname(db, user_id)
+    member_facts = await _load_member_facts(db, user_id)
+    return apply_live_member_basics(
+        payload, nickname=nickname, member_facts=member_facts
+    )
 
 
 async def create_report_invite_wxacode() -> dict[str, str]:

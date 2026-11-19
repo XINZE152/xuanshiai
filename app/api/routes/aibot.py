@@ -16,6 +16,9 @@ from app.schemas.aibot import (
     AibotReportResponse,
     AibotSessionCreate,
     AibotSessionResponse,
+    AibotStoryPeerResponse,
+    AibotStoryPlayResponse,
+    AibotStoryPlayUpsert,
     AibotTimelineMessageIn,
     AibotTimelineMessageOut,
     AibotTimelinePageResponse,
@@ -39,6 +42,7 @@ from app.services.aibot_report import (
     list_reports,
     latest_report,
 )
+from app.services.aibot_story_play import match_story_peer, upsert_story_play
 from app.services.discovery import get_aibot_recommendations_page
 
 router = APIRouter(prefix="/ai/aibot", tags=["恋 AI BOT"])
@@ -185,6 +189,41 @@ async def aibot_recommendations(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> DiscoveryPage:
     return await get_aibot_recommendations_page(db, current.id, filters)
+
+
+@router.post(
+    "/story-plays",
+    response_model=AibotStoryPlayResponse,
+    summary="上报剧本游玩进度（开玩/推进/暂停/演完）",
+)
+async def upsert_aibot_story_play(
+    body: AibotStoryPlayUpsert,
+    current: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AibotStoryPlayResponse:
+    result = await upsert_story_play(
+        db,
+        current.id,
+        body.task_id,
+        status=body.status,
+        chapter_idx=body.chapter_idx,
+    )
+    return AibotStoryPlayResponse(**result)
+
+
+@router.get(
+    "/story-plays/{task_id}/peer",
+    response_model=AibotStoryPeerResponse,
+    summary="演完后取 1 位玩过同本且符合喜好的真实用户（无人则 peer=null）",
+)
+async def read_aibot_story_peer(
+    task_id: Annotated[str, Path(min_length=1, max_length=64)],
+    current: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    title: Annotated[str, Query(max_length=64)] = "",
+) -> AibotStoryPeerResponse:
+    peer = await match_story_peer(db, current.id, task_id, task_title=title)
+    return AibotStoryPeerResponse(peer=peer)
 
 
 @router.post(

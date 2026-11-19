@@ -32,8 +32,9 @@ def test_code_schema_covers_every_table_with_a_primary_key() -> None:
     # + 人工提现收款信息表 withdrawal_payee_secret（WITHDRAWAL-MANUAL-20261116）
     # + 恋 AI BOT 4 张表（aibot_user_assignment / aibot_session /
     #   aibot_turn / aibot_love_report，20261117_01/03）
-    # + aibot_timeline_message（20261118_01），合计 283。
-    assert len(schema) == 283
+    # + aibot_timeline_message（20261118_01）
+    # + aibot_story_play / aibot_story_peer_shown（20261119_01），合计 285。
+    assert len(schema) == 285
     assert all(spec["has_primary_key"] for spec in schema.values()), "所有表都应有主键"
     assert "paper_plane_profile_unlock" in schema
     assert "payment_refund" in schema

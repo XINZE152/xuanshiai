@@ -61,6 +61,8 @@ def test_collect_reports_all_release_gates() -> None:
         "table aibot_turn",
         "table aibot_love_report",
         "table aibot_timeline_message",
+        "table aibot_story_play",
+        "table aibot_story_peer_shown",
         "user_profile.bot_intake_json",
     ]
     assert all(item.ok for item in results)

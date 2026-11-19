@@ -1,9 +1,11 @@
 """恋爱报告生成口径：素材三段、结构收敛、情绪兜底、分项条收敛。"""
 
 from app.services.aibot_report import (
+    _member_title,
     _normalize_bars,
     _normalize_narrative,
     _rule_emotion,
+    apply_live_member_basics,
     build_report_messages,
 )
 
@@ -20,14 +22,51 @@ def test_prompt_carries_three_sources_and_no_invented_score():
     )
     assert len(messages) == 2
     system, user = messages[0]["content"], messages[1]["content"]
-    # 三块素材都要进提示词
-    assert "会员资料" in user and "AI 画像" in user and "最近对话" in user
+    # 三块素材都要进提示词；聊天须驱动整份再分析，不只是情绪
+    assert "会员资料" in user and "AI 画像" in user and "最新 BOT 聊天记录" in user
+    assert "整体重写" in user
+    assert "全量再分析" in system
     # 来源标记这类内部字段不得当成事实喂给模型
     assert "gender_source" not in user
     assert "78" in user
     # 红线写死在 system：不承诺结果、不制造焦虑
     assert "不承诺关系结果" in system
     assert "命中注定" in system
+
+
+def test_member_title_does_not_default_to_female():
+    assert _member_title("男") == "先生"
+    assert _member_title("女") == "女士"
+    assert _member_title(None) == ""
+    assert _member_title("") == ""
+    assert _member_title("未知") == ""
+
+
+def test_apply_live_member_basics_refreshes_profile_without_touching_ai_copy():
+    payload = {
+        "member": {"name": "旧名", "title": "女士", "id": "XS-1"},
+        "part01": {
+            "profile": [{"k": "性别", "v": "女"}],
+            "strengths": ["AI写的优势"],
+            "summary": "AI摘要",
+        },
+        "letter": "旧寄语",
+    }
+    out = apply_live_member_basics(
+        payload,
+        nickname="新昵称",
+        member_facts={"gender": "男", "city": "杭州", "age_band": "1991–1995"},
+    )
+    assert out["member"]["name"] == "新昵称"
+    assert out["member"]["title"] == "先生"
+    assert out["member"]["id"] == "XS-1"
+    keys = {row["k"] for row in out["part01"]["profile"]}
+    assert "性别" in keys and "城市" in keys and "年龄段" in keys
+    assert {"k": "性别", "v": "男"} in out["part01"]["profile"]
+    # AI 正文不动
+    assert out["part01"]["strengths"] == ["AI写的优势"]
+    assert out["part01"]["summary"] == "AI摘要"
+    assert out["letter"] == "旧寄语"
 
 
 def test_prompt_drops_score_number_when_client_did_not_send():
