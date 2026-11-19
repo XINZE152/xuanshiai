@@ -34,18 +34,34 @@ def _snapshot(
     filters: DiscoveryFilters | None = None,
     *,
     apply_intent_gender_gate: bool = True,
+    plaza: bool = False,
+    completion_gate_mode: str | None = None,
 ):
     return discovery._candidate_snapshot(
         viewer_id=1,
         viewer=viewer,
         viewer_is_vip=False,
         filters=filters or DiscoveryFilters(),
-        plaza=False,
+        plaza=plaza,
         nickname=None,
         tag=None,
         respect_preferences=False,
         apply_intent_gender_gate=apply_intent_gender_gate,
+        completion_gate_mode=completion_gate_mode,
     )
+
+
+def test_plaza_candidate_gate_matches_home_recommend_min() -> None:
+    """广场出池与首页推荐一致：性别 + 年龄 + 现居地，不再要求完整度 100。"""
+    plaza = _snapshot(BASE_VIEWER, plaza=True)
+    home = _snapshot(BASE_VIEWER, plaza=False)
+    assert "gender_completed" in plaza.where_sql
+    assert "birthday_completed" in plaza.where_sql
+    assert "location_completed" in plaza.where_sql
+    assert "gender_completed" in home.where_sql
+    search = _snapshot(BASE_VIEWER, plaza=True, completion_gate_mode="full")
+    assert "gender_completed" not in search.where_sql
+    assert "COALESCE(c.score, 0) >= 100" in search.where_sql
 
 
 # ── 1. 身份 → 是否只推异性 ────────────────────────────────────────────────

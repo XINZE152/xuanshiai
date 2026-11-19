@@ -249,6 +249,7 @@ def _visibility_predicate(
     completion_alias: str = "c",
     completion_waiver: CompletionWaiver | None = None,
     skip_completion_gate: bool = False,
+    completion_gate_mode: str | None = None,
 ) -> SqlPredicate:
     return candidate_visibility_service.predicate(
         ViewerContext(
@@ -262,6 +263,7 @@ def _visibility_predicate(
         completion_alias=completion_alias,
         completion_waiver=completion_waiver,
         skip_completion_gate=skip_completion_gate,
+        completion_gate_mode=completion_gate_mode,  # type: ignore[arg-type]
     )
 
 
@@ -687,6 +689,7 @@ def _candidate_snapshot(
     respect_preferences: bool,
     apply_intent_gender_gate: bool = True,
     force_skip_completion_gate: bool = False,
+    completion_gate_mode: str | None = None,
 ) -> CandidateQuerySnapshot:
     """Build one server-owned candidate SELECT/count pair.
 
@@ -698,17 +701,30 @@ def _candidate_snapshot(
     关闭）：搜索是用户指名找人的动作，不该被身份口径限制成搜不到同性。
     推荐流与广场保持默认 True。
 
-    ``force_skip_completion_gate`` 供恋 AI BOT 推荐：资料可后置完善，但仍走
-    现网会员池与可见性裁剪，不绕过拉黑/隐私等其它门禁。
+    ``completion_gate_mode``：
+    - ``full``：候选须完整度 100（或 grandfather）——搜索等仍可显式指定
+    - ``recommend_min``：候选须性别+年龄+现居地——首页推荐 / 广场 / BOT 推荐默认
+    - ``none``：不查完整度（历史访客等）
+    ``force_skip_completion_gate`` 仍兼容旧调用，等价于 mode=none，且关闭异性门禁。
     """
     scene = VisibilityScene.SEARCH if nickname or tag else VisibilityScene.DISCOVERY
-    skip_gates = _skip_discovery_gates() or force_skip_completion_gate
+    env_skip = _skip_discovery_gates()
+    if completion_gate_mode is None:
+        if env_skip or force_skip_completion_gate:
+            resolved_mode = "none"
+        else:
+            # 首页推荐与广场默认：性别 + 年龄 + 现居地即可出池
+            resolved_mode = "recommend_min"
+    else:
+        resolved_mode = "none" if env_skip else completion_gate_mode
+    # 仅「完全跳过完整度」时同步关掉异性门禁（旧 BOT skip 行为）；recommend_min 仍按性别推。
+    skip_gender_gate = resolved_mode == "none" and (env_skip or force_skip_completion_gate)
     visibility = _visibility_predicate(
         viewer_id,
         viewer,
         viewer_is_vip,
         scene,
-        skip_completion_gate=skip_gates,
+        completion_gate_mode=resolved_mode,
     )
     params: dict[str, Any] = {
         "viewer_id": viewer_id,
@@ -736,7 +752,7 @@ def _candidate_snapshot(
         and _only_opposite_gender(viewer)
         and not filters.gender
     )
-    if not skip_gates and viewer.get("gender") in (1, 2) and only_opposite_gender:
+    if not skip_gender_gate and viewer.get("gender") in (1, 2) and only_opposite_gender:
         clauses.append("u.gender <> :opposite_gender")
         params["opposite_gender"] = viewer["gender"]
     if respect_preferences:
@@ -768,7 +784,7 @@ def _candidate_snapshot(
         # 让同一用户身份切换前后的游标指纹不同，不会把上一条口径的 cursor 续用。
         "gender": viewer.get("gender") if only_opposite_gender else None,
     }
-    if skip_gates:
+    if skip_gender_gate:
         viewer_predicate_facts["gender"] = None
     if respect_preferences:
         viewer_predicate_facts["partner_preferences"] = {
@@ -797,8 +813,9 @@ def _candidate_snapshot(
         "filters": filter_facts,
         "policy_revision": visibility.policy_revision,
         "sort_version": SORT_VERSION,
+        "completion_gate_mode": resolved_mode,
     }
-    if skip_gates:
+    if resolved_mode == "none":
         fingerprint_payload["skip_gates"] = True
     query_fingerprint = build_query_fingerprint(fingerprint_payload)
     return CandidateQuerySnapshot(
@@ -822,6 +839,7 @@ async def _candidate_query_page(
     respect_preferences: bool = True,
     apply_intent_gender_gate: bool = True,
     force_skip_completion_gate: bool = False,
+    completion_gate_mode: str | None = None,
 ) -> tuple[dict[str, Any], bool, CandidatePage]:
     viewer = await _viewer_context(db, viewer_id)
     viewer_is_vip = await _is_vip(db, viewer_id)
@@ -836,6 +854,7 @@ async def _candidate_query_page(
         respect_preferences=respect_preferences,
         apply_intent_gender_gate=apply_intent_gender_gate,
         force_skip_completion_gate=force_skip_completion_gate,
+        completion_gate_mode=completion_gate_mode,
     )
     try:
         page = await candidate_query_service.fetch_page(
@@ -891,12 +910,13 @@ async def get_discovery_page(
         and not _viewer_completion_ok(viewer)
     ):
         raise HTTPException(403, detail="请先完善资料后再进入推荐")
+    # 首页推荐与广场候选门槛一致：性别+年龄+现居地；BOT / 软浏览同口径。
     _, viewer_is_vip, candidate_page = await _candidate_query_page(
         db,
         viewer_id,
         filters,
         plaza=plaza,
-        force_skip_completion_gate=relax_viewer_completion,
+        completion_gate_mode="recommend_min",
     )
     items = [
         _card(
@@ -924,7 +944,7 @@ async def get_aibot_recommendations_page(
     viewer_id: int,
     filters: DiscoveryFilters,
 ) -> DiscoveryPage:
-    """恋 AI BOT 推荐：资料可后置，仍复用现网会员池。"""
+    """恋 AI BOT / 首页软浏览推荐：浏览方可后置完善；候选须性别+年龄+现居地。"""
     return await get_discovery_page(
         db,
         viewer_id,
@@ -956,6 +976,8 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         # 搜索单独放开性别（产品确认 2026-11-14）：按昵称/标签找人是明确的指名动作，
         # 找对象用户也要能搜到同性好友。推荐流与广场不受影响，仍按身份口径过滤。
         apply_intent_gender_gate=False,
+        # 搜索仍要求完整度 100，与首页/广场的 recommend_min 出池门槛分开。
+        completion_gate_mode="full",
     )
     items = [
         _card(
@@ -1323,11 +1345,17 @@ async def _target_rows(
     *,
     completion_waiver: CompletionWaiver | None = None,
     skip_completion_gate: bool = False,
+    completion_gate_mode: str | None = None,
 ) -> dict[int, dict[str, Any]]:
     if not target_ids:
         return {}
     placeholders = ", ".join(f":target_{index}" for index in range(len(target_ids)))
     viewer = await _viewer_context(db, viewer_id)
+    # 详情/点进主页默认与首页推荐、广场出池一致（recommend_min），
+    # 否则列表能出人、点详情却因完整度 <100 被 404。
+    resolved_mode = completion_gate_mode
+    if resolved_mode is None and not skip_completion_gate:
+        resolved_mode = "recommend_min"
     visibility = _visibility_predicate(
         viewer_id,
         viewer,
@@ -1335,6 +1363,7 @@ async def _target_rows(
         VisibilityScene.PROFILE,
         completion_waiver=completion_waiver,
         skip_completion_gate=skip_completion_gate,
+        completion_gate_mode=resolved_mode,
     )
     params = {
         "viewer_id": viewer_id,
@@ -1506,19 +1535,25 @@ async def _ensure_target(
     *,
     completion_waiver: CompletionWaiver | None = None,
     skip_completion_gate: bool | None = None,
+    completion_gate_mode: str | None = None,
 ) -> None:
     """Raise 404 when the target is not visible to the viewer.
 
     ``skip_completion_gate=None`` follows the test-only DISCOVERY_SKIP_GATES
-    switch, so展示链路（推荐/广场/搜索/详情）与交互链路（申请/收藏/爆灯/海报）
-    使用同一套可见性口径：否则测试号在推荐里能看到对方、点进去却是 404。
+    switch。展示链路（推荐/广场/详情）与交互链路（申请/收藏/爆灯）共用
+    ``_target_rows`` 默认 ``recommend_min``，避免推荐能见、点详情 404。
     """
     if skip_completion_gate is None:
         skip_completion_gate = _skip_discovery_gates()
     if viewer_id == target_id:
         raise HTTPException(422, detail="不能对自己执行此操作")
     if target_id not in await _target_rows(
-        db, viewer_id, [target_id], completion_waiver=completion_waiver, skip_completion_gate=skip_completion_gate
+        db,
+        viewer_id,
+        [target_id],
+        completion_waiver=completion_waiver,
+        skip_completion_gate=skip_completion_gate,
+        completion_gate_mode=completion_gate_mode,
     ):
         raise HTTPException(404, detail="目标用户不存在或当前不可见")
 
