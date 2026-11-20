@@ -3,7 +3,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.api.dependencies import CurrentUser, get_realname_verified_user
+from app.api.dependencies import CurrentUser, get_current_user, get_realname_verified_user, get_verified_user
 from app.api.routes import social as social_routes
 from app.main import app
 from app.schemas.social import ChatMessageCreate
@@ -119,6 +119,17 @@ def test_reporting_blocking_and_reads_do_not_require_realname() -> None:
         assert get_realname_verified_user not in route_dependencies(path, method), (method, path)
 
 
+def test_like_routes_require_login_only_not_phone() -> None:
+    """详情页能打开（get_current_user）时，爱心应同样只需登录，不能再卡手机号。"""
+    for path, method in (
+        ("/api/v1/users/{target_id}/like", "PUT"),
+        ("/api/v1/users/{target_id}/like", "DELETE"),
+    ):
+        deps = route_dependencies(path, method)
+        assert get_current_user in deps, (method, path)
+        assert get_verified_user not in deps, (method, path)
+
+
 @pytest.mark.asyncio
 async def test_liked_by_is_gone_without_revealing_identities(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fail_if_queried(*_args: object, **_kwargs: object) -> object:
@@ -134,7 +145,7 @@ async def test_liked_by_is_gone_without_revealing_identities(monkeypatch: pytest
 
 @pytest.mark.asyncio
 async def test_unlike_does_not_revoke_application_match(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_ensure_target(_db: object, _user_id: int, _target_id: int) -> None:
+    async def fake_ensure_target(_db: object, _user_id: int, _target_id: int, **_kwargs: object) -> None:
         return None
 
     monkeypatch.setattr(social_service, "_ensure_target", fake_ensure_target)
@@ -149,7 +160,7 @@ async def test_unlike_does_not_revoke_application_match(monkeypatch: pytest.Monk
 async def test_unlike_reports_application_match_that_remains_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_target(_db: object, _user_id: int, _target_id: int) -> None:
+    async def fake_ensure_target(_db: object, _user_id: int, _target_id: int, **_kwargs: object) -> None:
         return None
 
     monkeypatch.setattr(social_service, "_ensure_target", fake_ensure_target)

@@ -99,8 +99,12 @@ async def _match_exists(db: AsyncSession, user_id: int, target_id: int) -> bool:
 
 
 async def set_like(db: AsyncSession, user_id: int, target_id: int, enabled: bool) -> RelationResponse:
-    """用户级喜欢：私有列表，不因互喜欢建 match/会话。聊天仅经申请同意。"""
-    await _ensure_target(db, user_id, target_id)
+    """用户级喜欢：私有列表，不因互喜欢建 match/会话。聊天仅经申请同意。
+
+    不套推荐完整度门禁：用户已能打开详情页时收藏应可成功；列表读取侧已用
+    skip_completion_gate，写入侧保持一致，避免「看得见点不了」。
+    """
+    await _ensure_target(db, user_id, target_id, skip_completion_gate=True)
     if enabled:
         await db.execute(
             text(
