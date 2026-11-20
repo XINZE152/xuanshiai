@@ -1449,6 +1449,70 @@ async def browse_history(db: AsyncSession, viewer_id: int, page: int, page_size:
     return BrowseHistoryPage(items=items, page=page, page_size=page_size, total=int(count.scalar() or 0))
 
 
+# 非会员访客列表脱敏用的本地占位头像：按性别取 seed-real 素材。
+# 刻意不下发真实头像 URL——URL 一旦进了响应，前端 CSS blur 只是障眼法，
+# 抓包即可还原，模糊形同虚设。
+_MASKED_VISITOR_AVATARS: dict[int, tuple[str, ...]] = {
+    1: (
+        "/static/portraits/seed-real/seed-m-avatar-01.webp",
+        "/static/portraits/seed-real/seed-m-avatar-02.webp",
+    ),
+    2: (
+        "/static/portraits/seed-real/seed-f-avatar-01.webp",
+        "/static/portraits/seed-real/seed-f-avatar-02.webp",
+        "/static/portraits/seed-real/seed-f-avatar-03.webp",
+    ),
+}
+
+
+def _masked_visitor_avatar(gender: int | None, index: int) -> str:
+    pool = _MASKED_VISITOR_AVATARS.get(gender if gender in (1, 2) else 0)
+    if not pool:
+        pool = _MASKED_VISITOR_AVATARS[1] + _MASKED_VISITOR_AVATARS[2]
+    return pool[index % len(pool)]
+
+
+def _masked_visitor_nickname(nickname: str | None) -> str:
+    text = (nickname or "").strip()
+    return f"{text[0]}**" if text else "神秘访客"
+
+
+def _mask_visitor_card(card: DiscoveryCard, index: int) -> DiscoveryCard:
+    """把一条真实访客卡脱敏成「看得出有人来过、看不出是谁」。
+
+    ``distance_km`` / ``match_score`` 保留（列表要显示「距你 x km」「合拍度 y%」，
+    本就是脱敏聚合量）；其余身份字段一律置空。``user_id`` 换成负数占位，
+    前端拿不到真实 id 就无法拼 ``/user/detail?userId=`` 绕过付费墙。
+    """
+    return card.model_copy(
+        update={
+            "user_id": -(index + 1),
+            "nickname": _masked_visitor_nickname(card.nickname),
+            "avatar": _masked_visitor_avatar(card.gender, index),
+            "age": None,
+            "height": None,
+            "education_level": None,
+            "occupation": None,
+            "city_code": None,
+            "income": None,
+            "is_married": None,
+            "online_status": 0,
+            "mbti": None,
+            "weight": None,
+            "hometown_display": None,
+            "residence_display": None,
+            "zodiac": None,
+            "constellation": None,
+            "self_intro": None,
+            "qa_answers": [],
+            "personal_tags": [],
+            "interest_tags": [],
+            "certification_tags": [],
+            "detail_locked": True,
+        }
+    )
+
+
 async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) -> VisitorPage:
     # 同 browse_history：访客名单不受推荐流完整度门禁约束，只受封禁/隐私约束。
     viewer, vip, predicate = await _scene_visibility(
@@ -1462,8 +1526,8 @@ async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) 
         LEFT JOIN user_profile_completion c ON c.user_id = u.id
         WHERE h.target_user_id = :viewer_id{visible}"""), params)
     count = int(count_result.scalar() or 0)
-    if not vip:
-        return VisitorPage(can_view_details=False, count=count, items=[], page=page, page_size=page_size, has_more=False)
+    # 非会员不再拿空列表（原 items=[] 会让页面只剩会员墙）：
+    # 照样返回真实条数的列表，但逐条脱敏，前端叠模糊 + 点击弹开通引导。
     result = await db.execute(text(f"""SELECT h.user_id, MAX(h.created_at) AS viewed_at
         FROM user_browse_history h JOIN users u ON u.id = h.user_id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
@@ -1490,8 +1554,22 @@ async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) 
         for row in rows
         if int(row["user_id"]) in targets
     ]
-    await _attach_card_qa_media(db, [item.target for item in items])
-    return VisitorPage(can_view_details=True, count=count, items=items, page=page, page_size=page_size, has_more=page * page_size < count)
+    if vip:
+        await _attach_card_qa_media(db, [item.target for item in items])
+    else:
+        items = [
+            BrowseHistoryItem(target=_mask_visitor_card(item.target, index), viewed_at=item.viewed_at)
+            for index, item in enumerate(items)
+        ]
+    return VisitorPage(
+        can_view_details=vip,
+        count=count,
+        items=items,
+        page=page,
+        page_size=page_size,
+        has_more=page * page_size < count,
+        masked=not vip,
+    )
 
 
 _EMOTION_LAB_CANDIDATE_SCAN = 300

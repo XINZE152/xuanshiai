@@ -124,7 +124,7 @@ async def test_visitors_passes_skip_gate_to_both_calls(
     monkeypatch.setattr(discovery, "_scene_visibility", fake_scene)
     monkeypatch.setattr(discovery, "_target_rows", fake_targets)
 
-    # VIP 才会真正查列表；非 VIP 直接返回 can_view_details=False（原行为不变）。
+    # 2026-11-20 起非会员也查列表（返回脱敏占位），两条路径都要带 skip_completion_gate。
     await discovery.visitors(_Db(), 5, 1, 20)
 
     assert captured["scene"]["skip_completion_gate"] is True
