@@ -59,7 +59,8 @@ from app.services.social import (
     update_privacy,
 )
 
-router = APIRouter(dependencies=[Depends(get_verified_user)])
+# 通知/会话/关系列表等浏览仅需登录；关注等写操作在端点声明实名（含手机）门禁。
+router = APIRouter(dependencies=[Depends(get_current_user)])
 # 喜欢/取消喜欢：仅需登录（与查看他人主页同门槛），不挂路由级手机号/实名依赖。
 like_router = APIRouter()
 

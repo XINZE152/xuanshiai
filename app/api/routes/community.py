@@ -112,7 +112,9 @@ from app.services.social import (
     list_my_reports,
 )
 
-router = APIRouter(dependencies=[Depends(get_verified_user)])
+# 浏览（动态流/话题/活动/纸飞机读取等）仅需登录；写操作与点赞等在端点上声明更强门禁。
+# 未绑手机也可看关注/同城/发现，绑手机提示放到具体行为上。
+router = APIRouter(dependencies=[Depends(get_current_user)])
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 logger = logging.getLogger(__name__)
 

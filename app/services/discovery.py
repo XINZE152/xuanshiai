@@ -1141,10 +1141,23 @@ async def _consume_browse(db: AsyncSession, user_id: int, match_score: float, is
 
 
 async def _record_browse(db: AsyncSession, viewer_id: int, target_id: int) -> None:
-    anonymous = await db.execute(text("SELECT anonymous_browse_enabled FROM user_privacy WHERE user_id = :user_id"), {"user_id": viewer_id})
-    if anonymous.scalar():
-        return
-    await db.execute(text("INSERT INTO user_browse_history (user_id, target_user_id) VALUES (:user_id, :target_id)"), {"user_id": viewer_id, "target_id": target_id})
+    """写入浏览足迹。
+
+    隐身（``anonymous_browse_enabled``）仍记入自己的「我看过谁」，
+    但 ``is_anonymous=1``，对方「谁看过我」/访客计数不计入。
+    """
+    anonymous = await db.execute(
+        text("SELECT anonymous_browse_enabled FROM user_privacy WHERE user_id = :user_id"),
+        {"user_id": viewer_id},
+    )
+    is_anonymous = 1 if anonymous.scalar() else 0
+    await db.execute(
+        text(
+            "INSERT INTO user_browse_history (user_id, target_user_id, is_anonymous) "
+            "VALUES (:user_id, :target_id, :is_anonymous)"
+        ),
+        {"user_id": viewer_id, "target_id": target_id, "is_anonymous": is_anonymous},
+    )
 
 
 _EDUCATION_LABELS: dict[int, str] = {1: "高中及以下", 2: "大专", 3: "本科", 4: "硕士", 5: "博士"}
@@ -1520,11 +1533,13 @@ async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) 
     )
     visible = " AND " + predicate.clause
     params = {"viewer_id": viewer_id, "user_id": viewer_id, **predicate.params}
+    # 无痕浏览（is_anonymous=1）只留自己足迹，不进对方「谁看过我」。
+    anon_filter = " AND COALESCE(h.is_anonymous, 0) = 0"
     count_result = await db.execute(text(f"""SELECT COUNT(DISTINCT h.user_id)
         FROM user_browse_history h JOIN users u ON u.id = h.user_id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN user_profile_completion c ON c.user_id = u.id
-        WHERE h.target_user_id = :viewer_id{visible}"""), params)
+        WHERE h.target_user_id = :viewer_id{anon_filter}{visible}"""), params)
     count = int(count_result.scalar() or 0)
     # 非会员不再拿空列表（原 items=[] 会让页面只剩会员墙）：
     # 照样返回真实条数的列表，但逐条脱敏，前端叠模糊 + 点击弹开通引导。
@@ -1532,7 +1547,7 @@ async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) 
         FROM user_browse_history h JOIN users u ON u.id = h.user_id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN user_profile_completion c ON c.user_id = u.id
-        WHERE h.target_user_id = :viewer_id{visible}
+        WHERE h.target_user_id = :viewer_id{anon_filter}{visible}
         GROUP BY h.user_id ORDER BY viewed_at DESC LIMIT :limit OFFSET :offset"""), {
             **params,
             "limit": page_size,
@@ -1630,7 +1645,10 @@ async def visitor_count(db: AsyncSession, viewer_id: int, target_id: int) -> dic
     """Return only the deduplicated visitor count for a visible user."""
     await _ensure_target(db, viewer_id, target_id)
     result = await db.execute(
-        text("SELECT COUNT(DISTINCT user_id) FROM user_browse_history WHERE target_user_id = :target_id"),
+        text(
+            "SELECT COUNT(DISTINCT user_id) FROM user_browse_history "
+            "WHERE target_user_id = :target_id AND COALESCE(is_anonymous, 0) = 0"
+        ),
         {"target_id": target_id},
     )
     return {"user_id": target_id, "visitor_count": int(result.scalar() or 0)}

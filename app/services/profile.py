@@ -1087,7 +1087,7 @@ async def get_profile_overview(db: AsyncSession, user_id: int) -> ProfileOvervie
         (SELECT COUNT(*) FROM match_apply a WHERE a.to_user_id = u.id AND a.status = 0) AS incoming_count,
         (SELECT COUNT(*) FROM match_apply a WHERE a.from_user_id = u.id AND a.status = 0) AS outgoing_count,
         (SELECT COUNT(*) FROM user_match m WHERE m.user_id = u.id AND m.status IN (1, 2)) AS match_count,
-        (SELECT COUNT(DISTINCT bh.user_id) FROM user_browse_history bh WHERE bh.target_user_id = u.id) AS visitor_count,
+        (SELECT COUNT(DISTINCT bh.user_id) FROM user_browse_history bh WHERE bh.target_user_id = u.id AND COALESCE(bh.is_anonymous, 0) = 0) AS visitor_count,
         -- C 端「我的收藏」与红心/列表同源：type=1（喜欢）。type=2 是旧收藏，不再计数。
         (SELECT COUNT(*) FROM user_favorite f WHERE f.user_id = u.id AND f.type = 1) AS favorite_count,
         -- 旧「谁收藏我」字段（type=2），C 端已无消费方，保留仅为兼容/审计。
