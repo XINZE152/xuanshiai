@@ -1310,13 +1310,21 @@ async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> Publ
     # 服务红娘在管理中心查看会员公开档案时不受会员/浏览额度限制。
     is_matchmaker = waiver is not None
     privacy_locked = bool(row.get("only_vip_can_see_detail")) and not vip and not is_matchmaker
-    quota = (
-        None
-        if privacy_locked
-        else (None if is_matchmaker else await _consume_browse(db, viewer_id, score, vip, target_id))
-    )
-    full = vip or is_matchmaker or (not privacy_locked and quota is not None)
+    # 足迹与额度解耦：先写「我看过谁」，再扣额度。
+    # 否则额度 429 会在 _record_browse 之前抛出，进了详情页却落不了库。
     await _record_browse(db, viewer_id, target_id)
+    quota: int | None
+    if privacy_locked or is_matchmaker:
+        quota = None
+    else:
+        try:
+            quota = await _consume_browse(db, viewer_id, score, vip, target_id)
+        except HTTPException as exc:
+            if exc.status_code == 429:
+                # 会话尚未最终 commit；先提交足迹再把 429 抛给前端
+                await db.commit()
+            raise
+    full = vip or is_matchmaker or (not privacy_locked and quota is not None)
     card = _card(row, score, reason, detail_locked=not full)
     await _attach_card_qa_media(db, [card])
     profile = await get_profile(db, target_id, public=True) if full else None

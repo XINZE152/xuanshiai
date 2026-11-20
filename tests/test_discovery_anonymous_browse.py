@@ -52,3 +52,16 @@ async def test_normal_browse_inserts_visible_history() -> None:
     assert len(db.inserts) == 1
     _, params = db.inserts[0]
     assert params["is_anonymous"] == 0
+
+
+def test_view_profile_records_browse_before_quota_consume() -> None:
+    """额度 429 不得发生在写足迹之前，否则「进了详情、我看过谁仍空」。"""
+    import inspect
+
+    source = inspect.getsource(discovery.view_profile)
+    record_at = source.find("await _record_browse")
+    consume_at = source.find("await _consume_browse")
+    assert record_at >= 0 and consume_at >= 0
+    assert record_at < consume_at
+    assert "await db.commit()" in source
+    assert "status_code == 429" in source

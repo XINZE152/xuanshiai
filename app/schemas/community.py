@@ -70,6 +70,7 @@ class CommunityPostResponse(BaseModel):
     is_liked: bool
     is_collected: bool = False
     is_followed: bool = False
+    apply_status: Literal["none", "pending", "accepted", "rejected", "expired"] = "none"
     gender: int | None = None
     age: int | None = None
     mbti: str | None = None

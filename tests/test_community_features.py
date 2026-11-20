@@ -26,6 +26,7 @@ from app.api.dependencies import (
     get_current_user,
     get_face_verified_user,
     get_realname_verified_user,
+    get_verified_user,
 )
 from app.api.routes import community as community_routes
 from app.core import redis as redis_module
@@ -892,6 +893,10 @@ def test_community_browsing_does_not_require_realname() -> None:
         dependencies = route_dependencies(path, method)
         assert get_realname_verified_user not in dependencies, (method, path)
         assert get_face_verified_user not in dependencies, (method, path)
+        # 动态/评论点赞与浏览同门槛：登录即可，不卡手机号
+        if "/like" in path:
+            assert get_verified_user not in dependencies, (method, path)
+            assert get_current_user in dependencies, (method, path)
 
 @pytest.mark.asyncio
 async def test_list_comments_checks_post_visibility(monkeypatch: pytest.MonkeyPatch) -> None:
