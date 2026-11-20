@@ -714,7 +714,14 @@ async def update_profile(
     """
     values = request.model_dump(exclude_unset=True)
     sync_precise_from_bot = bool(values.pop("sync_precise_from_bot", False))
+    clear_bot_intake = bool(values.pop("clear_bot_intake", False))
     incoming_bot_intake = values.pop("bot_intake", None)
+
+    # 清空 BOT 采集快照：去掉历史 Demo/默认预置，不影响经典精准字段
+    if clear_bot_intake:
+        values["bot_intake_json"] = None
+        incoming_bot_intake = None
+        sync_precise_from_bot = False
 
     if incoming_bot_intake is not None or sync_precise_from_bot:
         from app.services.aibot_profile_sync import (

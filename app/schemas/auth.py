@@ -207,6 +207,11 @@ class ProfileUpdateRequest(BaseModel):
         default=None,
         description="是否用 bot_intake 回填空的精准字段",
     )
+    # true：清空 bot_intake_json（用于清掉历史 Demo/默认预置采集，不碰经典精准字段）
+    clear_bot_intake: bool | None = Field(
+        default=None,
+        description="是否清空 BOT 采集快照 bot_intake_json",
+    )
     hometown_province_code: str | None = Field(default=None, max_length=32)
     hometown_city_code: str | None = Field(default=None, max_length=32)
     hometown_district_code: str | None = Field(default=None, max_length=32)
