@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Assert release-critical schema objects introduced by Q23/Q45/Q63/Q74.
+"""Assert release-critical schema objects, including settings writes (Q7).
 
 This is a database-backed preflight, not a migration runner. Run it after the
 reviewed migration SQL has been applied and before starting the service:
@@ -122,6 +122,25 @@ def _unlock_cost(cursor: Any) -> CheckResult:
     )
 
 
+# Q7: GET can succeed while PUT fails on a missing write column or an outbox dependency.
+_SETTINGS_WRITE_COLUMNS = {
+    "user_privacy": (
+        "user_id", "updated_at", "profile_visibility", "message_privacy",
+        "hide_online_status", "anonymous_browse_enabled", "notify_like", "notify_comment",
+        "notify_follow", "notify_message", "notify_match", "notify_apply", "notify_system",
+        "notify_activity",
+    ),
+    "user_revision_state": (
+        "user_id", "updated_at", "profile_revision", "preference_revision", "privacy_revision",
+        "relationship_revision", "policy_revision",
+    ),
+    "derivation_outbox": (
+        "event_id", "aggregate_type", "aggregate_id", "event_type", "changed_fields",
+        "source_revision_json", "privacy_revision", "payload_minimal", "priority", "published_at",
+    ),
+}
+
+
 def collect(cursor: Any) -> list[CheckResult]:
     return [
         _column_present(cursor, "user_profile_completion", "completion_grandfathered"),
@@ -140,12 +159,17 @@ def collect(cursor: Any) -> list[CheckResult]:
         _table_present(cursor, "aibot_story_play"),
         _table_present(cursor, "aibot_story_peer_shown"),
         _column_present(cursor, "user_profile", "bot_intake_json"),
+        *(
+            _column_present(cursor, table, column)
+            for table, columns in _SETTINGS_WRITE_COLUMNS.items()
+            for column in columns
+        ),
     ]
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Check Q23/Q45/Q63/Q74 release-critical schema objects"
+        description="Check release-critical schema objects"
     )
     parser.add_argument(
         "--target",

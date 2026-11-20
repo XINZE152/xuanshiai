@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_current_admin
+from app.api.routes.auth import RealnamePrivacyRoute
 from app.db.session import get_db
 from app.schemas.admin import (
     AdminReportItem,
@@ -53,12 +54,18 @@ async def realname_reviews(
     return await list_realname_reviews(db, page=page, page_size=page_size, status=status)
 
 
-@router.patch("/users/{user_id}/realname/review", response_model=RealnameReviewResponse, summary="审核实名认证")
 async def review_user_realname(
     user_id: int = Path(..., ge=1), body: RealnameReviewRequest = Body(...),
     admin: CurrentUser = Depends(get_current_admin), db: AsyncSession = Depends(get_db),
 ) -> RealnameReviewResponse:
-    return await review_realname(db, user_id, body.status, body.reason, admin.id)
+    return await review_realname(db, user_id, body.status, body.reason, admin.id, submission_version=body.submission_version)
+
+
+router.add_api_route(
+    "/users/{user_id}/realname/review", review_user_realname, methods=["PATCH"],
+    response_model=RealnameReviewResponse, summary="审核实名认证", route_class_override=RealnamePrivacyRoute,
+    responses={422: {"description": "实名审核参数不合法；不回显原始输入"}},
+)
 
 
 @router.get("/certification-reviews", response_model=CertificationReviewPage, summary="查看学历房产婚姻认证待审核列表")

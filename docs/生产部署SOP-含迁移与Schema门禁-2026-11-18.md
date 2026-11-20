@@ -102,7 +102,7 @@ sudo .venv/bin/python scripts/check_release_schema.py \
 
 退出码：`0` 全部通过 / `1` 有缺失 / `2` 配置或连接错误。**退出码非 0 不得继续重启服务。**
 
-> 门禁清单现含 9 项（`scripts/check_release_schema.py` `collect()`）：`user_profile_completion.completion_grandfathered`、`community_post_remind`、`chat_message_hidden`、`paper_plane_profile_unlock.points_cost`、`aibot_user_assignment`、`aibot_session`、`aibot_turn`、`aibot_love_report`、`user_profile.bot_intake_json`。
+> 门禁清单以 `scripts/check_release_schema.py` 的 `collect()` 为准。问题 7 另查 `user_privacy`、`user_revision_state`、`derivation_outbox` 的设置保存依赖列。能读取设置不代表能写入；若任一检查失败，先核对目标库已有迁移和缺失对象，不要跳过外发事件写入或直接重跑全量初始化。
 
 ### 第 5 步：重启
 

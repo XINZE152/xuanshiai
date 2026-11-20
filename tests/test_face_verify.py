@@ -146,6 +146,8 @@ async def test_success_writes_face_verified_and_audit(monkeypatch: pytest.Monkey
     _use_provider(monkeypatch, FaceVerifyResult(verified=True, score=98.0, provider="mock"))
     db = _Db(
         _Result(rows=[{"avatar": "/uploads/a.webp"}]),
+        _Result(rows=[{"avatar": "/uploads/a.webp"}]),  # 锁定用户行
+        _Result(),  # 无实名记录，测试 provider 仍可验证
         _Result(),  # INSERT ... ON DUPLICATE KEY UPDATE
         _Result(),  # business_audit_log
     )
@@ -158,6 +160,21 @@ async def test_success_writes_face_verified_and_audit(monkeypatch: pytest.Monkey
     assert db.committed is True
     assert any("face_verified = 1" in sql for sql, _ in db.calls)
     assert any("user.face_verify" in sql for sql, _ in db.calls)
+
+
+@pytest.mark.asyncio
+async def test_stale_face_result_cannot_attach_to_new_realname(monkeypatch):
+    _use_provider(monkeypatch, FaceVerifyResult(verified=True, score=98.0, provider="mock"))
+    db = _Db(
+        _Result([{"avatar": "/uploads/a.webp", "realname_status": 2, "retry_count": 1}]),
+        _Result([{"avatar": "/uploads/a.webp"}]),
+        _Result([{"realname_status": 2, "retry_count": 2}]),
+    )
+    with pytest.raises(HTTPException) as error:
+        await service.verify_avatar(db, 7, "/uploads/a.webp")
+    assert error.value.status_code == 409
+    assert all("INSERT" not in sql for sql, _ in db.calls)
+    assert not db.committed
 
 
 @pytest.mark.asyncio

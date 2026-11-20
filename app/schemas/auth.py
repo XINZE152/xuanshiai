@@ -182,6 +182,12 @@ class RealNameRequest(BaseModel):
                                r"(0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]$")
 
 
+class RealNameSubmissionResponse(BaseModel):
+    status: Literal[1, 2, 3] = Field(description="1 审核中，2 已通过，3 未通过")
+    id_card_masked: str
+    realname_fail_reason: str | None = Field(description="仅未通过时返回可向本人展示的原因")
+
+
 class ProfileUpdateRequest(BaseModel):
     # Avatar is a multipart upload handled by POST /users/me/avatar, not a profile field.
     model_config = ConfigDict(extra="forbid")
@@ -361,6 +367,7 @@ class UserResponse(BaseModel):
     status: int
     phone_verified: bool
     realname_status: int
+    realname_fail_reason: str | None = Field(default=None, description="仅实名未通过且本人登录时返回固定原因；模拟会话返回 null")
     face_verified: int = Field(
         description="人脸认证状态：0未认证、1通过、2失败",
         examples=[1],

@@ -34,6 +34,7 @@ _PREFERENCE_BY_EVENT = {
 _MANDATORY_EVENT_TYPES = frozenset({
     "report_result",
     "appeal_result",
+    "realname_review_result",
     "community_moderation_submitted",
     "community_moderation_result",
 })

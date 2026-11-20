@@ -41,6 +41,8 @@ jobs:
         run: uv run --no-sync python database_setup_marriage.py
       - name: Diff live schema against code contract
         run: uv run --no-sync python scripts/schema_contract.py check-db --verbose
+      - name: Check release-critical schema on the bootstrapped test database
+        run: uv run --no-sync python scripts/check_release_schema.py --target development
       - name: Schema lifecycle unit contracts
         run: >-
           uv run --no-sync pytest
