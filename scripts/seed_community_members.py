@@ -687,22 +687,27 @@ def _asset_source(token: str) -> Path:
 
 
 def _render_image(source: Path, directory: Path, name: str, *, thumbnail: bool) -> dict[str, Any]:
-    """Convert one source image to webp (+thumbnail) and return URLs and sizes."""
+    """Convert one source image to JPEG (+thumbnail) for WeChat mini-program compatibility.
+
+    源素材可以是 webp/png/jpg；入库一律落成 ``.jpg``。远程 ``.webp`` 在部分真机
+    ``<image>`` 上不渲染（开发者工具却能看），测用户头像/封面必须走 JPEG。
+    """
     from PIL import Image, ImageOps
 
     directory.mkdir(parents=True, exist_ok=True)
     with Image.open(source) as raw:
         image = ImageOps.exif_transpose(raw)
-        if image.mode not in {"RGB", "RGBA"}:
+        # JPEG 不支持透明通道
+        if image.mode != "RGB":
             image = image.convert("RGB")
-        image_path = directory / f"{name}.webp"
-        image.save(image_path, format="WEBP", quality=85, method=4)
+        image_path = directory / f"{name}.jpg"
+        image.save(image_path, format="JPEG", quality=85, optimize=True)
         thumb_url = None
         if thumbnail:
             copy = image.copy()
             copy.thumbnail((480, 480), Image.Resampling.LANCZOS)
-            thumb_path = directory / f"{name}-thumb.webp"
-            copy.save(thumb_path, format="WEBP", quality=80, method=4)
+            thumb_path = directory / f"{name}-thumb.jpg"
+            copy.save(thumb_path, format="JPEG", quality=80, optimize=True)
             thumb_url = f"/storage/uploads/{directory.name}/{thumb_path.name}"
     return {
         "url": f"/storage/uploads/{directory.name}/{image_path.name}",
@@ -1056,7 +1061,7 @@ def _replace_media(cur: Any, member: dict[str, Any], user_id: int, assets: dict[
         """INSERT INTO user_media
         (user_id, media_type, file_url, storage_key, thumbnail_url, mime_type, file_size,
          sort_order, is_primary, review_status, reviewed_at)
-        VALUES (%s,'avatar',%s,%s,%s,'image/webp',%s,0,1,1,UTC_TIMESTAMP())""",
+        VALUES (%s,'avatar',%s,%s,%s,'image/jpeg',%s,0,1,1,UTC_TIMESTAMP())""",
         (
             user_id, assets["avatar"]["url"], f"{DEMO_SLUG}/{user_id}/avatar",
             assets["avatar"]["thumb"], assets["avatar"]["size"],
@@ -1067,7 +1072,7 @@ def _replace_media(cur: Any, member: dict[str, Any], user_id: int, assets: dict[
             """INSERT INTO user_media
             (user_id, media_type, file_url, storage_key, thumbnail_url, mime_type, file_size,
              sort_order, is_primary, review_status, reviewed_at)
-            VALUES (%s,'photo',%s,%s,%s,'image/webp',%s,%s,0,1,UTC_TIMESTAMP())""",
+            VALUES (%s,'photo',%s,%s,%s,'image/jpeg',%s,%s,0,1,UTC_TIMESTAMP())""",
             (
                 user_id, item["url"], f"{DEMO_SLUG}/{user_id}/photo-{index}",
                 item["thumb"], item["size"], index,
@@ -1077,7 +1082,7 @@ def _replace_media(cur: Any, member: dict[str, Any], user_id: int, assets: dict[
         """INSERT INTO user_media
         (user_id, media_type, file_url, storage_key, thumbnail_url, mime_type, file_size,
          sort_order, is_primary, review_status, reviewed_at)
-        VALUES (%s,'background',%s,%s,NULL,'image/webp',%s,0,0,1,UTC_TIMESTAMP())""",
+        VALUES (%s,'background',%s,%s,NULL,'image/jpeg',%s,0,0,1,UTC_TIMESTAMP())""",
         (
             user_id, assets["background"]["url"], f"{DEMO_SLUG}/{user_id}/background",
             assets["background"]["size"],
