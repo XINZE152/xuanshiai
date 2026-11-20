@@ -143,7 +143,8 @@ BASIC_PROFILE_COMPLETION_KEYS: tuple[str, ...] = (
 )
 
 # 推荐流「可被推荐」最低门槛：性别 + 年龄(生日) + 现居地。
-# 比 BASIC_PROFILE 更窄；首页推荐 / 广场 / 点进主页详情共用此门槛；搜索仍要求完整度 100。
+# 比 BASIC_PROFILE 更窄；首页推荐 / 广场 / 点进主页详情 / 浏览方准入共用此门槛；
+# 昵称与条件搜索按命中出池（completion_gate_mode=none），不套此门槛。
 RECOMMEND_MIN_COMPLETION_KEYS: tuple[str, ...] = (
     "gender",
     "birthday",

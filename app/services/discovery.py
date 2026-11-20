@@ -179,6 +179,9 @@ async def _viewer_context(db: AsyncSession, user_id: int) -> dict[str, Any]:
     result = await db.execute(
         text("""SELECT u.gender, u.birthday, COALESCE(c.score, 0) AS completion_score,
                       COALESCE(c.completion_grandfathered, 0) AS completion_grandfathered,
+                      COALESCE(c.gender_completed, 0) AS gender_completed,
+                      COALESCE(c.birthday_completed, 0) AS birthday_completed,
+                      COALESCE(c.location_completed, 0) AS location_completed,
                       u.phone, p.height, p.education_level, p.income, p.mbti, p.interest_tags,
                p.personality_tags, p.tags, p.residence_city_code,
                COALESCE(ua.realname_status, 0) AS realname_status,
@@ -236,6 +239,33 @@ def _viewer_completion_ok(viewer: dict[str, Any]) -> bool:
     return float(viewer.get("completion_score") or 0) >= 100 or bool(
         viewer.get("completion_grandfathered")
     )
+
+
+def _viewer_recommend_min_ok(viewer: dict[str, Any]) -> bool:
+    """浏览方最低门槛：与 get_browsable_user / recommend_min 对齐。
+
+    完整度 100 / grandfather 直接放行；否则须性别+生日+现居地。
+    优先用 completion 标记；单测若只 stub 了原始字段则回退到字段本身。
+    """
+    if _viewer_completion_ok(viewer):
+        return True
+    from app.services.profile import recommend_min_completed
+
+    if any(
+        key in viewer
+        for key in ("gender_completed", "birthday_completed", "location_completed")
+    ):
+        return recommend_min_completed(
+            {
+                "gender": bool(viewer.get("gender_completed")),
+                "birthday": bool(viewer.get("birthday_completed")),
+                "location": bool(viewer.get("location_completed")),
+            }
+        )
+    gender_ok = viewer.get("gender") in (1, 2)
+    birthday_ok = viewer.get("birthday") is not None
+    location_ok = bool(str(viewer.get("residence_city_code") or "").strip())
+    return gender_ok and birthday_ok and location_ok
 
 
 def _visibility_predicate(
@@ -702,9 +732,9 @@ def _candidate_snapshot(
     推荐流与广场保持默认 True。
 
     ``completion_gate_mode``：
-    - ``full``：候选须完整度 100（或 grandfather）——搜索等仍可显式指定
+    - ``full``：候选须完整度 100（或 grandfather）——显式指定时仍可用
     - ``recommend_min``：候选须性别+年龄+现居地——首页推荐 / 广场 / BOT 推荐默认
-    - ``none``：不查完整度（历史访客等）
+    - ``none``：不查完整度（昵称/标签搜索按命中；历史访客等）
     ``force_skip_completion_gate`` 仍兼容旧调用，等价于 mode=none，且关闭异性门禁。
     """
     scene = VisibilityScene.SEARCH if nickname or tag else VisibilityScene.DISCOVERY
@@ -907,9 +937,9 @@ async def get_discovery_page(
     if (
         not relax_viewer_completion
         and not _skip_discovery_gates()
-        and not _viewer_completion_ok(viewer)
+        and not _viewer_recommend_min_ok(viewer)
     ):
-        raise HTTPException(403, detail="请先完善资料后再进入推荐")
+        raise HTTPException(403, detail="请先完善性别、年龄和现居地后再浏览")
     # 首页推荐与广场候选门槛一致：性别+年龄+现居地；BOT / 软浏览同口径。
     _, viewer_is_vip, candidate_page = await _candidate_query_page(
         db,
@@ -963,8 +993,8 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         page_size=query.page_size,
     )
     viewer = await _viewer_context(db, viewer_id)
-    if not _skip_discovery_gates() and not _viewer_completion_ok(viewer):
-        raise HTTPException(403, detail="请先完善资料后再搜索用户")
+    if not _skip_discovery_gates() and not _viewer_recommend_min_ok(viewer):
+        raise HTTPException(403, detail="请先完善性别、年龄和现居地后再搜索用户")
     _, viewer_is_vip, candidate_page = await _candidate_query_page(
         db,
         viewer_id,
@@ -976,8 +1006,8 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         # 搜索单独放开性别（产品确认 2026-11-14）：按昵称/标签找人是明确的指名动作，
         # 找对象用户也要能搜到同性好友。推荐流与广场不受影响，仍按身份口径过滤。
         apply_intent_gender_gate=False,
-        # 搜索仍要求完整度 100，与首页/广场的 recommend_min 出池门槛分开。
-        completion_gate_mode="full",
+        # 昵称/标签搜索按命中出结果，不再套候选完整度 100 / recommend_min。
+        completion_gate_mode="none",
     )
     items = [
         _card(
