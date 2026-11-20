@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import HTTPException, Response
@@ -1429,7 +1429,16 @@ async def _target_rows(
     return {int(row["user_id"]): dict(row) for row in result.mappings().all()}
 
 
-async def browse_history(db: AsyncSession, viewer_id: int, page: int, page_size: int) -> BrowseHistoryPage:
+BrowseHistoryFilter = Literal["all", "liked", "unliked"]
+
+
+async def browse_history(
+    db: AsyncSession,
+    viewer_id: int,
+    page: int,
+    page_size: int,
+    filter: BrowseHistoryFilter = "all",
+) -> BrowseHistoryPage:
     # 浏览记录/访客是「已发生的历史事件」，不是推荐曝光位：不能套用推荐流的
     # 资料完整度门禁（candidate_visibility 的 score >= 100），否则被浏览者资料
     # 不完整时整条记录被过滤，会员开通后仍看到空列表。封禁/隐私 predicate 不变。
@@ -1438,19 +1447,22 @@ async def browse_history(db: AsyncSession, viewer_id: int, page: int, page_size:
     )
     offset = (page - 1) * page_size
     history_window = "" if vip else " AND h.created_at >= CURDATE()"
-    visible = " AND " + predicate.clause
-    params = {
-        "user_id": viewer_id,
-        **predicate.params,
-        "limit": page_size,
-        "offset": offset,
-    }
-    result = await db.execute(text(f"""SELECT h.target_user_id, MAX(h.created_at) AS viewed_at
-        FROM user_browse_history h JOIN users u ON u.id = h.target_user_id
+    like_exists = """EXISTS (SELECT 1 FROM user_favorite f
+        WHERE f.user_id = :user_id AND f.target_user_id = h.target_user_id AND f.type = 1)"""
+    like_filter = ""
+    if filter == "liked":
+        like_filter = f" AND {like_exists}"
+    elif filter == "unliked":
+        like_filter = f" AND NOT {like_exists}"
+    source = f"""FROM user_browse_history h JOIN users u ON u.id = h.target_user_id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN user_profile_completion c ON c.user_id = u.id
-        WHERE h.user_id = :user_id{history_window}{visible}
-        GROUP BY h.target_user_id ORDER BY viewed_at DESC LIMIT :limit OFFSET :offset"""), params)
+        WHERE h.user_id = :user_id{history_window} AND {predicate.clause}{like_filter}"""
+    params = {"user_id": viewer_id, **predicate.params}
+    result = await db.execute(text(f"""SELECT h.target_user_id, MAX(h.created_at) AS viewed_at
+        {source}
+        GROUP BY h.target_user_id ORDER BY viewed_at DESC, h.target_user_id DESC
+        LIMIT :limit OFFSET :offset"""), {**params, "limit": page_size, "offset": offset})
     rows = list(result.mappings().all())
     targets = await _target_rows(
         db, viewer_id, [int(row["target_user_id"]) for row in rows], skip_completion_gate=True
@@ -1462,11 +1474,7 @@ async def browse_history(db: AsyncSession, viewer_id: int, page: int, page_size:
             score, reason = _candidate_score(viewer, target)
             items.append(BrowseHistoryItem(target=_card(target, score, reason, detail_locked=bool(target.get("only_vip_can_see_detail")) and not vip), viewed_at=row["viewed_at"]))
     await _attach_card_qa_media(db, [item.target for item in items])
-    count = await db.execute(text(f"""SELECT COUNT(DISTINCT h.target_user_id)
-        FROM user_browse_history h JOIN users u ON u.id = h.target_user_id
-        LEFT JOIN user_privacy pr ON pr.user_id = u.id
-        LEFT JOIN user_profile_completion c ON c.user_id = u.id
-        WHERE h.user_id = :user_id{history_window}{visible}"""), params)
+    count = await db.execute(text(f"SELECT COUNT(DISTINCT h.target_user_id) {source}"), params)
     return BrowseHistoryPage(items=items, page=page, page_size=page_size, total=int(count.scalar() or 0))
 
 
@@ -1539,24 +1547,19 @@ async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) 
     viewer, vip, predicate = await _scene_visibility(
         db, viewer_id, VisibilityScene.VISITORS, skip_completion_gate=True
     )
-    visible = " AND " + predicate.clause
     params = {"viewer_id": viewer_id, "user_id": viewer_id, **predicate.params}
     # 无痕浏览（is_anonymous=1）只留自己足迹，不进对方「谁看过我」。
-    anon_filter = " AND COALESCE(h.is_anonymous, 0) = 0"
-    count_result = await db.execute(text(f"""SELECT COUNT(DISTINCT h.user_id)
-        FROM user_browse_history h JOIN users u ON u.id = h.user_id
+    source = f"""FROM user_browse_history h JOIN users u ON u.id = h.user_id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN user_profile_completion c ON c.user_id = u.id
-        WHERE h.target_user_id = :viewer_id{anon_filter}{visible}"""), params)
+        WHERE h.target_user_id = :viewer_id AND COALESCE(h.is_anonymous, 0) = 0 AND {predicate.clause}"""
+    count_result = await db.execute(text(f"SELECT COUNT(DISTINCT h.user_id) {source}"), params)
     count = int(count_result.scalar() or 0)
     # 非会员不再拿空列表（原 items=[] 会让页面只剩会员墙）：
     # 照样返回真实条数的列表，但逐条脱敏，前端叠模糊 + 点击弹开通引导。
     result = await db.execute(text(f"""SELECT h.user_id, MAX(h.created_at) AS viewed_at
-        FROM user_browse_history h JOIN users u ON u.id = h.user_id
-        LEFT JOIN user_privacy pr ON pr.user_id = u.id
-        LEFT JOIN user_profile_completion c ON c.user_id = u.id
-        WHERE h.target_user_id = :viewer_id{anon_filter}{visible}
-        GROUP BY h.user_id ORDER BY viewed_at DESC LIMIT :limit OFFSET :offset"""), {
+        {source}
+        GROUP BY h.user_id ORDER BY viewed_at DESC, h.user_id DESC LIMIT :limit OFFSET :offset"""), {
             **params,
             "limit": page_size,
             "offset": (page - 1) * page_size,

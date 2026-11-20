@@ -12,10 +12,18 @@
 
 from __future__ import annotations
 
+import sqlite3
+from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from app.api.routes import discovery as discovery_routes
+from app.schemas.discovery import BrowseHistoryPage
 from app.services import discovery
 from app.services.candidate_visibility import (
     CandidateVisibilityService,
@@ -129,6 +137,116 @@ async def test_visitors_passes_skip_gate_to_both_calls(
 
     assert captured["scene"]["skip_completion_gate"] is True
     assert captured["targets"]["skip_completion_gate"] is True
+
+
+@pytest.fixture
+def footprint_db(monkeypatch):
+    # 在内存中执行真实的分页 SQL；仅替换 MySQL 的 CURDATE 和名片加载。
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = sqlite3.Row
+        conn.create_function("CURDATE", 0, lambda: "2026-11-20")
+        conn.executescript("""
+            CREATE TABLE users (id INTEGER, status INTEGER);
+            CREATE TABLE user_privacy (user_id INTEGER);
+            CREATE TABLE user_profile_completion (user_id INTEGER);
+            CREATE TABLE user_favorite (user_id INTEGER, target_user_id INTEGER, type INTEGER);
+            CREATE TABLE user_browse_history (user_id INTEGER, target_user_id INTEGER,
+                created_at TEXT, is_anonymous INTEGER);
+            INSERT INTO users VALUES (5, 1), (10, 1), (11, 1), (12, 1), (13, 1), (14, 0), (15, 1);
+            INSERT INTO user_favorite VALUES (5, 10, 1), (5, 10, 2), (5, 11, 1),
+                (5, 12, 2), (15, 12, 1), (13, 5, 1), (5, 14, 1), (5, 15, 1);
+            INSERT INTO user_browse_history VALUES
+                (5, 10, '2026-11-20 08:00:00', 0), (5, 10, '2026-11-20 09:00:00', 0),
+                (5, 11, '2026-11-20 09:00:00', 1), (5, 12, '2026-11-20 10:00:00', 0),
+                (5, 13, '2026-11-20 11:00:00', 0), (5, 14, '2026-11-20 12:00:00', 0),
+                (5, 15, '2026-11-19 09:00:00', 0),
+                (10, 5, '2026-11-20 08:00:00', NULL), (10, 5, '2026-11-20 09:00:00', 1),
+                (11, 5, '2026-11-20 08:00:00', 0), (12, 5, '2026-11-20 12:00:00', 1),
+                (14, 5, '2026-11-20 10:00:00', 0);
+        """)
+
+        class Db:
+            vip = False
+
+            async def execute(self, statement, params):
+                cursor = conn.execute(str(statement), params)
+                if str(statement).startswith("SELECT COUNT"):
+                    return _Result(scalar=cursor.fetchone()[0])
+                rows = [dict(row) for row in cursor.fetchall()]
+                for row in rows:
+                    row["viewed_at"] = datetime.fromisoformat(row["viewed_at"])
+                return _Result(rows)
+
+        async def scene(db, viewer_id, _scene, **_kwargs):
+            return {"user_id": viewer_id}, db.vip, SimpleNamespace(clause="u.status = 1", params={})
+
+        async def targets(_db, _viewer_id, ids, **_kwargs):
+            return {target: {"user_id": target, "nickname": f"访客{target}"} for target in ids}
+
+        monkeypatch.setattr(discovery, "_scene_visibility", scene)
+        monkeypatch.setattr(discovery, "_target_rows", targets)
+        monkeypatch.setattr(discovery, "_attach_card_qa_media", AsyncMock())
+        yield Db()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("filter_name", "expected"), [("all", [13, 12, 11, 10]), ("liked", [11, 10]), ("unliked", [13, 12])])
+async def test_browse_history_filters_before_pagination(footprint_db, filter_name, expected):
+    for index, expected_id in enumerate(expected, 1):
+        page = await discovery.browse_history(footprint_db, 5, index, 1, filter=filter_name)
+        assert page.total == len(expected)
+        assert [item.target.user_id for item in page.items] == [expected_id]
+    empty = await discovery.browse_history(footprint_db, 5, len(expected) + 1, 1, filter=filter_name)
+    assert empty.items == []
+    assert empty.total == len(expected)
+
+
+@pytest.mark.asyncio
+async def test_vip_history_keeps_previous_day(footprint_db):
+    footprint_db.vip = True
+    page = await discovery.browse_history(footprint_db, 5, 1, 20, filter="liked")
+    assert page.total == 3
+    assert [item.target.user_id for item in page.items] == [11, 10, 15]
+
+
+@pytest.mark.asyncio
+async def test_visitors_exclude_anonymous_and_keep_stable_pages(footprint_db):
+    for vip in (False, True):
+        footprint_db.vip = vip
+        for index, visitor_id in enumerate((11, 10), 1):
+            page = await discovery.visitors(footprint_db, 5, index, 1)
+            assert page.count == 2
+            assert page.has_more == (index == 1)
+            assert page.can_view_details is vip
+            assert page.masked is not vip
+            assert len(page.items) == 1
+            assert page.items[0].target.user_id == (visitor_id if vip else -1)
+            assert page.items[0].viewed_at == datetime(2026, 11, 20, 8)
+            if not vip:
+                assert page.items[0].target.detail_locked
+        empty = await discovery.visitors(footprint_db, 5, 3, 1)
+        assert empty.count == 2 and empty.items == [] and not empty.has_more
+
+
+def test_history_route_validates_filter_and_keeps_default(monkeypatch):
+    app = FastAPI()
+    app.include_router(discovery_routes.router, prefix="/api/v1")
+    app.dependency_overrides[discovery_routes.get_current_user] = lambda: SimpleNamespace(id=5)
+    app.dependency_overrides[discovery_routes.get_db] = lambda: None
+    service = AsyncMock(return_value=BrowseHistoryPage(items=[], page=2, page_size=1, total=0))
+    monkeypatch.setattr(discovery_routes, "browse_history", service)
+    with TestClient(app) as client:
+        url = "/api/v1/discovery/browse-history"
+        for query, expected in (({}, "all"), ({"filter": "liked"}, "liked"), ({"filter": "unliked"}, "unliked")):
+            response = client.get(url, params={"page": 2, "page_size": 1, **query})
+            assert response.status_code == 200
+            assert response.json() == {"items": [], "page": 2, "page_size": 1, "total": 0}
+            service.assert_awaited_with(None, 5, 2, 1, filter=expected)
+        service.reset_mock()
+        response = client.get(url, params={"filter": "favorite"})
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["loc"] == ["query", "filter"]
+        service.assert_not_awaited()
 
 
 def test_recommendation_scene_keeps_gate_by_default() -> None:

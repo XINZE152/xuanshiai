@@ -1,4 +1,3 @@
-import json
 from datetime import date
 
 from sqlalchemy import text
@@ -6,9 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.redis import daily_quota_key, get_daily_used
+from app.schemas.membership import MembershipDailyLimits
 from app.schemas.quotas import QuotaItem, QuotaSummary
 from app.services.admin_config import get_runtime_value
-from app.services.membership import get_active_membership_row
+from app.services.membership import get_active_membership_row, parse_package_rights
 from app.services.runtime_config import match_line_permissions
 
 
@@ -16,13 +16,7 @@ async def _membership_rights(db: AsyncSession, user_id: int) -> tuple[bool, dict
     row = await get_active_membership_row(db, user_id)
     if not row:
         return False, {}
-    value = row["rights"]
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            value = {}
-    return True, value if isinstance(value, dict) else {}
+    return True, parse_package_rights(row["rights"])
 
 
 async def _extra_remaining(db: AsyncSession, user_id: int, quota_code: str) -> int:
@@ -44,6 +38,11 @@ async def grant(db: AsyncSession, user_id: int, quota_code: str, amount: int, so
     await db.execute(text("INSERT INTO user_quota_grant (user_id,quota_code,remaining,source,order_no) VALUES (:user_id,:quota_code,:remaining,:source,:order_no)"), {"user_id": user_id, "quota_code": quota_code, "remaining": amount, "source": source, "order_no": order_no})
 
 
+def _vip_browse_limit(rights: dict) -> int:
+    value = rights.get("browse_daily_limit")
+    return max(0, int(value)) if value is not None else 20
+
+
 async def resolve_browse_limit(
     db: AsyncSession, user_id: int, is_vip: bool | None = None
 ) -> int:
@@ -57,8 +56,11 @@ async def resolve_browse_limit(
     if is_vip is not None:
         vip = is_vip
     if vip:
-        value = rights.get("browse_daily_limit")
-        return max(0, int(value)) if value is not None else 20
+        return _vip_browse_limit(rights)
+    return await _free_browse_limit(db)
+
+
+async def _free_browse_limit(db: AsyncSession) -> int:
     return int(
         await get_runtime_value(
             db,
@@ -90,21 +92,26 @@ async def resolve_apply_limit(db: AsyncSession, user_id: int, is_vip: bool | Non
         if vip is None:
             vip = member_vip
         rights = member_rights if member_vip else {}
-    line_perm = await match_line_permissions(db)
-    unified = line_perm.get("apply_daily")
+    base, unified = await _apply_limit_config(db)
+    return _apply_limit_with_rights(base, unified, rights if vip else {})
+
+
+async def _apply_limit_config(db: AsyncSession) -> tuple[int, bool]:
+    unified = (await match_line_permissions(db)).get("apply_daily")
     if unified and int(unified) > 0:
-        return int(unified)
-    free_limit = int(
+        return int(unified), True
+    return int(
         await get_runtime_value(
             db,
             "platform_permissions",
             "free_apply_daily_limit",
             settings.apply_daily_free_limit,
         )
-    )
-    if not vip:
-        return free_limit
-    return free_limit + int(rights.get("apply_bonus") or 0)
+    ), False
+
+
+def _apply_limit_with_rights(base: int, unified: bool, rights: dict) -> int:
+    return base if unified else base + int(rights.get("apply_bonus") or 0)
 
 
 async def resolve_superlike_limit(db: AsyncSession, user_id: int, is_vip: bool | None = None) -> int:
@@ -113,14 +120,40 @@ async def resolve_superlike_limit(db: AsyncSession, user_id: int, is_vip: bool |
         vip, _ = await _membership_rights(db, user_id)
     else:
         vip = is_vip
+    return await _superlike_limit(db, vip)
+
+
+async def _superlike_limit(db: AsyncSession, is_vip: bool) -> int:
     return int(
         await get_runtime_value(
             db,
             "platform_permissions",
-            "vip_superlike_daily_limit" if vip else "free_superlike_daily_limit",
-            settings.superlike_daily_vip_limit if vip else settings.superlike_daily_free_limit,
+            "vip_superlike_daily_limit" if is_vip else "free_superlike_daily_limit",
+            settings.superlike_daily_vip_limit if is_vip else settings.superlike_daily_free_limit,
         )
     )
+
+
+async def resolve_membership_daily_limits(
+    db: AsyncSession, package_rights: list[dict | None]
+) -> list[MembershipDailyLimits]:
+    """按同一份实时配置计算套餐预览或当前账号上限；None 代表非会员。"""
+    if not package_rights:
+        return []
+    base, unified = await _apply_limit_config(db)
+    superlike = {
+        is_vip: await _superlike_limit(db, is_vip)
+        for is_vip in dict.fromkeys(rights is not None for rights in package_rights)
+    }
+    free_browse = await _free_browse_limit(db) if None in package_rights else 0
+    return [
+        MembershipDailyLimits(
+            apply=_apply_limit_with_rights(base, unified, rights or {}),
+            browse=_vip_browse_limit(rights) if rights is not None else free_browse,
+            superlike=superlike[rights is not None],
+        )
+        for rights in package_rights
+    ]
 
 
 async def resolve_paper_plane_limit(db: AsyncSession) -> int:

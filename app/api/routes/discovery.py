@@ -35,6 +35,7 @@ from app.schemas.discovery import (
     VisitorPage,
 )
 from app.services.discovery import (
+    BrowseHistoryFilter,
     browse_history,
     create_application,
     create_poster,
@@ -92,8 +93,18 @@ async def update_saved_filter(body: DiscoveryFilters, current: CurrentUser = Dep
 
 
 @router.get("/browse-history", response_model=BrowseHistoryPage, summary="查询浏览记录")
-async def history(page: int = Query(default=1, ge=1, le=1000), page_size: int = Query(default=20, ge=1, le=50), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> BrowseHistoryPage:
-    return await browse_history(db, current.id, page, page_size)
+async def history(
+    page: int = Query(default=1, ge=1, le=1000),
+    page_size: int = Query(default=20, ge=1, le=50),
+    filter: BrowseHistoryFilter = Query(
+        default="all",
+        description="按当前用户对浏览对象的喜欢关系筛选：all 全部，liked 已喜欢，unliked 未喜欢",
+        examples=["liked"],
+    ),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> BrowseHistoryPage:
+    return await browse_history(db, current.id, page, page_size, filter=filter)
 
 
 @router.get("/visitors", response_model=VisitorPage, summary="查询谁看过我")
