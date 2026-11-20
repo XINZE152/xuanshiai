@@ -128,6 +128,8 @@ def _member(**kwargs: Any) -> dict[str, Any]:
         "income_min": 8000,
         "preferred_province_code": None,
         "preferred_city_codes": (),
+        "qa_answers": (),
+        "chat_extra_tags": (),
     }
     defaults.update(kwargs)
     city_code = str(defaults["city_code"])
@@ -137,6 +139,85 @@ def _member(**kwargs: Any) -> dict[str, Any]:
     defaults["birthday_date"] = date.fromisoformat(defaults["birthday"])
     defaults["age"] = _age_of(defaults["birthday_date"])
     return defaults
+
+
+# 交叉匹配用的「吃 / 周末 / 店」类标签：扩写兴趣池，方便推荐算 shared、分身开聊破冰。
+_CHAT_OVERLAP_TAGS = (
+    "探咖啡店",
+    "城市漫步",
+    "公园野餐",
+    "周末徒步",
+    "火锅",
+    "周末探店",
+    "去音乐节",
+    "研究家常菜",
+    "低糖烘焙",
+)
+
+
+def _expand_interest_tags(tags: tuple[str, ...] | list[str], extra: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
+    """扩到最多 10 条，保留原有顺序，再补交叉可聊标签。"""
+    seen: list[str] = []
+    for tag in list(tags) + list(extra) + list(_CHAT_OVERLAP_TAGS):
+        text = str(tag).strip()
+        if text == "" or text in seen:
+            continue
+        seen.append(text)
+        if len(seen) >= 10:
+            break
+    return tuple(seen)
+
+
+def _build_qa_answers(member: dict[str, Any]) -> list[dict[str, Any]]:
+    """每人 3 题公开问答：理想型 / 运动 / 期待的爱情；答案贴近兴趣与文案。"""
+    tags = [str(t) for t in member.get("interest_tags") or ()]
+    sport = next((t for t in tags if t in {"跑马拉松", "周末徒步", "游泳", "打篮球", "打羽毛球", "骑行", "瑜伽", "露营"}), "城市漫步")
+    food = next((t for t in tags if t in {"火锅", "探咖啡店", "低糖烘焙", "研究家常菜", "周末探店"}), "探咖啡店")
+    ideal = str(member.get("ideal_partner") or "希望对方情绪稳定、愿意沟通").strip()
+    if len(ideal) > 120:
+        ideal = ideal[:117] + "…"
+    love = str(member.get("love_view") or "希望关系里两个人都能做自己").strip()
+    if len(love) > 120:
+        love = love[:117] + "…"
+    return [
+        {
+            "question_id": 1,
+            "question": "你理想中的另一半是什么样的",
+            "answer": ideal,
+            "media_ids": [],
+        },
+        {
+            "question_id": 2,
+            "question": "喜欢什么运动",
+            "answer": f"平时比较常{sport}，周末也想找人一起{food}。",
+            "media_ids": [],
+        },
+        {
+            "question_id": 3,
+            "question": "你期待的爱情是什么样子的",
+            "answer": love,
+            "media_ids": [],
+        },
+    ]
+
+
+def _finalize_member(member: dict[str, Any]) -> dict[str, Any]:
+    """兴趣扩写 + 公开问答补齐（幂等，便于分身用共同爱好开聊）。"""
+    row = dict(member)
+    row["interest_tags"] = _expand_interest_tags(
+        tuple(row.get("interest_tags") or ()),
+        tuple(row.get("chat_extra_tags") or ()),
+    )
+    raw_qa = row.get("qa_answers")
+    if not raw_qa:
+        row["qa_answers"] = _build_qa_answers(row)
+    else:
+        row["qa_answers"] = list(raw_qa)
+    hobbies = str(row.get("hobbies") or "").strip()
+    # 爱好文案补上「吃 / 周末」线索，方便资料页与分身引用
+    if "火锅" not in hobbies and "咖啡" not in hobbies and "做饭" not in hobbies:
+        row["hobbies"] = (hobbies + "、探店美食").strip("、") if hobbies else "探店美食、城市漫步"
+    return row
 
 
 def _age_of(birthday: date) -> int:
@@ -158,7 +239,7 @@ def _zodiac(birthday: date) -> str:
     return _ZODIAC_NAMES[(birthday.year - _ZODIAC_ANCHOR_YEAR) % 12]
 
 
-MEMBERS: tuple[dict[str, Any], ...] = (
+_MEMBERS_RAW: tuple[dict[str, Any], ...] = (
     _member(
         phone="13800001001", nickname="林知夏", real_name="林知夏", gender=2,
         birthday="1996-05-18", avatar="portrait:seed-real/seed-f-avatar-01.webp", id_card="320105199605180021",
@@ -506,6 +587,8 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
 )
 
+MEMBERS: tuple[dict[str, Any], ...] = tuple(_finalize_member(item) for item in _MEMBERS_RAW)
+
 
 def _slug(phone: str) -> str:
     return f"demo-{phone}"
@@ -785,6 +868,7 @@ def _upsert_profile(cur: Any, member: dict[str, Any], user_id: int, assets: dict
             "custom_categories": {member["custom_tag"]: member["custom_tag_category"]},
         }
     album_urls = [item["url"] for item in assets["album"]]
+    qa_payload = member.get("qa_answers") or _build_qa_answers(member)
     cur.execute(
         """INSERT INTO user_profile
         (user_id, height, weight, income, hometown, residence, mbti, constellation, zodiac, tags,
@@ -793,9 +877,9 @@ def _upsert_profile(cur: Any, member: dict[str, Any], user_id: int, assets: dict
          residence_province_code, residence_city_code, residence_district_code, household,
          ethnicity, house, car, smoking, drinking, religion, community_city_name, community_city_code,
          community_city_updated_at, online_status, last_active_at, interest_tags,
-         personality_tags, location_consent, location_visible, location_source, location_updated_at)
+         personality_tags, qa_answers, location_consent, location_visible, location_source, location_updated_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,'汉族',%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,1,1,'manual',%s)
+                %s,'汉族',%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,%s,1,1,'manual',%s)
         ON DUPLICATE KEY UPDATE height=VALUES(height), weight=VALUES(weight), income=VALUES(income),
         hometown=VALUES(hometown), residence=VALUES(residence), mbti=VALUES(mbti),
         constellation=VALUES(constellation), zodiac=VALUES(zodiac), tags=VALUES(tags),
@@ -812,7 +896,8 @@ def _upsert_profile(cur: Any, member: dict[str, Any], user_id: int, assets: dict
         community_city_name=VALUES(community_city_name), community_city_code=VALUES(community_city_code),
         community_city_updated_at=VALUES(community_city_updated_at), online_status=1,
         last_active_at=VALUES(last_active_at), interest_tags=VALUES(interest_tags),
-        personality_tags=VALUES(personality_tags), location_consent=1, location_visible=1,
+        personality_tags=VALUES(personality_tags), qa_answers=VALUES(qa_answers),
+        location_consent=1, location_visible=1,
         location_source='manual', location_updated_at=VALUES(location_updated_at)""",
         (
             user_id, member["height"], member["weight"], member["income"], member["hometown"],
@@ -826,7 +911,8 @@ def _upsert_profile(cur: Any, member: dict[str, Any], user_id: int, assets: dict
             member["house"], member["car"], member["smoking"], member["drinking"], member["religion"],
             member["city"], member["city_code"],
             now, now, json.dumps(member["interest_tags"], ensure_ascii=False),
-            json.dumps(member["personality_tags"], ensure_ascii=False), now,
+            json.dumps(member["personality_tags"], ensure_ascii=False),
+            json.dumps(qa_payload, ensure_ascii=False), now,
         ),
     )
 
