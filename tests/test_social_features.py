@@ -95,8 +95,6 @@ def test_social_actions_require_authentication() -> None:
 
 def test_social_interactions_and_applications_require_realname() -> None:
     guarded_routes = (
-        ("/api/v1/users/{target_id}/like", "PUT"),
-        ("/api/v1/users/{target_id}/like", "DELETE"),
         ("/api/v1/users/{target_id}/follow", "PUT"),
         ("/api/v1/users/{target_id}/follow", "DELETE"),
         ("/api/v1/discovery/applications/{target_id}", "POST"),
@@ -109,6 +107,8 @@ def test_social_interactions_and_applications_require_realname() -> None:
 
 def test_reporting_blocking_and_reads_do_not_require_realname() -> None:
     available_routes = (
+        ("/api/v1/users/{target_id}/like", "PUT"),
+        ("/api/v1/users/{target_id}/like", "DELETE"),
         ("/api/v1/relations/likes", "GET"),
         ("/api/v1/discovery/applications/incoming", "GET"),
         ("/api/v1/security/blocks/{target_id}", "PUT"),

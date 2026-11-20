@@ -63,12 +63,13 @@ router = APIRouter(dependencies=[Depends(get_verified_user)])
 
 
 @router.put("/users/{target_id}/like", response_model=RelationResponse, summary="喜欢用户")
-async def like(target_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_realname_verified_user), db: AsyncSession = Depends(get_db)) -> RelationResponse:
+async def like(target_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_verified_user), db: AsyncSession = Depends(get_db)) -> RelationResponse:
+    # 点赞/喜欢暂不要求实名；路由级仍需已绑定手机号（get_verified_user）。
     return await set_like(db, current.id, target_id, True)
 
 
 @router.delete("/users/{target_id}/like", response_model=RelationResponse, summary="取消喜欢")
-async def unlike(target_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_realname_verified_user), db: AsyncSession = Depends(get_db)) -> RelationResponse:
+async def unlike(target_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_verified_user), db: AsyncSession = Depends(get_db)) -> RelationResponse:
     return await set_like(db, current.id, target_id, False)
 
 

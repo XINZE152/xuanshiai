@@ -299,16 +299,17 @@ async def remove_post(
 @router.put("/community/posts/{post_id}/like", response_model=CommunityPostResponse, summary="点赞动态")
 async def like(
     post_id: int = Path(..., ge=1),
-    current: CurrentUser = Depends(get_realname_verified_user),
+    current: CurrentUser = Depends(get_verified_user),
     db: AsyncSession = Depends(get_db),
 ) -> CommunityPostResponse:
+    # 点赞暂不要求实名；仍需已登录且绑定手机号。
     return await like_post(db, current.id, post_id, True)
 
 
 @router.delete("/community/posts/{post_id}/like", response_model=CommunityPostResponse, summary="取消动态点赞")
 async def unlike(
     post_id: int = Path(..., ge=1),
-    current: CurrentUser = Depends(get_realname_verified_user),
+    current: CurrentUser = Depends(get_verified_user),
     db: AsyncSession = Depends(get_db),
 ) -> CommunityPostResponse:
     return await like_post(db, current.id, post_id, False)
@@ -418,9 +419,10 @@ async def remove_comment(
 )
 async def like_comment_route(
     comment_id: int = Path(..., ge=1),
-    current: CurrentUser = Depends(get_realname_verified_user),
+    current: CurrentUser = Depends(get_verified_user),
     db: AsyncSession = Depends(get_db),
 ) -> CommunityCommentResponse:
+    # 评论点赞暂不要求实名；仍需已登录且绑定手机号。
     return await like_comment(db, current.id, comment_id, True)
 
 
@@ -431,7 +433,7 @@ async def like_comment_route(
 )
 async def unlike_comment_route(
     comment_id: int = Path(..., ge=1),
-    current: CurrentUser = Depends(get_realname_verified_user),
+    current: CurrentUser = Depends(get_verified_user),
     db: AsyncSession = Depends(get_db),
 ) -> CommunityCommentResponse:
     return await like_comment(db, current.id, comment_id, False)
