@@ -26,7 +26,7 @@ from app.services.notifications import emit_notification
 from app.services.admin_config import get_runtime_value
 
 
-BOOST_PACKAGES = {
+DEFAULT_BOOST_PACKAGES = {
     "boost_1d": BoostPackage(code="boost_1d", name="置顶1天", days=1, price=Decimal("1.00"), recommended=False),
     "boost_7d": BoostPackage(code="boost_7d", name="置顶7天", days=7, price=Decimal("5.00"), recommended=True),
     "boost_30d": BoostPackage(code="boost_30d", name="置顶30天", days=30, price=Decimal("15.00"), recommended=False),
@@ -82,12 +82,36 @@ async def _create_order(
     return PaidOrderResponse(order_no=order_no, product_code=product_code, product_name=product_name, amount=amount, status=0, expire_at=expire_at, payment_required=True)
 
 
-async def list_boost_packages() -> list[BoostPackage]:
-    return list(BOOST_PACKAGES.values())
+async def list_boost_packages(db: AsyncSession) -> list[BoostPackage]:
+    config = await get_runtime_value(db, "finance", "boost_packages", None)
+    if not isinstance(config, list):
+        return list(DEFAULT_BOOST_PACKAGES.values())
+    packages: dict[str, BoostPackage] = {}
+    for row in config:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("code") or "")
+        if code not in DEFAULT_BOOST_PACKAGES:
+            continue
+        default = DEFAULT_BOOST_PACKAGES[code]
+        try:
+            days = int(row.get("days", default.days))
+            price = Decimal(str(row.get("price", default.price)))
+        except (ValueError, TypeError, ArithmeticError):
+            continue
+        name = str(row.get("name") or default.name).strip()
+        if not 1 <= days <= 3650 or not price.is_finite() or not 0 <= price <= Decimal("1000000") or not name or len(name) > 64:
+            continue
+        packages[code] = BoostPackage(code=code, name=name, days=days, price=price, recommended=bool(row.get("recommended", default.recommended)))
+    return sorted(packages.values(), key=lambda item: (item.days, item.code)) or list(DEFAULT_BOOST_PACKAGES.values())
+
+
+async def get_boost_package(db: AsyncSession, code: str) -> BoostPackage | None:
+    return next((item for item in await list_boost_packages(db) if item.code == code), None)
 
 
 async def create_boost_order(db: AsyncSession, user_id: int, body: CreateBoostOrderRequest, idempotency_key: str) -> PaidOrderResponse:
-    package = BOOST_PACKAGES.get(body.package_code)
+    package = await get_boost_package(db, body.package_code)
     if not package:
         raise HTTPException(404, detail="置顶套餐不存在")
     return await _create_order(db, user_id, 4, user_id, package.code, package.name, package.price, idempotency_key)
@@ -117,16 +141,14 @@ async def get_paid_order(db: AsyncSession, user_id: int, order_no: str, order_ty
 
 async def get_spotlight_price(db: AsyncSession) -> SpotlightPriceResponse:
     """爆灯单价。展示与下单读同一处运行期配置，前端不要用常量兜底成另一个价。"""
-    amount = Decimal(
-        str(
-            await get_runtime_value(
-                db,
-                SPOTLIGHT_PRICE_NAMESPACE,
-                SPOTLIGHT_PRICE_KEY,
-                SPOTLIGHT_PRICE_FALLBACK,
-            )
-        )
-    )
+    try:
+        amount = Decimal(str(await get_runtime_value(
+            db, SPOTLIGHT_PRICE_NAMESPACE, SPOTLIGHT_PRICE_KEY, SPOTLIGHT_PRICE_FALLBACK,
+        )))
+    except (ValueError, TypeError, ArithmeticError):
+        amount = Decimal(SPOTLIGHT_PRICE_FALLBACK)
+    if not amount.is_finite() or amount < 0 or amount > Decimal("1000000"):
+        amount = Decimal(SPOTLIGHT_PRICE_FALLBACK)
     return SpotlightPriceResponse(amount=amount)
 
 
@@ -213,7 +235,7 @@ async def complete_test_payment(db: AsyncSession, user_id: int, body: TestPaymen
                     target_id=user_id,
                 )
             else:
-                package = BOOST_PACKAGES.get(str(order["product_type"]))
+                package = await get_boost_package(db, str(order["product_type"]))
                 if not package:
                     raise HTTPException(422, detail="置顶套餐不存在")
                 start_at = datetime.now(UTC).replace(tzinfo=None)

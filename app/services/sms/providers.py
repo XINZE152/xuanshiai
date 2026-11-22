@@ -4,6 +4,7 @@ from fastapi import HTTPException
 
 from app.core.config import settings
 from app.services.sms.base import SmsProvider
+from app.services.sms.tencent_cloud import TencentCloudSmsProvider
 
 
 class DisabledSmsProvider:
@@ -62,8 +63,10 @@ def get_sms_template_provider() -> SmsProvider:
     providers: dict[str, SmsProvider] = {
         "disabled": DisabledSmsProvider(),
         "mock": MockSmsProvider(),
+        "tencent_cloud": TencentCloudSmsProvider(),
     }
-    provider = providers.get(settings.sms_template_provider.lower())
+    configured = settings.sms_template_provider.lower()
+    provider = providers.get("tencent_cloud" if configured == "disabled" else configured)
     if provider is None:
         raise HTTPException(status_code=503, detail="短信服务供应商未实现")
     return provider
@@ -74,8 +77,10 @@ def get_sms_provider() -> SmsProvider:
     providers: dict[str, SmsProvider] = {
         "disabled": DisabledSmsProvider(),
         "mock": MockSmsProvider(),
+        "tencent_cloud": TencentCloudSmsProvider(),
     }
-    provider = providers.get(settings.sms_provider.lower())
+    configured = settings.sms_provider.lower()
+    provider = providers.get("tencent_cloud" if configured == "disabled" else configured)
     if provider is None:
         raise HTTPException(status_code=503, detail="短信服务供应商未实现")
     return provider

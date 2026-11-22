@@ -104,5 +104,18 @@ class PointRechargePackage(BaseModel):
     price: Decimal = Field(description="售价（元），服务端定价，客户端不可传")
 
 
+class AdminPointRechargePackage(BaseModel):
+    id: int | None = Field(default=None, ge=1)
+    name: str = Field(min_length=1, max_length=128)
+    points: int = Field(ge=1, le=2_147_483_647)
+    price: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    enabled: bool = True
+    sort: int = Field(default=0, ge=0, le=100000)
+
+
+class AdminPointRechargePackageList(BaseModel):
+    items: list[AdminPointRechargePackage]
+
+
 class CreatePointRechargeOrderRequest(BaseModel):
     package_id: int = Field(ge=1, description="充值商品 ID；数量固定 1，金额由服务端按目录计算")

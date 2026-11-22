@@ -531,7 +531,7 @@ async def review_auth(
     婚姻核验结果本身为 married/no_record/divorced，不存在「通过/未通过」语义，
     因此 marriage 不支持该审核动作，直接返回 400。
     """
-    new_status = body.status  # 1 通过 2 未通过
+    new_status = body.status  # 0 待审 1 通过 2 未通过
     if new_status == 2 and kind in ("commitment", "education") and not (body.remark or "").strip():
         raise HTTPException(422, detail="审核未通过时必须填写原因")
     if kind == "realname":
@@ -557,8 +557,7 @@ async def review_auth(
         commitment = exists.mappings().first()
         if not commitment:
             raise HTTPException(404, detail="承诺书签署记录不存在")
-        if int(commitment["status"] or 0) != 0:
-            raise HTTPException(409, detail="当前承诺书不在审核中")
+        # 允许后台直接切换签署结果（待审/通过/未通过之间可任意改）
         await db.execute(
             text("UPDATE user_commitment_sign SET status = :st, reviewed_by = :actor, reviewed_at = UTC_TIMESTAMP(), remark = :remark WHERE id = :id"),
             {"st": new_status, "actor": actor_id, "id": review_id, "remark": body.remark},
@@ -584,9 +583,8 @@ async def review_auth(
         education_review = exists.mappings().first()
         if not education_review:
             raise HTTPException(404, detail="学历认证记录不存在")
-        if int(education_review["education_verified"] or 0) != 1:
-            raise HTTPException(409, detail="当前学历认证不在审核中")
-        qualification_status = 2 if new_status == 1 else 3
+        # 允许后台直接切换学历认证结果（审核中/通过/未通过之间可任意改）
+        qualification_status = {0: 1, 1: 2, 2: 3}[new_status]
         await db.execute(
             text("""UPDATE user_auth SET education_verified=:st, education_fail_reason=:remark,
                 education_reviewed_at=UTC_TIMESTAMP(), reviewed_by=:actor, reviewed_at=UTC_TIMESTAMP(),

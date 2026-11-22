@@ -22,6 +22,7 @@ from app.api.routes import (
     admin,
     admin_home,
     admin_config,
+    admin_membership_packages,
     admin_common_upload,
     admin_content,
     admin_good_news,
@@ -94,6 +95,8 @@ from app.api.routes import (
     profile,
     public_page_switches,
     public_preview,
+    public_articles,
+    public_navigation,
     regions,
     reward_rule_admin,
     apportion_config_admin,
@@ -149,6 +152,8 @@ api_router.include_router(discovery.router, tags=["首页与资料"])
 api_router.include_router(discovery.users_router, tags=["首页与资料"])
 api_router.include_router(public_preview.router, tags=["游客预览"])
 api_router.include_router(public_page_switches.router, tags=["游客预览"])
+api_router.include_router(public_articles.router, tags=["公开内容"])
+api_router.include_router(public_navigation.router, tags=["公开内容"])
 api_router.include_router(matchmaker.router, tags=["红娘"])
 # 静态 /matchmaker/workbench/good-news 必须先于工作台动态路由挂载。
 api_router.include_router(good_news_workspace.router, tags=["红娘"])
@@ -165,6 +170,7 @@ api_router.include_router(message_admin.router, tags=["\u7ba1\u7406\u540e\u53f0"
 api_router.include_router(admin.router, tags=["管理后台"])
 api_router.include_router(admin_home.router, tags=["管理端首页"])
 api_router.include_router(admin_config.router, tags=["管理后台配置"])
+api_router.include_router(admin_membership_packages.router, tags=["管理后台配置"])
 api_router.include_router(admin_common_upload.router, tags=["管理后台通用上传"])
 # 静态 /admin/content/good_news 必须先于通用 /admin/content/{domain} 挂载。
 api_router.include_router(admin_good_news.router, tags=["管理后台"])

@@ -37,6 +37,10 @@ class CommissionRuleResponse(BaseModel):
     created_at: datetime
 
 
+class CommissionEventConfig(BaseModel):
+    events: list[str] = Field(min_length=1, max_length=40)
+
+
 class ProductCommissionConfigCreate(BaseModel):
     beneficiary_type: Literal["service_matchmaker", "store", "promoter", "partner"]
     mode: Literal["fixed", "rate"]

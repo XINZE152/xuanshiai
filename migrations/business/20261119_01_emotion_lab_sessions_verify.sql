@@ -1,0 +1,3 @@
+SELECT COUNT(*) AS emotion_lab_session_exists
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'emotion_lab_session';

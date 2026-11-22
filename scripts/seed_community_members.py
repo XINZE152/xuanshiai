@@ -1,14 +1,21 @@
-"""填充本地开发库的完整会员数据，使 C 端功能（除红娘）全部可验证。
+"""填充完整测试种子会员数据，使 C 端功能（除红娘）全部可验证。
 
 与 ``seed_community_demo.py`` 的分工：
     - ``seed_community_demo.py`` 负责社区内容演示行（话题/动态/活动/纸飞机/Banner）。
-    - 本脚本负责"会员本身"：16 位演示会员的完整资料、认证材料、会员权益、
+    - 本脚本负责"会员本身"：14 位种子会员的完整资料、认证材料、会员权益、
       积分账本、关系链、聊天、通知，以及发现页可见性所需的全部前置条件。
 
 设计要点：
-    - 只在 development/testing 执行，其它环境直接拒绝。
+    - 默认只在 development/testing 执行；生产需显式 ``--allow-production``
+      （或环境变量 ``XUANSHIAI_ALLOW_SEED_PRODUCTION=1``），且只动这 14 个手机号。
+    - 写入 ``users.is_test_seed=1``，与真实会员同表共存，清理时按该标记过滤。
     - 幂等：所有写入以手机号 / user_id / 自然键做 UPSERT；日志型表按业务键判重后追加。
-    - 生成的素材统一写入 ``storage/uploads/<user_id>/demo-*``，可安全重复执行。
+    - 生成的素材统一写入 ``storage/uploads/<user_id>/``，可安全重复执行。
+
+用法::
+
+    python scripts/seed_community_members.py
+    python scripts/seed_community_members.py --allow-production
 """
 
 from __future__ import annotations
@@ -110,6 +117,8 @@ def _member(**kwargs: Any) -> dict[str, Any]:
         "house": "暂无房",
         "car": "暂无车",
         "smoking": "不吸烟",
+        "drinking": "不喝酒",
+        "religion": "无宗教信仰",
         "single_reason": "工作节奏较快，希望认真开始一段关系。",
         "family_background": "家庭氛围平和，父母尊重我的选择。",
         "children_intention": "顺其自然",
@@ -119,6 +128,8 @@ def _member(**kwargs: Any) -> dict[str, Any]:
         "income_min": 8000,
         "preferred_province_code": None,
         "preferred_city_codes": (),
+        "qa_answers": (),
+        "chat_extra_tags": (),
     }
     defaults.update(kwargs)
     city_code = str(defaults["city_code"])
@@ -128,6 +139,85 @@ def _member(**kwargs: Any) -> dict[str, Any]:
     defaults["birthday_date"] = date.fromisoformat(defaults["birthday"])
     defaults["age"] = _age_of(defaults["birthday_date"])
     return defaults
+
+
+# 交叉匹配用的「吃 / 周末 / 店」类标签：扩写兴趣池，方便推荐算 shared、分身开聊破冰。
+_CHAT_OVERLAP_TAGS = (
+    "探咖啡店",
+    "城市漫步",
+    "公园野餐",
+    "周末徒步",
+    "火锅",
+    "周末探店",
+    "去音乐节",
+    "研究家常菜",
+    "低糖烘焙",
+)
+
+
+def _expand_interest_tags(tags: tuple[str, ...] | list[str], extra: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
+    """扩到最多 10 条，保留原有顺序，再补交叉可聊标签。"""
+    seen: list[str] = []
+    for tag in list(tags) + list(extra) + list(_CHAT_OVERLAP_TAGS):
+        text = str(tag).strip()
+        if text == "" or text in seen:
+            continue
+        seen.append(text)
+        if len(seen) >= 10:
+            break
+    return tuple(seen)
+
+
+def _build_qa_answers(member: dict[str, Any]) -> list[dict[str, Any]]:
+    """每人 3 题公开问答：理想型 / 运动 / 期待的爱情；答案贴近兴趣与文案。"""
+    tags = [str(t) for t in member.get("interest_tags") or ()]
+    sport = next((t for t in tags if t in {"跑马拉松", "周末徒步", "游泳", "打篮球", "打羽毛球", "骑行", "瑜伽", "露营"}), "城市漫步")
+    food = next((t for t in tags if t in {"火锅", "探咖啡店", "低糖烘焙", "研究家常菜", "周末探店"}), "探咖啡店")
+    ideal = str(member.get("ideal_partner") or "希望对方情绪稳定、愿意沟通").strip()
+    if len(ideal) > 120:
+        ideal = ideal[:117] + "…"
+    love = str(member.get("love_view") or "希望关系里两个人都能做自己").strip()
+    if len(love) > 120:
+        love = love[:117] + "…"
+    return [
+        {
+            "question_id": 1,
+            "question": "你理想中的另一半是什么样的",
+            "answer": ideal,
+            "media_ids": [],
+        },
+        {
+            "question_id": 2,
+            "question": "喜欢什么运动",
+            "answer": f"平时比较常{sport}，周末也想找人一起{food}。",
+            "media_ids": [],
+        },
+        {
+            "question_id": 3,
+            "question": "你期待的爱情是什么样子的",
+            "answer": love,
+            "media_ids": [],
+        },
+    ]
+
+
+def _finalize_member(member: dict[str, Any]) -> dict[str, Any]:
+    """兴趣扩写 + 公开问答补齐（幂等，便于分身用共同爱好开聊）。"""
+    row = dict(member)
+    row["interest_tags"] = _expand_interest_tags(
+        tuple(row.get("interest_tags") or ()),
+        tuple(row.get("chat_extra_tags") or ()),
+    )
+    raw_qa = row.get("qa_answers")
+    if not raw_qa:
+        row["qa_answers"] = _build_qa_answers(row)
+    else:
+        row["qa_answers"] = list(raw_qa)
+    hobbies = str(row.get("hobbies") or "").strip()
+    # 爱好文案补上「吃 / 周末」线索，方便资料页与分身引用
+    if "火锅" not in hobbies and "咖啡" not in hobbies and "做饭" not in hobbies:
+        row["hobbies"] = (hobbies + "、探店美食").strip("、") if hobbies else "探店美食、城市漫步"
+    return row
 
 
 def _age_of(birthday: date) -> int:
@@ -149,10 +239,10 @@ def _zodiac(birthday: date) -> str:
     return _ZODIAC_NAMES[(birthday.year - _ZODIAC_ANCHOR_YEAR) % 12]
 
 
-MEMBERS: tuple[dict[str, Any], ...] = (
+_MEMBERS_RAW: tuple[dict[str, Any], ...] = (
     _member(
         phone="13800001001", nickname="林知夏", real_name="林知夏", gender=2,
-        birthday="1996-05-18", avatar="anime:001", id_card="320105199605180021",
+        birthday="1996-05-18", avatar="portrait:seed-real/seed-f-avatar-01.webp", id_card="320105199605180021",
         city="南京", city_code="320100", district_code="320105",
         hometown="南京", hometown_code="320100",
         occupation="内容策划", industry="文化传媒", company="南京一间文化传播有限公司",
@@ -162,9 +252,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="先认真认识，再一起决定关系的节奏；坦诚不等于急着给答案。",
         ideal_partner="希望对方情绪稳定、愿意沟通，能接受我偶尔需要独处充电。",
         hobbies="阅读、散步、城市旅行、手账",
-        interest_tags=("逛独立书店", "做读书笔记", "城市漫步", "逛美术馆"),
+        interest_tags=("逛独立书店", "城市漫步", "逛美术馆", "做读书笔记", "探咖啡店", "周末探店"),
         personality_tags=("懂得倾听", "有边界感", "情绪稳定", "慢热"),
-        photos=("anime:010", "portrait:profile-woman-community.webp"),
+        photos=("portrait:seed-real/seed-cover-bookstore.webp", "portrait:seed-real/seed-f-avatar-01.webp", "portrait:profile-woman-community.webp"),
         single_reason="工作节奏快，宁缺毋滥。",
         family_background="父母在南京，家庭氛围松弛，支持我自己的节奏。",
         house="已购房",
@@ -178,7 +268,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="13800001002", nickname="周予安", real_name="周予安", gender=1,
-        birthday="1995-09-12", avatar="anime:003", id_card="310104199509120013",
+        birthday="1995-09-12", avatar="portrait:seed-real/seed-m-avatar-01.webp", id_card="310104199509120013",
         city="上海", city_code="310100", district_code="310104",
         hometown="扬州", hometown_code="321000",
         occupation="建筑设计", industry="设计服务", company="上海拾光建筑设计事务所",
@@ -188,9 +278,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="舒服的关系应该让双方都能做自己，而不是互相改造。",
         ideal_partner="希望对方有自己的热爱，也愿意一起把普通日子过得有意思。",
         hobbies="摄影、音乐、城市漫步、骑行",
-        interest_tags=("街头摄影", "城市漫步", "独立音乐", "跑马拉松"),
+        interest_tags=("街头摄影", "城市漫步", "独立音乐", "跑马拉松", "周末徒步", "公园野餐"),
         personality_tags=("温柔细心", "做事有计划", "说到做到", "随和"),
-        photos=("anime:020", "portrait:profile-man-light.webp"),
+        photos=("portrait:seed-real/seed-cover-park.webp", "portrait:seed-real/seed-m-avatar-01.webp", "portrait:profile-man-light.webp"),
         single_reason="之前忙于项目，现在想把生活重心挪回来。",
         family_background="普通工薪家庭，父母在扬州，关系亲近但不干涉。",
         house="已购房", car="已购车",
@@ -203,7 +293,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="13998020600", nickname="顾言澄", real_name="顾言澄", gender=2,
-        birthday="1997-02-26", avatar="anime:004", id_card="320104199702260028",
+        birthday="1997-02-26", avatar="portrait:seed-real/seed-f-avatar-02.webp", id_card="320104199702260028",
         city="南京", city_code="320100", district_code="320104",
         hometown="苏州", hometown_code="320500",
         occupation="心理咨询助理", industry="教育服务", company="南京心桥心理咨询中心",
@@ -213,9 +303,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="坦诚说出需要，也尊重对方的边界。",
         ideal_partner="希望对方愿意沟通、不回避冲突，能一起把问题说开。",
         hobbies="看展、烘焙、读书、瑜伽",
-        interest_tags=("逛摄影展", "低糖烘焙", "读心理学", "瑜伽"),
+        interest_tags=("探咖啡店", "低糖烘焙", "瑜伽", "逛摄影展", "读心理学", "城市漫步"),
         personality_tags=("外向开朗", "善解人意", "爱分享", "有耐心"),
-        photos=("anime:012", "portrait:profile-woman-alt.webp"),
+        photos=("portrait:seed-real/seed-cover-cafe.webp", "portrait:seed-real/seed-f-avatar-02.webp", "portrait:profile-woman-alt.webp"),
         single_reason="上一段关系结束后，花了一段时间重新认识自己。",
         family_background="父母都在苏州做老师，家里很重视沟通。",
         house="与家人同住",
@@ -229,7 +319,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="13905000870", nickname="沈知意", real_name="沈知意", gender=2,
-        birthday="1998-11-03", avatar="anime:005", id_card="310101199811030024",
+        birthday="1998-11-03", avatar="portrait:seed-real/seed-f-avatar-03.webp", id_card="310101199811030024",
         city="上海", city_code="310100", district_code="310101",
         hometown="无锡", hometown_code="320200",
         occupation="产品经理", industry="互联网", company="上海云枢科技有限公司",
@@ -239,9 +329,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="好的关系需要明确，也需要留有空间。",
         ideal_partner="希望对方独立、讲道理，能接受我把事情先想清楚再回应。",
         hobbies="游泳、电影、羽毛球、手账",
-        interest_tags=("科幻片", "游泳", "打羽毛球", "做手账"),
+        interest_tags=("游泳", "做手账", "科幻片", "打羽毛球", "周末探店", "探咖啡店"),
         personality_tags=("独立自信", "直接坦率", "情绪稳定", "喜欢独处"),
-        photos=("anime:014", "portrait:profile-woman-main.webp"),
+        photos=("portrait:seed-real/seed-cover-park.webp", "portrait:seed-real/seed-f-avatar-03.webp", "portrait:profile-woman-main.webp"),
         single_reason="工作强度大，也在学习把时间留给自己和关系。",
         family_background="父母在无锡经营小生意，从小比较独立。",
         house="已购房",
@@ -254,7 +344,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="17870810285", nickname="许闻洲", real_name="许闻洲", gender=1,
-        birthday="1994-07-21", avatar="anime:006", id_card="330106199407210015",
+        birthday="1994-07-21", avatar="portrait:seed-real/seed-m-avatar-02.webp", id_card="330106199407210015",
         city="杭州", city_code="330100", district_code="330106",
         hometown="合肥", hometown_code="340100",
         occupation="高校教师", industry="教育", company="杭州某高校",
@@ -264,9 +354,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="长期关系靠日常的尊重和兑现承诺。",
         ideal_partner="希望对方作息规律、有自己的事做，能一起把日子过稳。",
         hobbies="骑行、做饭、历史书、露营",
-        interest_tags=("骑行", "研究家常菜", "看历史故事", "露营"),
+        interest_tags=("骑行", "研究家常菜", "露营", "看历史故事", "周末徒步", "跑马拉松"),
         personality_tags=("做事有计划", "说到做到", "随和", "有耐心"),
-        photos=("anime:022", "portrait:profile-man-alt.webp"),
+        photos=("portrait:seed-real/seed-cover-coast.webp", "portrait:seed-real/seed-m-avatar-02.webp", "portrait:profile-man-alt.webp"),
         single_reason="博士毕业后先站稳工作，感情的事排在了后面。",
         family_background="父母在合肥，家庭氛围传统但开明。",
         house="已购房", car="已购车",
@@ -278,7 +368,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="17870810286", nickname="唐婉", real_name="唐婉", gender=2,
-        birthday="1996-08-09", avatar="anime:007", id_card="330105199608090026",
+        birthday="1996-08-09", avatar="portrait:seed-real/seed-f-avatar-01.webp", id_card="330105199608090026",
         city="杭州", city_code="330100", district_code="330105",
         hometown="杭州", hometown_code="330100",
         occupation="品牌运营", industry="消费品", company="杭州拾味食品有限公司",
@@ -288,9 +378,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="互相支持，比漂亮的承诺更重要。",
         ideal_partner="希望对方顾家、情绪稳定，愿意一起安排周末和假期。",
         hobbies="瑜伽、咖啡、旅行、逛市集",
-        interest_tags=("瑜伽", "探咖啡店", "周末探店", "去音乐节"),
+        interest_tags=("瑜伽", "探咖啡店", "去音乐节", "周末探店", "城市漫步", "公园野餐"),
         personality_tags=("外向开朗", "爱分享", "重视仪式感", "爱笑"),
-        photos=("anime:016", "portrait:profile-woman-community.webp"),
+        photos=("portrait:seed-real/seed-cover-cafe.webp", "portrait:seed-real/seed-f-avatar-01.webp", "portrait:profile-woman-community.webp"),
         single_reason="这两年把精力放在工作和家人身上，现在想认真开始一段关系。",
         family_background="土生土长杭州人，父母在身边，家庭氛围热闹。",
         house="与家人同住", car="已购车",
@@ -303,7 +393,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="17870810291", nickname="程野", real_name="程野", gender=1,
-        birthday="1997-12-15", avatar="anime:009", id_card="320102199712150011",
+        birthday="1997-12-15", avatar="portrait:seed-real/seed-m-avatar-01.webp", id_card="320102199712150011",
         city="南京", city_code="320100", district_code="320102",
         hometown="南通", hometown_code="320600",
         occupation="公益项目专员", industry="社会服务", company="南京同路人公益发展中心",
@@ -313,9 +403,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="彼此诚实、一起成长，关系才有安全感。",
         ideal_partner="希望对方善良、有行动力，能理解我的工作节奏。",
         hobbies="徒步、公益、吉他、篮球",
-        interest_tags=("周末徒步", "打篮球", "弹吉他", "公园野餐"),
+        interest_tags=("周末徒步", "打篮球", "弹吉他", "公园野餐", "城市漫步", "去音乐节"),
         personality_tags=("行动力强", "爱分享", "随和", "遇事不慌"),
-        photos=("anime:024", "portrait:profile-man-light.webp"),
+        photos=("portrait:seed-real/seed-cover-park.webp", "portrait:seed-real/seed-m-avatar-01.webp", "portrait:profile-man-light.webp"),
         single_reason="之前一直在外地做项目，刚回南京稳定下来。",
         family_background="父母在南通，普通家庭，很支持我做公益。",
         dating_goal="倾向恋爱", meeting_pace="可以先约一场徒步或公益活动",
@@ -327,7 +417,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     # ---------------------------- 新增会员 ----------------------------
     _member(
         phone="13800001011", nickname="苏芷宁", real_name="苏芷宁", gender=2,
-        birthday="1997-03-14", avatar="anime:011", id_card="320102199703140023",
+        birthday="1997-03-14", avatar="portrait:seed-real/seed-f-avatar-02.webp", id_card="320102199703140023",
         city="南京", city_code="320100", district_code="320102",
         hometown="扬州", hometown_code="321000",
         occupation="财务分析师", industry="金融", company="南京汇诚资本管理有限公司",
@@ -337,9 +427,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="关系里最重要的是稳定和可预期，说到的事情尽量做到。",
         ideal_partner="希望对方踏实、有储蓄和长期规划，愿意一起讨论现实问题。",
         hobbies="跑步、烘焙、理财、看纪录片",
-        interest_tags=("跑马拉松", "低糖烘焙", "看美食纪录片", "记账复盘"),
+        interest_tags=("跑马拉松", "低糖烘焙", "逛独立书店", "记账复盘", "城市漫步", "瑜伽"),
         personality_tags=("做事有计划", "细节控", "情绪稳定", "慢热"),
-        photos=("anime:017", "portrait:profile-woman-alt.webp"),
+        photos=("portrait:seed-real/seed-cover-bookstore.webp", "portrait:seed-real/seed-f-avatar-02.webp", "portrait:profile-woman-alt.webp"),
         single_reason="工作和考证占满了前几年，现在想把生活补回来。",
         family_background="父母在扬州，家里观念传统，希望我尽早稳定。",
         house="已购房",
@@ -352,7 +442,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="13800001012", nickname="陆云舟", real_name="陆云舟", gender=1,
-        birthday="1995-06-08", avatar="anime:013", id_card="320105199506080017",
+        birthday="1995-06-08", avatar="portrait:seed-real/seed-m-avatar-02.webp", id_card="320105199506080017",
         city="南京", city_code="320100", district_code="320105",
         hometown="常州", hometown_code="320400",
         occupation="结构工程师", industry="建筑工程", company="南京城建设计研究院",
@@ -362,9 +452,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="我希望关系是两个独立的人互相加分，而不是彼此消耗。",
         ideal_partner="希望对方有自己的判断和节奏，我们能就事论事地讨论分歧。",
         hobbies="音乐、做饭、游泳、看展",
-        interest_tags=("独立音乐", "研究家常菜", "游泳", "逛美术馆"),
+        interest_tags=("街头摄影", "独立音乐", "探咖啡店", "城市漫步", "周末徒步", "逛美术馆"),
         personality_tags=("喜欢独处", "直接坦率", "做事有计划", "遇事不慌"),
-        photos=("anime:028", "portrait:profile-man-alt.webp"),
+        photos=("portrait:seed-real/seed-cover-bookstore.webp", "portrait:seed-real/seed-m-avatar-02.webp", "portrait:profile-man-sea.webp"),
         single_reason="读书、工作一路按计划走，感情这件事反而没有计划。",
         family_background="父母在常州，都是普通职员，家庭关系简单。",
         house="已购房", car="已购车",
@@ -376,7 +466,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="13800001013", nickname="何知遥", real_name="何知遥", gender=2,
-        birthday="1998-01-22", avatar="anime:015", id_card="310105199801220042",
+        birthday="1998-01-22", avatar="portrait:seed-real/seed-f-avatar-03.webp", id_card="310105199801220042",
         city="上海", city_code="310100", district_code="310105",
         hometown="上海", hometown_code="310100",
         occupation="小学语文老师", industry="教育", company="上海市长宁区某小学",
@@ -386,9 +476,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="关系里要能一起笑，也要能一起安静地待着。",
         ideal_partner="希望对方体贴、愿意表达，不会把情绪都憋在心里。",
         hobbies="话剧、音乐剧、读书、旅行",
-        interest_tags=("看话剧", "看音乐剧", "逛创意市集", "公园野餐"),
+        interest_tags=("逛美术馆", "城市漫步", "探咖啡店", "做读书笔记", "周末徒步", "公园野餐"),
         personality_tags=("外向开朗", "温柔细心", "爱笑", "懂得倾听"),
-        photos=("anime:019", "portrait:profile-woman-community.webp"),
+        photos=("portrait:seed-real/seed-cover-park.webp", "portrait:seed-real/seed-f-avatar-03.webp", "portrait:profile-woman-main.webp"),
         single_reason="圈子比较小，同事朋友大多是女生。",
         family_background="上海本地家庭，父母都是教师，家庭氛围温和。",
         house="与家人同住",
@@ -401,7 +491,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="13800001014", nickname="江砚", real_name="江砚", gender=1,
-        birthday="1996-04-30", avatar="anime:030", id_card="310104199604300035",
+        birthday="1996-04-30", avatar="portrait:seed-real/seed-m-avatar-01.webp", id_card="310104199604300035",
         city="上海", city_code="310100", district_code="310104",
         hometown="宁波", hometown_code="330200",
         occupation="游戏策划", industry="互联网", company="上海某游戏研发工作室",
@@ -411,9 +501,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="好的关系让人放松，不必一直表现得很厉害。",
         ideal_partner="希望对方想法多、不无聊，也接受我有时候会较真。",
         hobbies="桌游、剧本杀、拍胶片、做饭",
-        interest_tags=("桌游", "剧本杀", "拍胶片", "复刻餐厅菜"),
+        interest_tags=("骑行", "露营", "研究家常菜", "跑马拉松", "公园野餐", "周末徒步"),
         personality_tags=("脑洞大", "有幽默感", "喜欢尝试新事物", "直接坦率"),
-        photos=("anime:032", "portrait:profile-man-light.webp"),
+        photos=("portrait:seed-real/seed-cover-cafe.webp", "portrait:seed-real/seed-m-avatar-01.webp", "portrait:profile-man-alt.webp"),
         single_reason="之前项目上线连轴转，社交圈基本只剩同事。",
         family_background="父母在宁波做小生意，家里比较务实。",
         dating_goal="倾向恋爱", meeting_pace="先约一场轻松的活动",
@@ -423,7 +513,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="13800001015", nickname="邵以宁", real_name="邵以宁", gender=2,
-        birthday="1997-09-05", avatar="anime:021", id_card="330102199709050048",
+        birthday="1997-09-05", avatar="portrait:seed-real/seed-f-avatar-01.webp", id_card="330102199709050048",
         city="杭州", city_code="330100", district_code="330102",
         hometown="嘉兴", hometown_code="330400",
         occupation="平面设计师", industry="设计服务", company="杭州白露品牌设计工作室",
@@ -433,9 +523,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="希望关系里有了解，也有各自的空间。",
         ideal_partner="希望对方温和、有审美、愿意一起去看展和旅行。",
         hobbies="画画、摄影、旅行、逛美术馆",
-        interest_tags=("画插画", "逛美术馆", "去小城住几天", "探咖啡店"),
+        interest_tags=("独立音乐", "街头摄影", "城市漫步", "去音乐节", "探咖啡店", "逛摄影展"),
         personality_tags=("慢热", "喜欢独处", "温柔细心", "重视仪式感"),
-        photos=("anime:023", "portrait:profile-woman-alt.webp"),
+        photos=("portrait:seed-real/seed-cover-coast.webp", "portrait:seed-real/seed-f-avatar-01.webp", "portrait:profile-woman-community.webp"),
         single_reason="性格偏安静，不太会主动进入新的社交圈。",
         family_background="父母在嘉兴，家里比较尊重我的选择。",
         dating_goal="倾向恋爱", meeting_pace="先线上熟悉，再约线下",
@@ -446,7 +536,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     ),
     _member(
         phone="13800001016", nickname="秦朗", real_name="秦朗", gender=1,
-        birthday="1994-11-27", avatar="anime:025", id_card="330106199411270019",
+        birthday="1994-11-27", avatar="portrait:seed-real/seed-m-avatar-02.webp", id_card="330106199411270019",
         city="杭州", city_code="330100", district_code="330106",
         hometown="温州", hometown_code="330300",
         occupation="软件测试工程师", industry="互联网", company="杭州某互联网公司",
@@ -456,9 +546,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="经历过一段婚姻，更清楚沟通和边界有多重要。",
         ideal_partner="希望对方务实、不回避问题，我们能坦诚地把话说清楚。",
         hobbies="球类、自驾游、看车评、做饭",
-        interest_tags=("打篮球", "自驾游", "看车评", "周末山路自驾"),
+        interest_tags=("打篮球", "独立音乐", "去音乐节", "城市漫步", "探咖啡店", "周末徒步"),
         personality_tags=("直接坦率", "遇事不慌", "说到做到", "有边界感"),
-        photos=("anime:025", "portrait:profile-man-sea.webp"),
+        photos=("portrait:seed-real/seed-cover-coast.webp", "portrait:seed-real/seed-m-avatar-02.webp", "portrait:profile-man-light.webp"),
         single_reason="上一段婚姻在 2022 年结束，现在状态和心态都稳定了。",
         family_background="父母在温州，对我的再婚没有给压力。",
         house="已购房", car="已购车",
@@ -473,7 +563,7 @@ MEMBERS: tuple[dict[str, Any], ...] = (
     # C 端主测试账号（账号一）：同时是红娘工作台账号，补齐后 C 端门禁才全部打开。
     _member(
         phone=PRIMARY_VIEWER_PHONE, nickname="账号一·测试", real_name="邱嘉诚", gender=1,
-        birthday="1993-06-15", avatar="portrait:profile-man-light.webp", id_card="320102199306150019",
+        birthday="1993-06-15", avatar="portrait:seed-real/seed-m-avatar-01.webp", id_card="320102199306150019",
         city="北京", city_code="110100", district_code="110105",
         hometown="北京", hometown_code="110100",
         occupation="产品负责人", industry="互联网", company="本地演示科技有限公司",
@@ -483,9 +573,9 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         love_view="希望关系里两个人都能保持自我，同时愿意为对方调整。",
         ideal_partner="希望对方独立、愿意沟通，能一起讨论长期的生活安排。",
         hobbies="跑步、电影、阅读、做饭",
-        interest_tags=("城市漫步", "看悬疑片", "研究家常菜", "跑马拉松"),
+        interest_tags=("城市漫步", "探咖啡店", "周末徒步", "独立音乐", "街头摄影", "公园野餐"),
         personality_tags=("情绪稳定", "说到做到", "直接坦率", "做事有计划"),
-        photos=("anime:002", "anime:008"),
+        photos=("portrait:seed-real/seed-cover-park.webp", "portrait:seed-real/seed-m-avatar-01.webp", "portrait:profile-man-sea.webp"),
         house="已购房", car="已购车",
         dating_goal="倾向结婚", meeting_pace="先线上熟悉，再约线下",
         children_intention="愿意要孩子",
@@ -496,6 +586,8 @@ MEMBERS: tuple[dict[str, Any], ...] = (
         membership="yearly", boost_active=True,
     ),
 )
+
+MEMBERS: tuple[dict[str, Any], ...] = tuple(_finalize_member(item) for item in _MEMBERS_RAW)
 
 
 def _slug(phone: str) -> str:
@@ -516,11 +608,52 @@ def _connect() -> Any:
     )
 
 
-def _assert_environment(environment: str | None) -> None:
-    """Refuse to run anywhere but a local development/testing database."""
+def _assert_environment(
+    environment: str | None,
+    *,
+    allow_production: bool = False,
+) -> str:
+    """允许 development/testing；生产需显式放行。返回归一化后的环境名。"""
     env = (environment or os.getenv("ENV") or os.getenv("ENVIRONMENT") or "development").lower()
-    if env not in {"development", "testing"}:
-        raise RuntimeError("会员演示数据只允许在 development/testing 环境执行")
+    if env in {"development", "testing"}:
+        return env
+    allow = allow_production or os.getenv("XUANSHIAI_ALLOW_SEED_PRODUCTION", "").strip() in {
+        "1", "true", "yes", "on",
+    }
+    if allow and env in {"production", "prod", "staging"}:
+        return env
+    raise RuntimeError(
+        "会员种子数据默认只允许在 development/testing 执行；"
+        "生产/预发请加 --allow-production 或设置 XUANSHIAI_ALLOW_SEED_PRODUCTION=1"
+    )
+
+
+def _ensure_is_test_seed_column(cur: Any) -> None:
+    """幂等补齐 ``users.is_test_seed``，避免未跑迁移时 seed 直接报错。"""
+    cur.execute(
+        """SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'users'
+          AND COLUMN_NAME = 'is_test_seed'"""
+    )
+    row = cur.fetchone()
+    count = int(row["c"] if isinstance(row, dict) else row[0])
+    if count == 0:
+        cur.execute(
+            """ALTER TABLE `users`
+            ADD COLUMN `is_test_seed` tinyint NOT NULL DEFAULT 0
+            COMMENT '是否测试种子账号 0否 1是；清理时只删此标记' AFTER `status`"""
+        )
+    cur.execute(
+        """SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'users'
+          AND INDEX_NAME = 'idx_users_is_test_seed'"""
+    )
+    row = cur.fetchone()
+    count = int(row["c"] if isinstance(row, dict) else row[0])
+    if count == 0:
+        cur.execute("ALTER TABLE `users` ADD KEY `idx_users_is_test_seed` (`is_test_seed`)")
 
 
 # --------------------------------------------------------------------------- #
@@ -554,22 +687,27 @@ def _asset_source(token: str) -> Path:
 
 
 def _render_image(source: Path, directory: Path, name: str, *, thumbnail: bool) -> dict[str, Any]:
-    """Convert one source image to webp (+thumbnail) and return URLs and sizes."""
+    """Convert one source image to JPEG (+thumbnail) for WeChat mini-program compatibility.
+
+    源素材可以是 webp/png/jpg；入库一律落成 ``.jpg``。远程 ``.webp`` 在部分真机
+    ``<image>`` 上不渲染（开发者工具却能看），测用户头像/封面必须走 JPEG。
+    """
     from PIL import Image, ImageOps
 
     directory.mkdir(parents=True, exist_ok=True)
     with Image.open(source) as raw:
         image = ImageOps.exif_transpose(raw)
-        if image.mode not in {"RGB", "RGBA"}:
+        # JPEG 不支持透明通道
+        if image.mode != "RGB":
             image = image.convert("RGB")
-        image_path = directory / f"{name}.webp"
-        image.save(image_path, format="WEBP", quality=85, method=4)
+        image_path = directory / f"{name}.jpg"
+        image.save(image_path, format="JPEG", quality=85, optimize=True)
         thumb_url = None
         if thumbnail:
             copy = image.copy()
             copy.thumbnail((480, 480), Image.Resampling.LANCZOS)
-            thumb_path = directory / f"{name}-thumb.webp"
-            copy.save(thumb_path, format="WEBP", quality=80, method=4)
+            thumb_path = directory / f"{name}-thumb.jpg"
+            copy.save(thumb_path, format="JPEG", quality=80, optimize=True)
             thumb_url = f"/storage/uploads/{directory.name}/{thumb_path.name}"
     return {
         "url": f"/storage/uploads/{directory.name}/{image_path.name}",
@@ -589,7 +727,13 @@ def _render_certificate(directory: Path, name: str, title: str, lines: tuple[str
     draw.rectangle((46, 46, 954, 654), outline=(216, 202, 178), width=1)
 
     def font(size: int) -> Any:
-        for candidate in ("C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf"):
+        for candidate in (
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+        ):
             try:
                 return ImageFont.truetype(candidate, size)
             except OSError:
@@ -611,6 +755,17 @@ def _render_certificate(directory: Path, name: str, title: str, lines: tuple[str
     return {"url": f"/storage/uploads/{directory.name}/{path.name}", "size": path.stat().st_size}
 
 
+def _album_tokens(member: dict[str, Any]) -> tuple[str, ...]:
+    """相册至少 3 张：生产完整度规则 ``album_count >= 3``，不足时用头像/已有图补齐。"""
+    tokens = list(member["photos"])
+    fillers = (member["avatar"], *member["photos"])
+    filler_index = 0
+    while len(tokens) < 3:
+        tokens.append(fillers[filler_index % len(fillers)])
+        filler_index += 1
+    return tuple(tokens)
+
+
 def _prepare_assets(member: dict[str, Any], user_id: int) -> dict[str, Any]:
     """Create every image this member needs and return their public URLs."""
     directory = Path("storage/uploads") / str(user_id)
@@ -618,7 +773,7 @@ def _prepare_assets(member: dict[str, Any], user_id: int) -> dict[str, Any]:
     avatar = _render_image(_asset_source(member["avatar"]), directory, f"{tag}-avatar", thumbnail=True)
     album = [
         _render_image(_asset_source(extra), directory, f"{tag}-photo-{index}", thumbnail=True)
-        for index, extra in enumerate(member["photos"], start=1)
+        for index, extra in enumerate(_album_tokens(member), start=1)
     ]
     background = _render_image(_asset_source(member["photos"][0]), directory, f"{tag}-background", thumbnail=False)
     certificates = {
@@ -685,8 +840,8 @@ def _ensure_user(cur: Any, member: dict[str, Any], now: datetime) -> tuple[int, 
     if row:
         user_id = int(row["id"])
         cur.execute(
-            """UPDATE users SET nickname=%s, gender=%s, birthday=%s, status=1, is_real_name=1,
-            is_married=%s, is_single_pledge=1, risk_status=0,
+            """UPDATE users SET nickname=%s, gender=%s, birthday=%s, status=1, is_test_seed=1,
+            is_real_name=1, is_married=%s, is_single_pledge=1, risk_status=0,
             phone_verified_at=COALESCE(phone_verified_at, UTC_TIMESTAMP()),
             openid=COALESCE(NULLIF(openid,''), %s), password=%s,
             register_ip='127.0.0.1', updated_at=%s
@@ -699,9 +854,9 @@ def _ensure_user(cur: Any, member: dict[str, Any], now: datetime) -> tuple[int, 
         return user_id, False
     cur.execute(
         """INSERT INTO users (openid, phone, phone_verified_at, nickname, gender, birthday,
-        status, is_real_name, is_married, is_single_pledge, data_complete_rate, register_ip,
-        password, created_at, updated_at)
-        VALUES (%s,%s,UTC_TIMESTAMP(),%s,%s,%s,1,1,%s,1,0,'127.0.0.1',%s,%s,%s)""",
+        status, is_test_seed, is_real_name, is_married, is_single_pledge, data_complete_rate,
+        register_ip, password, created_at, updated_at)
+        VALUES (%s,%s,UTC_TIMESTAMP(),%s,%s,%s,1,1,1,%s,1,0,'127.0.0.1',%s,%s,%s)""",
         (
             _slug(member["phone"]), member["phone"], member["nickname"], member["gender"],
             member["birthday_date"], member["is_married"], password, now, now,
@@ -718,17 +873,18 @@ def _upsert_profile(cur: Any, member: dict[str, Any], user_id: int, assets: dict
             "custom_categories": {member["custom_tag"]: member["custom_tag_category"]},
         }
     album_urls = [item["url"] for item in assets["album"]]
+    qa_payload = member.get("qa_answers") or _build_qa_answers(member)
     cur.execute(
         """INSERT INTO user_profile
         (user_id, height, weight, income, hometown, residence, mbti, constellation, zodiac, tags,
          self_intro, love_view, ideal_partner, single_reason, family_background, hobbies, photos,
          occupation, industry, education_level, hometown_province_code, hometown_city_code,
          residence_province_code, residence_city_code, residence_district_code, household,
-         ethnicity, house, car, smoking, community_city_name, community_city_code,
+         ethnicity, house, car, smoking, drinking, religion, community_city_name, community_city_code,
          community_city_updated_at, online_status, last_active_at, interest_tags,
-         personality_tags, location_consent, location_visible, location_source, location_updated_at)
+         personality_tags, qa_answers, location_consent, location_visible, location_source, location_updated_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,'汉族',%s,%s,%s,%s,%s,%s,1,%s,%s,%s,1,1,'manual',%s)
+                %s,'汉族',%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,%s,1,1,'manual',%s)
         ON DUPLICATE KEY UPDATE height=VALUES(height), weight=VALUES(weight), income=VALUES(income),
         hometown=VALUES(hometown), residence=VALUES(residence), mbti=VALUES(mbti),
         constellation=VALUES(constellation), zodiac=VALUES(zodiac), tags=VALUES(tags),
@@ -741,10 +897,12 @@ def _upsert_profile(cur: Any, member: dict[str, Any], user_id: int, assets: dict
         residence_city_code=VALUES(residence_city_code),
         residence_district_code=VALUES(residence_district_code), household=VALUES(household),
         house=VALUES(house), car=VALUES(car), smoking=VALUES(smoking),
+        drinking=VALUES(drinking), religion=VALUES(religion),
         community_city_name=VALUES(community_city_name), community_city_code=VALUES(community_city_code),
         community_city_updated_at=VALUES(community_city_updated_at), online_status=1,
         last_active_at=VALUES(last_active_at), interest_tags=VALUES(interest_tags),
-        personality_tags=VALUES(personality_tags), location_consent=1, location_visible=1,
+        personality_tags=VALUES(personality_tags), qa_answers=VALUES(qa_answers),
+        location_consent=1, location_visible=1,
         location_source='manual', location_updated_at=VALUES(location_updated_at)""",
         (
             user_id, member["height"], member["weight"], member["income"], member["hometown"],
@@ -755,9 +913,11 @@ def _upsert_profile(cur: Any, member: dict[str, Any], user_id: int, assets: dict
             member["occupation"], member["industry"], member["education_level"],
             member["hometown_province_code"], member["hometown_code"], member["province_code"],
             member["city_code"], member["district_code"], f"{member['hometown']}市",
-            member["house"], member["car"], member["smoking"], member["city"], member["city_code"],
+            member["house"], member["car"], member["smoking"], member["drinking"], member["religion"],
+            member["city"], member["city_code"],
             now, now, json.dumps(member["interest_tags"], ensure_ascii=False),
-            json.dumps(member["personality_tags"], ensure_ascii=False), now,
+            json.dumps(member["personality_tags"], ensure_ascii=False),
+            json.dumps(qa_payload, ensure_ascii=False), now,
         ),
     )
 
@@ -901,7 +1061,7 @@ def _replace_media(cur: Any, member: dict[str, Any], user_id: int, assets: dict[
         """INSERT INTO user_media
         (user_id, media_type, file_url, storage_key, thumbnail_url, mime_type, file_size,
          sort_order, is_primary, review_status, reviewed_at)
-        VALUES (%s,'avatar',%s,%s,%s,'image/webp',%s,0,1,1,UTC_TIMESTAMP())""",
+        VALUES (%s,'avatar',%s,%s,%s,'image/jpeg',%s,0,1,1,UTC_TIMESTAMP())""",
         (
             user_id, assets["avatar"]["url"], f"{DEMO_SLUG}/{user_id}/avatar",
             assets["avatar"]["thumb"], assets["avatar"]["size"],
@@ -912,7 +1072,7 @@ def _replace_media(cur: Any, member: dict[str, Any], user_id: int, assets: dict[
             """INSERT INTO user_media
             (user_id, media_type, file_url, storage_key, thumbnail_url, mime_type, file_size,
              sort_order, is_primary, review_status, reviewed_at)
-            VALUES (%s,'photo',%s,%s,%s,'image/webp',%s,%s,0,1,UTC_TIMESTAMP())""",
+            VALUES (%s,'photo',%s,%s,%s,'image/jpeg',%s,%s,0,1,UTC_TIMESTAMP())""",
             (
                 user_id, item["url"], f"{DEMO_SLUG}/{user_id}/photo-{index}",
                 item["thumb"], item["size"], index,
@@ -922,7 +1082,7 @@ def _replace_media(cur: Any, member: dict[str, Any], user_id: int, assets: dict[
         """INSERT INTO user_media
         (user_id, media_type, file_url, storage_key, thumbnail_url, mime_type, file_size,
          sort_order, is_primary, review_status, reviewed_at)
-        VALUES (%s,'background',%s,%s,NULL,'image/webp',%s,0,0,1,UTC_TIMESTAMP())""",
+        VALUES (%s,'background',%s,%s,NULL,'image/jpeg',%s,0,0,1,UTC_TIMESTAMP())""",
         (
             user_id, assets["background"]["url"], f"{DEMO_SLUG}/{user_id}/background",
             assets["background"]["size"],
@@ -945,7 +1105,9 @@ def _refresh_completion(cur: Any, user_id: int) -> float:
         p.ethnicity, p.house, p.car, p.smoking, p.drinking, p.religion,
         p.mbti, p.tags, pref.age_min, pref.age_max,
         EXISTS (SELECT 1 FROM user_media m WHERE m.user_id = u.id AND m.media_type='photo'
-                AND m.deleted_at IS NULL) AS album_done
+                AND m.deleted_at IS NULL) AS album_done,
+        (SELECT COUNT(*) FROM user_media m WHERE m.user_id = u.id AND m.media_type='photo'
+                AND m.deleted_at IS NULL) AS album_count
         FROM users u
         LEFT JOIN user_profile p ON p.user_id = u.id
         LEFT JOIN user_partner_preference pref ON pref.user_id = u.id
@@ -1718,6 +1880,7 @@ def seed_community_members(
     connection: Any = None,
     *,
     environment: str | None = None,
+    allow_production: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """填充完整会员数据；返回各表写入统计。
@@ -1725,17 +1888,20 @@ def seed_community_members(
     步骤：素材生成 → 用户与资料 → 认证 → 媒体 → 完整度 → 权益 → 关系链 →
     社区补充 → 通知。全部在一条事务内提交，失败回滚。
     """
-    _assert_environment(environment)
+    env = _assert_environment(environment, allow_production=allow_production)
     owned = connection is None
     if owned:
         connection = _connect()
     moment = (now or datetime.now(UTC)).replace(tzinfo=None)
     cur = connection.cursor()
     stats: dict[str, Any] = {
+        "environment": env,
+        "roster_size": len(MEMBERS),
         "created": [], "updated": [], "profiles": 0, "certifications": 0, "media": 0,
         "completion_100": 0, "memberships": 0, "extras": 0,
     }
     try:
+        _ensure_is_test_seed_column(cur)
         for kind, name, days, price, sort in _BOOST_PACKAGES:
             cur.execute(
                 """INSERT INTO config_boost_package (type, name, duration_days, price, sort, is_active)
@@ -1819,5 +1985,22 @@ def _first_boost_package(cur: Any) -> int | None:
 
 
 if __name__ == "__main__":
-    result = seed_community_members()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="写入 14 位测试种子会员（同表 + is_test_seed=1）")
+    parser.add_argument(
+        "--allow-production",
+        action="store_true",
+        help="允许在 production/staging 执行（仅写入名单内手机号并打 is_test_seed=1）",
+    )
+    parser.add_argument(
+        "--environment",
+        default=None,
+        help="覆盖 ENV/ENVIRONMENT（默认读环境变量，缺省 development）",
+    )
+    args = parser.parse_args()
+    result = seed_community_members(
+        environment=args.environment,
+        allow_production=args.allow_production,
+    )
     print("会员数据已写入: " + json.dumps(result, ensure_ascii=False, default=str))

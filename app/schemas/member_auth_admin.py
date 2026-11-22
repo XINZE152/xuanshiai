@@ -218,7 +218,7 @@ class AuthTypeUpdate(BaseModel):
 class ReviewActionRequest(BaseModel):
     """认证审核动作：通过(1)/未通过(2)。"""
 
-    status: int = Field(..., ge=1, le=2)  # 1 通过 2 未通过
+    status: int = Field(..., ge=0, le=2)  # 0 待审 1 通过 2 未通过
     remark: str | None = Field(default=None, max_length=255)
 
 

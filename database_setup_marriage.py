@@ -1309,6 +1309,7 @@ class DatabaseManager:
                     `gender` tinyint DEFAULT NULL COMMENT '性别 1男 2女',
                     `birthday` date DEFAULT NULL COMMENT '出生日期',
                     `status` tinyint DEFAULT '1' COMMENT '状态 1正常 2冻结 3注销',
+                    `is_test_seed` tinyint NOT NULL DEFAULT 0 COMMENT '是否测试种子账号 0否 1是；清理时只删此标记',
                     `is_real_name` tinyint DEFAULT '0' COMMENT '是否实名认证 0否 1是',
                     `is_married` tinyint DEFAULT '0' COMMENT '婚姻状态 0未知 1未婚 2离异 3丧偶',
                     `is_single_pledge` tinyint DEFAULT '0' COMMENT '是否签署单身承诺 0否 1是',
@@ -4011,7 +4012,10 @@ class DatabaseManager:
             "activity_signup": "tinyint NOT NULL DEFAULT 0 COMMENT '活动报名 0否 1是'",
             "level": "varchar(32) DEFAULT NULL COMMENT '会员级别'",
             "fetched_at": "datetime DEFAULT NULL COMMENT '最近一次被红娘捞取的时间'",
+            # 镜像 migrations/business/20261119_02_users_is_test_seed_up.sql
+            "is_test_seed": "tinyint NOT NULL DEFAULT 0 COMMENT '是否测试种子账号 0否 1是；清理时只删此标记'",
         }))
+        self._ensure_optional_index(cursor, "users", "idx_users_is_test_seed", "(`is_test_seed`)")
         self._ensure_table_columns(cursor, "`user_profile`", self._named_columns({
             "car": "varchar(32) DEFAULT NULL COMMENT '购车情况'",
             "household": "varchar(128) DEFAULT NULL COMMENT '户口所在地'",

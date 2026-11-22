@@ -6,9 +6,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentMatchmakerAdmin, declare_permission, get_current_matchmaker_admin
 from app.db.session import get_db
 from app.schemas.admin_config import AdminConfigAuditPage, AdminConfigSnapshot, AdminConfigUpdate
+from app.schemas.admin_sms_admin import IdentityVendorConfigUpdate
 from app.services.admin_config import get_config, list_audits, update_config
+from app.services import identity_config as identity_service
 
 router = APIRouter(prefix="/admin/configs")
+
+
+@declare_permission("platform.config.read")
+@router.get("/identity-vendor", summary="实名核验配置（密钥掩码回显）")
+async def identity_vendor_read(
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    current.require("platform.config.read")
+    return await identity_service.get_identity_config(db)
+
+
+@declare_permission("platform.config.write")
+@router.patch("/identity-vendor", summary="更新实名核验配置")
+async def identity_vendor_update(
+    body: IdentityVendorConfigUpdate = ...,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    current.require("platform.config.write")
+    return await identity_service.update_identity_config(db, current.account.id, body.model_dump(exclude_unset=True))
 
 
 @declare_permission("platform.config.read")

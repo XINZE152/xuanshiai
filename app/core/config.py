@@ -1,6 +1,7 @@
 """Environment-backed application settings."""
 
 from functools import lru_cache
+import json
 from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
@@ -76,6 +77,25 @@ class Settings(BaseSettings):
     wechat_pay_public_key_path: str | None = None
     wechat_pay_timeout_seconds: float = Field(default=10, gt=0, le=60)
     wechat_pay_max_clock_skew_seconds: int = Field(default=300, ge=0, le=3600)
+
+    # ── 小程序虚拟支付（米大师 / wx.requestVirtualPayment）──────────
+    # 会员/置顶/爆灯/积分充值等虚拟商品须走本通道；与上面 JSAPI 网关独立，
+    # 便于灰度：XPAY=real 时 C 端优先拉虚拟支付，JSAPI 仍可作非虚拟或回滚。
+    # disabled=不启用；mock=本地联调（不调微信）；real=真实虚拟支付。
+    wechat_xpay_mode: Literal["disabled", "mock", "real"] = "disabled"
+    wechat_xpay_offer_id: str | None = None
+    # env=0 用现网 AppKey；env=1 用沙箱 AppKey。
+    wechat_xpay_app_key: SecretStr | None = None
+    wechat_xpay_app_key_sandbox: SecretStr | None = None
+    wechat_xpay_env: Literal[0, 1] = 0
+    # 业务 product_type → MP 道具 productId；JSON 对象字符串，如
+    # {"monthly":"vip_monthly","boost_1d":"boost_1d","superlike":"superlike"}。
+    # 未配置时默认 productId=product_type（需在 MP 用同名道具发布）。
+    wechat_xpay_product_map_json: str = "{}"
+    # 发货推送（消息推送）校验；与 MP「虚拟支付 → 发货推送配置」一致。
+    wechat_xpay_push_token: str | None = None
+    wechat_xpay_push_aes_key: SecretStr | None = None
+    wechat_xpay_push_encrypt_mode: Literal["plaintext", "compatible", "aes"] = "aes"
 
     # D-14：人脸认证供应商。disabled 时门禁 fail-closed（不可发帖），
     # mock 仅允许 development/testing。
@@ -809,7 +829,59 @@ class Settings(BaseSettings):
             ):
                 raise ValueError("staging/production 的 AI_AVATAR_BASE_URL 必须使用 HTTPS")
         self._validate_wechat_pay_gateway()
+        self._validate_wechat_xpay()
         return self
+
+    def wechat_xpay_product_map(self) -> dict[str, str]:
+        """解析 ``WECHAT_XPAY_PRODUCT_MAP_JSON``；非法 JSON 视为空映射。"""
+        raw = (self.wechat_xpay_product_map_json or "").strip() or "{}"
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(key).strip(): str(value).strip()
+            for key, value in data.items()
+            if str(key).strip() and str(value).strip()
+        }
+
+    def wechat_xpay_app_key_for_env(self) -> str | None:
+        """按 ``wechat_xpay_env`` 选择现网/沙箱 AppKey。"""
+        secret = (
+            self.wechat_xpay_app_key_sandbox
+            if int(self.wechat_xpay_env) == 1
+            else self.wechat_xpay_app_key
+        )
+        if secret is None:
+            return None
+        value = secret.get_secret_value().strip()
+        return value or None
+
+    def _validate_wechat_xpay(self) -> None:
+        """虚拟支付配置校验：mock 仅测试环境；real 必须配 OfferID + AppKey。"""
+        mode = self.wechat_xpay_mode
+        if mode == "mock" and not self.is_test_mode:
+            raise ValueError("staging/production 环境禁止启用虚拟支付 Mock 模式")
+        if mode != "real":
+            return
+        if not (self.wechat_xpay_offer_id or "").strip():
+            raise ValueError("虚拟支付 real 模式必须配置 WECHAT_XPAY_OFFER_ID")
+        if not self.wechat_xpay_app_key_for_env():
+            raise ValueError(
+                "虚拟支付 real 模式必须配置对应环境的 AppKey"
+                "（env=0 → WECHAT_XPAY_APP_KEY；env=1 → WECHAT_XPAY_APP_KEY_SANDBOX）"
+            )
+        if not (self.wechat_app_id or "").strip() or not (self.wechat_app_secret or "").strip():
+            raise ValueError("虚拟支付 real 模式必须配置 WECHAT_APP_ID / WECHAT_APP_SECRET")
+        raw = (self.wechat_xpay_product_map_json or "").strip() or "{}"
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("WECHAT_XPAY_PRODUCT_MAP_JSON 必须是合法 JSON 对象") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("WECHAT_XPAY_PRODUCT_MAP_JSON 必须是 JSON 对象")
 
     def ai_approvals_complete(self) -> bool:
         """Return whether all three production approval gates are satisfied."""

@@ -226,6 +226,51 @@ async def list_rules(db: AsyncSession) -> list[CommissionRuleResponse]:
     return [_rule(row) for row in result.mappings().all()]
 
 
+async def list_commission_event_names(db: AsyncSession) -> list[str]:
+    result = await db.execute(text("""SELECT DISTINCT name FROM commission_rule
+        WHERE status = 1 ORDER BY name"""))
+    return [str(row["name"]) for row in result.mappings().all()]
+
+
+async def save_commission_event_names(
+    db: AsyncSession, admin: CurrentUser, events: list[str]
+) -> list[str]:
+    names = list(dict.fromkeys(name.strip() for name in events if name.strip()))
+    if not names:
+        raise HTTPException(422, detail="至少保留一个分成事件")
+    if len(names) > 40 or any(len(name) > 128 for name in names):
+        raise HTTPException(422, detail="分成事件最多40项，每项不超过128个字符")
+
+    beneficiaries = ("service_matchmaker", "promoter", "partner", "store")
+    active = (await db.execute(text("""SELECT id, beneficiary_type, name
+        FROM commission_rule WHERE status = 1 FOR UPDATE"""))).mappings().all()
+    desired = set(names)
+    for row in active:
+        if row["name"] not in desired:
+            await db.execute(
+                text("UPDATE commission_rule SET status=2 WHERE id=:id"), {"id": row["id"]}
+            )
+
+    for beneficiary in beneficiaries:
+        version = int(await db.scalar(
+            text("SELECT COALESCE(MAX(version), 0) FROM commission_rule WHERE beneficiary_type=:kind"),
+            {"kind": beneficiary},
+        ) or 0)
+        existing = {str(row["name"]) for row in active if row["beneficiary_type"] == beneficiary}
+        for name in names:
+            if name in existing:
+                continue
+            version += 1
+            await db.execute(text("""INSERT INTO commission_rule
+                (beneficiary_type, name, mode, fixed_amount, rate_percent,
+                 priority, status, version, created_by)
+                VALUES (:kind, :name, 'fixed', 0.00, NULL, 0, 1, :version, :admin_id)"""), {
+                "kind": beneficiary, "name": name, "version": version, "admin_id": admin.id,
+            })
+    await db.commit()
+    return await list_commission_event_names(db)
+
+
 def _member_anchor_scope(
     admin: CurrentMatchmakerAdmin,
     params: dict[str, object],

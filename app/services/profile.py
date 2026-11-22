@@ -142,10 +142,23 @@ BASIC_PROFILE_COMPLETION_KEYS: tuple[str, ...] = (
     "hometown",
 )
 
+# 推荐流「可被推荐」最低门槛：性别 + 年龄(生日) + 现居地。
+# 比 BASIC_PROFILE 更窄；首页推荐 / 广场 / 点进主页详情共用此门槛；搜索仍要求完整度 100。
+RECOMMEND_MIN_COMPLETION_KEYS: tuple[str, ...] = (
+    "gender",
+    "birthday",
+    "location",
+)
+
 
 def basic_profile_completed(completed: dict[str, bool]) -> bool:
     """基础信息那一栏是否填完；自然注册会员据此自动建归属并进入资料待审。"""
     return all(completed.get(key, False) for key in BASIC_PROFILE_COMPLETION_KEYS)
+
+
+def recommend_min_completed(completed: dict[str, bool]) -> bool:
+    """是否达到推荐流最低可见门槛（性别、年龄、现居地）。"""
+    return all(completed.get(key, False) for key in RECOMMEND_MIN_COMPLETION_KEYS)
 _COMPLETION_EMPTY_TEXTS = {"", "未填写", "请选择"}
 
 
