@@ -21,6 +21,7 @@ from app.schemas.finance import (
     CommissionEntryDetailOptions,
     CommissionEntryDetailPage,
     CommissionRuleCreate,
+    CommissionEventConfig,
     CommissionRuleResponse,
     MatchmakerCommissionEntryCreate,
     MatchmakerCommissionEntryCreateResult,
@@ -80,6 +81,8 @@ from app.services.finance import (
     admin_list_orders,
     admin_list_withdrawals,
     admin_revenue_daily_report,
+    list_commission_event_names,
+    save_commission_event_names,
 )
 from app.services.sensitive_operations import (
     abort_sensitive_operation,
@@ -160,6 +163,18 @@ async def rule(body: CommissionRuleCreate = Body(...), admin: CurrentMatchmakerA
 async def rules(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[CommissionRuleResponse]:
     admin.require("finance.read")
     return await list_rules(db)
+
+
+@admin_router.get("/commission-events", response_model=list[str], summary="查询统一分成事件")
+async def commission_events(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[str]:
+    admin.require("finance.read")
+    return await list_commission_event_names(db)
+
+
+@admin_router.put("/commission-events", response_model=list[str], summary="统一维护分成事件")
+async def update_commission_events(body: CommissionEventConfig, admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[str]:
+    admin.require("finance.write")
+    return await save_commission_event_names(db, admin, body.events)
 
 
 @admin_router.post("/product-commission-rules/{product_id}", response_model=ProductCommissionConfigResponse, status_code=201, summary="配置商品分成对象")

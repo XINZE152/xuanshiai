@@ -101,19 +101,19 @@ async def platform_maintenance_message(db: AsyncSession) -> str:
 async def match_line_permissions(db: AsyncSession) -> dict[str, Any]:
     """线上牵线权限（power-config 卡片4）。
 
-    - realname_allowed: line.realname == "yes" -> 未实名也可发起牵线
-    - be_linked_allowed: line.beLinked == "yes" -> 允许向未实名对象发起牵线
+    - 实名认证是产品安全门槛，不允许后台快照覆盖
+    - 单身承诺书仅作可选加分，不作为操作门槛
     - apply_daily: line.times 的数值（>0 才作为统一每日上限；0/缺省回退旧限额）
-    - active: 是否已保存过 line 分组（决定上述开关是否生效）
+    - 旧版 realname/beLinked 字段只为兼容快照保留，不再改变实名要求
     """
     cfg = await load_config(db, "platform_permissions")
     line = cfg.get("line")
     if not isinstance(line, dict):
-        return {"realname_allowed": None, "be_linked_allowed": None,
+        return {"realname_allowed": False, "be_linked_allowed": None,
                 "apply_daily": None, "active": False}
     return {
-        "realname_allowed": _bool_of(line, "realname", False) if line.get("realname") is not None else None,
-        "be_linked_allowed": _bool_of(line, "beLinked", False) if line.get("beLinked") is not None else None,
+        "realname_allowed": False,
+        "be_linked_allowed": None,
         "apply_daily": _as_int(line.get("times"), 0) if line.get("times") is not None else None,
         "active": True,
     }

@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentMatchmakerAdmin, declare_permission, get_current_matchmaker_admin
 from app.db.session import get_db
 from app.schemas.admin_home import AdminBootstrap, AdminDashboard, AnnouncementPage, LegacyResponse, RechargeItem
+from app.schemas.points import AdminPointRechargePackage, AdminPointRechargePackageList
 from app.services import admin_home
+from app.services.points_recharge import list_admin_recharge_packages, save_admin_recharge_packages
 
 router = APIRouter(prefix="/admin")
 legacy_router = APIRouter()
@@ -55,6 +57,20 @@ async def get_academy_categories(admin: CurrentMatchmakerAdmin = Depends(get_cur
 @router.get("/finance/recharge-items", response_model=list[RechargeItem], summary="查询充值资源包")
 async def get_recharge_items(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[RechargeItem]:
     return await admin_home.recharge_items(db)
+
+
+@declare_permission("finance.read")
+@router.get("/points/recharge-packages", response_model=list[AdminPointRechargePackage], summary="查询积分充值套餐配置")
+async def get_points_recharge_packages(admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[AdminPointRechargePackage]:
+    admin.require("finance.read")
+    return await list_admin_recharge_packages(db)
+
+
+@declare_permission("finance.write")
+@router.put("/points/recharge-packages", response_model=list[AdminPointRechargePackage], summary="保存积分充值套餐配置")
+async def put_points_recharge_packages(body: AdminPointRechargePackageList, admin: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> list[AdminPointRechargePackage]:
+    admin.require("finance.write")
+    return await save_admin_recharge_packages(db, body.items)
 
 
 def _legacy(data):

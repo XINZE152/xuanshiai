@@ -306,7 +306,7 @@ async def send_sms(db: AsyncSession, actor_id: int, body: SmsSendRequest) -> Sms
         message_id = int(result.lastrowid)
         try:
             provider_ref = await provider.send_template(
-                phone, template.code if template else "free_text", body.variables
+                phone, template.content if template else content, body.variables
             )
         except HTTPException as exc:
             if exc.status_code == 503:

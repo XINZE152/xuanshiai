@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from app.core.config import settings
 from app.services.identity_verify.aliyun import AliyunCloudAuthIdentityProvider
+from app.services.identity_verify.cloudmarket_idcard import CloudMarketIdentityProvider
 from app.services.identity_verify.base import IdentityProvider, IdentityVerifyRequest, IdentityVerifyResult
 
 
@@ -54,8 +55,10 @@ def get_identity_provider() -> IdentityProvider:
         "mock": MockIdentityProvider(),
         "aliyun": AliyunCloudAuthIdentityProvider(),
         "real": UnimplementedRealIdentityProvider(),
+        "cloud_market": CloudMarketIdentityProvider(),
     }
-    provider = providers.get((settings.identity_provider or "disabled").lower())
+    configured = (settings.identity_provider or "disabled").lower()
+    provider = providers.get("cloud_market" if configured in ("disabled", "real") else configured)
     if provider is None:
         raise HTTPException(status_code=503, detail="实名核验供应商未实现")
     return provider

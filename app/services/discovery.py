@@ -1030,25 +1030,56 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
     )
 
 
-async def get_filter_options() -> FilterOptionsResponse:
+async def get_filter_options(db: AsyncSession | None = None) -> FilterOptionsResponse:
     # education_levels 必须与 user_profile.education_level 的存储域一致：
     # 1=高中及以下 … 5=博士（档案编辑写入域，utils 编号即 educationOptions
     # 数组下标；_AI_SYNC_EDU_MAP 目标域同）。此前 1=博士…5=高中 与存储域
     # 方向相反——education_min 的 SQL 语义是 `education_level >= :min`，
     # 反向字典会让"本科及以上"实际筛出"本科及以下"。
+    from app.services.runtime_config import load_config
+
+    config = await load_config(db, "platform_base_data") if db is not None else {}
+    labels = config.get("mini_filter_labels")
+    labels = labels if isinstance(labels, dict) else {}
+    sections = config.get("sections")
+    sections = sections if isinstance(sections, list) else []
+    section_options: dict[str, dict[str, str]] = {}
+    for section in sections:
+        if not isinstance(section, dict) or not isinstance(section.get("key"), str):
+            continue
+        options: dict[str, str] = {}
+        for item in section.get("tags", []):
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("value", "")).strip()
+            name = str(item.get("label", "")).strip()
+            if code and name and len(name) <= 24:
+                options[code] = name
+        section_options[section["key"]] = options
+
+    def label(key: str, fallback: str, section: str | None = None, code: str | None = None) -> str:
+        value = section_options.get(section or "", {}).get(code or "")
+        if value is None:
+            value = labels.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+            if value and len(value) <= 24:
+                return value
+        return fallback
+
     return FilterOptionsResponse(
-        genders=[{"value": 1, "label": "男"}, {"value": 2, "label": "女"}],
-        marriage_statuses=[{"value": 1, "label": "未婚"}, {"value": 2, "label": "离异"}, {"value": 3, "label": "丧偶"}],
+        genders=[{"value": 1, "label": label("gender_1", "男", "gender", "1")}, {"value": 2, "label": label("gender_2", "女", "gender", "2")}],
+        marriage_statuses=[{"value": 1, "label": label("marriage_1", "未婚", "marriage", "1")}, {"value": 2, "label": label("marriage_2", "离异", "marriage", "2")}, {"value": 3, "label": label("marriage_3", "丧偶", "marriage", "3")}],
         education_levels=[
-            {"value": 1, "label": "高中及以下"},
-            {"value": 2, "label": "大专"},
-            {"value": 3, "label": "本科"},
-            {"value": 4, "label": "硕士"},
-            {"value": 5, "label": "博士"},
+            {"value": 1, "label": label("education_1", "高中及以下", "education", "1")},
+            {"value": 2, "label": label("education_2", "大专", "education", "2")},
+            {"value": 3, "label": label("education_3", "本科", "education", "3")},
+            {"value": 4, "label": label("education_4", "硕士", "education", "4")},
+            {"value": 5, "label": label("education_5", "博士", "education", "5")},
         ],
         cities=sorted(DISCOVERY_CITY_OPTIONS),
-        mbti_types=[{"value": code, "label": label} for code, label in MBTI_TYPE_OPTIONS],
-        certification_options=[{"value": "realname", "label": "实名认证"}],
+        mbti_types=[{"value": code, "label": label("mbti_" + code.lower(), title, "mbti", code)} for code, title in MBTI_TYPE_OPTIONS],
+        certification_options=[{"value": "realname", "label": label("certification_realname", "实名认证", "certification", "realname")}],
     )
 
 

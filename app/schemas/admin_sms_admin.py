@@ -5,6 +5,35 @@ from datetime import datetime
 from pydantic import BaseModel, Field, model_validator
 
 
+class SmsVendorConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    provider: str | None = Field(default=None, max_length=32)
+    region: str | None = Field(default=None, max_length=32)
+    secret_id: str | None = Field(default=None, max_length=128)
+    secret_key: str | None = Field(default=None, max_length=256)
+    sdk_app_id: str | None = Field(default=None, max_length=64)
+    sign_name: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def require_update(self) -> "SmsVendorConfigUpdate":
+        if not self.model_dump(exclude_unset=True):
+            raise ValueError("至少提供一个需要修改的字段")
+        return self
+
+
+class IdentityVendorConfigUpdate(BaseModel):
+    base_url: str | None = Field(default=None, max_length=300)
+    secret_id: str | None = Field(default=None, max_length=128)
+    secret_key: str | None = Field(default=None, max_length=256)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=60)
+
+    @model_validator(mode="after")
+    def require_update(self) -> "IdentityVendorConfigUpdate":
+        if not self.model_dump(exclude_unset=True):
+            raise ValueError("至少提供一个需要修改的字段")
+        return self
+
+
 # ─────────────────────────── 签名 ───────────────────────────
 
 

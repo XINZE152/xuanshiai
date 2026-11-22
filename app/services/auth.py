@@ -218,8 +218,9 @@ class SmsStore:
             self._items.pop((phone, purpose), None)
 
     async def issue(self, phone: str, purpose: str, ip: str, device_id: str | None) -> int:
-        if settings.sms_provider.lower() == "disabled":
-            await get_sms_provider().send_code(phone, purpose, "")
+        # 真实供应商已在工厂中默认启用；此处改为检查解析出的 provider，避免对真实通道空发短信。
+        if (await get_sms_provider()).name == "disabled":
+            raise HTTPException(status_code=503, detail="短信服务未配置")
         code = settings.sms_mock_code if settings.sms_provider.lower() == "mock" else f"{secrets.randbelow(1_000_000):06d}"
         reserved_payload: str | None = None
         using_local = False
@@ -1074,7 +1075,7 @@ async def _write_realname_submission(
 # aliyun_cloudauth 为生产在线核验，mock 仅在测试环境生效。其余任何 provider
 # （含未来误接入/占位实现）即便返回 verified=True 也一律降级人工审核，
 # 绝不把非白名单/未核验状态映射为“已实名”，实现 deny-by-default。
-_TRUSTED_VERIFIED_PROVIDERS: frozenset[str] = frozenset({"aliyun_cloudauth", "mock"})
+_TRUSTED_VERIFIED_PROVIDERS: frozenset[str] = frozenset({"aliyun_cloudauth", "mock", "cloud_market_idcard"})
 
 
 def _realname_status_for_result(result: IdentityVerifyResult | None) -> tuple[int, str | None]:

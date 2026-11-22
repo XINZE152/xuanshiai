@@ -18,6 +18,7 @@ from app.schemas.admin_sms_admin import (
     SmsRecordPage,
     SmsSendRequest,
     SmsSendResult,
+    SmsVendorConfigUpdate,
     SmsSignatureCreate,
     SmsSignatureItem,
     SmsSignaturePage,
@@ -28,6 +29,7 @@ from app.schemas.admin_sms_admin import (
     SmsTemplateUpdate,
 )
 from app.services import admin_sms_admin as service
+from app.services import sms_vendor_config as vendor_service
 from app.services.sensitive_operations import (
     abort_sensitive_operation,
     begin_sensitive_operation,
@@ -35,6 +37,27 @@ from app.services.sensitive_operations import (
 )
 
 router = APIRouter(prefix="/admin/sms")
+
+
+@declare_permission("platform.sms.read")
+@router.get("/vendor-config", summary="短信厂商配置（密钥掩码回显）")
+async def sms_vendor_config_read(
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    current.require("platform.sms.read")
+    return await vendor_service.get_vendor_config(db)
+
+
+@declare_permission("platform.sms.write")
+@router.patch("/vendor-config", summary="更新短信厂商配置")
+async def sms_vendor_config_update(
+    body: SmsVendorConfigUpdate = ...,
+    current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    current.require("platform.sms.write")
+    return await vendor_service.update_vendor_config(db, current.account.id, body.model_dump(exclude_unset=True))
 
 
 @declare_permission("platform.sms.read")

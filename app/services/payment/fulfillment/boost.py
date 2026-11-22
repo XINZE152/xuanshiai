@@ -10,8 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.notifications import emit_notification
 from app.services.payment.fulfillment.base import FulfillmentError
-# 置顶套餐天数目前是代码常量；复用旧模块，避免两份天数口径漂移。
-from app.services.payments import BOOST_PACKAGES
+from app.services.payments import get_boost_package
 
 
 class BoostFulfillmentHandler:
@@ -23,7 +22,7 @@ class BoostFulfillmentHandler:
     order_type = 4
 
     async def fulfill(self, db: AsyncSession, order: Mapping[str, Any]) -> dict[str, Any]:
-        package = BOOST_PACKAGES.get(str(order.get("product_type") or ""))
+        package = await get_boost_package(db, str(order.get("product_type") or ""))
         if package is None:
             raise FulfillmentError("置顶套餐不存在，无法发放权益")
 

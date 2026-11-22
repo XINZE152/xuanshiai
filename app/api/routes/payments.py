@@ -70,8 +70,8 @@ router = APIRouter()
 
 
 @router.get("/boost/packages", response_model=list[BoostPackage], summary="查询置顶套餐")
-async def boost_packages() -> list[BoostPackage]:
-    return await list_boost_packages()
+async def boost_packages(db: AsyncSession = Depends(get_db)) -> list[BoostPackage]:
+    return await list_boost_packages(db)
 
 
 @router.get("/users/me/boost/status", response_model=BoostStatus, summary="查询我的置顶状态")

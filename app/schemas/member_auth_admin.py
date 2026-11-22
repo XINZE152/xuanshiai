@@ -219,7 +219,7 @@ class AuthTypeUpdate(BaseModel):
 class ReviewActionRequest(BaseModel):
     """认证审核动作：通过(1)/未通过(2)。"""
 
-    status: int = Field(..., ge=1, le=2)  # 1 通过 2 未通过
+    status: int = Field(..., ge=0, le=2)  # 0 待审 1 通过 2 未通过
     remark: str | None = Field(default=None, max_length=255, description="实名驳回建议传固定原因代码；省略或旧自由备注使用通用文案，非空值不可全空白；承诺、学历驳回必填")
     submission_version: int | None = Field(default=None, ge=0, description="仅实名审核使用，原样回传列表返回的提交版本")
 

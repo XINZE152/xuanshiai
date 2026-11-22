@@ -119,9 +119,8 @@ async def claim_task(db: AsyncSession, user_id: int, task_code: str) -> ClaimTas
         if row and row[0] == 2:
             return ClaimTaskResponse(task_code=task_code, claimed=True, points=0, balance=await _balance(db, user_id))
         if task_code == "profile_complete":
-            completion_row = (await db.execute(text("SELECT score, completion_grandfathered FROM user_profile_completion WHERE user_id=:id"), {"id": user_id})).mappings().first()
-            complete = float((completion_row or {}).get("score") or 0)
-            if complete < 100 and not bool((completion_row or {}).get("completion_grandfathered")):
+            complete = (await db.execute(text("SELECT score FROM user_profile_completion WHERE user_id=:id"), {"id": user_id})).scalar()
+            if float(complete or 0) < 100:
                 raise HTTPException(409, detail="资料尚未完成")
         else:
             verified = (await db.execute(text("SELECT realname_status FROM user_auth WHERE user_id=:id"), {"id": user_id})).scalar()
@@ -147,38 +146,32 @@ async def products(db: AsyncSession) -> list[PointProduct]:
 async def redeem(db: AsyncSession, user_id: int, body: RedeemRequest, idempotency_key: str | None) -> RedeemResponse:
     if not idempotency_key or len(idempotency_key) > 128:
         raise HTTPException(422, detail="请提供有效的 Idempotency-Key")
-    count = int(body.count)
     async with db.begin():
-        existing = (await db.execute(text("SELECT o.order_no,o.product_code,o.count,p.name,o.points_cost,o.status FROM point_redeem_order o LEFT JOIN config_point_product p ON p.id=o.product_id WHERE o.user_id=:user_id AND o.idempotency_key=:key"), {"user_id": user_id, "key": idempotency_key})).mappings().first()
+        existing = (await db.execute(text("SELECT o.order_no,o.product_code,p.name,o.points_cost,o.status FROM point_redeem_order o LEFT JOIN config_point_product p ON p.id=o.product_id WHERE o.user_id=:user_id AND o.idempotency_key=:key"), {"user_id": user_id, "key": idempotency_key})).mappings().first()
         if existing:
-            # 同 key 必须是同一载荷；静默按旧单返回会让客户端以为新数量生效。
-            if existing["product_code"] != body.product_code or int(existing["count"] or 1) != count:
-                raise HTTPException(409, detail="幂等键已用于不同的兑换请求")
             balance = await _balance(db, user_id)
-            return RedeemResponse(order_no=existing["order_no"], product_code=existing["product_code"], product_name=existing["name"] or existing["product_code"], points_cost=existing["points_cost"], count=int(existing["count"] or 1), status=existing["status"], balance=balance)
-        product = (await db.execute(text("SELECT id,code,name,points_cost,value,stock FROM config_point_product WHERE code=:code AND is_active=1 FOR UPDATE"), {"code": body.product_code})).mappings().first()
+            return RedeemResponse(order_no=existing["order_no"], product_code=existing["product_code"], product_name=existing["name"] or existing["product_code"], points_cost=existing["points_cost"], status=existing["status"], balance=balance)
+        product = (await db.execute(text("SELECT id,code,name,points_cost,stock FROM config_point_product WHERE code=:code AND is_active=1 FOR UPDATE"), {"code": body.product_code})).mappings().first()
         if not product:
             raise HTTPException(404, detail="积分商品或权益不存在")
         points_cost = settings.point_cost_override(product["code"], product["points_cost"])
-        total_cost = points_cost * count
-        if product["stock"] is not None and int(product["stock"]) < count:
+        if product["stock"] is not None and product["stock"] <= 0:
             raise HTTPException(409, detail="积分商品库存不足")
         before = await _balance(db, user_id, True)
-        if before < total_cost:
+        if before < points_cost:
             raise HTTPException(409, detail="积分余额不足")
-        after = before - total_cost
+        after = before - points_cost
         order_no = f"PT{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}{secrets.token_hex(5).upper()}"
-        description = f"兑换{product['name']}" if count == 1 else f"兑换{product['name']}×{count}"
-        await db.execute(text("INSERT INTO user_points (user_id,type,amount,balance,`desc`) VALUES (:id,4,:amount,:balance,:description)"), {"id": user_id, "amount": -total_cost, "balance": after, "description": description})
+        await db.execute(text("INSERT INTO user_points (user_id,type,amount,balance,`desc`) VALUES (:id,4,:amount,:balance,:description)"), {"id": user_id, "amount": -points_cost, "balance": after, "description": f"兑换{product['name']}"})
         right_quota = {"extra_apply": "apply", "browse_unlock": "browse", "paper_plane_unlock": "paper_plane"}.get(product["code"])
         order_status = 1 if right_quota else 0
-        await db.execute(text("INSERT INTO point_redeem_order (order_no,user_id,product_id,product_code,points_cost,`count`,status,idempotency_key) VALUES (:order_no,:user_id,:product_id,:product_code,:points_cost,:count,:status,:key)"), {"order_no": order_no, "user_id": user_id, "product_id": product["id"], "product_code": product["code"], "points_cost": total_cost, "count": count, "status": order_status, "key": idempotency_key})
+        await db.execute(text("INSERT INTO point_redeem_order (order_no,user_id,product_id,product_code,points_cost,status,idempotency_key) VALUES (:order_no,:user_id,:product_id,:product_code,:points_cost,:status,:key)"), {"order_no": order_no, "user_id": user_id, "product_id": product["id"], "product_code": product["code"], "points_cost": points_cost, "status": order_status, "key": idempotency_key})
         if right_quota:
             try:
-                per_unit = max(1, int(product["value"] or 1))
+                amount = max(1, int(product["value"] or 1))
             except (TypeError, ValueError):
                 raise HTTPException(422, detail="积分商品权益数量配置无效")
-            await grant(db, user_id, right_quota, per_unit * count, "points", order_no)
+            await grant(db, user_id, right_quota, amount, "points", order_no)
         if product["stock"] is not None:
-            await db.execute(text("UPDATE config_point_product SET stock=stock-:count WHERE id=:id"), {"count": count, "id": product["id"]})
-    return RedeemResponse(order_no=order_no, product_code=product["code"], product_name=product["name"], points_cost=total_cost, count=count, status=order_status, balance=after)
+            await db.execute(text("UPDATE config_point_product SET stock=stock-1 WHERE id=:id"), {"id": product["id"]})
+    return RedeemResponse(order_no=order_no, product_code=product["code"], product_name=product["name"], points_cost=points_cost, status=order_status, balance=after)

@@ -103,7 +103,10 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
     ),
     "platform_content": (
         "平台内容配置", "协议、公告、引导和运营文案。",
-        {"user_agreement": None, "privacy_policy": None, "safety_pledge": None,
+        {"user_agreement": None, "privacy_policy": None, "children_policy": None,
+         "thirdparty_list": None, "platform_rules": None, "community_rules": None,
+         "ai_service_agreement": None, "governance_notice": None,
+         "safety_pledge": None,
          "membership_agreement": None, "realname_notice": None, "home_notice": None,
          "registration_guide": None, "match_notice": None, "maintenance_message": "平台正在维护中，请稍后再试。",
          "customer_service_phone": None, "seo": {"title": "宣誓爱", "keywords": "婚恋,交友", "description": ""}}, [],
@@ -135,6 +138,19 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
         {"app_id": None, "app_secret": None, "login_enabled": True, "subscribe_templates": [], "home_modules": []},
         ["app_secret"],
     ),
+    "identity_vendor": (
+        "实名核验配置", "系统管理-实名配置：腾讯云市场身份证二要素核验地址与密钥（加密存储）。",
+        {"base_url": "https://ap-beijing.cloudmarket-apigw.com/service-hcgajsa5/idcard/VerifyIdcardv2",
+         "secret_id": None, "secret_key": None, "timeout_seconds": 10},
+        ["secret_id", "secret_key"],
+    ),
+    "sms_vendor": (
+        "短信厂商配置", "短信系统签名配置页：腾讯云短信 SDK 凭据与模板（密钥加密存储）。",
+        {"enabled": False, "provider": "tencent_cloud", "region": "ap-beijing",
+         "secret_id": None, "secret_key": None, "sdk_app_id": None,
+         "sign_name": None, "template_map": {}},
+        ["secret_id", "secret_key"],
+    ),
     "sms": (
         "短信配置", "短信供应商、签名、模板和发送开关。",
         {"provider": "disabled", "signatures": [], "templates": [], "send_enabled": False,
@@ -148,6 +164,12 @@ DEFAULT_CONFIGS: dict[str, tuple[str, str, dict[str, Any], list[str]]] = {
          "point_name": "金币",                  # 积分名称
          "point_ratio": 10,                     # 1元=10积分
          "balance_name": "余额",                # 余额名称
+         "spotlight_price": "9.90",
+         "boost_packages": [
+             {"code": "boost_1d", "name": "置顶1天", "days": 1, "price": "1.00", "recommended": False},
+             {"code": "boost_7d", "name": "置顶7天", "days": 7, "price": "5.00", "recommended": True},
+             {"code": "boost_30d", "name": "置顶30天", "days": 30, "price": "15.00", "recommended": False},
+         ],
          "withdrawal": {
              "enabled": False, "min_amount": "0.00",
              "fee_mode": "none", "fee_rate": 1, "fee_threshold": "100",
