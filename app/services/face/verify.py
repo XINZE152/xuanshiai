@@ -24,10 +24,10 @@ async def verify_avatar(db: AsyncSession, user_id: int, avatar_url: str) -> Face
     row = (
         await db.execute(
             text(
-                """SELECT u.avatar, ua.real_name, ua.id_card
-                   FROM users u
-                   LEFT JOIN user_auth ua
-                     ON ua.user_id = u.id AND ua.realname_status = 2
+                """SELECT u.avatar, ua.realname_status, ua.retry_count,
+                          CASE WHEN ua.realname_status = 2 THEN ua.real_name END AS real_name,
+                          CASE WHEN ua.realname_status = 2 THEN ua.id_card END AS id_card
+                   FROM users u LEFT JOIN user_auth ua ON ua.user_id = u.id
                    WHERE u.id = :id"""
             ),
             {"id": user_id},
@@ -73,6 +73,17 @@ async def verify_avatar(db: AsyncSession, user_id: int, avatar_url: str) -> Face
             status_code=422,
             detail={"code": "FACE_NOT_MATCHED", "remaining_attempts": remaining},
         )
+
+    # 与实名提交使用相同的锁顺序；旧头像或旧实名对应的人脸结果不得写回。
+    owner = (await db.execute(
+        text("SELECT avatar FROM users WHERE id = :id FOR UPDATE"), {"id": user_id}
+    )).mappings().first()
+    latest = (await db.execute(
+        text("SELECT realname_status, retry_count FROM user_auth WHERE user_id = :id FOR UPDATE"), {"id": user_id}
+    )).mappings().first()
+    fields = ("realname_status", "retry_count")
+    if not owner or owner["avatar"] != avatar_url or any((latest or {}).get(key) != row.get(key) for key in fields):
+        raise HTTPException(409, detail="头像或实名状态已更新，请重新进行人脸核验")
 
     await db.execute(
         text(

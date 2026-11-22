@@ -162,6 +162,8 @@ api_router.include_router(matchmaker.product_router, tags=["红娘"])
 api_router.include_router(matchmaker.requests_router, tags=["红娘"])
 api_router.include_router(matchmaker.service_router, tags=["红娘"])
 api_router.include_router(meeting.router, tags=["红娘"])
+# 喜欢接口单独挂载：仅登录即可，不继承 social.router 的手机号门槛。
+api_router.include_router(social.like_router, tags=["消息"])
 api_router.include_router(social.router, tags=["消息"])
 api_router.include_router(community.router, tags=["社区"])
 api_router.include_router(media.router, tags=["社区"])

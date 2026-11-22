@@ -95,3 +95,10 @@ class MaterialUploadResponse(BaseModel):
     thumbnail_url: str
     mime_type: str
     size: int
+
+
+class MaterialPublicCopyResponse(BaseModel):
+    """Public common-image URL for long-lived platform configuration."""
+
+    material_id: int
+    url: str

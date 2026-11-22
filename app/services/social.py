@@ -90,6 +90,25 @@ async def ensure_users_can_interact(db: AsyncSession, left_id: int, right_id: in
         raise HTTPException(403, detail="双方当前不能进行该互动")
 
 
+async def _ensure_like_target(db: AsyncSession, user_id: int, target_id: int) -> None:
+    """喜欢/取消喜欢的轻量校验：不要求浏览方实名，也不套 who_can_see_me。
+
+    产品口径：推荐/广场已能看见的人，点爱心应可成功；实名仅拦申请认识等互动。
+    """
+    if user_id == target_id:
+        raise HTTPException(422, detail="不能对自己执行此操作")
+    if await _is_blocked(db, user_id, target_id):
+        raise HTTPException(403, detail="双方当前不能进行该互动")
+    row = (
+        await db.execute(
+            text("SELECT id, status FROM users WHERE id = :target_id LIMIT 1"),
+            {"target_id": target_id},
+        )
+    ).mappings().first()
+    if row is None or int(row.get("status") or 0) != 1:
+        raise HTTPException(404, detail="目标用户不存在或当前不可见")
+
+
 async def _match_exists(db: AsyncSession, user_id: int, target_id: int) -> bool:
     result = await db.execute(
         text("SELECT 1 FROM user_match WHERE user_id = :user_id AND target_user_id = :target_id AND status IN (1, 2)"),
@@ -99,8 +118,12 @@ async def _match_exists(db: AsyncSession, user_id: int, target_id: int) -> bool:
 
 
 async def set_like(db: AsyncSession, user_id: int, target_id: int, enabled: bool) -> RelationResponse:
-    """用户级喜欢：私有列表，不因互喜欢建 match/会话。聊天仅经申请同意。"""
-    await _ensure_target(db, user_id, target_id)
+    """用户级喜欢：私有列表，不因互喜欢建 match/会话。聊天仅经申请同意。
+
+    登录即可；不要求实名 / 绑手机，也不套 who_can_see_me=仅认证可见。
+    避免「推荐流看得见、点爱心却因未实名 404/403」。
+    """
+    await _ensure_like_target(db, user_id, target_id)
     if enabled:
         await db.execute(
             text(

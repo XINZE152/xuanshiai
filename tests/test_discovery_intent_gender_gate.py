@@ -34,17 +34,66 @@ def _snapshot(
     filters: DiscoveryFilters | None = None,
     *,
     apply_intent_gender_gate: bool = True,
+    plaza: bool = False,
+    completion_gate_mode: str | None = None,
 ):
     return discovery._candidate_snapshot(
         viewer_id=1,
         viewer=viewer,
         viewer_is_vip=False,
         filters=filters or DiscoveryFilters(),
-        plaza=False,
+        plaza=plaza,
         nickname=None,
         tag=None,
         respect_preferences=False,
         apply_intent_gender_gate=apply_intent_gender_gate,
+        completion_gate_mode=completion_gate_mode,
+    )
+
+
+def test_plaza_candidate_gate_matches_home_recommend_min() -> None:
+    """广场出池与首页推荐一致：性别 + 年龄 + 现居地，不再要求完整度 100。"""
+    plaza = _snapshot(BASE_VIEWER, plaza=True)
+    home = _snapshot(BASE_VIEWER, plaza=False)
+    assert "gender_completed" in plaza.where_sql
+    assert "birthday_completed" in plaza.where_sql
+    assert "location_completed" in plaza.where_sql
+    assert "gender_completed" in home.where_sql
+    # 搜索按命中：不套 full / recommend_min 候选完整度门槛
+    search = _snapshot(BASE_VIEWER, plaza=True, completion_gate_mode="none")
+    assert "gender_completed" not in search.where_sql
+    assert "COALESCE(c.score, 0) >= 100" not in search.where_sql
+
+
+def test_viewer_recommend_min_ok_aligns_with_three_fields() -> None:
+    """浏览方服务层门槛：三字段或完整度 100 / grandfather 即可。"""
+    assert discovery._viewer_recommend_min_ok(
+        {"completion_score": 100, "completion_grandfathered": 0}
+    )
+    assert discovery._viewer_recommend_min_ok(
+        {"completion_score": 0, "completion_grandfathered": 1}
+    )
+    assert discovery._viewer_recommend_min_ok(
+        {
+            "completion_score": 40,
+            "gender_completed": 1,
+            "birthday_completed": 1,
+            "location_completed": 1,
+        }
+    )
+    assert not discovery._viewer_recommend_min_ok(
+        {
+            "completion_score": 40,
+            "gender_completed": 1,
+            "birthday_completed": 1,
+            "location_completed": 0,
+        }
+    )
+    assert discovery._viewer_recommend_min_ok(
+        {"gender": 1, "birthday": "1995-01-01", "residence_city_code": "330100"}
+    )
+    assert not discovery._viewer_recommend_min_ok(
+        {"gender": 1, "birthday": "1995-01-01", "residence_city_code": ""}
     )
 
 
@@ -179,11 +228,13 @@ def test_only_search_disables_the_gate() -> None:
 
     search_source = inspect.getsource(discovery.search_discovery)
     assert "apply_intent_gender_gate=False" in search_source
+    assert 'completion_gate_mode="none"' in search_source
 
     # 推荐流与广场走 get_discovery_page，不得关闭该门禁
-    assert "apply_intent_gender_gate" not in inspect.getsource(
-        discovery.get_discovery_page
-    )
+    page_source = inspect.getsource(discovery.get_discovery_page)
+    assert "apply_intent_gender_gate" not in page_source
+    assert 'completion_gate_mode="recommend_min"' in page_source
+    assert "_viewer_recommend_min_ok" in page_source
     # AI 助理的标签推荐是推荐行为，不是搜索行为，同样保持门禁
     assert "apply_intent_gender_gate" not in inspect.getsource(ai_assistant)
 
@@ -231,6 +282,8 @@ async def test_search_discovery_snapshot_has_no_gender_gate(
     snapshot = captured["snapshot"]
     assert "u.gender <> :opposite_gender" not in snapshot.where_sql
     assert "opposite_gender" not in snapshot.params
+    assert "COALESCE(c.score, 0) >= 100" not in snapshot.where_sql
+    assert "gender_completed" not in snapshot.where_sql
 
 
 @pytest.mark.asyncio

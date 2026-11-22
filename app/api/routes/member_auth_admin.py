@@ -14,6 +14,7 @@ from app.api.dependencies import (
     get_current_matchmaker_admin,
     require_sensitive_operation,
 )
+from app.api.routes.auth import RealnamePrivacyRoute
 from app.db.session import get_db
 from app.schemas.member_auth_admin import (
     AuthTypeCreate,
@@ -52,7 +53,7 @@ router = APIRouter(prefix="/admin/members")
 async def realname_reviews(
     page: int = Query(1, ge=1, le=1000),
     page_size: int = Query(20, ge=1, le=100),
-    status: str = Query("all", pattern="^(all|success|fail)$"),
+    status: str = Query("all", pattern="^(all|pending|success|fail)$"),
     keyword: str | None = Query(None, max_length=64),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
@@ -280,7 +281,6 @@ async def delete_auth_type(
 # ─── 审核 / 删除（动态路由，必须放在静态路由之后） ────────────────
 
 
-@router.patch("/auth/{kind}/{review_id}", summary="认证审核（通过/未通过）")
 async def review_auth(
     kind: str = Path(..., pattern="^(realname|commitment|marriage|house|education|other)$"),
     review_id: int = Path(..., ge=1),
@@ -290,6 +290,12 @@ async def review_auth(
 ) -> dict:
     current.require("matchmaker.member.manage")
     return await service.review_auth(db, kind, review_id, body, current.account.id)
+
+
+router.add_api_route(
+    "/auth/{kind}/{review_id}", review_auth, methods=["PATCH"],
+    summary="认证审核（通过/未通过）", route_class_override=RealnamePrivacyRoute,
+)
 
 
 @router.delete("/auth/{kind}/{review_id}", summary="删除认证记录")

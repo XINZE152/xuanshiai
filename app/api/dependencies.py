@@ -146,13 +146,14 @@ async def get_face_verified_user(
 
 
 async def get_browsable_user(
-    current: CurrentUser = Depends(get_verified_user),
+    current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CurrentUser:
     """首页推荐/广场/搜索的浏览方门槛，与出池 recommend_min 对齐。
 
     具备性别、生日（年龄）、现居地即可浏览；不再要求资料完整度 100。
-    完整度 100 / grandfather 仍直接放行。手机号绑定由 get_verified_user 处理。
+    完整度 100 / grandfather 仍直接放行。
+    未绑手机也可浏览；绑手机门禁留给申请认识等互动行为。
     """
     from app.services.profile import recommend_min_completed
 

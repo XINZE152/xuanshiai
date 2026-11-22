@@ -427,6 +427,9 @@ class DatabaseManager:
                 "show_likes": "`show_likes` tinyint NOT NULL DEFAULT '1' COMMENT '是否展示喜欢列表'",
                 "show_posts": "`show_posts` tinyint NOT NULL DEFAULT '1' COMMENT '是否展示个人动态'",
             },
+            "user_browse_history": {
+                "is_anonymous": "`is_anonymous` tinyint NOT NULL DEFAULT '0' COMMENT '无痕浏览：1=仅记自己足迹，不进对方访客'",
+            },
             "community_post": {
                 "visibility": "`visibility` tinyint NOT NULL DEFAULT '0' COMMENT '0公开 1仅好友 2仅自己'",
                 "declaration": "`declaration` varchar(32) NOT NULL DEFAULT '' COMMENT '内容声明'",
@@ -1802,10 +1805,12 @@ class DatabaseManager:
                     `id` bigint unsigned NOT NULL AUTO_INCREMENT,
                     `user_id` bigint unsigned NOT NULL,
                     `target_user_id` bigint unsigned NOT NULL,
+                    `is_anonymous` tinyint NOT NULL DEFAULT '0' COMMENT '无痕浏览：1=仅记自己足迹，不进对方访客',
                     `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (`id`),
                     KEY `idx_user` (`user_id`),
-                    KEY `idx_target` (`target_user_id`)
+                    KEY `idx_target` (`target_user_id`),
+                    KEY `idx_browse_target_anon` (`target_user_id`,`is_anonymous`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户浏览足迹'
             """,
             # ============================================

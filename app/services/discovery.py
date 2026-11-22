@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import HTTPException, Response
@@ -179,6 +179,9 @@ async def _viewer_context(db: AsyncSession, user_id: int) -> dict[str, Any]:
     result = await db.execute(
         text("""SELECT u.gender, u.birthday, COALESCE(c.score, 0) AS completion_score,
                       COALESCE(c.completion_grandfathered, 0) AS completion_grandfathered,
+                      COALESCE(c.gender_completed, 0) AS gender_completed,
+                      COALESCE(c.birthday_completed, 0) AS birthday_completed,
+                      COALESCE(c.location_completed, 0) AS location_completed,
                       u.phone, p.height, p.education_level, p.income, p.mbti, p.interest_tags,
                p.personality_tags, p.tags, p.residence_city_code,
                COALESCE(ua.realname_status, 0) AS realname_status,
@@ -236,6 +239,33 @@ def _viewer_completion_ok(viewer: dict[str, Any]) -> bool:
     return float(viewer.get("completion_score") or 0) >= 100 or bool(
         viewer.get("completion_grandfathered")
     )
+
+
+def _viewer_recommend_min_ok(viewer: dict[str, Any]) -> bool:
+    """浏览方最低门槛：与 get_browsable_user / recommend_min 对齐。
+
+    完整度 100 / grandfather 直接放行；否则须性别+生日+现居地。
+    优先用 completion 标记；单测若只 stub 了原始字段则回退到字段本身。
+    """
+    if _viewer_completion_ok(viewer):
+        return True
+    from app.services.profile import recommend_min_completed
+
+    if any(
+        key in viewer
+        for key in ("gender_completed", "birthday_completed", "location_completed")
+    ):
+        return recommend_min_completed(
+            {
+                "gender": bool(viewer.get("gender_completed")),
+                "birthday": bool(viewer.get("birthday_completed")),
+                "location": bool(viewer.get("location_completed")),
+            }
+        )
+    gender_ok = viewer.get("gender") in (1, 2)
+    birthday_ok = viewer.get("birthday") is not None
+    location_ok = bool(str(viewer.get("residence_city_code") or "").strip())
+    return gender_ok and birthday_ok and location_ok
 
 
 def _visibility_predicate(
@@ -702,9 +732,9 @@ def _candidate_snapshot(
     推荐流与广场保持默认 True。
 
     ``completion_gate_mode``：
-    - ``full``：候选须完整度 100（或 grandfather）——搜索等仍可显式指定
+    - ``full``：候选须完整度 100（或 grandfather）——显式指定时仍可用
     - ``recommend_min``：候选须性别+年龄+现居地——首页推荐 / 广场 / BOT 推荐默认
-    - ``none``：不查完整度（历史访客等）
+    - ``none``：不查完整度（昵称/标签搜索按命中；历史访客等）
     ``force_skip_completion_gate`` 仍兼容旧调用，等价于 mode=none，且关闭异性门禁。
     """
     scene = VisibilityScene.SEARCH if nickname or tag else VisibilityScene.DISCOVERY
@@ -907,9 +937,9 @@ async def get_discovery_page(
     if (
         not relax_viewer_completion
         and not _skip_discovery_gates()
-        and not _viewer_completion_ok(viewer)
+        and not _viewer_recommend_min_ok(viewer)
     ):
-        raise HTTPException(403, detail="请先完善资料后再进入推荐")
+        raise HTTPException(403, detail="请先完善性别、年龄和现居地后再浏览")
     # 首页推荐与广场候选门槛一致：性别+年龄+现居地；BOT / 软浏览同口径。
     _, viewer_is_vip, candidate_page = await _candidate_query_page(
         db,
@@ -963,8 +993,8 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         page_size=query.page_size,
     )
     viewer = await _viewer_context(db, viewer_id)
-    if not _skip_discovery_gates() and not _viewer_completion_ok(viewer):
-        raise HTTPException(403, detail="请先完善资料后再搜索用户")
+    if not _skip_discovery_gates() and not _viewer_recommend_min_ok(viewer):
+        raise HTTPException(403, detail="请先完善性别、年龄和现居地后再搜索用户")
     _, viewer_is_vip, candidate_page = await _candidate_query_page(
         db,
         viewer_id,
@@ -976,8 +1006,8 @@ async def search_discovery(db: AsyncSession, viewer_id: int, query: DiscoverySea
         # 搜索单独放开性别（产品确认 2026-11-14）：按昵称/标签找人是明确的指名动作，
         # 找对象用户也要能搜到同性好友。推荐流与广场不受影响，仍按身份口径过滤。
         apply_intent_gender_gate=False,
-        # 搜索仍要求完整度 100，与首页/广场的 recommend_min 出池门槛分开。
-        completion_gate_mode="full",
+        # 昵称/标签搜索按命中出结果，不再套候选完整度 100 / recommend_min。
+        completion_gate_mode="none",
     )
     items = [
         _card(
@@ -1142,10 +1172,23 @@ async def _consume_browse(db: AsyncSession, user_id: int, match_score: float, is
 
 
 async def _record_browse(db: AsyncSession, viewer_id: int, target_id: int) -> None:
-    anonymous = await db.execute(text("SELECT anonymous_browse_enabled FROM user_privacy WHERE user_id = :user_id"), {"user_id": viewer_id})
-    if anonymous.scalar():
-        return
-    await db.execute(text("INSERT INTO user_browse_history (user_id, target_user_id) VALUES (:user_id, :target_id)"), {"user_id": viewer_id, "target_id": target_id})
+    """写入浏览足迹。
+
+    隐身（``anonymous_browse_enabled``）仍记入自己的「我看过谁」，
+    但 ``is_anonymous=1``，对方「谁看过我」/访客计数不计入。
+    """
+    anonymous = await db.execute(
+        text("SELECT anonymous_browse_enabled FROM user_privacy WHERE user_id = :user_id"),
+        {"user_id": viewer_id},
+    )
+    is_anonymous = 1 if anonymous.scalar() else 0
+    await db.execute(
+        text(
+            "INSERT INTO user_browse_history (user_id, target_user_id, is_anonymous) "
+            "VALUES (:user_id, :target_id, :is_anonymous)"
+        ),
+        {"user_id": viewer_id, "target_id": target_id, "is_anonymous": is_anonymous},
+    )
 
 
 _EDUCATION_LABELS: dict[int, str] = {1: "高中及以下", 2: "大专", 3: "本科", 4: "硕士", 5: "博士"}
@@ -1298,13 +1341,21 @@ async def view_profile(db: AsyncSession, viewer_id: int, target_id: int) -> Publ
     # 服务红娘在管理中心查看会员公开档案时不受会员/浏览额度限制。
     is_matchmaker = waiver is not None
     privacy_locked = bool(row.get("only_vip_can_see_detail")) and not vip and not is_matchmaker
-    quota = (
-        None
-        if privacy_locked
-        else (None if is_matchmaker else await _consume_browse(db, viewer_id, score, vip, target_id))
-    )
-    full = vip or is_matchmaker or (not privacy_locked and quota is not None)
+    # 足迹与额度解耦：先写「我看过谁」，再扣额度。
+    # 否则额度 429 会在 _record_browse 之前抛出，进了详情页却落不了库。
     await _record_browse(db, viewer_id, target_id)
+    quota: int | None
+    if privacy_locked or is_matchmaker:
+        quota = None
+    else:
+        try:
+            quota = await _consume_browse(db, viewer_id, score, vip, target_id)
+        except HTTPException as exc:
+            if exc.status_code == 429:
+                # 会话尚未最终 commit；先提交足迹再把 429 抛给前端
+                await db.commit()
+            raise
+    full = vip or is_matchmaker or (not privacy_locked and quota is not None)
     card = _card(row, score, reason, detail_locked=not full)
     await _attach_card_qa_media(db, [card])
     profile = await get_profile(db, target_id, public=True) if full else None
@@ -1409,7 +1460,16 @@ async def _target_rows(
     return {int(row["user_id"]): dict(row) for row in result.mappings().all()}
 
 
-async def browse_history(db: AsyncSession, viewer_id: int, page: int, page_size: int) -> BrowseHistoryPage:
+BrowseHistoryFilter = Literal["all", "liked", "unliked"]
+
+
+async def browse_history(
+    db: AsyncSession,
+    viewer_id: int,
+    page: int,
+    page_size: int,
+    filter: BrowseHistoryFilter = "all",
+) -> BrowseHistoryPage:
     # 浏览记录/访客是「已发生的历史事件」，不是推荐曝光位：不能套用推荐流的
     # 资料完整度门禁（candidate_visibility 的 score >= 100），否则被浏览者资料
     # 不完整时整条记录被过滤，会员开通后仍看到空列表。封禁/隐私 predicate 不变。
@@ -1418,19 +1478,22 @@ async def browse_history(db: AsyncSession, viewer_id: int, page: int, page_size:
     )
     offset = (page - 1) * page_size
     history_window = "" if vip else " AND h.created_at >= CURDATE()"
-    visible = " AND " + predicate.clause
-    params = {
-        "user_id": viewer_id,
-        **predicate.params,
-        "limit": page_size,
-        "offset": offset,
-    }
-    result = await db.execute(text(f"""SELECT h.target_user_id, MAX(h.created_at) AS viewed_at
-        FROM user_browse_history h JOIN users u ON u.id = h.target_user_id
+    like_exists = """EXISTS (SELECT 1 FROM user_favorite f
+        WHERE f.user_id = :user_id AND f.target_user_id = h.target_user_id AND f.type = 1)"""
+    like_filter = ""
+    if filter == "liked":
+        like_filter = f" AND {like_exists}"
+    elif filter == "unliked":
+        like_filter = f" AND NOT {like_exists}"
+    source = f"""FROM user_browse_history h JOIN users u ON u.id = h.target_user_id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN user_profile_completion c ON c.user_id = u.id
-        WHERE h.user_id = :user_id{history_window}{visible}
-        GROUP BY h.target_user_id ORDER BY viewed_at DESC LIMIT :limit OFFSET :offset"""), params)
+        WHERE h.user_id = :user_id{history_window} AND {predicate.clause}{like_filter}"""
+    params = {"user_id": viewer_id, **predicate.params}
+    result = await db.execute(text(f"""SELECT h.target_user_id, MAX(h.created_at) AS viewed_at
+        {source}
+        GROUP BY h.target_user_id ORDER BY viewed_at DESC, h.target_user_id DESC
+        LIMIT :limit OFFSET :offset"""), {**params, "limit": page_size, "offset": offset})
     rows = list(result.mappings().all())
     targets = await _target_rows(
         db, viewer_id, [int(row["target_user_id"]) for row in rows], skip_completion_gate=True
@@ -1442,12 +1505,72 @@ async def browse_history(db: AsyncSession, viewer_id: int, page: int, page_size:
             score, reason = _candidate_score(viewer, target)
             items.append(BrowseHistoryItem(target=_card(target, score, reason, detail_locked=bool(target.get("only_vip_can_see_detail")) and not vip), viewed_at=row["viewed_at"]))
     await _attach_card_qa_media(db, [item.target for item in items])
-    count = await db.execute(text(f"""SELECT COUNT(DISTINCT h.target_user_id)
-        FROM user_browse_history h JOIN users u ON u.id = h.target_user_id
-        LEFT JOIN user_privacy pr ON pr.user_id = u.id
-        LEFT JOIN user_profile_completion c ON c.user_id = u.id
-        WHERE h.user_id = :user_id{history_window}{visible}"""), params)
+    count = await db.execute(text(f"SELECT COUNT(DISTINCT h.target_user_id) {source}"), params)
     return BrowseHistoryPage(items=items, page=page, page_size=page_size, total=int(count.scalar() or 0))
+
+
+# 非会员访客列表脱敏用的本地占位头像：按性别取 seed-real 素材。
+# 刻意不下发真实头像 URL——URL 一旦进了响应，前端 CSS blur 只是障眼法，
+# 抓包即可还原，模糊形同虚设。
+_MASKED_VISITOR_AVATARS: dict[int, tuple[str, ...]] = {
+    1: (
+        "/static/portraits/seed-real/seed-m-avatar-01.webp",
+        "/static/portraits/seed-real/seed-m-avatar-02.webp",
+    ),
+    2: (
+        "/static/portraits/seed-real/seed-f-avatar-01.webp",
+        "/static/portraits/seed-real/seed-f-avatar-02.webp",
+        "/static/portraits/seed-real/seed-f-avatar-03.webp",
+    ),
+}
+
+
+def _masked_visitor_avatar(gender: int | None, index: int) -> str:
+    pool = _MASKED_VISITOR_AVATARS.get(gender if gender in (1, 2) else 0)
+    if not pool:
+        pool = _MASKED_VISITOR_AVATARS[1] + _MASKED_VISITOR_AVATARS[2]
+    return pool[index % len(pool)]
+
+
+def _masked_visitor_nickname(nickname: str | None) -> str:
+    text = (nickname or "").strip()
+    return f"{text[0]}**" if text else "神秘访客"
+
+
+def _mask_visitor_card(card: DiscoveryCard, index: int) -> DiscoveryCard:
+    """把一条真实访客卡脱敏成「看得出有人来过、看不出是谁」。
+
+    ``distance_km`` / ``match_score`` 保留（列表要显示「距你 x km」「合拍度 y%」，
+    本就是脱敏聚合量）；其余身份字段一律置空。``user_id`` 换成负数占位，
+    前端拿不到真实 id 就无法拼 ``/user/detail?userId=`` 绕过付费墙。
+    """
+    return card.model_copy(
+        update={
+            "user_id": -(index + 1),
+            "nickname": _masked_visitor_nickname(card.nickname),
+            "avatar": _masked_visitor_avatar(card.gender, index),
+            "age": None,
+            "height": None,
+            "education_level": None,
+            "occupation": None,
+            "city_code": None,
+            "income": None,
+            "is_married": None,
+            "online_status": 0,
+            "mbti": None,
+            "weight": None,
+            "hometown_display": None,
+            "residence_display": None,
+            "zodiac": None,
+            "constellation": None,
+            "self_intro": None,
+            "qa_answers": [],
+            "personal_tags": [],
+            "interest_tags": [],
+            "certification_tags": [],
+            "detail_locked": True,
+        }
+    )
 
 
 async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) -> VisitorPage:
@@ -1455,22 +1578,19 @@ async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) 
     viewer, vip, predicate = await _scene_visibility(
         db, viewer_id, VisibilityScene.VISITORS, skip_completion_gate=True
     )
-    visible = " AND " + predicate.clause
     params = {"viewer_id": viewer_id, "user_id": viewer_id, **predicate.params}
-    count_result = await db.execute(text(f"""SELECT COUNT(DISTINCT h.user_id)
-        FROM user_browse_history h JOIN users u ON u.id = h.user_id
+    # 无痕浏览（is_anonymous=1）只留自己足迹，不进对方「谁看过我」。
+    source = f"""FROM user_browse_history h JOIN users u ON u.id = h.user_id
         LEFT JOIN user_privacy pr ON pr.user_id = u.id
         LEFT JOIN user_profile_completion c ON c.user_id = u.id
-        WHERE h.target_user_id = :viewer_id{visible}"""), params)
+        WHERE h.target_user_id = :viewer_id AND COALESCE(h.is_anonymous, 0) = 0 AND {predicate.clause}"""
+    count_result = await db.execute(text(f"SELECT COUNT(DISTINCT h.user_id) {source}"), params)
     count = int(count_result.scalar() or 0)
-    if not vip:
-        return VisitorPage(can_view_details=False, count=count, items=[], page=page, page_size=page_size, has_more=False)
+    # 非会员不再拿空列表（原 items=[] 会让页面只剩会员墙）：
+    # 照样返回真实条数的列表，但逐条脱敏，前端叠模糊 + 点击弹开通引导。
     result = await db.execute(text(f"""SELECT h.user_id, MAX(h.created_at) AS viewed_at
-        FROM user_browse_history h JOIN users u ON u.id = h.user_id
-        LEFT JOIN user_privacy pr ON pr.user_id = u.id
-        LEFT JOIN user_profile_completion c ON c.user_id = u.id
-        WHERE h.target_user_id = :viewer_id{visible}
-        GROUP BY h.user_id ORDER BY viewed_at DESC LIMIT :limit OFFSET :offset"""), {
+        {source}
+        GROUP BY h.user_id ORDER BY viewed_at DESC, h.user_id DESC LIMIT :limit OFFSET :offset"""), {
             **params,
             "limit": page_size,
             "offset": (page - 1) * page_size,
@@ -1491,8 +1611,22 @@ async def visitors(db: AsyncSession, viewer_id: int, page: int, page_size: int) 
         for row in rows
         if int(row["user_id"]) in targets
     ]
-    await _attach_card_qa_media(db, [item.target for item in items])
-    return VisitorPage(can_view_details=True, count=count, items=items, page=page, page_size=page_size, has_more=page * page_size < count)
+    if vip:
+        await _attach_card_qa_media(db, [item.target for item in items])
+    else:
+        items = [
+            BrowseHistoryItem(target=_mask_visitor_card(item.target, index), viewed_at=item.viewed_at)
+            for index, item in enumerate(items)
+        ]
+    return VisitorPage(
+        can_view_details=vip,
+        count=count,
+        items=items,
+        page=page,
+        page_size=page_size,
+        has_more=page * page_size < count,
+        masked=not vip,
+    )
 
 
 _EMOTION_LAB_CANDIDATE_SCAN = 300
@@ -1553,7 +1687,10 @@ async def visitor_count(db: AsyncSession, viewer_id: int, target_id: int) -> dic
     """Return only the deduplicated visitor count for a visible user."""
     await _ensure_target(db, viewer_id, target_id)
     result = await db.execute(
-        text("SELECT COUNT(DISTINCT user_id) FROM user_browse_history WHERE target_user_id = :target_id"),
+        text(
+            "SELECT COUNT(DISTINCT user_id) FROM user_browse_history "
+            "WHERE target_user_id = :target_id AND COALESCE(is_anonymous, 0) = 0"
+        ),
         {"target_id": target_id},
     )
     return {"user_id": target_id, "visitor_count": int(result.scalar() or 0)}

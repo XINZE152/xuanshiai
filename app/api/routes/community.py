@@ -112,7 +112,9 @@ from app.services.social import (
     list_my_reports,
 )
 
-router = APIRouter(dependencies=[Depends(get_verified_user)])
+# 浏览（动态流/话题/活动/纸飞机读取等）仅需登录；写操作与点赞等在端点上声明更强门禁。
+# 未绑手机也可看关注/同城/发现，绑手机提示放到具体行为上。
+router = APIRouter(dependencies=[Depends(get_current_user)])
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 logger = logging.getLogger(__name__)
 
@@ -299,16 +301,17 @@ async def remove_post(
 @router.put("/community/posts/{post_id}/like", response_model=CommunityPostResponse, summary="点赞动态")
 async def like(
     post_id: int = Path(..., ge=1),
-    current: CurrentUser = Depends(get_realname_verified_user),
+    current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CommunityPostResponse:
+    # 点赞：登录即可，不要求绑手机 / 实名。
     return await like_post(db, current.id, post_id, True)
 
 
 @router.delete("/community/posts/{post_id}/like", response_model=CommunityPostResponse, summary="取消动态点赞")
 async def unlike(
     post_id: int = Path(..., ge=1),
-    current: CurrentUser = Depends(get_realname_verified_user),
+    current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CommunityPostResponse:
     return await like_post(db, current.id, post_id, False)
@@ -418,9 +421,10 @@ async def remove_comment(
 )
 async def like_comment_route(
     comment_id: int = Path(..., ge=1),
-    current: CurrentUser = Depends(get_realname_verified_user),
+    current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CommunityCommentResponse:
+    # 评论点赞：登录即可，不要求绑手机 / 实名。
     return await like_comment(db, current.id, comment_id, True)
 
 
@@ -431,7 +435,7 @@ async def like_comment_route(
 )
 async def unlike_comment_route(
     comment_id: int = Path(..., ge=1),
-    current: CurrentUser = Depends(get_realname_verified_user),
+    current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CommunityCommentResponse:
     return await like_comment(db, current.id, comment_id, False)

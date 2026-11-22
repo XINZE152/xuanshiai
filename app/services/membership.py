@@ -121,13 +121,17 @@ async def get_active_membership_row(
     return result.mappings().first()
 
 
-def _rights(value, vip: bool = False) -> dict:
+def parse_package_rights(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except json.JSONDecodeError:
-            value = {}
-    rights = {**DEFAULT_RIGHTS, **(value if isinstance(value, dict) else {})}
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _rights(value, vip: bool = False) -> dict:
+    rights = {**DEFAULT_RIGHTS, **parse_package_rights(value)}
     if vip:
         rights.update(
             apply_daily_limit=3 + int(rights.get("apply_bonus") or 0),
@@ -140,22 +144,40 @@ def _rights(value, vip: bool = False) -> dict:
 
 
 async def list_packages(db: AsyncSession) -> list[MembershipPackage]:
+    # quotas 也依赖本模块的有效会员查询，延迟导入避免循环依赖。
+    from app.services.quotas import resolve_membership_daily_limits
+
     result = await db.execute(text("SELECT code,name,duration_days,price,original_price,daily_price,badge,rights FROM config_membership_package WHERE is_active=1 ORDER BY sort,id"))
+    rows = result.mappings().all()
+    limits = await resolve_membership_daily_limits(db, [parse_package_rights(row["rights"]) for row in rows])
     return [
         MembershipPackage(
             code=row["code"], name=row["name"], duration_days=row["duration_days"],
             price=settings.membership_price_override(row["code"], "price", float(row["price"])),
             original_price=settings.membership_price_override(row["code"], "original_price", float(row["original_price"]) if row["original_price"] is not None else None),
             daily_price=settings.membership_price_override(row["code"], "daily_price", float(row["daily_price"]) if row["daily_price"] is not None else None),
-            badge=row["badge"], rights=_rights(row["rights"]),
+            badge=row["badge"], rights=_rights(row["rights"]), daily_limits=daily_limits,
         )
-        for row in result.mappings()
+        for row, daily_limits in zip(rows, limits, strict=True)
     ]
 
 
 async def get_status(db: AsyncSession, user_id: int) -> MembershipStatus:
+    from app.services.quotas import resolve_membership_daily_limits
+
     row = await get_active_membership_row(db, user_id)
-    return MembershipStatus(is_vip=bool(row), package_type=row["package_type"] if row else None, start_at=row["start_at"] if row else None, end_at=row["end_at"] if row else None, rights=_rights(row["rights"] if row else None, bool(row)))
+    raw_rights = row["rights"] if row else None
+    (daily_limits,) = await resolve_membership_daily_limits(
+        db, [parse_package_rights(raw_rights) if row else None]
+    )
+    return MembershipStatus(
+        is_vip=bool(row),
+        package_type=row["package_type"] if row else None,
+        start_at=row["start_at"] if row else None,
+        end_at=row["end_at"] if row else None,
+        rights=_rights(raw_rights, bool(row)),
+        daily_limits=daily_limits,
+    )
 
 
 async def history(db: AsyncSession, user_id: int, page: int, page_size: int) -> MembershipHistoryPage:
@@ -204,7 +226,12 @@ async def create_order(db: AsyncSession, user_id: int, body: CreateMembershipOrd
     # ENVIRONMENT=development 就写成 4（测试支付），否则对账/报表会把真实
     # 订单误判为测试单。
     pay_type = 1 if settings.wechat_pay_mode == "real" else (4 if settings.is_test_mode else 1)
-    await db.execute(text("INSERT INTO payment_order (user_id,order_no,type,product_id,product_type,product_name,amount,pay_type,status,expire_at,idempotency_key) VALUES (:uid,:order_no,1,:pid,:code,:name,:amount,:pay_type,0,:expire_at,:key)"), {"uid": user_id, "order_no": order_no, "pid": package["id"], "code": package["code"], "name": package["name"], "amount": price, "pay_type": pay_type, "expire_at": expire_at, "key": idempotency_key})
+    # 会员属虚拟商品：建单即落 wechat_xpay，使旧 JSAPI ``/prepay`` 的
+    # ``channel != 'wechat'`` 校验直接 409，从接口层堵住「普通微信支付买会员」。
+    # 函数内导入，避免 membership ↔ payment.xpay 的循环依赖。
+    from app.services.payment.xpay import XPAY_CHANNEL
+
+    await db.execute(text("INSERT INTO payment_order (user_id,order_no,type,product_id,product_type,product_name,amount,pay_type,channel,status,expire_at,idempotency_key) VALUES (:uid,:order_no,1,:pid,:code,:name,:amount,:pay_type,:channel,0,:expire_at,:key)"), {"uid": user_id, "order_no": order_no, "pid": package["id"], "code": package["code"], "name": package["name"], "amount": price, "pay_type": pay_type, "channel": XPAY_CHANNEL, "expire_at": expire_at, "key": idempotency_key})
     await db.commit()
     return MembershipOrderResponse(order_no=order_no, package_code=package["code"], product_name=package["name"], amount=price, pay_type=pay_type, status=0, expire_at=expire_at, payment_required=True)
 

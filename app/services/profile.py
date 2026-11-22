@@ -143,7 +143,8 @@ BASIC_PROFILE_COMPLETION_KEYS: tuple[str, ...] = (
 )
 
 # 推荐流「可被推荐」最低门槛：性别 + 年龄(生日) + 现居地。
-# 比 BASIC_PROFILE 更窄；首页推荐 / 广场 / 点进主页详情共用此门槛；搜索仍要求完整度 100。
+# 比 BASIC_PROFILE 更窄；首页推荐 / 广场 / 点进主页详情 / 浏览方准入共用此门槛；
+# 昵称与条件搜索按命中出池（completion_gate_mode=none），不套此门槛。
 RECOMMEND_MIN_COMPLETION_KEYS: tuple[str, ...] = (
     "gender",
     "birthday",
@@ -713,7 +714,14 @@ async def update_profile(
     """
     values = request.model_dump(exclude_unset=True)
     sync_precise_from_bot = bool(values.pop("sync_precise_from_bot", False))
+    clear_bot_intake = bool(values.pop("clear_bot_intake", False))
     incoming_bot_intake = values.pop("bot_intake", None)
+
+    # 清空 BOT 采集快照：去掉历史 Demo/默认预置，不影响经典精准字段
+    if clear_bot_intake:
+        values["bot_intake_json"] = None
+        incoming_bot_intake = None
+        sync_precise_from_bot = False
 
     if incoming_bot_intake is not None or sync_precise_from_bot:
         from app.services.aibot_profile_sync import (
@@ -1079,7 +1087,7 @@ async def get_profile_overview(db: AsyncSession, user_id: int) -> ProfileOvervie
         (SELECT COUNT(*) FROM match_apply a WHERE a.to_user_id = u.id AND a.status = 0) AS incoming_count,
         (SELECT COUNT(*) FROM match_apply a WHERE a.from_user_id = u.id AND a.status = 0) AS outgoing_count,
         (SELECT COUNT(*) FROM user_match m WHERE m.user_id = u.id AND m.status IN (1, 2)) AS match_count,
-        (SELECT COUNT(DISTINCT bh.user_id) FROM user_browse_history bh WHERE bh.target_user_id = u.id) AS visitor_count,
+        (SELECT COUNT(DISTINCT bh.user_id) FROM user_browse_history bh WHERE bh.target_user_id = u.id AND COALESCE(bh.is_anonymous, 0) = 0) AS visitor_count,
         -- C 端「我的收藏」与红心/列表同源：type=1（喜欢）。type=2 是旧收藏，不再计数。
         (SELECT COUNT(*) FROM user_favorite f WHERE f.user_id = u.id AND f.type = 1) AS favorite_count,
         -- 旧「谁收藏我」字段（type=2），C 端已无消费方，保留仅为兼容/审计。

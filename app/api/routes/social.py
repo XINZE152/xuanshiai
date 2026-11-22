@@ -59,16 +59,20 @@ from app.services.social import (
     update_privacy,
 )
 
-router = APIRouter(dependencies=[Depends(get_verified_user)])
+# 通知/会话/关系列表等浏览仅需登录；关注等写操作在端点声明实名（含手机）门禁。
+router = APIRouter(dependencies=[Depends(get_current_user)])
+# 喜欢/取消喜欢：仅需登录（与查看他人主页同门槛），不挂路由级手机号/实名依赖。
+like_router = APIRouter()
 
 
-@router.put("/users/{target_id}/like", response_model=RelationResponse, summary="喜欢用户")
-async def like(target_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_realname_verified_user), db: AsyncSession = Depends(get_db)) -> RelationResponse:
+@like_router.put("/users/{target_id}/like", response_model=RelationResponse, summary="喜欢用户")
+async def like(target_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> RelationResponse:
+    # 点赞/喜欢不要求实名、不要求绑定手机；与 GET /users/{id}/profile 同为登录即可。
     return await set_like(db, current.id, target_id, True)
 
 
-@router.delete("/users/{target_id}/like", response_model=RelationResponse, summary="取消喜欢")
-async def unlike(target_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_realname_verified_user), db: AsyncSession = Depends(get_db)) -> RelationResponse:
+@like_router.delete("/users/{target_id}/like", response_model=RelationResponse, summary="取消喜欢")
+async def unlike(target_id: int = Path(..., ge=1), current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> RelationResponse:
     return await set_like(db, current.id, target_id, False)
 
 

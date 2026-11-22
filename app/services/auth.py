@@ -40,6 +40,7 @@ from app.schemas.auth import (
 )
 from app.services.identity_verify.base import IdentityVerifyRequest, IdentityVerifyResult
 from app.services.identity_verify.providers import DisabledIdentityProvider, get_identity_provider
+from app.services.notifications import emit_notification
 from app.services.sms.providers import get_sms_provider
 from app.services.user_columns import should_reset_phone_region
 from app.services.wechat.providers import get_wechat_provider
@@ -952,26 +953,65 @@ def calculate_age(birthday: date) -> int:
     return today.year - birthday.year - ((today.month, today.day) < (birthday.month, birthday.day))
 
 
+REALNAME_STATUS_PENDING = 1
+REALNAME_STATUS_PASSED = 2
+REALNAME_STATUS_FAILED = 3
+REALNAME_STATUS_MANUAL = 4
+_REALNAME_REVIEWABLE = {REALNAME_STATUS_PENDING, REALNAME_STATUS_MANUAL}
+_REALNAME_RESUBMITTABLE = {0, REALNAME_STATUS_FAILED, 5}
+
+REALNAME_GENERIC_FAILURE = "实名认证未通过，请核对资料后重新提交"
+_REALNAME_ONLINE_FAILURE = "身份信息核验未通过，请核对姓名和身份证号后重新提交"
+_REALNAME_PUBLIC_REASONS = {
+    "identity_mismatch": "姓名与身份证信息不一致，请核对后重新提交",
+    "姓名与证件不符": "姓名与身份证信息不一致，请核对后重新提交",
+    "document_unclear": "证件资料不清晰，请核对后重新提交",
+    "证件不清晰": "证件资料不清晰，请核对后重新提交",
+    "photo_mismatch": "人脸照片与身份资料不一致，请核对后重新提交",
+    "照片不符": "人脸照片与身份资料不一致，请核对后重新提交",
+}
+_REALNAME_PUBLIC_REASON_TEXTS = frozenset({
+    REALNAME_GENERIC_FAILURE, _REALNAME_ONLINE_FAILURE, *_REALNAME_PUBLIC_REASONS.values(),
+})
+
+
+def public_realname_fail_reason(status: int, reason: str | None) -> str | None:
+    if status != REALNAME_STATUS_FAILED:
+        return None
+    return reason if reason in _REALNAME_PUBLIC_REASON_TEXTS else REALNAME_GENERIC_FAILURE
+
+
+async def _ensure_realname_card_available(db: AsyncSession, user_id: int, card_hash: str) -> None:
+    # 锁定证件哈希索引上「已通过」的范围；人工通过和自动通过都在落库前检查。
+    duplicate = await db.execute(
+        text("SELECT user_id FROM user_auth WHERE id_card_hash = :hash "
+             "AND realname_status = 2 AND user_id <> :uid FOR UPDATE"),
+        {"hash": card_hash, "uid": user_id},
+    )
+    if duplicate.first():
+        raise HTTPException(409, detail="该身份信息已被其他账号认证")
+
+
 async def _check_realname_submission_guard(
     db: AsyncSession, *, user_id: int, card_hash: str, allow_same_id: bool
-) -> None:
-    """校验重复证件与已认证状态；调用方必须处于事务内。"""
-    if not allow_same_id:
-        duplicate = await db.execute(
-            text(
-                "SELECT user_id FROM user_auth WHERE id_card_hash = :hash "
-                "AND user_id <> :uid AND realname_status = 2"
-            ),
-            {"hash": card_hash, "uid": user_id},
-        )
-        if duplicate.first():
-            raise HTTPException(409, detail="该身份信息已被其他账号认证")
-    current = await db.execute(
-        text("SELECT realname_status FROM user_auth WHERE user_id = :uid FOR UPDATE"),
+) -> tuple[int, int]:
+    # 用户行锁也覆盖首次提交时尚无 user_auth 记录的情况。
+    user = await db.execute(text("SELECT id, status FROM users WHERE id = :uid FOR UPDATE"), {"uid": user_id})
+    user_row = user.mappings().first()
+    if not user_row or user_row["status"] != 1:
+        raise HTTPException(403, detail="账号当前不可用")
+    current = (await db.execute(
+        text("SELECT realname_status, retry_count FROM user_auth WHERE user_id = :uid FOR UPDATE"),
         {"uid": user_id},
-    )
-    if current.scalar() == 2:
+    )).mappings().first()
+    current_status = int(current["realname_status"] or 0) if current else 0
+    if current_status == REALNAME_STATUS_PASSED:
         raise HTTPException(409, detail="实名认证通过后不能修改认证信息")
+    if current_status not in _REALNAME_RESUBMITTABLE:
+        raise HTTPException(409, detail="当前实名认证正在审核，请勿重复提交")
+    if not allow_same_id:
+        await _ensure_realname_card_available(db, user_id, card_hash)
+    return current_status, int(current["retry_count"] or 0) if current else 0
 
 
 async def _write_realname_submission(
@@ -984,11 +1024,14 @@ async def _write_realname_submission(
     allow_same_id: bool,
     status: int,
     reason: str | None,
+    expected_submission: tuple[int, int] | None = None,
 ) -> None:
     """写入一次实名提交；status 1=人工审核 2=自动通过 3=自动未通过。"""
-    await _check_realname_submission_guard(
+    current_status, version = await _check_realname_submission_guard(
         db, user_id=user_id, card_hash=card_hash, allow_same_id=allow_same_id
     )
+    if expected_submission is not None and (current_status, version) != expected_submission:
+        raise HTTPException(409, detail="实名认证资料已更新，请刷新后重试")
     step = 3 if status == 1 else 4 if status == 2 else 5
     await db.execute(
         text(
@@ -1000,8 +1043,10 @@ async def _write_realname_submission(
             ON DUPLICATE KEY UPDATE real_name = VALUES(real_name), id_card = VALUES(id_card),
             id_card_hash = VALUES(id_card_hash), id_card_masked = VALUES(id_card_masked),
             realname_status = :status, auth_status = :status, auth_step = :step,
-            submitted_at = UTC_TIMESTAMP(), retry_count = retry_count + 1,
-            fail_reason = :reason"""
+            submitted_at = UTC_TIMESTAMP(), retry_count = :next_version,
+            fail_reason = :reason, face_verified = 0, face_photo = NULL,
+            face_score = NULL, face_method = NULL, face_vendor = NULL, verified_at = NULL,
+            id_card_front = NULL, id_card_back = NULL, id_card_issued = NULL"""
         ),
         {
             "uid": user_id,
@@ -1012,6 +1057,7 @@ async def _write_realname_submission(
             "status": status,
             "step": step,
             "reason": reason,
+            "next_version": max(version, 1 if current_status in (REALNAME_STATUS_FAILED, 5) else 0) + 1,
         },
     )
     reviewed_at = "NULL" if status == 1 else "UTC_TIMESTAMP()"
@@ -1045,7 +1091,7 @@ def _realname_status_for_result(result: IdentityVerifyResult | None) -> tuple[in
             result.provider,
         )
         return 1, None
-    return 3, (result.reason or "身份信息核验未通过").strip()[:255]
+    return REALNAME_STATUS_FAILED, _REALNAME_ONLINE_FAILURE
 
 
 async def _verify_realname_with_provider(
@@ -1082,7 +1128,10 @@ async def _verify_realname_with_provider(
 async def submit_realname(db: AsyncSession, user_id: int, request: RealNameRequest) -> dict[str, Any]:
     if not await mini_realname_enabled(db):
         raise HTTPException(403, detail="实名认证功能暂未开放")
-    birth = date(int(request.id_card[6:10]), int(request.id_card[10:12]), int(request.id_card[12:14]))
+    try:
+        birth = date(int(request.id_card[6:10]), int(request.id_card[10:12]), int(request.id_card[12:14]))
+    except ValueError:
+        raise HTTPException(422, detail="身份证出生日期无效") from None
     if calculate_age(birth) < 18:
         raise HTTPException(422, detail="仅支持年满18周岁的用户认证")
     card_hash = hashlib.sha256(request.id_card.upper().encode()).hexdigest()
@@ -1104,11 +1153,11 @@ async def submit_realname(db: AsyncSession, user_id: int, request: RealNameReque
                 status=1,
                 reason=None,
             )
-        return {"status": 1, "id_card_masked": mask_id_card(request.id_card)}
+        return {"status": 1, "id_card_masked": mask_id_card(request.id_card), "realname_fail_reason": None}
 
-    # 第三方调用不能放在数据库事务内：先做一次只读校验，调用后再原子写入。
+    # 第三方调用不能放在数据库事务内；落库前比对提交版本，过期结果不得覆盖届时的记录。
     async with db.begin():
-        await _check_realname_submission_guard(
+        expected_submission = await _check_realname_submission_guard(
             db, user_id=user_id, card_hash=card_hash, allow_same_id=allow_same_id
         )
     result = await _verify_realname_with_provider(user_id, request)
@@ -1123,8 +1172,9 @@ async def submit_realname(db: AsyncSession, user_id: int, request: RealNameReque
             allow_same_id=allow_same_id,
             status=status,
             reason=reason,
+            expected_submission=expected_submission,
         )
-    return {"status": status, "id_card_masked": mask_id_card(request.id_card)}
+    return {"status": status, "id_card_masked": mask_id_card(request.id_card), "realname_fail_reason": reason}
 
 
 async def list_realname_reviews(db: AsyncSession, *, page: int, page_size: int, status: int | None = None, search: str | None = None, scope: str | None = None, scope_params: dict[str, object] | None = None):
@@ -1140,17 +1190,18 @@ async def list_realname_reviews(db: AsyncSession, *, page: int, page_size: int, 
         where += " AND (u.nickname LIKE CONCAT('%', :search, '%') OR u.phone LIKE CONCAT('%', :search, '%'))"
         params["search"] = search
     rows = (await db.execute(text(f"""SELECT ua.user_id, u.nickname, ua.real_name, ua.id_card_masked,
-        ua.realname_status, ua.submitted_at, ua.reviewed_at, ua.fail_reason
+        ua.realname_status, ua.submitted_at, ua.reviewed_at, ua.fail_reason,
+        ua.retry_count AS submission_version
         FROM user_auth ua JOIN users u ON u.id = ua.user_id
         WHERE {where} ORDER BY ua.submitted_at ASC, ua.user_id ASC"""), params)).mappings().all()
     total = len(rows)
     offset = (page - 1) * page_size
-    return RealnameReviewPage(items=[RealnameReviewItem(**dict(row)) for row in rows[offset:offset + page_size]], page=page, page_size=page_size, total=total, has_more=page * page_size < total)
-
-
-REALNAME_STATUS_PASSED = 2
-REALNAME_STATUS_FAILED = 3
-REALNAME_STATUS_MANUAL = 4
+    items = []
+    for row in rows[offset:offset + page_size]:
+        item = dict(row)
+        item["fail_reason"] = public_realname_fail_reason(item["realname_status"], item["fail_reason"])
+        items.append(RealnameReviewItem(**item))
+    return RealnameReviewPage(items=items, page=page, page_size=page_size, total=total, has_more=page * page_size < total)
 
 # 审核通过 / 未通过时人脸标记的取值（face_verified：1 通过 2 未通过 0 未核验）。
 _FACE_VERIFIED_BY_STATUS = {
@@ -1162,28 +1213,43 @@ _FACE_VERIFIED_BY_STATUS = {
 
 async def apply_realname_review(
     db: AsyncSession,
-    user_id: int,
+    user_id: int | None,
     status: int,
     reason: str | None,
     admin_id: int,
     *,
-    sync_face: bool = False,
-) -> None:
-    """实名审核统一落列（D-14）。
-
-    `realname_status` 是 C 端门禁的**唯一读取列**（`dependencies.py` 要求 ==2）；
-    `face_verified` 是人脸核验标记（`get_face_verified_user` 要求 ==1）。
-    两个后台入口必须经此函数写入 realname_status，避免「在会员认证后台通过实名
-    却不满足 C 端门禁」的双写分裂。
-
-    ``sync_face=True`` 时同步写入人脸标记：仅「会员认证后台」使用，因为它的审核
-    记录携带人脸照片与评分（face_photo / face_score），审核即等价于人脸核验；
-    纯实名审核入口保持只写 realname_status，不越权授予发帖所需的人脸标记。
-
-    调用方负责前置校验与事务提交。
-    """
+    review_id: int | None = None,
+    submission_version: int | None = None,
+) -> str | None:
+    """两类入口共用行锁、状态校验和通知；调用方在同一事务内提交。"""
     if status not in _FACE_VERIFIED_BY_STATUS:
         raise HTTPException(422, detail="不支持的实名认证审核状态")
+    public_reason = None
+    if status == REALNAME_STATUS_FAILED:
+        # 旧入口允许省略原因；只接受受控文案，空白误填和旧自由备注分别处理。
+        if reason is not None and not reason.strip():
+            raise HTTPException(422, detail="审核未通过时请填写有效原因或省略该字段")
+        public_reason = _REALNAME_PUBLIC_REASONS.get((reason or "").strip(), REALNAME_GENERIC_FAILURE)
+
+    # 两个入口分别按唯一 user_id 和主键查询，但锁定的是同一条物理记录。
+    key, value = ("id", review_id) if review_id is not None else ("user_id", user_id)
+    row = (await db.execute(text(f"""SELECT user_id, realname_status, retry_count,
+        real_name, id_card, id_card_hash, face_verified, face_photo FROM user_auth
+        WHERE {key} = :value FOR UPDATE"""), {"value": value})).mappings().first()
+    if not row:
+        raise HTTPException(404, detail="实名认证记录不存在")
+    current_status = int(row["realname_status"] or 0)
+    version = int(row["retry_count"] or 0)
+    if current_status not in _REALNAME_REVIEWABLE or (status == REALNAME_STATUS_MANUAL and current_status != REALNAME_STATUS_PENDING):
+        raise HTTPException(409, detail="当前实名认证状态不可执行此审核操作")
+    # 老客户端仍可审核首份材料；重提后必须提供版本，避免旧页面误审新材料。
+    if (submission_version is None and version > 1) or (submission_version is not None and submission_version != version):
+        raise HTTPException(409, detail="实名认证资料已更新，请刷新列表并使用本次提交版本重新审核")
+    if not row["real_name"] or not row["id_card"]:
+        raise HTTPException(409, detail="当前记录缺少实名资料，不能审核")
+    user_id = int(row["user_id"])
+    if status == REALNAME_STATUS_PASSED and row["id_card_hash"] and not await same_id_multiple_accounts_allowed(db):
+        await _ensure_realname_card_available(db, user_id, row["id_card_hash"])
     assignments = [
         "realname_status=:status",
         "auth_status=:status",
@@ -1196,29 +1262,43 @@ async def apply_realname_review(
     params: dict[str, Any] = {
         "status": status,
         "auth_step": 4 if status == REALNAME_STATUS_PASSED else 5 if status == REALNAME_STATUS_FAILED else 3,
-        "reason": reason,
+        "reason": public_reason,
         "admin_id": admin_id,
         "user_id": user_id,
     }
-    if sync_face:
+    # 会员认证后台只有审到已存的人脸材料时才同步人脸；纯实名不授予人脸标记。
+    if review_id is not None and str(row["face_photo"] or "").strip() and not int(row["face_verified"] or 0):
         assignments.append("face_verified=:face")
         params["face"] = _FACE_VERIFIED_BY_STATUS[status]
     await db.execute(
         text(f"UPDATE user_auth SET {', '.join(assignments)} WHERE user_id=:user_id"), params
     )
+    if status == REALNAME_STATUS_PASSED:
+        title, content = "实名认证已通过", "您的实名认证已通过，可前往认证中心查看。"
+    elif status == REALNAME_STATUS_FAILED:
+        title, content = "实名认证未通过", "请前往认证中心查看原因并重新提交。"
+    else:
+        return None  # 转复核不是最终审核结果。
+    delivered = await emit_notification(
+        db, recipient_user_id=user_id, actor_user_id=None,
+        event_type="realname_review_result", title=title, content=content,
+    )
+    if not delivered:
+        # 实名结果是必达系统通知，未写入不得提交审核状态。
+        raise HTTPException(503, detail="审核结果通知暂无法保存，请稍后重试")
+    return public_reason
 
 
-async def review_realname(db: AsyncSession, user_id: int, status: int, reason: str | None, admin_id: int):
+async def review_realname(
+    db: AsyncSession, user_id: int, status: int, reason: str | None, admin_id: int,
+    *, submission_version: int | None = None,
+):
     from app.schemas.admin import RealnameReviewResponse
-    if status not in (2, 3, 4):
-        raise HTTPException(422, detail="不支持的实名认证审核状态")
-    row = (await db.execute(text("SELECT realname_status FROM user_auth WHERE user_id=:user_id FOR UPDATE"), {"user_id": user_id})).mappings().first()
-    if not row:
-        raise HTTPException(404, detail="实名认证记录不存在")
-    if int(row["realname_status"]) != 1:
-        raise HTTPException(409, detail="当前实名认证不在审核中")
-    await apply_realname_review(db, user_id, status, reason, admin_id)
+
+    public_reason = await apply_realname_review(
+        db, user_id, status, reason, admin_id, submission_version=submission_version
+    )
     await db.commit()
-    return RealnameReviewResponse(user_id=user_id, realname_status=status, reason=reason)
+    return RealnameReviewResponse(user_id=user_id, realname_status=status, reason=public_reason)
 
 

@@ -164,7 +164,19 @@ def _post_select_sql(extra_where: str = "", *, include_pending: bool = False) ->
         EXISTS (SELECT 1 FROM community_like l WHERE l.user_id = :user_id AND l.target_id = p.id AND l.type = 1) AS is_liked,
         EXISTS (SELECT 1 FROM community_like c WHERE c.user_id = :user_id AND c.target_id = p.id AND c.type = 3) AS is_collected,
         (SELECT COUNT(*) FROM community_like c2 WHERE c2.target_id = p.id AND c2.type = 3) AS collect_count,
-        EXISTS (SELECT 1 FROM user_favorite f WHERE f.user_id = :user_id AND f.target_user_id = p.user_id AND f.type = 3) AS is_followed
+        EXISTS (SELECT 1 FROM user_favorite f WHERE f.user_id = :user_id AND f.target_user_id = p.user_id AND f.type = 3) AS is_followed,
+        (SELECT ma.status FROM match_apply ma
+          WHERE ((ma.from_user_id = :user_id AND ma.to_user_id = p.user_id)
+              OR (ma.from_user_id = p.user_id AND ma.to_user_id = :user_id))
+            AND ma.status IN (0, 1, 2, 3)
+          ORDER BY FIELD(ma.status, 1, 0, 2, 3), ma.id DESC
+          LIMIT 1) AS apply_status_code,
+        EXISTS (
+          SELECT 1 FROM user_match m
+          WHERE ((m.user_id = :user_id AND m.target_user_id = p.user_id)
+              OR (m.user_id = p.user_id AND m.target_user_id = :user_id))
+            AND m.status IN (1, 2)
+        ) AS is_matched
         FROM community_post p
         JOIN users u ON u.id = p.user_id
         LEFT JOIN community_topic t ON t.id = p.topic_id
@@ -208,6 +220,31 @@ def _post_visibility_clause() -> str:
     )"""
 
 
+def _apply_status_from_row(row: dict[str, Any]) -> str:
+    """把 match_apply.status / user_match 归一成前端可读关系态（与发现卡一致）。"""
+    if bool(row.get("is_matched")):
+        return "accepted"
+    code = row.get("apply_status_code")
+    if code is None and row.get("apply_status") is not None:
+        raw = row.get("apply_status")
+        if isinstance(raw, str) and raw:
+            return raw
+        code = raw
+    try:
+        status = int(code) if code is not None else -1
+    except (TypeError, ValueError):
+        return "none"
+    if status == 0:
+        return "pending"
+    if status == 1:
+        return "accepted"
+    if status == 2:
+        return "rejected"
+    if status == 3:
+        return "expired"
+    return "none"
+
+
 def _post_response(row: dict[str, Any]) -> CommunityPostResponse:
     age = _calculate_age(row["birthday"]) if row.get("birthday") else None
     return CommunityPostResponse(
@@ -229,6 +266,7 @@ def _post_response(row: dict[str, Any]) -> CommunityPostResponse:
         is_liked=bool(row.get("is_liked")),
         is_collected=bool(row.get("is_collected")),
         is_followed=bool(row.get("is_followed")),
+        apply_status=_apply_status_from_row(row),  # type: ignore[arg-type]
         gender=int(row["gender"]) if row.get("gender") is not None else None,
         age=age,
         mbti=row.get("mbti"),

@@ -1802,6 +1802,7 @@ def build_search_query_snapshot(
     JSON_CONTAINS 逐条编译；fingerprint 绑定 cursor 与查询身份。不包含任何
     模型生成的 SQL。
     """
+    # 条件/AI 搜索与昵称搜索一致：按条件命中出池，不套候选完整度 100。
     visibility = candidate_visibility_service.predicate(
         ViewerContext(
             user_id=viewer_id,
@@ -1809,6 +1810,7 @@ def build_search_query_snapshot(
             is_vip=viewer_is_vip,
         ),
         VisibilityScene.SEARCH,
+        completion_gate_mode="none",
     )
     params: dict[str, Any] = {"viewer_id": viewer_id, **visibility.params}
     clauses = [visibility.clause]
@@ -1831,6 +1833,7 @@ def build_search_query_snapshot(
             "hard_memberships": compiled.hard_memberships,
             "policy_revision": visibility.policy_revision,
             "sort_version": SORT_VERSION,
+            "completion_gate_mode": "none",
         }
     )
     return CandidateQuerySnapshot(

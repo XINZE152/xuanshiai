@@ -104,6 +104,24 @@ def test_sql_predicate_completion_gate_is_opt_out_only() -> None:
     assert "COALESCE(c.score, 0) >= 100" not in skipped.clause
 
 
+def test_sql_predicate_recommend_min_requires_gender_age_location() -> None:
+    """推荐流候选门槛：性别 + 生日(年龄) + 现居地，不再要求完整度 100。"""
+    service = CandidateVisibilityService()
+    viewer = ViewerContext(user_id=1, realname_status=2, is_vip=True)
+
+    predicate = service.predicate(
+        viewer,
+        VisibilityScene.DISCOVERY,
+        completion_gate_mode="recommend_min",
+    )
+
+    assert "gender_completed" in predicate.clause
+    assert "birthday_completed" in predicate.clause
+    assert "location_completed" in predicate.clause
+    assert "marriage_completed" not in predicate.clause
+    assert "COALESCE(c.score, 0) >= 100" in predicate.clause
+
+
 @pytest.mark.parametrize("candidate_alias", ["candidate.id", "1candidate", "u; DROP TABLE users"])
 def test_sql_predicate_rejects_non_identifier_aliases(candidate_alias: str) -> None:
     with pytest.raises(ValueError, match="invalid SQL alias"):

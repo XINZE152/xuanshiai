@@ -3,7 +3,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.api.dependencies import CurrentUser, get_realname_verified_user
+from app.api.dependencies import CurrentUser, get_current_user, get_realname_verified_user, get_verified_user
 from app.api.routes import social as social_routes
 from app.main import app
 from app.schemas.social import ChatMessageCreate
@@ -95,8 +95,6 @@ def test_social_actions_require_authentication() -> None:
 
 def test_social_interactions_and_applications_require_realname() -> None:
     guarded_routes = (
-        ("/api/v1/users/{target_id}/like", "PUT"),
-        ("/api/v1/users/{target_id}/like", "DELETE"),
         ("/api/v1/users/{target_id}/follow", "PUT"),
         ("/api/v1/users/{target_id}/follow", "DELETE"),
         ("/api/v1/discovery/applications/{target_id}", "POST"),
@@ -109,6 +107,8 @@ def test_social_interactions_and_applications_require_realname() -> None:
 
 def test_reporting_blocking_and_reads_do_not_require_realname() -> None:
     available_routes = (
+        ("/api/v1/users/{target_id}/like", "PUT"),
+        ("/api/v1/users/{target_id}/like", "DELETE"),
         ("/api/v1/relations/likes", "GET"),
         ("/api/v1/discovery/applications/incoming", "GET"),
         ("/api/v1/security/blocks/{target_id}", "PUT"),
@@ -117,6 +117,17 @@ def test_reporting_blocking_and_reads_do_not_require_realname() -> None:
     )
     for path, method in available_routes:
         assert get_realname_verified_user not in route_dependencies(path, method), (method, path)
+
+
+def test_like_routes_require_login_only_not_phone() -> None:
+    """详情页能打开（get_current_user）时，爱心应同样只需登录，不能再卡手机号。"""
+    for path, method in (
+        ("/api/v1/users/{target_id}/like", "PUT"),
+        ("/api/v1/users/{target_id}/like", "DELETE"),
+    ):
+        deps = route_dependencies(path, method)
+        assert get_current_user in deps, (method, path)
+        assert get_verified_user not in deps, (method, path)
 
 
 @pytest.mark.asyncio
@@ -134,10 +145,10 @@ async def test_liked_by_is_gone_without_revealing_identities(monkeypatch: pytest
 
 @pytest.mark.asyncio
 async def test_unlike_does_not_revoke_application_match(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_ensure_target(_db: object, _user_id: int, _target_id: int) -> None:
+    async def fake_ensure_like_target(_db: object, _user_id: int, _target_id: int, **_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr(social_service, "_ensure_target", fake_ensure_target)
+    monkeypatch.setattr(social_service, "_ensure_like_target", fake_ensure_like_target)
     db = RecordingSession()
     response = await social_service.set_like(db, user_id=7, target_id=8, enabled=False)
 
@@ -149,12 +160,33 @@ async def test_unlike_does_not_revoke_application_match(monkeypatch: pytest.Monk
 async def test_unlike_reports_application_match_that_remains_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_target(_db: object, _user_id: int, _target_id: int) -> None:
+    async def fake_ensure_like_target(_db: object, _user_id: int, _target_id: int, **_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr(social_service, "_ensure_target", fake_ensure_target)
+    monkeypatch.setattr(social_service, "_ensure_like_target", fake_ensure_like_target)
     db = RecordingSession(active_match=True)
     response = await social_service.set_like(db, user_id=7, target_id=8, enabled=False)
 
     assert response.matched is True
     assert not any("UPDATE user_match" in statement for statement in db.statements)
+
+
+@pytest.mark.asyncio
+async def test_set_like_skips_who_can_see_me_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """未实名浏览方点爱心：不走 _ensure_target（含 who_can_see_me=2），仅轻量存在/拉黑校验。"""
+    called: dict[str, int] = {"ensure_target": 0, "ensure_like": 0}
+
+    async def fake_ensure_target(*_a: object, **_k: object) -> None:
+        called["ensure_target"] += 1
+
+    async def fake_ensure_like_target(_db: object, _user_id: int, _target_id: int) -> None:
+        called["ensure_like"] += 1
+
+    monkeypatch.setattr(social_service, "_ensure_target", fake_ensure_target)
+    monkeypatch.setattr(social_service, "_ensure_like_target", fake_ensure_like_target)
+    db = RecordingSession()
+    response = await social_service.set_like(db, user_id=7, target_id=8, enabled=True)
+
+    assert response.enabled is True
+    assert called["ensure_like"] == 1
+    assert called["ensure_target"] == 0

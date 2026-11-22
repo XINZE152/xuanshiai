@@ -663,8 +663,10 @@ async def test_ensure_target_follows_discovery_skip_gates(
         *,
         completion_waiver: object | None = None,
         skip_completion_gate: bool = False,
+        completion_gate_mode: str | None = None,
     ) -> dict[int, dict[str, object]]:
         recorded["skip"] = skip_completion_gate
+        recorded["mode"] = completion_gate_mode
         return {}
 
     monkeypatch.setattr(discovery, "_target_rows", fake_target_rows)
@@ -679,6 +681,53 @@ async def test_ensure_target_follows_discovery_skip_gates(
     with pytest.raises(HTTPException):
         await discovery._ensure_target(object(), 1, 22)
     assert recorded["skip"] is False
+
+
+@pytest.mark.asyncio
+async def test_target_rows_profile_defaults_to_recommend_min(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """点进主页须与推荐出池同门槛，避免列表能见、详情 404。"""
+    recorded: dict[str, object] = {}
+
+    async def fake_viewer_context(_db: object, _viewer_id: int) -> dict[str, object]:
+        return {"realname_status": 2}
+
+    async def fake_is_vip(_db: object, _viewer_id: int) -> bool:
+        return False
+
+    def fake_visibility_predicate(*_args: object, **kwargs: object) -> object:
+        recorded["completion_gate_mode"] = kwargs.get("completion_gate_mode")
+        recorded["skip_completion_gate"] = kwargs.get("skip_completion_gate")
+
+        class Pred:
+            clause = "1=1"
+            params: dict[str, int] = {}
+
+        return Pred()
+
+    class FakeResult:
+        def mappings(self) -> object:
+            return self
+
+        def all(self) -> list[object]:
+            return []
+
+    class FakeDb:
+        async def execute(self, *_args: object, **_kwargs: object) -> object:
+            return FakeResult()
+
+    monkeypatch.setattr(discovery, "_viewer_context", fake_viewer_context)
+    monkeypatch.setattr(discovery, "_is_vip", fake_is_vip)
+    monkeypatch.setattr(discovery, "_visibility_predicate", fake_visibility_predicate)
+
+    await discovery._target_rows(FakeDb(), 1, [22])
+    assert recorded["completion_gate_mode"] == "recommend_min"
+    assert recorded["skip_completion_gate"] is False
+
+    await discovery._target_rows(FakeDb(), 1, [22], skip_completion_gate=True)
+    assert recorded["completion_gate_mode"] is None
+    assert recorded["skip_completion_gate"] is True
 
 
 @pytest.mark.asyncio

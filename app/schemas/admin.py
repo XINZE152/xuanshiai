@@ -137,7 +137,8 @@ class CertificationReviewResponse(BaseModel):
 
 class RealnameReviewRequest(BaseModel):
     status: Literal[2, 3, 4]
-    reason: str | None = Field(default=None, max_length=255)
+    reason: str | None = Field(default=None, max_length=255, description="驳回时建议传 identity_mismatch、document_unclear 或 photo_mismatch；省略或旧自由备注使用通用文案，非空值不可全空白")
+    submission_version: int | None = Field(default=None, ge=0, description="列表返回的本次提交版本；用于防止审核旧材料")
 
 
 class RealnameReviewItem(BaseModel):
@@ -149,6 +150,7 @@ class RealnameReviewItem(BaseModel):
     submitted_at: datetime | None
     reviewed_at: datetime | None
     fail_reason: str | None
+    submission_version: int = Field(default=0, description="审核时原样回传，防止误审重提后的材料")
 
 
 class RealnameReviewPage(BaseModel):

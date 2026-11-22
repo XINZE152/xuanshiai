@@ -3,6 +3,12 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+class MembershipDailyLimits(BaseModel):
+    apply: int = Field(description="每日申请认识上限")
+    browse: int = Field(description="每日可查看的不同用户上限")
+    superlike: int = Field(description="每日爆灯上限")
+
+
 class MembershipPackage(BaseModel):
     code: str
     name: str
@@ -12,9 +18,10 @@ class MembershipPackage(BaseModel):
     daily_price: float | None
     badge: str | None
     rights: dict[str, int | bool | str | None]
+    daily_limits: MembershipDailyLimits = Field(description="套餐生效后的每日额度预览")
 
 
-class MembershipStatus(BaseModel):
+class MembershipPeriod(BaseModel):
     is_vip: bool
     package_type: str | None
     start_at: datetime | None
@@ -22,7 +29,11 @@ class MembershipStatus(BaseModel):
     rights: dict[str, int | bool | str | None]
 
 
-class MembershipHistoryItem(MembershipStatus):
+class MembershipStatus(MembershipPeriod):
+    daily_limits: MembershipDailyLimits = Field(description="当前账号的实际每日额度上限")
+
+
+class MembershipHistoryItem(MembershipPeriod):
     id: int
     amount: float | None
     order_no: str | None

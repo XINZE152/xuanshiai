@@ -167,6 +167,10 @@ class VisitorPage(BaseModel):
     page: int
     page_size: int
     has_more: bool
+    # 非会员也拿得到列表，但 items 是脱敏占位：昵称打码、头像换本地素材、
+    # user_id 为负数占位。前端据此叠模糊并拦截点击，会员为 False。
+    # ``can_view_details`` 语义保持原样（仅会员 True），浏览记录窗口仍靠它判断身份。
+    masked: bool = False
 
 
 class VisitorCountResponse(BaseModel):

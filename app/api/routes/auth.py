@@ -1,6 +1,8 @@
 """用户认证和账号安全接口。"""
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +17,7 @@ from app.schemas.auth import (
     PhoneLoginRequest,
     RefreshRequest,
     RealNameRequest,
+    RealNameSubmissionResponse,
     SmsSendRequest,
     SmsSendResponse,
     TokenResponse,
@@ -134,15 +137,23 @@ async def logout_all(current: CurrentUser = Depends(get_current_user), db: Async
 
 
 @router.get("/me", response_model=UserResponse, summary="获取当前用户信息")
-async def me(current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict:
+async def me(response: Response, current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict:
     """返回当前用户基本信息、手机号脱敏结果和认证状态。"""
-    result = await db.execute(text("SELECT id, phone, nickname, avatar, status, phone_verified_at FROM users WHERE id = :id"), {"id": current.id})
+    response.headers["Cache-Control"] = "private, no-store"
+    result = await db.execute(text("""SELECT u.id, u.phone, u.nickname, u.avatar, u.status, u.phone_verified_at,
+        COALESCE(ua.realname_status, 0) AS realname_status, COALESCE(ua.face_verified, 0) AS face_verified,
+        ua.fail_reason FROM users u LEFT JOIN user_auth ua ON ua.user_id = u.id WHERE u.id = :id"""), {"id": current.id})
     row = result.mappings().first()
     phone = row["phone"] if row else None
+    realname_status = row["realname_status"] if row else current.realname_status
     return {"id": current.id, "phone_masked": f"{phone[:3]}****{phone[-4:]}" if phone else None,
             "nickname": row["nickname"] if row else None, "avatar": row["avatar"] if row else None,
             "status": row["status"] if row else current.status, "phone_verified": bool(row and row["phone_verified_at"]),
-            "realname_status": current.realname_status, "face_verified": current.face_verified or 0,
+            "realname_status": realname_status, "face_verified": row["face_verified"] if row else current.face_verified or 0,
+            "realname_fail_reason": (
+                auth.public_realname_fail_reason(realname_status, row["fail_reason"] if row else None)
+                if current.impersonated_by is None else None
+            ),
             "need_bind_phone": not bool(phone)}
 
 
@@ -160,7 +171,29 @@ async def agreements() -> dict[str, dict[str, str]]:
             for agreement_type, version in settings.agreement_versions.items()}
 
 
-@router.post("/realname", status_code=status.HTTP_200_OK, summary="提交实名认证")
+class RealnamePrivacyRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def handle(request: Request):
+            try:
+                return await handler(request)
+            except RequestValidationError:
+                if request.path_params.get("kind", "realname") != "realname":
+                    raise
+                # 默认 422 可能回显姓名、证件号或后台自由备注。
+                raise HTTPException(422, detail="实名认证请求参数无效") from None
+
+        return handle
+
+
 async def realname(body: RealNameRequest, current: CurrentUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict:
-    """提交姓名和身份证信息，进入实名认证审核流程。"""
+    """提交姓名和身份证信息，返回本次提交的实际结果。"""
     return await auth.submit_realname(db, current.id, body)
+
+
+router.add_api_route(
+    "/realname", realname, methods=["POST"], response_model=RealNameSubmissionResponse,
+    summary="提交实名认证", route_class_override=RealnamePrivacyRoute,
+    responses={422: {"description": "实名输入不合法；错误详情不回显提交资料"}},
+)

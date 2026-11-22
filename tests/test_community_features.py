@@ -26,6 +26,7 @@ from app.api.dependencies import (
     get_current_user,
     get_face_verified_user,
     get_realname_verified_user,
+    get_verified_user,
 )
 from app.api.routes import community as community_routes
 from app.core import redis as redis_module
@@ -849,11 +850,9 @@ async def test_face_guard_requires_realname_and_face() -> None:
 
 
 def test_community_interactions_require_realname() -> None:
-    """点赞/收藏/评论/话题/活动/纸飞机只需实名；发布动态需实名 + 人脸。"""
+    """收藏/评论/话题/活动/纸飞机只需实名；点赞暂不要求实名；发布动态需实名 + 人脸。"""
     realname_routes = (
         ("/api/v1/community/posts/{post_id}", "DELETE"),
-        ("/api/v1/community/posts/{post_id}/like", "PUT"),
-        ("/api/v1/community/posts/{post_id}/like", "DELETE"),
         ("/api/v1/community/posts/{post_id}/collect", "PUT"),
         ("/api/v1/community/posts/{post_id}/collect", "DELETE"),
         ("/api/v1/community/posts/{post_id}/comments", "POST"),
@@ -881,6 +880,10 @@ def test_community_browsing_does_not_require_realname() -> None:
         ("/api/v1/community/posts", "GET"),
         ("/api/v1/community/posts/{post_id}", "GET"),
         ("/api/v1/community/posts/{post_id}/comments", "GET"),
+        ("/api/v1/community/posts/{post_id}/like", "PUT"),
+        ("/api/v1/community/posts/{post_id}/like", "DELETE"),
+        ("/api/v1/community/comments/{comment_id}/like", "PUT"),
+        ("/api/v1/community/comments/{comment_id}/like", "DELETE"),
         ("/api/v1/community/topics", "GET"),
         ("/api/v1/community/activities", "GET"),
         ("/api/v1/community/report-reasons", "GET"),
@@ -890,6 +893,10 @@ def test_community_browsing_does_not_require_realname() -> None:
         dependencies = route_dependencies(path, method)
         assert get_realname_verified_user not in dependencies, (method, path)
         assert get_face_verified_user not in dependencies, (method, path)
+        # 动态/评论点赞与浏览同门槛：登录即可，不卡手机号
+        if "/like" in path:
+            assert get_verified_user not in dependencies, (method, path)
+            assert get_current_user in dependencies, (method, path)
 
 @pytest.mark.asyncio
 async def test_list_comments_checks_post_visibility(monkeypatch: pytest.MonkeyPatch) -> None:

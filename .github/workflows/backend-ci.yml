@@ -90,6 +90,10 @@ jobs:
           tests/test_matchmaker_application_name.py
           tests/test_discovery_features.py
           app/services/user_columns.py tests/test_region_preflight_20261104.py
+      - name: Settings privacy write contracts (Q7)
+        run: >-
+          uv run --no-sync pytest tests/test_settings_features.py
+          tests/test_derivation_outbox.py::test_privacy_mutation_enqueues_high_priority_before_commit -q
       - name: Ruff (workspace member filters)
         run: uv run --no-sync ruff check tests/test_workspace_member_filter_scope.py
       - name: Test workspace activity check-in
@@ -338,6 +342,7 @@ jobs:
           app/schemas/matchmaker_workspace.py app/services/matchmaker_workspace.py
           tests/test_workspace_lead_intention_grades_20261107.py
           app/services/idempotency.py app/services/matchmaker_member_admin.py
+          app/services/member_auth_admin.py app/services/certifications.py
           app/services/promoter_staff_admin.py app/services/user_columns.py
           app/services/message_admin.py
           scripts/region_preflight.py

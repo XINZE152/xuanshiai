@@ -37,7 +37,7 @@ Content-Type: application/json
 | --- | --- | --- | --- | --- | --- | --- |
 | `page` | query | int | 否 | 1 | ≥1, ≤1000 | 页码 |
 | `page_size` | query | int | 否 | 20 | ≥1, ≤100 | 每页条数 |
-| `status` | query | string | 否 | `all` | 枚举 `all\|success\|fail` | `all`=全部（含待审）、`success`=认证成功（face_verified=1）、`fail`=认证失败（face_verified=2） |
+| `status` | query | string | 否 | `all` | 枚举 `all\|pending\|success\|fail` | `all`=已提交的实名记录；`pending`=审核中/复核（1/4），`success`=通过（2），`fail`=未通过/撤销（3/5） |
 | `keyword` | query | string | 否 | 无 | ≤64 | 模糊匹配 `users.nickname` / `users.phone` / `user_auth.real_name` |
 
 #### 请求示例
@@ -50,10 +50,10 @@ Authorization: Bearer <token>
 非法示例（`status` 取非法枚举）：
 
 ```http
-GET /api/v1/admin/members/auth/realname-reviews?status=pending
+GET /api/v1/admin/members/auth/realname-reviews?status=unknown
 ```
 
-返回 `422`，`detail` 提示 `status` 不在 `^(all|success|fail)$` 内。
+返回 `422`，`detail` 提示 `status` 不在 `^(all|pending|success|fail)$` 内。
 
 #### 返回参数
 
@@ -79,6 +79,7 @@ GET /api/v1/admin/members/auth/realname-reviews?status=pending
 | `items[].file_url` | string\|null | 是 | `null` | 同 `face_photo`（核验文件） |
 | `items[].result` | string | 是 | — | `success`/`fail`/`pending` |
 | `items[].result_label` | string | 是 | — | 认证成功/认证失败/待审 |
+| `items[].submission_version` | int | 是 | — | 本次提交版本；审核时原样传回 |
 | `items[].created_at` | string\|null | 是 | `null` | 提交认证时间 |
 | `page` / `page_size` / `total` / `has_more` | int/bool | 是 | — | 分页元数据 |
 
@@ -94,7 +95,7 @@ GET /api/v1/admin/members/auth/realname-reviews?status=pending
       "id_card_front": "/uploads/id/1.jpg", "id_card_back": "/uploads/id/2.jpg",
       "face_method": "动作活检", "face_vendor": "腾讯云人脸核身", "face_score": "93.39",
       "face_photo": "/uploads/face/1.jpg", "file_url": "/uploads/face/1.jpg",
-      "result": "success", "result_label": "认证成功", "created_at": "2026-07-12T11:14:48"
+      "result": "success", "result_label": "认证成功", "created_at": "2026-07-12T11:14:48", "submission_version": 1
     }
   ],
   "page": 1, "page_size": 20, "total": 1, "has_more": false
@@ -111,7 +112,7 @@ GET /api/v1/admin/members/auth/realname-reviews?status=pending
 
 - 前置：登录且具备 `matchmaker.member.read`。
 - 调用顺序：页面「实名认证」Tab 进入时调用本接口 + `realname-stats`；切换状态 Tab / 点击「搜索」时带新 `status`/`keyword` 重新调用。
-- 状态流转：`user_auth.face_verified` 0 待审 / 1 通过 / 2 失败；审核由 `PATCH /auth/realname/{id}` 修改。
+- **任务 15 变更**：列表从按 `face_verified` 分类改为按 `realname_status` 分类；审核使用 §7 并回传 `submission_version`。§2.2 仍是人脸核验统计，故与实名列表数不必相同。
 - 边界：无权限返回 `403`；未登录 `401`。
 
 #### 错误
@@ -376,7 +377,7 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 
 #### 返回参数差异
 
-- **house**：`items[].file_url` = `user_auth.house_cert`（文件凭证）；无附加字段。
+- **house**：`items[].file_url` = `user_auth.house_cert`（文件凭证）；底层四态为 0未提交、1审核中、2通过、3未通过，并映射为 `pending/pass/fail`。
 - **education**：只返回 `education_cert IS NOT NULL` 的已提交记录；`items[].degree`（学历）、`items[].school`（毕业学校）；`file_url` = `education_cert`。底层四态为 0未提交、1审核中、2通过、3未通过，并映射为 `pending/pass/fail`。
 - **other**：`items[].auth_type_id`（int）、`items[].auth_type_name`（string）；`file_url` = `user_auth_extra.file_url`。
 
@@ -608,8 +609,8 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 #### 基本信息
 
 - 用途：对认证记录执行通过(1)/未通过(2)审核。
-- 权限：`matchmaker.member.manage`。
-- 成功状态：`200 OK`，返回 `{ "id": int, "kind": string, "status": int }`。
+- 权限：后台登录，`Authorization: Bearer <token>`，需要 `matchmaker.member.manage`。
+- 无 query；请求和响应 Content-Type 均为 `application/json`。成功为 `200 OK`，返回 `{ "id": int, "kind": string, "status": int }`。
 
 #### 请求参数
 
@@ -618,30 +619,37 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 | `kind` | path | string | 是 | `realname\|commitment\|marriage\|house\|education\|other` | 认证类型 |
 | `review_id` | path | int | 是 | ≥1 | 记录主键（实名/房产/学历为 `user_auth.id`，其余为各自表 id） |
 | `status` | body | int | 是 | 1 或 2 | 1 通过 / 2 未通过 |
-| `remark` | body | string\|null | 条件必填 | ≤255；`status=2` 时前端必须填写 | 审核备注；承诺和学历驳回原因会回显给用户 |
+| `remark` | body | string\|null | 承诺、学历驳回必填；实名可省略，默认 `null` | ≤255；实名驳回如传字符串，不得全空白 | 新客户端实名驳回应传原因代码（见下文）；旧请求省略或传自由备注时只使用固定通用原因 |
+| `submission_version` | body | int\|null | 实名重提后必填，默认 `null` | ≥0 | 原样回传审核列表返回的 `submission_version`；其他认证忽略 |
 
 #### 请求示例
 
-```json
-{ "status": 1, "remark": "资料清晰，予以通过" }
+```http
+PATCH /api/v1/admin/members/auth/realname/364
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"status":2,"remark":"document_unclear","submission_version":2}
 ```
 
-非法示例（`status=3`）：`422`，`status` 超出 1–2 范围。
+`200 application/json`：`{"id":364,"kind":"realname","status":2}`。`id`（整数）为认证记录主键；`kind`（字符串）原样返回类别；`status`（整数）回显动作（1 通过、2 未通过），三项均必返且不为空。非法示例：`{"status":2,"remark":"  "}` → `422 {"detail":"审核未通过时请填写有效原因或省略该字段"}`；`status=3` → `422 {"detail":"实名认证请求参数无效"}`（仅示例中的实名路径）。
 
 #### 使用方法与业务规则
 
-- `kind=commitment/house/education/other/realname`：更新对应表 `status`/`verified` 并写审计。承诺通过/驳回同时更新单身承诺完成标记；学历将后台动作 `1/2` 映射为用户侧 `2通过/3未通过`。
+- `kind=commitment/house/education/other/realname`：更新对应表状态并写审计；审核动作 `status=1/2` 分别表示通过/未通过。承诺通过/驳回同时更新单身承诺完成标记；学历和房产将后台动作 `1/2` 映射为用户侧 `2通过/3未通过`。实名仅接受 `realname_status=1/4` 且具有实名材料的记录；房产仅接受凭证存在且 `house_verified=1` 的待审记录；其他认证仅接受 `status=0` 的待审记录，重复或过期审核返回 `409`。房产提交时进入 `house_verified=1` 待审状态。
 - `kind=marriage`：**不支持**，返回 `400`（婚姻核验结果为 married/no_record/divorced，无通过/未通过语义）。
-- `kind` 非法值（如 `foo`）被路径正则拦截，返回 `404`（未匹配到路由）。
+- `kind` 非法值（如 `foo`）被路径参数校验拦截，返回 `422`。实名审核没有专用次数限制，不要求 `Idempotency-Key`；并发或重放由状态和提交版本拦截。
 
 #### 错误
 
 | HTTP | 触发条件 | 前端处理 |
 | --- | --- | --- |
 | 400 | `kind=marriage` | 提示婚姻核验不可审核 |
-| 404 | 记录不存在 / kind 非法 | 提示 |
-| 409 | 承诺或学历记录已不在审核中 | 刷新列表，不允许重复改判 |
-| 422 | `status` 非法，或驳回承诺/学历时未填写原因 | 提示并保留当前审核输入 |
+| 401/403 | 未登录或无审核权限 | 重新登录或核对权限 |
+| 404 | 记录不存在 | 提示并刷新列表 |
+| 409 | 记录已不在审核中，或实名版本不匹配/重提后未传版本，或实名通过时证件冲突 | 刷新列表并核对，不能直接重放 |
+| 422 | 参数非法、实名原因全空白，或承诺/学历驳回未填写原因 | 检查参数，不回显实名请求原始输入 |
+| 500/503 | 审核或通知写入失败 | 未确认结果时先刷新；未提交的事务不会留下审核结果或通知 |
 
 #### 文档完成自检清单
 
@@ -651,7 +659,36 @@ GET /api/v1/admin/members/auth/commitment-reviews?status=pending&keyword=%E5%BE%
 - [x] 使用方法（含 marriage 不支持说明）
 - [x] 错误表
 
+#### 变更记录
+
+- **任务 15**：实名审核按当前实名状态与提交版本判定；与纯实名审核共用同一行锁，审核结果和站内通知在同一事务。重复或过期审核返回 `409`，不重复发通知。只有会员认证后台实际审核已存人脸材料时，才可同步尚未核验的人脸标记。新客户端驳回应选择 `identity_mismatch`（身份资料不一致）、`document_unclear`（证件资料不清晰）或 `photo_mismatch`（人脸与资料不一致）。服务端映射为固定文案；旧客户端省略原因或提交自由备注时，使用「实名认证未通过，请核对资料后重新提交」，不原样保存或返回自由备注。全空白字符串返回 `422`。通知不含备注、身份材料、审核人或供应商明细。旧客户端仍可审核首份资料；重提后的材料必须刷新列表并回传版本，不能不带版本盲审。
+- 2026-11-18（M3-1）：房产认证列表和审核统一按用户侧四态处理；新提交的房产资料进入待审状态，审核成功/失败分别落为 2/3。审核接口增加实名、房产、其他认证的待审状态校验，避免重复审核。请求与响应结构保持兼容。
+
 ---
+
+#### 纯实名审核入口（任务 15）
+
+平台管理员：`GET /api/v1/admin/realname-reviews?status=1`（或 `4`），`PATCH /api/v1/admin/users/{user_id}/realname/review`。有权限且可访问该会员的红娘后台：`GET /api/v1/admin/matchmaker/members/realname-reviews?status=4`，`PATCH /api/v1/admin/matchmaker/members/{member_id}/realname/review`。这些 PATCH 使用 Bearer 登录和 JSON，以会员 ID（正整数，不是认证记录 ID）定位；成功返回 `200 application/json`。
+
+| 字段 | 位置 | 类型 | 必填及默认 | 含义 |
+| --- | --- | --- | --- | --- |
+| `status` | body | int | 必填，无默认 | 2 通过、3 驳回、4 转人工复核 |
+| `reason` | body | string/null | 否，默认 `null` | 最长 255 字符；实名驳回应选择固定原因代码；省略或旧自由备注按 §7 使用通用文案 |
+| `submission_version` | body | int/null | 重提后必填，默认 `null` | 列表返回的提交版本，≥0 |
+
+```http
+PATCH /api/v1/admin/users/7/realname/review
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"status":3,"reason":"document_unclear","submission_version":2}
+```
+
+```json
+{"user_id":7,"realname_status":3,"reason":"证件资料不清晰，请核对后重新提交"}
+```
+
+三个字段均必返：`user_id`（整数）为会员 ID，`realname_status`（整数）为结果 2/3/4，`reason`（字符串或 `null`）仅驳回时返回固定公开文案。不回传原始资料、自由备注或供应商错误。非法示例 `{"status":3,"reason":"  "}` 返回 `422 {"detail":"审核未通过时请填写有效原因或省略该字段"}`；`{"status":3}` 仍兼容，使用固定通用原因。`401/403` 重新登录或核对权限和会员范围，`404` 记录不存在，`409` 应刷新后重新核对资料，`500/503` 先刷新确认是否生效。无专用限额或幂等键。此前只能由状态 1 发起审核；现在 `1→4` 可转复核，`1/4→2/3` 可终审，不重复转复核，不授予人脸通过。两个列表均新增 `items[].submission_version`；旧客户端兼容边界同 §7。
 
 ### 8. `DELETE /api/v1/admin/members/auth/{kind}/{review_id}`
 

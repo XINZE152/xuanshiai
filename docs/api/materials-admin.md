@@ -100,6 +100,19 @@ Content-Type: application/json
 
 ## 3. 素材
 
+### 3.0 将私有素材复制为长期配置图片
+
+素材列表中的 url 是短时签名地址，不能直接写入长期平台配置。选择素材时调用本接口，将已有 WebP 图片复制到公开的 common/ 图片目录；原素材不变，公共副本供平台配置长期引用。
+
+- **基本信息**：POST /api/v1/admin/materials/{material_id}/copy-to-common；需登录且具备 platform.material.write；无请求体；成功返回 201 Created。
+- **请求参数**：material_id（path，正整数，必填，≥1，素材 ID；示例 42，非法示例 0）。Header：Authorization: Bearer access_token。
+- **请求示例**：POST /api/v1/admin/materials/42/copy-to-common，携带 Authorization Header；无请求体。
+- **返回参数**：material_id（integer，必返，源素材 ID）；url（string，必返，长期公共图片路径，例如 /storage/uploads/common/<uuid>.webp）。
+- **返回示例**：{"material_id":42,"url":"/storage/uploads/common/9b12d60dcae444488ebac4dfd1bc88f5.webp"}。
+- **使用方法与业务规则**：先从素材列表选择未删除素材，再调用本接口；复制操作需要素材写权限，源素材仍保留，复制产生的公共副本不会随素材软删除而删除。仅允许复制素材库 admin/ 目录下的 WebP 文件；接口记录 material.copy_to_common 审计事件。该接口不修改配置；调用方仍需通过对应平台配置接口保存返回的 url。
+- **错误**：401 未登录；403 缺少写权限；404 素材或文件不存在；422 ID 或素材路径非法；500 复制或审计失败。调用方应提示错误并保持原配置不变。
+- **兼容性**：新增端点，不改变现有素材列表/上传/编辑/删除响应。
+
 ### 3.1 `GET /api/v1/admin/materials`
 
 - 用途：分页查询素材（软删除不计）。
@@ -243,6 +256,7 @@ Content-Type: application/json
 | 日期 | 变更 |
 | --- | --- |
 | 2026-10-20 | 新增素材库分类与素材 CRUD 接口（A4） |
+| 2026-11-07 | TASK-PLATFORM-MATERIAL-2026-11-07-01：新增短时签名素材复制为长期配置图片的接口 |
 
 ## 6. 文档完成自检清单
 

@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin, require_sensitive_operation
+from app.api.routes.auth import RealnamePrivacyRoute
 from app.core.config import settings
 from app.core.sensitive_fields import mask_contact, redaction_level_from_permissions
 from app.db.session import get_db
@@ -1211,7 +1212,6 @@ async def member_realname_reviews(
     return (await list_realname_reviews(db, page=page, page_size=page_size, status=status, search=search, scope=scope, scope_params=params)).model_dump()
 
 
-@router.patch("/members/{member_id}/realname/review")
 async def review_member_realname(
     member_id: int,
     body: RealnameReviewRequest,
@@ -1220,7 +1220,17 @@ async def review_member_realname(
 ) -> dict:
     from app.api.routes.member_records_admin import _ensure_member
     await _ensure_member(db, member_id, current)
-    return (await review_realname(db, member_id, body.status, body.reason, current.account.id)).model_dump()
+    result = await review_realname(
+        db, member_id, body.status, body.reason, current.account.id, submission_version=body.submission_version
+    )
+    return result.model_dump()
+
+
+router.add_api_route(
+    "/members/{member_id}/realname/review", review_member_realname, methods=["PATCH"],
+    route_class_override=RealnamePrivacyRoute,
+    responses={422: {"description": "实名审核参数不合法；不回显原始输入"}},
+)
 
 
 @router.get("/members/certification-reviews")
