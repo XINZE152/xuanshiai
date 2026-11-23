@@ -71,6 +71,9 @@ scripts/*
 !scripts/recalculate_profile_completion.py
 # P0 发布前 schema 预检：schema-contract/backend-ci 引用，必须随仓库发布
 !scripts/check_release_schema.py
+# 前后端接口对账（P3）：防止「前端已上、后端没有路由」再次发生，脚本与基线都要入库
+!scripts/check_api_contract.py
+!scripts/api_contract_baseline.json
 # paper_plane/chat 域迁移执行器：P3 起必须随仓库发布
 !scripts/manage_domain_migration.py
 # 业务迁移执行器：tests/test_business_schema_migration_contract.py 直接导入

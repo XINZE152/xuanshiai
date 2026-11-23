@@ -1,0 +1,195 @@
+{
+  "note": "前端调用但后端 OpenAPI 里没有的接口。新增失配必须评审后再登记；能匹配上的条目请删除。",
+  "entries": [
+    {
+      "file": "community.uts",
+      "url": "/community/activity/detail",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/activity/signup",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/block",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/city/set",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/comment/delete",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/dynamic/collect",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/dynamic/comment",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/dynamic/delete",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/dynamic/detail",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/dynamic/like",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/dynamic/list",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/dynamic/publish",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/dynamic/share",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/follow",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/notifications/read",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/notifications/read-all",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/paper-planes",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/paper-planes/conversations",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/paper-planes/conversations/read",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/paper-planes/conversations/unread",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/paper-planes/mine",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/paper-planes/reply",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/paper-planes/send",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/paper-planes/sent",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/report",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/report/reasons",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/topic/detail",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/topic/join",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/topic/leave",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "community.uts",
+      "url": "/community/unfollow",
+      "reason": "社区旧 mock 分支路径：仅 USE_MOCK 时走这里，真接口为 /community/posts、/community/topics、/community/activities、/paper-planes 系列"
+    },
+    {
+      "file": "parent.uts",
+      "url": "/parent/children",
+      "reason": "家长端（parent）为独立后端服务，路由不在本仓 OpenAPI"
+    },
+    {
+      "file": "parent.uts",
+      "url": "/parent/context",
+      "reason": "家长端（parent）为独立后端服务，路由不在本仓 OpenAPI"
+    },
+    {
+      "file": "user.uts",
+      "url": "/user/apply",
+      "reason": "用户端旧 mock 路径（cloudFunctionName='user'）：仅 USE_MOCK 时走这里，真接口为 /users/me/*、/users/{id}、/discovery/*"
+    },
+    {
+      "file": "user.uts",
+      "url": "/user/detail",
+      "reason": "用户端旧 mock 路径（cloudFunctionName='user'）：仅 USE_MOCK 时走这里，真接口为 /users/me/*、/users/{id}、/discovery/*"
+    },
+    {
+      "file": "user.uts",
+      "url": "/user/like",
+      "reason": "用户端旧 mock 路径（cloudFunctionName='user'）：仅 USE_MOCK 时走这里，真接口为 /users/me/*、/users/{id}、/discovery/*"
+    },
+    {
+      "file": "user.uts",
+      "url": "/user/me",
+      "reason": "用户端旧 mock 路径（cloudFunctionName='user'）：仅 USE_MOCK 时走这里，真接口为 /users/me/*、/users/{id}、/discovery/*"
+    },
+    {
+      "file": "user.uts",
+      "url": "/user/me/nickname",
+      "reason": "用户端旧 mock 路径（cloudFunctionName='user'）：仅 USE_MOCK 时走这里，真接口为 /users/me/*、/users/{id}、/discovery/*"
+    },
+    {
+      "file": "user.uts",
+      "url": "/user/me/profile",
+      "reason": "用户端旧 mock 路径（cloudFunctionName='user'）：仅 USE_MOCK 时走这里，真接口为 /users/me/*、/users/{id}、/discovery/*"
+    }
+  ]
+}

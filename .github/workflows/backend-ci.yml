@@ -530,3 +530,53 @@ jobs:
           tests/integration/ai/test_ai_memory_projection_real_db.py
           tests/integration/ai/test_consent_generation_identity_real_db.py
           tests/integration/business/test_workspace_member_pickup_mysql.py -q
+
+  # 2026-11-23：前后端接口对账（P3）。安全中心曾因「前端调 /security/center、后端无此路由」
+  # 全站 404，而两端测试都是绿的。本 job 把前端 api/*.uts 的 url 字面量与后端 OpenAPI 比对，
+  # 新增失配即失败；已知历史路径记在 scripts/api_contract_baseline.json（每条带原因）。
+  # 前端仓库读不到时（私有仓未配 token）只告警不失败，避免误伤无关 PR。
+  api-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ENVIRONMENT: testing
+      AUTO_INIT_DB: "false"
+      # 只读 OpenAPI，不连库；仍给一个不可达 DSN，防止脚本意外访问真实数据库。
+      DATABASE_URL: mysql+aiomysql://ci:ci@127.0.0.1:1/ci_unreachable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: backend
+      # 前端私有仓需在 Secrets 配置 XUANSHIAI_VUE_TOKEN；公开仓用默认 GITHUB_TOKEN 即可。
+      - id: frontend
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: redspider-ai/xuanshiai-vue
+          path: frontend
+          token: ${{ secrets.XUANSHIAI_VUE_TOKEN || github.token }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install backend and dev dependencies
+        working-directory: backend
+        run: uv sync --locked --extra dev
+      - name: Ruff (security center and api contract)
+        working-directory: backend
+        run: >-
+          uv run --no-sync ruff check
+          app/api/routes/security.py app/schemas/security.py app/services/security_center.py
+          scripts/check_api_contract.py tests/test_api_contract.py tests/test_security_center_api.py
+      - name: Security center and api contract tests
+        working-directory: backend
+        run: >-
+          uv run --no-sync pytest
+          tests/test_security_center_api.py tests/test_api_contract.py -q
+      - name: Frontend/backend api contract
+        if: steps.frontend.outcome == 'success'
+        working-directory: backend
+        run: uv run --no-sync python scripts/check_api_contract.py --frontend ../frontend
+      - name: Frontend repo not readable (skipped)
+        if: steps.frontend.outcome != 'success'
+        run: |
+          echo "::warning::未能检出 redspider-ai/xuanshiai-vue，接口对账已跳过；请配置 Secrets.XUANSHIAI_VUE_TOKEN"
