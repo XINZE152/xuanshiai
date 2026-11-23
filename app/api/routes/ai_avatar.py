@@ -137,6 +137,7 @@ async def send_message(
         target_user_id,
         body.content,
         idempotency_key=idempotency_key,
+        style=(body.style or "").strip() or None,
     )
 
 

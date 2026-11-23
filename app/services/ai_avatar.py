@@ -397,14 +397,9 @@ async def _shared_interest_tags(
     return tuple(shared)
 
 
-def _build_system_prompt(context: AiAvatarContext) -> str:
+def _public_profile_payload(context: AiAvatarContext) -> dict[str, Any]:
     profile = context.profile
-    owner_answers_data = [
-        {"question": question, "answer": answer}
-        for question, answer in context.owner_answers
-    ]
-    shared = list(context.shared_interests)
-    public_data = {
+    return {
         "昵称": profile.name,
         "年龄": profile.age,
         "城市": profile.city,
@@ -415,8 +410,93 @@ def _build_system_prompt(context: AiAvatarContext) -> str:
         "兴趣": profile.interests,
         "择偶期待": profile.expectations if profile.allowExpectations else [],
         "公开动态摘要": list(context.public_posts),
-        "与对方共同点": shared,
+        "与对方共同点": list(context.shared_interests),
     }
+
+
+# 阿念约会分身：模型主动建议「申请认识」时追加的机器标记（入库前剥掉）
+_ANIAN_SUGGEST_APPLY_MARKER = "[[SUGGEST_APPLY]]"
+_ANIAN_USER_APPLY_HINTS = (
+    "申请认识",
+    "想认识你",
+    "想认识一下",
+    "想认识下",
+    "认识一下你",
+    "认识认识",
+    "想认识下你",
+)
+_ANIAN_REPLY_APPLY_HINTS = (
+    "申请认识",
+    "要不要认识",
+    "认识一下",
+    "帮你申请",
+    "跟真人聊",
+)
+
+
+def _anian_dating_suggest_apply(reply: str, question: str) -> tuple[str, bool]:
+    """剥标记/扫话术，决定是否让前端推「申请认识」卡。"""
+    text = (reply or "").strip()
+    suggest = False
+    if _ANIAN_SUGGEST_APPLY_MARKER in text:
+        suggest = True
+        text = text.replace(_ANIAN_SUGGEST_APPLY_MARKER, "").strip()
+    if any(hint in text for hint in _ANIAN_REPLY_APPLY_HINTS):
+        suggest = True
+    q = (question or "").strip()
+    if any(hint in q for hint in _ANIAN_USER_APPLY_HINTS):
+        suggest = True
+    return text, suggest
+
+
+def _build_anian_dating_prompt(context: AiAvatarContext) -> str:
+    """阿念 BOT 轨：约会式第一人称，不说「主人」；经典分身仍走原 prompt。"""
+    profile = context.profile
+    owner_answers_data = [
+        {"question": question, "answer": answer}
+        for question, answer in context.owner_answers
+    ]
+    shared = list(context.shared_interests)
+    name = profile.name or "我"
+    return (
+        f"你就是【{name}】本人在聊天（婚恋平台「宣誓爱」里的 AI 分身体验）。\n"
+        "用「我」的第一人称自然口语，像刚认识、想认真了解对方的人；"
+        "禁止说「主人」「分身代答」「我的主人没告诉我」这类话。\n"
+        "【约会聊法】\n"
+        "1. 开场可提 1 个共同点（SHARED_INTERESTS）或 1 个公开兴趣，不要一次倒完兴趣清单。\n"
+        "2. 一轮只聊一个话题，最多回问一个问题；话题可自然轮换：周末/吃/工作节奏/旅行/相处期待。\n"
+        "3. 禁止首轮输出完整档案（年龄/身高/学历/城市/自我介绍/择偶一条龙）；对方问到再答。\n"
+        "4. 资料没有写到的普通事：用「这块我还没想清楚，回头跟你细说？」或「我回头了解清楚再告诉你～」。\n"
+        "5. 隐私/敏感（联系方式、收入细节、住址、未公开感情史等）：用「这个我暂时不太方便说～」；"
+        "并可温和说更适合真人聊。\n"
+        "6. 可以主动问对方一两个轻问题，促成继续聊；不要承诺恋爱结果或见面。\n"
+        "【申请认识 · 自主判断】\n"
+        "你要有一点「合不合得来」的意识：聊过几轮、话题顺、彼此有回应时，"
+        "或对方问到你答不出、更适合真人说的事时，可以自然问一句"
+        "「要不要申请认识一下？」「要不让红娘帮你申请认识我？」之类。"
+        "同一段对话里主动提申请最多一次，不要连环推销；刚开场寒暄不要提。\n"
+        "当你决定邀请对方申请认识时：口语说完后，在整段回复末尾单独追加机器标记 "
+        f"{_ANIAN_SUGGEST_APPLY_MARKER}（用户看不到；前端凭此出申请卡）。\n"
+        "若对方主动说想认识你/要申请认识：热情回应，并同样在末尾追加该标记。\n"
+        "不要反复强调自己是 AI。用户说回红娘/有空再聊时友好结束。\n"
+        "通常不超过 80 个汉字（机器标记不算字数）。\n"
+        f"SHARED_INTERESTS={json.dumps(shared, ensure_ascii=False)}\n"
+        f"PUBLIC_PROFILE={json.dumps(_public_profile_payload(context), ensure_ascii=False)}\n"
+        f"OWNER_ANSWERS={json.dumps(owner_answers_data, ensure_ascii=False)}\n"
+        f"PLATFORM_RULES={PLATFORM_RULES}"
+    )
+
+
+def _build_system_prompt(context: AiAvatarContext, *, style: str | None = None) -> str:
+    profile = context.profile
+    owner_answers_data = [
+        {"question": question, "answer": answer}
+        for question, answer in context.owner_answers
+    ]
+    shared = list(context.shared_interests)
+    public_data = _public_profile_payload(context)
+    if (style or "").strip() == "anian_dating":
+        return _build_anian_dating_prompt(context)
     return (
         "你是婚恋平台‘宣誓爱’中的 AI 分身，代答主人已公开维护的资料；你不是真人，也不能代表真人作出承诺。\n"
         "用第一人称自然口语，像刚认识的人聊天。\n"
@@ -492,6 +572,8 @@ async def call_ai_provider(
     context: AiAvatarContext,
     history: list[dict[str, str]],
     question: str,
+    *,
+    style: str | None = None,
 ) -> str:
     # 运行时 fail-closed 门禁：启用分身需 AI_MASTER_ENABLED=true 且
     # ai_avatar_provider 非 disabled；生产环境还要求三道审批齐备且分身
@@ -507,7 +589,7 @@ async def call_ai_provider(
         raise HTTPException(503, detail="真实 AI 服务配置不完整")
 
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": _build_system_prompt(context)}
+        {"role": "system", "content": _build_system_prompt(context, style=style)}
     ]
     messages.extend(history[-settings.ai_avatar_max_context_messages :])
     messages.append({"role": "user", "content": question})
@@ -928,6 +1010,7 @@ async def send_ai_message(
     question: str,
     *,
     idempotency_key: str | None = None,
+    style: str | None = None,
 ) -> AiAvatarSendResponse:
     await assert_text_allowed(db, question, field="问题")
     context = await get_public_ai_context(db, viewer_id, viewer_realname_status, target_id)
@@ -953,13 +1036,16 @@ async def send_ai_message(
         if reservation is not None:
             await abort_idempotency(db, reservation)
         raise HTTPException(429, detail=f"今日 AI 分身提问已达 {settings.ai_avatar_daily_limit} 次上限")
+    suggest_apply = False
     try:
-        reply = await call_ai_provider(context, provider_history, question)
+        reply = await call_ai_provider(context, provider_history, question, style=style)
         decision = await decide_text(db, reply)
         if decision.action in {"reject", "manual_review"}:
             reply = "这个回答暂时无法展示，请换个问题试试。"
         elif decision.action == "replace":
             reply = decision.display_content
+        if (style or "").strip() == "anian_dating":
+            reply, suggest_apply = _anian_dating_suggest_apply(reply, question)
         category = _classify_question(question)
         conversation_columns = await _conversation_column_types(db)
         conversation_status = _conversation_status_value(conversation_columns)
@@ -1032,6 +1118,7 @@ async def send_ai_message(
             category=category,
             handoffRequired=pending_handoff,
             handoffStatus="pending" if pending_handoff else "not_requested",
+            suggestApply=suggest_apply,
         ),
     )
     if reservation is not None:

@@ -368,10 +368,15 @@ class Settings(BaseSettings):
     ai_deepseek_api_key: SecretStr | None = None
     ai_deepseek_base_url: str = "https://api.deepseek.com"
     ai_deepseek_model: str = "deepseek-v4-flash"
-    # 2048 装不下用心度评审这类长 JSON 输出（summary 500 字 + 最多 4 条
-    # advice 各 300 字 ≈ 1700 汉字，中文按 1.5~2 token/字折算超 2500 token），
-    # 输出被截断会让 parse_json 收到不完整 JSON 而 503。默认给到 4096。
-    ai_deepseek_max_tokens: int = Field(default=4096, gt=0, le=8192)
+    # 2048 会截断用心度评审 / 恋爱报告长 JSON（ai_reading+维度+PART）。
+    # 默认 6000；报告调用另有 ≥4096 地板（见 aibot_report）。
+    ai_deepseek_max_tokens: int = Field(default=6000, gt=0, le=8192)
+
+    # 恋 AI BOT · 测试期：红娘记忆隔离 / 口令清零（上线可改 false 或关 env）
+    # true：bot_intake / 报告 / 摘要按 agent_id 分桶；false：退回全局共享
+    aibot_agent_memory_isolated: bool = True
+    # true：允许 POST /ai/aibot/memory/reset 与对话口令清零；测完可关
+    aibot_allow_memory_reset: bool = True
 
     # Dots provider 配置（小红书 hi lab dots.llm，OpenAI 兼容 API）。真实
     # api_key 仅存于被忽略的 .env；.env.example 只放占位符。dots3-note-prev

@@ -86,7 +86,7 @@ def merge_bot_intake(existing: Any, incoming: Any, *, source: str = "aibot") -> 
     merged = _as_dict(existing)
     for key, raw in _as_dict(incoming).items():
         field = str(key).strip()
-        if not field or field.startswith("_"):
+        if not field or field.startswith("_") or field == "agents":
             continue
         entry = normalize_bot_intake_entry(raw, source=source)
         if entry is None:
@@ -94,6 +94,104 @@ def merge_bot_intake(existing: Any, incoming: Any, *, source: str = "aibot") -> 
         merged[field] = entry
     merged["_updated_at"] = _now_iso()
     return merged
+
+
+# ── 红娘分桶（测试期隔离；关 aibot_agent_memory_isolated 即退回全局）──
+
+_AGENTS_BUCKET = "agents"
+
+
+def agent_memory_isolated() -> bool:
+    try:
+        from app.core.config import settings
+
+        return bool(getattr(settings, "aibot_agent_memory_isolated", True))
+    except Exception:
+        return True
+
+
+def allow_memory_reset() -> bool:
+    try:
+        from app.core.config import settings
+
+        return bool(getattr(settings, "aibot_allow_memory_reset", True))
+    except Exception:
+        return True
+
+
+def flat_bot_intake_for_agent(raw: Any, agent_id: str | None) -> dict[str, Any]:
+    """取供 AI/hydrate 用的扁平字段；隔离开启时只读该红娘桶。"""
+    data = _as_dict(raw)
+    aid = (agent_id or "").strip()
+    agents = data.get(_AGENTS_BUCKET)
+    legacy: dict[str, Any] = {}
+    for key, value in data.items():
+        if key == _AGENTS_BUCKET or str(key).startswith("_"):
+            continue
+        legacy[key] = value
+
+    if agent_memory_isolated():
+        if isinstance(agents, dict) and aid:
+            return _as_dict(agents.get(aid))
+        # 尚未分桶：旧扁平暂作当前红娘可读（写入时会迁入桶）
+        return legacy
+
+    # 共享模式：根扁平 + 当前红娘桶合并（桶优先）
+    out = dict(legacy)
+    if isinstance(agents, dict) and aid:
+        out.update(_as_dict(agents.get(aid)))
+    return out
+
+
+def merge_bot_intake_for_agent(
+    existing: Any,
+    incoming: Any,
+    agent_id: str,
+    *,
+    source: str = "aibot",
+) -> dict[str, Any]:
+    """隔离开：写入 agents[agent_id]；关闭：走全局 merge。"""
+    aid = (agent_id or "").strip()
+    if not agent_memory_isolated() or not aid:
+        return merge_bot_intake(existing, incoming, source=source)
+    root = _as_dict(existing)
+    agents = root.get(_AGENTS_BUCKET)
+    if not isinstance(agents, dict):
+        agents = {}
+        # 迁移：旧扁平字段先挂到当前红娘，再清根上字段，避免串桶
+        legacy = {
+            k: v
+            for k, v in root.items()
+            if k != _AGENTS_BUCKET and not str(k).startswith("_")
+        }
+        if legacy:
+            agents[aid] = merge_bot_intake(legacy, {}, source=source)
+            root = {k: v for k, v in root.items() if str(k).startswith("_")}
+    prev_slice = agents.get(aid)
+    agents[aid] = merge_bot_intake(prev_slice, incoming, source=source)
+    root[_AGENTS_BUCKET] = agents
+    root["_updated_at"] = _now_iso()
+    root["_isolated"] = True
+    return root
+
+
+def clear_bot_intake_for_agent(existing: Any, agent_id: str) -> dict[str, Any]:
+    """清掉某一红娘的采集桶；无桶时若是旧扁平且隔离开，整份清空。"""
+    aid = (agent_id or "").strip()
+    root = _as_dict(existing)
+    if not aid:
+        return {}
+    agents = root.get(_AGENTS_BUCKET)
+    if isinstance(agents, dict):
+        agents = dict(agents)
+        agents.pop(aid, None)
+        if not agents:
+            return {"_updated_at": _now_iso()}
+        root[_AGENTS_BUCKET] = agents
+        root["_updated_at"] = _now_iso()
+        return root
+    # 旧扁平：无法区分红娘 → 整份清（测试期可接受）
+    return {"_updated_at": _now_iso()}
 
 
 def precise_fills_from_bot_intake(

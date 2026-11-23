@@ -30,6 +30,8 @@ class AiAvatarMessageRequest(BaseModel):
     """One visitor question sent to a target user's AI avatar."""
 
     content: str = Field(min_length=1, max_length=300)
+    # anian_dating：恋 AI BOT 阿念轨约会式人设；空=经典公开资料代答
+    style: str | None = Field(default=None, max_length=32)
 
     @field_validator("content")
     @classmethod
@@ -92,6 +94,8 @@ class AiAvatarReplyResult(BaseModel):
     source: Literal["real-ai"] = "real-ai"
     handoffRequired: bool = False
     handoffStatus: Literal["not_requested", "pending", "answered"] = "not_requested"
+    # 阿念约会分身：建议前端在对话流中插入「申请认识」卡（经典分身恒为 false）
+    suggestApply: bool = False
 
 class AiAvatarSendResponse(BaseModel):
     """Conversation snapshot returned after a successful AI reply."""

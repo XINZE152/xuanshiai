@@ -114,9 +114,17 @@ async def _load_nickname(db: AsyncSession, user_id: int) -> str:
     return "会员"
 
 
-async def _load_member_facts(db: AsyncSession, user_id: int) -> dict[str, Any]:
-    """精准资料优先，空则回落 bot_intake 模糊文案，供红娘对话上下文。"""
-    from app.services.aibot_profile_sync import facts_for_ai
+async def _load_member_facts(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    """精准资料优先，空则回落 bot_intake 模糊文案，供红娘对话上下文。
+
+    测试期隔离开启时，bot_intake 只取当前红娘桶。
+    """
+    from app.services.aibot_profile_sync import facts_for_ai, flat_bot_intake_for_agent
 
     try:
         row = (
@@ -167,7 +175,8 @@ async def _load_member_facts(db: AsyncSession, user_id: int) -> dict[str, Any]:
         "residence_city_code": row.get("residence_city_code"),
         "residence_display": residence_display,
     }
-    return facts_for_ai(precise=precise, bot_intake=row.get("bot_intake_json"))
+    bot_flat = flat_bot_intake_for_agent(row.get("bot_intake_json"), agent_id)
+    return facts_for_ai(precise=precise, bot_intake=bot_flat)
 
 
 async def get_assignment(db: AsyncSession, user_id: int) -> AibotAssignmentResponse:
@@ -377,7 +386,7 @@ async def post_welcome(db: AsyncSession, user_id: int, session_id: str) -> Aibot
 
     meta = get_agent_meta(session.agent_id)
     welcomes = {
-        "anian": "我是阿念，你的专属红娘。感觉和条件我都会帮你看——今天想先聊聊，还是直接看恋爱报告？",
+        "anian": "我是阿念，你的专属红娘。想先随便聊聊，还是看看恋爱报告？材料够了我再帮你整理一版理解。",
         "yuzhou": "我是予舟，专帮 30 内的男生把「不敢开口」练成「约得出来」。先聊你卡在哪一步？",
         "chengan": "我是承安，帮 30+ 的你少盲聊、多见面。条件先对齐——你更看重哪几条？",
         "nianchu": "我是念初，帮你把「聊得来」和「真适合」分开看。今天想先梳理边界，还是看看同频的人？",
@@ -431,7 +440,7 @@ async def _generate_reply(
     user_text: str,
 ) -> dict[str, Any]:
     nickname = await _load_nickname(db, user_id)
-    member_facts = await _load_member_facts(db, user_id)
+    member_facts = await _load_member_facts(db, user_id, agent_id=agent_id)
     history_rows = (
         await db.execute(
             text(

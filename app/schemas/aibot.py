@@ -16,6 +16,17 @@ class AibotAssignmentUpdate(BaseModel):
     agent_id: str = Field(..., min_length=1, max_length=32)
 
 
+class AibotMemoryResetRequest(BaseModel):
+    agent_id: str = Field(..., min_length=1, max_length=32)
+
+
+class AibotMemoryResetResponse(BaseModel):
+    agent_id: str
+    ok: bool = True
+    deleted: dict[str, int] = Field(default_factory=dict)
+    message: str = ""
+
+
 class AibotTurnItem(BaseModel):
     turn_id: str
     role: str

@@ -596,6 +596,54 @@ async def test_master_switch_off_fails_closed_with_stable_503_detail(
     assert exc_info.value.detail == "AI服务未启用"
 
 
+def test_anian_dating_prompt_avoids_主人_and_uses_dating_tone() -> None:
+    context = ai_avatar.AiAvatarContext(
+        profile=AiAvatarProfileResponse(
+            id=2,
+            name="小满",
+            interests=["徒步", "咖啡"],
+            restricted=False,
+        ),
+        public_posts=(),
+        shared_interests=("徒步",),
+    )
+    prompt = ai_avatar._build_system_prompt(context, style="anian_dating")
+    assert "我的主人还没告诉我" not in prompt
+    assert "「我」" in prompt
+    assert "回头" in prompt
+    assert "不太方便" in prompt
+    assert "申请认识" in prompt
+    assert "倒完兴趣" in prompt or "兴趣清单" in prompt
+    assert "[[SUGGEST_APPLY]]" in prompt
+    assert "自主判断" in prompt
+    classic = ai_avatar._build_system_prompt(context)
+    assert "我的主人还没告诉我" in classic
+
+
+def test_anian_dating_suggest_apply_strips_marker_and_honors_user_intent() -> None:
+    cleaned, flag = ai_avatar._anian_dating_suggest_apply(
+        "聊得挺投缘的，要不要申请认识一下？[[SUGGEST_APPLY]]",
+        "周末一般做什么",
+    )
+    assert flag is True
+    assert "[[SUGGEST_APPLY]]" not in cleaned
+    assert "申请认识" in cleaned
+
+    cleaned2, flag2 = ai_avatar._anian_dating_suggest_apply(
+        "好呀，我也想认真认识你～",
+        "我想认识一下你",
+    )
+    assert flag2 is True
+    assert cleaned2 == "好呀，我也想认真认识你～"
+
+    cleaned3, flag3 = ai_avatar._anian_dating_suggest_apply(
+        "我也喜欢徒步，你一般去哪走？",
+        "你好呀",
+    )
+    assert flag3 is False
+    assert "徒步" in cleaned3
+
+
 def test_ai_avatar_routes_and_tables_are_declared() -> None:
     from app.api.routes.ai_avatar import router
 

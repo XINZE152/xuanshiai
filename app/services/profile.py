@@ -716,16 +716,46 @@ async def update_profile(
     sync_precise_from_bot = bool(values.pop("sync_precise_from_bot", False))
     clear_bot_intake = bool(values.pop("clear_bot_intake", False))
     incoming_bot_intake = values.pop("bot_intake", None)
+    bot_intake_agent_id = values.pop("bot_intake_agent_id", None)
+    clear_bot_intake_agent_id = values.pop("clear_bot_intake_agent_id", None)
+    bot_agent = (
+        str(bot_intake_agent_id).strip()
+        if bot_intake_agent_id is not None and str(bot_intake_agent_id).strip() != ""
+        else ""
+    )
+    clear_agent = (
+        str(clear_bot_intake_agent_id).strip()
+        if clear_bot_intake_agent_id is not None and str(clear_bot_intake_agent_id).strip() != ""
+        else ""
+    )
 
     # 清空 BOT 采集快照：去掉历史 Demo/默认预置，不影响经典精准字段
     if clear_bot_intake:
-        values["bot_intake_json"] = None
+        from app.services.aibot_profile_sync import (
+            clear_bot_intake_for_agent,
+            parse_bot_intake_dict,
+        )
+
+        if clear_agent:
+            existing_bot_row = (
+                await db.execute(
+                    text("SELECT bot_intake_json FROM user_profile WHERE user_id = :id"),
+                    {"id": user_id},
+                )
+            ).mappings().first()
+            existing_bot = existing_bot_row["bot_intake_json"] if existing_bot_row else None
+            cleared = clear_bot_intake_for_agent(existing_bot, clear_agent)
+            values["bot_intake_json"] = json.dumps(cleared, ensure_ascii=False)
+        else:
+            values["bot_intake_json"] = None
         incoming_bot_intake = None
         sync_precise_from_bot = False
 
     if incoming_bot_intake is not None or sync_precise_from_bot:
         from app.services.aibot_profile_sync import (
+            flat_bot_intake_for_agent,
             merge_bot_intake,
+            merge_bot_intake_for_agent,
             parse_bot_intake_dict,
             precise_fills_from_bot_intake,
         )
@@ -738,12 +768,30 @@ async def update_profile(
         ).mappings().first()
         existing_bot = existing_bot_row["bot_intake_json"] if existing_bot_row else None
         if incoming_bot_intake is not None:
-            merged_bot = merge_bot_intake(existing_bot, incoming_bot_intake)
+            if bot_agent:
+                merged_bot = merge_bot_intake_for_agent(
+                    existing_bot, incoming_bot_intake, bot_agent
+                )
+            else:
+                merged_bot = merge_bot_intake(existing_bot, incoming_bot_intake)
             values["bot_intake_json"] = json.dumps(merged_bot, ensure_ascii=False)
         else:
             merged_bot = parse_bot_intake_dict(existing_bot)
 
-        if sync_precise_from_bot and merged_bot:
+        flat_for_fills = (
+            flat_bot_intake_for_agent(merged_bot, bot_agent)
+            if bot_agent
+            else parse_bot_intake_dict(merged_bot)
+        )
+        # precise_fills 只用扁平字段，忽略 agents 桶
+        if "agents" in flat_for_fills:
+            flat_for_fills = {
+                k: v
+                for k, v in flat_for_fills.items()
+                if k != "agents" and not str(k).startswith("_")
+            }
+
+        if sync_precise_from_bot and flat_for_fills:
             current_row = (
                 await db.execute(
                     text(
@@ -755,7 +803,7 @@ async def update_profile(
                 )
             ).mappings().first()
             fills = precise_fills_from_bot_intake(
-                merged_bot,
+                flat_for_fills,
                 current_gender=None if current_row is None else current_row["gender"],
                 current_is_married=None if current_row is None else current_row["is_married"],
                 current_education_level=None

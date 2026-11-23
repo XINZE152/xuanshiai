@@ -25,13 +25,72 @@ def test_prompt_carries_three_sources_and_no_invented_score():
     # 三块素材都要进提示词；聊天须驱动整份再分析，不只是情绪
     assert "会员资料" in user and "AI 画像" in user and "最新 BOT 聊天记录" in user
     assert "整体重写" in user
-    assert "全量再分析" in system
+    assert "一次输出三段" in system or "dimension_items" in system
+    # 阿念分支：长文 AI 解读 + 维度细项
+    assert "ai_reading" in user
+    assert "900" in user or "900" in system
+    assert "有意思的矛盾" in user
+    assert "我说说我对你的理解" in user
+    assert "dimension_items" in user
+    assert "说到心坎" in system or "信任" in system
+    assert "外部竞品" in system
     # 来源标记这类内部字段不得当成事实喂给模型
     assert "gender_source" not in user
     assert "78" in user
     # 红线写死在 system：不承诺结果、不制造焦虑
-    assert "不承诺关系结果" in system
+    assert "不承诺结果" in system or "不承诺关系结果" in system
     assert "命中注定" in system
+
+
+def test_other_agent_report_prompt_has_no_anian_portrait_block():
+    messages = build_report_messages(
+        agent_id="yuzhou",
+        nickname="会员",
+        member_facts={},
+        ai_lines=[],
+        chat_lines=[],
+        score_total=60,
+        love_index_label="观望",
+    )
+    system, user = messages[0]["content"], messages[1]["content"]
+    assert "ai_reading" not in user
+    assert "portrait_summary" not in user
+    assert "我说说我对你的理解" not in user
+    assert "予舟" in system or "专属红娘【予舟】" in system
+
+
+def test_normalize_keeps_ai_reading_and_portrait_summary():
+    narrative = _normalize_narrative(
+        {
+            "letter": "寄语",
+            "ai_reading": "我说说我对你的理解，你看准不准——你很清醒。",
+            "dimension_items": [
+                {"dim": "消费习惯", "side": "me", "text": "我习惯存钱并做计划。"},
+                {"dim": "消费习惯", "side": "partner", "text": "我希望对方有储蓄意识。"},
+                {"dim": "兴趣爱好", "side": "关于我", "text": "我喜欢小狗。"},
+            ],
+            "emotion": {"label": "平稳", "score": 0.2, "trend": "平"},
+        }
+    )
+    assert "清醒" in narrative["ai_reading"]
+    assert narrative["portrait_summary"] == narrative["ai_reading"]
+    assert narrative["letter"] == "寄语"
+    assert len(narrative["dimension_items"]) == 3
+    assert narrative["dimension_items"][0]["side"] == "me"
+    assert narrative["dimension_items"][1]["side"] == "partner"
+    assert narrative["dimension_items"][2]["side"] == "me"
+
+    # 兼容旧字段：仅 portrait_summary 时回填 ai_reading
+    legacy = _normalize_narrative(
+        {
+            "letter": "短",
+            "portrait_summary": "旧字段长文解读",
+            "emotion": {"label": "平稳", "score": 0.1, "trend": "平"},
+        }
+    )
+    assert legacy["ai_reading"] == "旧字段长文解读"
+    assert legacy["portrait_summary"] == "旧字段长文解读"
+    assert legacy["dimension_items"] == []
 
 
 def test_member_title_does_not_default_to_female():

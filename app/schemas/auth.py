@@ -208,6 +208,12 @@ class ProfileUpdateRequest(BaseModel):
         default=None,
         description="BOT 采集快照，字段值为 {id,label} 或字符串选项 id；服务端合并进 bot_intake_json",
     )
+    # 测试期按红娘分桶写入；空则走全局 merge（关隔离时忽略）
+    bot_intake_agent_id: str | None = Field(
+        default=None,
+        max_length=32,
+        description="写入 bot_intake 时归属的红娘 id（anian/yuzhou…）",
+    )
     # true：按 bot_intake 中可对齐项回填当前为空的精准字段（不取中值、不覆盖已有精准值）
     sync_precise_from_bot: bool | None = Field(
         default=None,
@@ -217,6 +223,12 @@ class ProfileUpdateRequest(BaseModel):
     clear_bot_intake: bool | None = Field(
         default=None,
         description="是否清空 BOT 采集快照 bot_intake_json",
+    )
+    # 与 clear_bot_intake 合用：只清某一红娘桶；空则整份清空
+    clear_bot_intake_agent_id: str | None = Field(
+        default=None,
+        max_length=32,
+        description="仅清空指定红娘的 bot_intake 桶",
     )
     hometown_province_code: str | None = Field(default=None, max_length=32)
     hometown_city_code: str | None = Field(default=None, max_length=32)

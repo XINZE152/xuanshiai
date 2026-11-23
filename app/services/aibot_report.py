@@ -83,6 +83,36 @@ def _clean_list(value: Any, limit: int = 6) -> list[str]:
     return out
 
 
+def _normalize_dimension_items(raw: Any) -> list[dict[str, str]]:
+    """阿念维度细项：{dim, side: me|partner, text}；支持扩展 dim 名。"""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        dim = str(item.get("dim") or item.get("name") or "").strip()[:8]
+        if not dim:
+            continue
+        side_raw = str(item.get("side") or "").strip().lower()
+        if side_raw in ("partner", "other", "ta", "对方", "关于对方"):
+            side = "partner"
+        else:
+            side = "me"
+        text = str(item.get("text") or item.get("body") or "").strip()[:120]
+        if not text:
+            continue
+        key = f"{side}:{dim}:{text}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"dim": dim, "side": side, "text": text})
+        if len(out) >= 24:
+            break
+    return out
+
+
 def _clamp_pct(value: Any) -> int:
     try:
         n = int(round(float(value)))
@@ -107,10 +137,15 @@ def _normalize_bars(raw: Any) -> list[dict[str, Any]]:
     return bars
 
 
-async def _load_member_facts(db: AsyncSession, user_id: int) -> dict[str, Any]:
+async def _load_member_facts(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
     from app.services.aibot_chat import _load_member_facts as load_facts
 
-    return await load_facts(db, user_id)
+    return await load_facts(db, user_id, agent_id=agent_id)
 
 
 async def _load_nickname(db: AsyncSession, user_id: int) -> str:
@@ -205,7 +240,10 @@ async def _load_chat_digest(
                 params,
             )
         ).mappings().all()
-        if not rows and aid:
+        # 隔离开启时不回落到其他红娘时间线
+        from app.services.aibot_profile_sync import agent_memory_isolated
+
+        if not rows and aid and not agent_memory_isolated():
             rows = (
                 await db.execute(
                     text(
@@ -224,17 +262,31 @@ async def _load_chat_digest(
     except Exception:
         logger.debug("aibot report timeline digest skipped", exc_info=True)
 
-    # 2) 回落 turn
+    # 2) 回落 turn（优先当前红娘 session）
     try:
-        session_row = (
-            await db.execute(
-                text(
-                    """SELECT session_id FROM aibot_session
-                       WHERE user_id = :uid ORDER BY updated_at DESC LIMIT 1"""
-                ),
-                {"uid": user_id},
-            )
-        ).mappings().first()
+        if aid:
+            session_row = (
+                await db.execute(
+                    text(
+                        """SELECT session_id FROM aibot_session
+                           WHERE user_id = :uid AND agent_id = :aid
+                           ORDER BY updated_at DESC LIMIT 1"""
+                    ),
+                    {"uid": user_id, "aid": aid},
+                )
+            ).mappings().first()
+        else:
+            session_row = None
+        if session_row is None:
+            session_row = (
+                await db.execute(
+                    text(
+                        """SELECT session_id FROM aibot_session
+                           WHERE user_id = :uid ORDER BY updated_at DESC LIMIT 1"""
+                    ),
+                    {"uid": user_id},
+                )
+            ).mappings().first()
         if not session_row:
             return [], 0
         rows = (
@@ -307,6 +359,7 @@ def _rule_narrative(
     ai_lines: list[str],
     emotion: dict[str, Any],
     love_index_label: str,
+    agent_id: str | None = None,
 ) -> dict[str, Any]:
     """模型不可用时的完整规则版正文，保证报告永远打得开。"""
     city = str(member_facts.get("city") or "所在城市")
@@ -319,12 +372,51 @@ def _rule_narrative(
         profile_bits.append(f"职业：{job}")
     profile_line = "；".join(profile_bits) if profile_bits else "资料还在补充中"
     ai_note = ai_lines[0] if ai_lines else "还没有已发布的 AI 画像，建议先做一次画像建构"
-    return {
-        "letter": (
+    is_anian = (agent_id or "").strip() == "anian"
+    if is_anian:
+        letter = f"{nickname}{title}，细项如下；完整理解见「AI解读」。"
+        portrait = (
+            f"我说说我对你的理解，你看准不准——\n\n"
+            f"从现有材料看，你主要生活在{city}，恋爱意愿偏「{love_index_label}」。"
+            f"{profile_line}。{ai_note}。"
+            f"你不是随便看看的心态，更在意节奏稳一点、心里有数一点；"
+            f"那种稳定，更像内在秩序，而不是把日子过成死板公式。"
+            f"聊天里若还没讲清日常怎么过、用什么小习惯把自己稳住，这一块我先标「待补充」。\n\n"
+            f"感情这件事上，你显得清醒：要善良、情绪稳、沟通能讲理，不喜欢用吵架推进关系——"
+            f"这通常不是不会沟通，而是更成熟的相处取向。"
+            f"过往经历如何塑造这些要求，材料不够处我也写「待补充」，不替你编故事。\n\n"
+            f"有意思的矛盾往往在这里：口说的条件表，和真正让你安心的东西，不一定同一条。"
+            f"你更在意人本身与相处氛围，还是标签与清单，需要你再补几句，我才能写准。\n\n"
+            f"生活方式与陪伴观也一样：需要陪伴，但不凑合。"
+            f"我已按这个方向记住你的偏好；有不准的地方直接改，我按你的原话记，"
+            f"再帮你留意合适的人。"
+        )
+    else:
+        letter = (
             f"{nickname}{title}你好。这版报告由红娘按你的资料、"
             f"{'已发布的 AI 画像' if ai_lines else '当前已采集的信息'}与最近对话整理"
             f"（{profile_line}）。我们先看清优势与节奏，再谈具体的人。"
-        ),
+        )
+        portrait = ""
+    dims: list[dict[str, str]] = []
+    if is_anian:
+        dims = [
+            {
+                "dim": "生活规划",
+                "side": "me",
+                "text": f"我目前主要在{city}生活，节奏与意愿偏「{love_index_label}」，细节待补充。",
+            },
+            {
+                "dim": "基本情况",
+                "side": "partner",
+                "text": "我对另一半的具体条件还需要再对齐，材料不足处先标待补充。",
+            },
+        ]
+    return {
+        "letter": letter,
+        "ai_reading": portrait,
+        "portrait_summary": portrait,
+        "dimension_items": dims,
         "emotion": emotion,
         "part01": {
             "strengths": [profile_line, ai_note],
@@ -359,7 +451,7 @@ def _rule_narrative(
         },
         "part07": {
             "path": ["确认择偶方向", "开启推荐并见人", "用真实反馈修正标准"],
-            "closing": "红娘会陪你走完整个过程，节奏由你定。",
+            "closing": "红娘会陪你走完整个过程，节奏由你定。" if not is_anian else "我按这个方向帮你留意合适的人，节奏由你定。",
         },
         "match_focus": ["同城优先", "意愿一致", "聊得来"],
     }
@@ -386,50 +478,125 @@ def build_report_messages(
     ai_block = "\n".join(f"- {line}" for line in ai_lines) or "- （还没有已发布的 AI 画像）"
     chat_block = "\n".join(chat_lines) or "- （还没有对话，情绪写「待观察」，不要臆测）"
 
-    system = (
-        f"你是恋 AI BOT 的专属红娘【{meta['name']}】，现在要为会员「{nickname}」写一份婚恋分析报告。\n"
-        "本版是全量再分析，不是局部润色：letter、emotion 与 part01～part07 都必须基于"
-        "下面三块材料整体重写；禁止只改情绪标签而沿用旧的单身原因/情感经历套话。\n"
-        "报告要给本人看，也要能被下载保存，因此必须只依据真实材料，"
-        "不得编造用户没有提供的经历、收入、家庭细节；材料不足就写「待补充」。\n"
-        "性别等精准字段以「会员资料」为准；对话说法与资料冲突时以资料为准，可在 note 点出对话说法。\n"
-        "平台红线：不承诺关系结果，不制造年龄焦虑，不使用「命中注定」「最后机会」这类表述，"
-        "不做心理诊断，不评价外貌高低。\n"
-        "只输出一个 JSON 对象，不要 Markdown 代码块，不要任何解释性文字。\n"
-        "控制总长度：列表每项 1~2 条、每条不超过 40 字；letter/closing 各不超过 120 字，"
-        "必须一次输出完整可解析的 JSON（以 } 收尾）。"
-    )
-    user = (
-        f"【会员资料（精准优先；bot 来源若是区间/手输原文，正文必须原样引用，禁止取中值）】\n{facts_block}\n\n"
-        f"【已发布的 AI 画像】\n{ai_block}\n\n"
-        f"【最新 BOT 聊天记录（与用户可见时间线一致，按时间截断；须驱动整份分析）】\n"
-        f"{chat_block}\n"
-        "要求：据此整体重写 letter / emotion / part02～part07 中与经历、顾虑、节奏、破局相关的结论；"
-        "聊天未出现的经历写「待补充」，禁止脑补；不要大段复述原文。\n\n"
-        f"【系统已算好的分数，不得改写】竞争力 {score_total} 分；恋爱意愿「{love_index_label}」。\n\n"
-        "请输出精简 JSON（缺失也保留键，数组宁可短）：\n"
-        "{\n"
-        '  "letter": "顾问寄语，≤120 字",\n'
-        '  "emotion": {\n'
-        '    "label": "4~6 字情绪标签",\n'
-        '    "score": -1.0 到 1.0,\n'
-        '    "trend": "升|平|降",\n'
-        '    "evidence": ["现象1","现象2"],\n'
-        '    "advice": "一条建议"\n'
-        "  },\n"
-        '  "part01": {"strengths": ["优势"], "summary": "一句话"},\n'
-        '  "part02": {"objective": ["客观"], "subjective": ["主观"], "conclusion": "结论"},\n'
-        '  "part03": {"history": ["经历"], "pattern": ["模式"], "growth": ["成长"]},\n'
-        '  "part04": {\n'
-        '    "current": [{"item": "期望", "raw": "原话", "advice": "建议", "tier": "核心底线|可调整项|加分项"}],\n'
-        '    "must": ["底线"], "plus": ["加分"], "flexible": ["可让步"]\n'
-        "  },\n"
-        '  "part05": {"timeline": ["节奏"], "growth": ["建设"]},\n'
-        '  "part06": {"issues": [{"name": "议题", "level": "高|中|低", "note": "说明"}], "tactics": ["策略"]},\n'
-        '  "part07": {"path": ["下一步"], "closing": "结尾≤80字"},\n'
-        '  "match_focus": ["优先看1","优先看2","优先看3"]\n'
-        "}"
-    )
+    is_anian = (agent_id or "").strip() == "anian"
+    if is_anian:
+        system = (
+            f"你是恋 AI BOT / 宣誓爱的专属红娘【阿念】，正在为会员「{nickname}」写《专属婚恋分析报告》。\n"
+            "品牌署名：宣誓爱 · 阿念。\n"
+            "【红娘目标】让用户觉得「你很了解我、很懂我的需求」；认知略高于用户一截，"
+            "话要说到心坎上，建立信任与专业认可。相对客观、稳妥，禁止偏激/阴阳/恐吓/"
+            "道德审判；不空夸，不鸡汤。\n"
+            "本版一次输出三段：① ai_reading 长文「我对你的理解」；"
+            "② dimension_items 维度细项卡片（关于我/关于对方）；"
+            "③ letter 短说明 + emotion + part01～part07（深度分析底稿）。\n"
+            "【ai_reading 硬标准】\n"
+            "- 900～1400 字，5～6 自然段（\\n\\n 分段）；禁止短评、禁止条目编号。\n"
+            "- 开场气质：「我说说我对你的理解，你看准不准——」。\n"
+            "- 嵌具体细节与洞察；至少一处「有意思的矛盾」；材料不足写「待补充」。\n"
+            "- 口气专业、温和、略高一阶：帮他看清自己真正要什么，而不是复读条件表。\n"
+            "【dimension_items 硬标准】\n"
+            "- 每条：{dim, side, text}；side 仅 me|partner（关于我|关于对方）。\n"
+            "- text 用第一人称「我…」短句归纳，像聊完后的一句结论，40～80 字为宜。\n"
+            "- 有材料才出卡；不足可跳过该维或 text 写「待补充：…」；每人卡片组合应不同。\n"
+            "- 推荐维度池（可扩展新 dim 名，≤8 字）："
+            "关于我：工作状态/事业规划/生活规划/社交习惯/性格特征/作息习惯/生活习惯/消费习惯/兴趣爱好；"
+            "关于对方：基本情况/工作状态/性格特征/相处模式/价值观/消费习惯。\n"
+            "- 同一 dim 可同时有 me 与 partner 两张。建议输出 8～16 条。\n"
+            "禁止外部竞品名。性别等以会员资料为准。\n"
+            "平台红线：不承诺结果，不年龄焦虑，不用命中注定/最后机会，不做心理诊断，不评外貌高低。\n"
+            "只输出一个 JSON；part 用人话短句；以 } 收尾。"
+        )
+        user = (
+            f"【会员资料（精准优先；bot 来源若是区间/手输原文，正文必须原样引用，禁止取中值）】\n{facts_block}\n\n"
+            f"【已发布的 AI 画像】\n{ai_block}\n\n"
+            f"【最新 BOT 聊天记录（与用户可见时间线一致，按时间截断；须驱动整份分析）】\n"
+            f"{chat_block}\n"
+            "要求：据此整体重写 ai_reading / dimension_items / letter / emotion / part02～part07；"
+            "聊天未出现的经历写「待补充」，禁止脑补。\n\n"
+            "【ai_reading · 说到心坎上】\n"
+            "段1 开场：收束 +「我说说我对你的理解，你看准不准——」\n"
+            "段2 当下状态：工作/生活节奏与内在秩序（用具体细节支撑）。\n"
+            "段3 感情原则：过往如何塑造要求（不审判）；真正标准与沟通取向。\n"
+            "段4 有意思的矛盾：口说 vs 真正看重（客观点出，勿挖苦）。\n"
+            "段5 生活方式与陪伴观。\n"
+            "段6 收尾：肯定清醒与坦诚；记住偏好、帮你留意合适的人；不准可改。"
+            "整篇要因人而异；认知略高一阶，客观稳妥。portrait_summary 可与 ai_reading 同文。\n\n"
+            "【dimension_items · 维度细项】有料才写；text 第一人称短句。\n\n"
+            f"【系统已算好的分数，不得改写】竞争力 {score_total} 分；恋爱意愿「{love_index_label}」。\n\n"
+            "请输出 JSON（缺失也保留键）：\n"
+            "{\n"
+            '  "ai_reading": "长文AI解读，900～1400 字，5～6 段",\n'
+            '  "portrait_summary": "可与 ai_reading 同文",\n'
+            '  "dimension_items": [\n'
+            '    {"dim": "消费习惯", "side": "me", "text": "我习惯……"},\n'
+            '    {"dim": "消费习惯", "side": "partner", "text": "我希望对方……"}\n'
+            "  ],\n"
+            '  "letter": "细项页眉短说明，≤80 字",\n'
+            '  "emotion": {\n'
+            '    "label": "4~6 字情绪标签",\n'
+            '    "score": -1.0 到 1.0,\n'
+            '    "trend": "升|平|降",\n'
+            '    "evidence": ["现象1","现象2"],\n'
+            '    "advice": "一条建议"\n'
+            "  },\n"
+            '  "part01": {"strengths": ["优势"], "summary": "一句话"},\n'
+            '  "part02": {"objective": ["人话短句"], "subjective": ["人话短句"], "conclusion": "结论"},\n'
+            '  "part03": {"history": ["经历"], "pattern": ["模式"], "growth": ["成长"]},\n'
+            '  "part04": {\n'
+            '    "current": [{"item": "期望", "raw": "原话", "advice": "建议", "tier": "核心底线|可调整项|加分项"}],\n'
+            '    "must": ["底线"], "plus": ["加分"], "flexible": ["可让步"]\n'
+            "  },\n"
+            '  "part05": {"timeline": ["节奏"], "growth": ["建设"]},\n'
+            '  "part06": {"issues": [{"name": "议题", "level": "高|中|低", "note": "说明"}], "tactics": ["策略"]},\n'
+            '  "part07": {"path": ["下一步"], "closing": "结尾≤80字"},\n'
+            '  "match_focus": ["优先看1","优先看2","优先看3"]\n'
+            "}"
+        )
+    else:
+        system = (
+            f"你是恋 AI BOT 的专属红娘【{meta['name']}】，现在要为会员「{nickname}」写一份婚恋分析报告。\n"
+            "本版是全量再分析，不是局部润色：letter、emotion 与 part01～part07 都必须基于"
+            "下面三块材料整体重写；禁止只改情绪标签而沿用旧的单身原因/情感经历套话。\n"
+            "报告要给本人看，也要能被下载保存，因此必须只依据真实材料，"
+            "不得编造用户没有提供的经历、收入、家庭细节；材料不足就写「待补充」。\n"
+            "性别等精准字段以「会员资料」为准；对话说法与资料冲突时以资料为准，可在 note 点出对话说法。\n"
+            "平台红线：不承诺关系结果，不制造年龄焦虑，不使用「命中注定」「最后机会」这类表述，"
+            "不做心理诊断，不评价外貌高低。\n"
+            "只输出一个 JSON 对象，不要 Markdown 代码块，不要任何解释性文字。\n"
+            "控制总长度：列表每项 1~2 条、每条不超过 40 字；letter/closing 各不超过 120 字，"
+            "必须一次输出完整可解析的 JSON（以 } 收尾）。"
+        )
+        user = (
+            f"【会员资料（精准优先；bot 来源若是区间/手输原文，正文必须原样引用，禁止取中值）】\n{facts_block}\n\n"
+            f"【已发布的 AI 画像】\n{ai_block}\n\n"
+            f"【最新 BOT 聊天记录（与用户可见时间线一致，按时间截断；须驱动整份分析）】\n"
+            f"{chat_block}\n"
+            "要求：据此整体重写 letter / emotion / part02～part07 中与经历、顾虑、节奏、破局相关的结论；"
+            "聊天未出现的经历写「待补充」，禁止脑补；不要大段复述原文。\n\n"
+            f"【系统已算好的分数，不得改写】竞争力 {score_total} 分；恋爱意愿「{love_index_label}」。\n\n"
+            "请输出精简 JSON（缺失也保留键，数组宁可短）：\n"
+            "{\n"
+            '  "letter": "顾问寄语，≤120 字",\n'
+            '  "emotion": {\n'
+            '    "label": "4~6 字情绪标签",\n'
+            '    "score": -1.0 到 1.0,\n'
+            '    "trend": "升|平|降",\n'
+            '    "evidence": ["现象1","现象2"],\n'
+            '    "advice": "一条建议"\n'
+            "  },\n"
+            '  "part01": {"strengths": ["优势"], "summary": "一句话"},\n'
+            '  "part02": {"objective": ["客观"], "subjective": ["主观"], "conclusion": "结论"},\n'
+            '  "part03": {"history": ["经历"], "pattern": ["模式"], "growth": ["成长"]},\n'
+            '  "part04": {\n'
+            '    "current": [{"item": "期望", "raw": "原话", "advice": "建议", "tier": "核心底线|可调整项|加分项"}],\n'
+            '    "must": ["底线"], "plus": ["加分"], "flexible": ["可让步"]\n'
+            "  },\n"
+            '  "part05": {"timeline": ["节奏"], "growth": ["建设"]},\n'
+            '  "part06": {"issues": [{"name": "议题", "level": "高|中|低", "note": "说明"}], "tactics": ["策略"]},\n'
+            '  "part07": {"path": ["下一步"], "closing": "结尾≤80字"},\n'
+            '  "match_focus": ["优先看1","优先看2","优先看3"]\n'
+            "}"
+        )
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -507,8 +674,23 @@ def _normalize_narrative(parsed: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
+    # 长文 AI 解读：优先 ai_reading，回落 portrait_summary
+    reading_raw = str(parsed.get("ai_reading") or parsed.get("aiReading") or "").strip()
+    if reading_raw == "":
+        reading_raw = str(parsed.get("portrait_summary") or "").strip()
+    reading = reading_raw[:3600]
+
+    # 维度细项卡片（阿念）；其他红娘通常为空
+    dimension_items = _normalize_dimension_items(
+        parsed.get("dimension_items") or parsed.get("dimensionItems")
+    )
+
     return {
         "letter": str(parsed.get("letter") or "").strip()[:600],
+        "ai_reading": reading,
+        # 兼容旧字段名；与 ai_reading 同文
+        "portrait_summary": reading,
+        "dimension_items": dimension_items,
         "emotion": emotion,
         "part01": {
             "strengths": _clean_list(part01.get("strengths"), 4),
@@ -736,10 +918,10 @@ async def _compose_and_store(
     assignment: Any,
 ) -> dict[str, Any]:
     nickname = await _load_nickname(db, user_id)
-    member_facts = await _load_member_facts(db, user_id)
+    resolved_agent = agent_id or getattr(assignment, "agent_id", None) or "anian"
+    member_facts = await _load_member_facts(db, user_id, agent_id=resolved_agent)
     ai_lines = await _load_ai_profile_lines(db, user_id)
 
-    resolved_agent = agent_id or getattr(assignment, "agent_id", None) or "anian"
     meta = get_agent_meta(resolved_agent)
     chat_lines, user_turns = await _load_chat_digest(
         db, user_id, agent_id=resolved_agent
@@ -773,6 +955,13 @@ async def _compose_and_store(
         score_total=total_for_prompt,
         love_index_label=li_label,
     )
+    # 恋爱报告 JSON 含长解读+维度+PART；环境若仍是 2048 易截断。报告调用抬到至少 4096。
+    from app.core.config import settings as _ai_settings
+
+    _prev_max_tokens = int(getattr(_ai_settings, "ai_deepseek_max_tokens", 0) or 0)
+    _report_floor = 4096
+    if _prev_max_tokens < _report_floor:
+        _ai_settings.ai_deepseek_max_tokens = _report_floor
     try:
         raw = await complete(
             messages,
@@ -803,7 +992,11 @@ async def _compose_and_store(
             ai_lines=ai_lines,
             emotion=_rule_emotion(chat_lines),
             love_index_label=li_label,
+            agent_id=resolved_agent,
         )
+    finally:
+        if _prev_max_tokens < _report_floor:
+            _ai_settings.ai_deepseek_max_tokens = _prev_max_tokens
 
     if not narrative["emotion"].get("evidence"):
         narrative["emotion"] = _rule_emotion(chat_lines)
@@ -831,6 +1024,9 @@ async def _compose_and_store(
             "state": li_state,
         },
         "letter": narrative["letter"],
+        "aiReading": narrative.get("ai_reading") or narrative.get("portrait_summary") or "",
+        "portraitSummary": narrative.get("portrait_summary") or narrative.get("ai_reading") or "",
+        "dimensionItems": narrative.get("dimension_items") or [],
         "part01": {
             "profile": _profile_rows(member_facts),
             "strengths": narrative["part01"]["strengths"],
@@ -881,17 +1077,31 @@ async def _compose_and_store(
     return payload
 
 
-async def list_reports(db: AsyncSession, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
+async def list_reports(
+    db: AsyncSession,
+    user_id: int,
+    limit: int = 20,
+    *,
+    agent_id: str | None = None,
+) -> list[dict[str, Any]]:
+    from app.services.aibot_profile_sync import agent_memory_isolated
+
+    aid = (agent_id or "").strip()[:32]
+    params: dict[str, Any] = {"uid": user_id, "lim": max(1, min(limit, 50))}
+    agent_sql = ""
+    if aid and agent_memory_isolated():
+        agent_sql = " AND agent_id = :aid"
+        params["aid"] = aid
     rows = (
         await db.execute(
             text(
-                """SELECT version, scene, score_total, love_index, emotion_label, created_at
+                f"""SELECT version, scene, score_total, love_index, emotion_label, created_at
                    FROM aibot_love_report
-                   WHERE user_id = :uid
+                   WHERE user_id = :uid{agent_sql}
                    ORDER BY version DESC
                    LIMIT :lim"""
             ),
-            {"uid": user_id, "lim": max(1, min(limit, 50))},
+            params,
         )
     ).mappings().all()
     out: list[dict[str, Any]] = []
@@ -1009,22 +1219,36 @@ async def get_report(db: AsyncSession, user_id: int, version: int) -> dict[str, 
     return _parse_payload_json(row["payload_json"])
 
 
-async def latest_report(db: AsyncSession, user_id: int) -> dict[str, Any] | None:
+async def latest_report(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    agent_id: str | None = None,
+) -> dict[str, Any] | None:
     """最新一版报告；PART01/称呼始终按当前会员资料覆盖后再返回（展示及时）。"""
+    from app.services.aibot_profile_sync import agent_memory_isolated
+
+    aid = (agent_id or "").strip()[:32]
+    params: dict[str, Any] = {"uid": user_id}
+    agent_sql = ""
+    if aid and agent_memory_isolated():
+        agent_sql = " AND agent_id = :aid"
+        params["aid"] = aid
     row = (
         await db.execute(
             text(
-                """SELECT version FROM aibot_love_report
-                   WHERE user_id = :uid ORDER BY version DESC LIMIT 1"""
+                f"""SELECT version FROM aibot_love_report
+                   WHERE user_id = :uid{agent_sql}
+                   ORDER BY version DESC LIMIT 1"""
             ),
-            {"uid": user_id},
+            params,
         )
     ).mappings().first()
     if not row:
         return None
     payload = await get_report(db, user_id, int(row["version"]))
     nickname = await _load_nickname(db, user_id)
-    member_facts = await _load_member_facts(db, user_id)
+    member_facts = await _load_member_facts(db, user_id, agent_id=aid or None)
     return apply_live_member_basics(
         payload, nickname=nickname, member_facts=member_facts
     )

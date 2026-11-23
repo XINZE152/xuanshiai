@@ -12,6 +12,8 @@ from app.schemas.aibot import (
     AibotAssignmentUpdate,
     AibotInterestQuizRequest,
     AibotInterestQuizResponse,
+    AibotMemoryResetRequest,
+    AibotMemoryResetResponse,
     AibotProfileBasicParseRequest,
     AibotProfileBasicParseResponse,
     AibotReportListItem,
@@ -38,6 +40,7 @@ from app.services.aibot_chat import (
     post_welcome,
     put_assignment,
 )
+from app.services.aibot_memory_reset import reset_agent_memory
 from app.services.aibot_timeline import append_timeline_message, list_timeline
 from app.services.aibot_report import (
     create_report_invite_wxacode,
@@ -69,6 +72,20 @@ async def update_assignment(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AibotAssignmentResponse:
     return await put_assignment(db, current.id, body.agent_id)
+
+
+@router.post(
+    "/memory/reset",
+    response_model=AibotMemoryResetResponse,
+    summary="测试期：清空指定红娘侧记忆（时间线/会话/报告/采集桶）",
+)
+async def reset_memory(
+    body: AibotMemoryResetRequest,
+    current: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AibotMemoryResetResponse:
+    payload = await reset_agent_memory(db, current.id, body.agent_id)
+    return AibotMemoryResetResponse(**payload)
 
 
 @router.post(
@@ -301,8 +318,9 @@ async def create_love_report(
 async def read_latest_love_report(
     current: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    agent_id: Annotated[str | None, Query(max_length=32)] = None,
 ) -> AibotReportResponse | None:
-    payload = await latest_report(db, current.id)
+    payload = await latest_report(db, current.id, agent_id=agent_id)
     return AibotReportResponse(**payload) if payload else None
 
 
@@ -315,8 +333,9 @@ async def read_love_reports(
     current: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    agent_id: Annotated[str | None, Query(max_length=32)] = None,
 ) -> AibotReportListResponse:
-    items = await list_reports(db, current.id, limit)
+    items = await list_reports(db, current.id, limit, agent_id=agent_id)
     return AibotReportListResponse(items=[AibotReportListItem(**item) for item in items])
 
 
