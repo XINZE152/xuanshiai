@@ -8,7 +8,8 @@ def test_anian_persona_has_dim_pool_and_gate_tone():
     persona = meta["persona"]
     assert "顺着聊" in persona
     assert "跟话题" in persona
-    assert "开放优先" in persona
+    assert "选项优先" in persona
+    assert "preferred_name" in persona or "称呼" in persona
     assert "填表" in persona
     assert "专业红娘" in persona
     assert "恋爱报告" in persona

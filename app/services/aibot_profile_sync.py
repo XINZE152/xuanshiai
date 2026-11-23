@@ -331,4 +331,10 @@ def facts_for_ai(
         out["city"] = city_text
         out["city_source"] = "precise"
 
+    # 阿念建档：用户希望被怎么叫（稍后/空则不注入）
+    pref = bot_label("preferred_name")
+    if pref and pref not in ("later", "skip", "你", "稍后告诉你"):
+        out["preferred_name"] = pref
+        out["preferred_name_source"] = "bot"
+
     return out

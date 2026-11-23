@@ -96,19 +96,42 @@ def _actions_for_intent(intent: str) -> list[dict[str, Any]]:
     return []
 
 
-async def _load_nickname(db: AsyncSession, user_id: int) -> str:
+async def _load_nickname(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    agent_id: str | None = None,
+    member_facts: dict | None = None,
+) -> str:
+    """优先阿念建档 preferred_name，其次账号昵称。"""
+    facts = member_facts or {}
+    pref = str(facts.get("preferred_name") or "").strip()
+    if pref and pref not in ("later", "skip", "你", "稍后告诉你", "会员"):
+        return pref
     try:
+        from app.services.aibot_profile_sync import flat_bot_intake_for_agent
+
         row = (
             await db.execute(
                 text(
-                    """SELECT COALESCE(NULLIF(nickname, ''), '会员') AS name
-                       FROM users WHERE id = :uid LIMIT 1"""
+                    """SELECT u.nickname, p.bot_intake_json
+                       FROM users u
+                       LEFT JOIN user_profile p ON p.user_id = u.id
+                       WHERE u.id = :uid LIMIT 1"""
                 ),
                 {"uid": user_id},
             )
         ).mappings().first()
-        if row and row.get("name"):
-            return str(row["name"])
+        if row:
+            bot_flat = flat_bot_intake_for_agent(row.get("bot_intake_json"), agent_id)
+            entry = bot_flat.get("preferred_name") if isinstance(bot_flat, dict) else None
+            if isinstance(entry, dict):
+                label = str(entry.get("label") or entry.get("id") or "").strip()
+                if label and label not in ("later", "skip", "你", "稍后告诉你"):
+                    return label
+            nick = str(row.get("nickname") or "").strip()
+            if nick:
+                return nick
     except Exception:
         logger.debug("aibot users nickname lookup skipped", exc_info=True)
     return "会员"
@@ -439,8 +462,10 @@ async def _generate_reply(
     session_id: str,
     user_text: str,
 ) -> dict[str, Any]:
-    nickname = await _load_nickname(db, user_id)
     member_facts = await _load_member_facts(db, user_id, agent_id=agent_id)
+    nickname = await _load_nickname(
+        db, user_id, agent_id=agent_id, member_facts=member_facts
+    )
     history_rows = (
         await db.execute(
             text(
