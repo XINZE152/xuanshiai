@@ -105,6 +105,7 @@ from app.api.routes import (
     promoter_level_admin,
     partner_admin,
     partner_level_admin,
+    security,
     social,
     support,
     users,
@@ -136,6 +137,7 @@ api_router.include_router(ai_avatar.router, tags=["AI 分身"])
 api_router.include_router(ai_avatar.memory_router, tags=["AI 分身"])
 api_router.include_router(users.router, tags=["账号与认证"])
 api_router.include_router(support.router, tags=["客服与反馈"])
+api_router.include_router(security.router, tags=["安全"])
 api_router.include_router(good_news.router, tags=["红娘喜讯"])
 api_router.include_router(certifications.router, tags=["认证审核"])
 api_router.include_router(membership.router, tags=["会员"])

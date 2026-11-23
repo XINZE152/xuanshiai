@@ -1466,6 +1466,26 @@ async def review_report(db: AsyncSession, report_id: int, request: ReportReviewR
     # omits the optional action field.
     if status == 1 and action == "none":
         if target_type == "user":
+            # 封号必须落 user_restriction：否则安全中心的治理统计和后台处置记录
+            # 都看不到这次封禁（历史实现只改 users.status，没有账）。
+            try:
+                await create_restriction(
+                    db,
+                    int(row["target_user_id"]),
+                    RestrictionCreate(
+                        restriction_type="TOTAL_BAN",
+                        reason_code="REPORT_UPHELD",
+                        reason=request.result,
+                        ends_at=None,
+                    ),
+                    actor_id or 0,
+                    commit=False,
+                )
+                restriction_created = True
+            except HTTPException as exc:
+                # 该用户已处于封禁中：本次审核只补 users.status，不重复记账。
+                if exc.status_code != 409:
+                    raise
             await db.execute(
                 text("UPDATE users SET status=2, nickname='已封禁用户', avatar=NULL, updated_at=UTC_TIMESTAMP() WHERE id=:user_id"),
                 {"user_id": int(row["target_user_id"])},
